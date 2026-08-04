@@ -71,16 +71,19 @@ describe('launcher setup renderer wiring', () => {
     const main = readSourceFile('main/index.ts');
     const configBridge = readSourceFile('main/config-bridge.ts');
 
-    expect(renderer).toContain('window.somnibot.discoverSupabaseProjects()');
+    expect(renderer).toContain('window.somnibot.discoverSupabaseProjects(');
+    expect(renderer).toContain('fields.supabaseAccessToken.value');
     expect(renderer).toContain('window.somnibot.selectSupabaseProject(ref)');
     expect(renderer).toContain('window.somnibot.generateSupabaseDatabasePassword()');
     expect(renderer).toContain('result.databasePasswordReady ?');
     expect(renderer).toContain('if (!result.secretKeyReady) fields.supabaseSecretKey.value = \'\';');
     expect(renderer).toContain('if (!result.publishableKeyReady) fields.supabasePublishableKey.value = \'\';');
-    expect(preload).toContain("ipcRenderer.invoke('supabase:discover-projects')");
+    expect(preload).toContain("ipcRenderer.invoke('supabase:discover-projects', accessToken)");
     expect(preload).toContain("ipcRenderer.invoke('supabase:select-project', ref)");
     expect(preload).toContain("ipcRenderer.invoke('supabase:generate-db-password')");
     expect(main).toContain("ipcMain.handle('supabase:discover-projects'");
+    expect(main).toContain("saveConfig(sanitized)");
+    expect(main).toContain("listSupabaseProjects(sanitized.supabaseAccessToken ?? '')");
     expect(main).toContain("ipcMain.handle('supabase:select-project'");
     expect(main).toContain('secretKeyReady: Boolean(result.credentials.secretKey)');
     expect(main).not.toContain('secretKey: result.credentials.secretKey');

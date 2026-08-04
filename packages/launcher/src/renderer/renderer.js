@@ -1251,10 +1251,11 @@ btnDiscoverSupabase.addEventListener('click', async () => {
   hideMessage();
 
   try {
-    // Persist the token through the normal main-process credential path before
-    // asking the main process to use it. Masked values are ignored safely.
-    await saveConfig();
-    const result = await window.somnibot.discoverSupabaseProjects();
+    // Persist and consume the currently entered PAT in one main-process
+    // operation so discovery can never race with autosave or use stale state.
+    const result = await window.somnibot.discoverSupabaseProjects(
+      fields.supabaseAccessToken.value,
+    );
     if (!result.ok) {
       supabaseProjectPicker.classList.add('hidden');
       setSupabaseProjectStatus(result.error || 'Could not discover Supabase projects.', 'error');

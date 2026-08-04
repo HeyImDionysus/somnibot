@@ -121,7 +121,7 @@ export interface SomniBotAPI {
     credentials?: Record<string, string | boolean>;
     error?: string;
   }>;
-  discoverSupabaseProjects: () => Promise<{
+  discoverSupabaseProjects: (accessToken: string) => Promise<{
     ok: boolean;
     projects?: Array<{
       ref: string;
@@ -291,7 +291,8 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Cloud sync
   // V5 Audit §10.P3a: Secret stays in main process
   pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
-  discoverSupabaseProjects: () => ipcRenderer.invoke('supabase:discover-projects'),
+  discoverSupabaseProjects: (accessToken: string) =>
+    ipcRenderer.invoke('supabase:discover-projects', accessToken),
   selectSupabaseProject: (ref: string) => ipcRenderer.invoke('supabase:select-project', ref),
   generateSupabaseDatabasePassword: () => ipcRenderer.invoke('supabase:generate-db-password'),
   runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload),

@@ -1902,9 +1902,17 @@ function registerIpcHandlers(): void {
   // The Management API token is owned by the main process. The renderer only
   // receives project metadata and readiness flags; API key values never cross
   // the IPC boundary in plaintext.
-  ipcMain.handle('supabase:discover-projects', async () => {
-    const cfg = getConfig();
-    const result = await listSupabaseProjects(cfg.supabaseAccessToken);
+  ipcMain.handle('supabase:discover-projects', async (_event, accessToken: unknown) => {
+    if (typeof accessToken !== 'string' || !accessToken.trim()) {
+      return { ok: false, error: 'Enter a Supabase personal access token first.' };
+    }
+
+    // Persist and consume the same PAT atomically. Previously the renderer
+    // swallowed save failures and discovery could silently use stale state.
+    const sanitized = sanitizeRendererConfigPatch({ supabaseAccessToken: accessToken });
+    saveConfig(sanitized);
+    void queueLauncherCredentialSync(getConfig());
+    const result = await listSupabaseProjects(sanitized.supabaseAccessToken ?? '');
     if (!result.ok) return result;
     return {
       ok: true,
