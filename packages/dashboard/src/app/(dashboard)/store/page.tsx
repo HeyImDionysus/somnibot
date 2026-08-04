@@ -9,6 +9,7 @@ import { useEffect, useState, useCallback } from 'react';
 import ProductFiles from '@/components/store/product-files';
 import StoreControlRoom from '@/components/store/store-control-room';
 import { RolePicker } from '@/components/shared/role-picker';
+import { ChannelPicker } from '@/components/shared/channel-picker';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
@@ -21,12 +22,13 @@ interface Product {
   guild_id: string;
   name: string;
   description: string | null;
-  type: 'one_time' | 'subscription';
+  type: 'one_time' | 'subscription' | 'free';
   delivery_type: 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed';
   paypal_product_id: string | null;
   price_cents: number;
   currency: string;
   granted_role_ids: string[];
+  granted_channel_ids: string[];
   granted_channel_ids: string[];
   active: boolean;
   sort_order: number;
@@ -68,11 +70,12 @@ interface LicenseConfig {
 const emptyForm: {
   name: string;
   description: string;
-  type: 'one_time' | 'subscription';
+  type: 'one_time' | 'subscription' | 'free';
   delivery_type: 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed';
   price_dollars: string;
   currency: string;
   granted_role_ids: string[];
+  granted_channel_ids: string[];
   active: boolean;
 } = {
   name: '',
@@ -82,6 +85,7 @@ const emptyForm: {
   price_dollars: '',
   currency: 'USD',
   granted_role_ids: [],
+  granted_channel_ids: [],
   active: true,
 };
 
@@ -97,6 +101,8 @@ function typeBadge(type: string) {
       return { label: 'One-Time', color: 'bg-discord-info/20 text-discord-info' };
     case 'subscription':
       return { label: 'Subscription', color: 'bg-[#FF1493]/20 text-[#FF1493]' };
+    case 'free':
+      return { label: 'Free', color: 'bg-emerald-500/20 text-emerald-300' };
     default:
       return { label: type, color: 'bg-discord-bg-tertiary text-discord-text-muted' };
   }
@@ -364,6 +370,7 @@ export default function StorePage() {
       price_dollars: (p.price_cents / 100).toFixed(2),
       currency: p.currency,
       granted_role_ids: p.granted_role_ids,
+      granted_channel_ids: p.granted_channel_ids ?? [],
       active: p.active,
     });
     const licenseConfig = p.product_license_config?.[0];
@@ -382,7 +389,7 @@ export default function StorePage() {
 
   const save = async () => {
     // Client-side validation
-    const priceCents = Math.round((parseFloat(form.price_dollars) || 0) * 100);
+    const priceCents = form.type === 'free' ? 0 : Math.round((parseFloat(form.price_dollars) || 0) * 100);
     if (priceCents < 0) {
       toast({ title: 'Price cannot be negative', variant: 'error' });
       return;
@@ -403,6 +410,7 @@ export default function StorePage() {
         price_cents: priceCents,
         currency: form.currency.toUpperCase(),
         granted_role_ids: form.granted_role_ids,
+        granted_channel_ids: form.granted_channel_ids,
         active: form.active,
       };
 
@@ -722,7 +730,8 @@ export default function StorePage() {
                   type="number"
                   step="0.01"
                   min="0"
-                  value={form.price_dollars}
+                  value={form.type === 'free' ? '0.00' : form.price_dollars}
+                  disabled={form.type === 'free'}
                   onChange={(e) => setForm({ ...form, price_dollars: e.target.value })}
                   className="w-full rounded-input bg-discord-bg-tertiary pl-7 pr-3 py-2 text-sm text-discord-text-primary outline-none"
                   placeholder="9.99"
@@ -736,12 +745,13 @@ export default function StorePage() {
               <select
                 value={form.type}
                 onChange={(e) =>
-                  setForm({ ...form, type: e.target.value as 'one_time' | 'subscription' })
+                  setForm({ ...form, type: e.target.value as 'one_time' | 'subscription' | 'free', price_dollars: e.target.value === 'free' ? '0.00' : form.price_dollars })
                 }
                 className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
               >
                 <option value="one_time">One-Time</option>
                 <option value="subscription">Subscription</option>
+                <option value="free">Free</option>
               </select>
             </div>
             <div>
@@ -868,6 +878,18 @@ export default function StorePage() {
                 hideManaged
                 requireAssignable
                 placeholder="Select roles to grant…"
+              />
+            </div>
+            <div>
+              <ChannelPicker
+                label="Granted Channels"
+                hint="Channels made visible to buyers on purchase"
+                value={form.granted_channel_ids}
+                onChange={(v) => setForm({ ...form, granted_channel_ids: (v as string[]) ?? [] })}
+                multi
+                channelTypes={['text', 'announcement', 'forum']}
+                requiredBotPermissions={['ManageChannels']}
+                placeholder="Select channels to grant…"
               />
             </div>
             <div>

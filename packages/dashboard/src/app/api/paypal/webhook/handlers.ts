@@ -5,7 +5,7 @@
  * Each handler deals with one PayPal event type (or a small group).
  */
 
-import { createHash } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
 import { applyPayPalPolicyEnvironment, type PayPalEnvironment } from '@/lib/paypal-policy';
@@ -302,6 +302,29 @@ async function recordProviderMoneyIncident(
   ) {
     throw new Error('Provider money incident returned malformed durable identity');
   }
+  if (input.eventType === 'PAYMENT.CAPTURE.COMPLETED') {
+    const { error: recoveryError } = await supabase
+      .from('commerce_provider_money_recovery')
+      .insert({
+        webhook_event_id: input.webhookEventId,
+        provider_resource_id: providerResourceId,
+        provider_parent_id: providerParentId,
+        guild_id: observedGuildId,
+        reason: input.reason,
+        status: 'pending',
+      });
+    if (recoveryError && recoveryError.code !== '23505') {
+      requireSupabaseSuccess(recoveryError, 'Failed to persist provider money recovery task');
+    }
+  }
+}
+
+function verifyCheckoutSignature(token: string, signature: string): boolean {
+  const secret = process.env.PAYPAL_RECONCILE_SECRET || process.env.PAYPAL_CLIENT_SECRET;
+  if (!secret || !/^[a-f0-9]{64}$/.test(signature)) return false;
+  const expected = Buffer.from(createHmac('sha256', secret).update(`somnibot-checkout:v1:${token}`).digest('hex'), 'utf8');
+  const provided = Buffer.from(signature, 'utf8');
+  return expected.length === provided.length && timingSafeEqual(expected, provided);
 }
 
 function parseDeliveryTypeSnapshot(value: unknown): DeliveryType | null {
@@ -1157,16 +1180,20 @@ async function ensureStagedLicenseKey(
     throw new Error('Staged license key plaintext is malformed');
   }
   const keyHash = createHash('sha256').update(plaintext).digest('hex');
+  const deliveryCustomerId = typeof payload.recipient_customer_id === 'string'
+    ? payload.recipient_customer_id : order.customer_id;
+  const deliveryDiscordId = typeof payload.recipient_discord_id === 'string'
+    ? payload.recipient_discord_id : String(payload.discord_id ?? '');
   const row = {
     id: licenseKeyId,
     order_id: order.id,
-    customer_id: order.customer_id,
+    customer_id: deliveryCustomerId,
     product_id: order.product_id,
     guild_id: order.guild_id,
     key_hash: keyHash,
     key_prefix: prefix,
     key_suffix: groups[4]!,
-    bound_discord_id: String(payload.discord_id ?? ''),
+    bound_discord_id: deliveryDiscordId,
     status: 'pending_activation',
   };
   if (!isNonEmptyString(row.bound_discord_id)) {
@@ -1195,7 +1222,7 @@ async function ensureStagedLicenseKey(
   if (
     !existing ||
     existing.order_id !== order.id ||
-    existing.customer_id !== order.customer_id ||
+    existing.customer_id !== deliveryCustomerId ||
     existing.product_id !== order.product_id ||
     existing.guild_id !== order.guild_id ||
     existing.key_hash !== keyHash
@@ -1517,9 +1544,15 @@ export async function handlePaymentCaptured(
     gift_intent_id?: string;
   } | null = null;
   let observedGuildId: string | null = null;
+  let checkoutToken: string | null = null;
+  let checkoutSignature: string | null = null;
 
   if (customId) {
-    try {
+    const signed = customId.match(/^v1:([0-9a-f-]{36})\.([a-f0-9]{64})$/i);
+    if (signed) {
+      checkoutToken = signed[1]!;
+      checkoutSignature = signed[2]!;
+    } else try {
       const raw = JSON.parse(customId) as unknown;
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         const custom = raw as Record<string, unknown>;
@@ -1588,12 +1621,41 @@ export async function handlePaymentCaptured(
     return;
   }
 
+  if (checkoutToken) {
+    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+      await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId, parentId: paypalOrderId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
+      return;
+    }
+    const { data: checkoutIntent, error: checkoutIntentError } = await supabase
+      .from('commerce_checkout_intents')
+      .select('token, guild_id, customer_id, product_id, gift_checkout_token, provider_id, expires_at, status')
+      .eq('token', checkoutToken)
+      .maybeSingle();
+    requireSupabaseSuccess(checkoutIntentError, 'Failed to validate checkout identity');
+    if (!checkoutIntent || checkoutIntent.status === 'cancelled' || (['pending', 'bound'].includes(String(checkoutIntent.status)) && Date.parse(String(checkoutIntent.expires_at)) <= Date.now())
+      || checkoutIntent.provider_id !== paypalOrderId) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId,
+        parentId: paypalOrderId, observedGuildId,
+        reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken },
+      });
+      return;
+    }
+    meta = {
+      guild_id: String(checkoutIntent.guild_id), product_id: String(checkoutIntent.product_id),
+      customer_id: String(checkoutIntent.customer_id), discord_id: '',
+      ...(typeof checkoutIntent.gift_checkout_token === 'string' && checkoutIntent.gift_checkout_token.length > 0
+        ? { gift_intent_id: checkoutIntent.gift_checkout_token } : {}),
+    };
+    observedGuildId = boundedObservedGuildId(meta.guild_id);
+  }
+
   if (
     !meta ||
     !isNonEmptyString(meta.guild_id) ||
     !isNonEmptyString(meta.product_id) ||
     !isNonEmptyString(meta.customer_id) ||
-    !isNonEmptyString(meta.discord_id)
+    (!meta.gift_intent_id && !isNonEmptyString(meta.discord_id))
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -1623,7 +1685,7 @@ export async function handlePaymentCaptured(
     !customer
     || customer.id !== meta.customer_id
     || customer.guild_id !== meta.guild_id
-    || customer.discord_id !== meta.discord_id
+    || (!meta.gift_intent_id && customer.discord_id !== meta.discord_id)
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -1638,6 +1700,33 @@ export async function handlePaymentCaptured(
       },
     });
     return;
+  }
+
+  if (meta.gift_intent_id) {
+    const token = meta.gift_intent_id;
+    const legacyIntentId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token);
+    if (!legacyIntentId && !/^[a-f0-9]{16}(?:[a-f0-9]{32})?$/.test(token)) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId,
+        parentId: paypalOrderId, observedGuildId: meta.guild_id,
+        reason: 'gift_intent_invalid_or_replayed', evidence: { gift_token: token },
+      });
+      return;
+    }
+    meta.discord_id = customer.discord_id;
+    let giftLookup = supabase.from('commerce_gift_intents').select('id').eq('guild_id', meta.guild_id).eq('buyer_customer_id', meta.customer_id).eq('product_id', meta.product_id);
+    giftLookup = legacyIntentId ? giftLookup.eq('id', token) : giftLookup.eq('checkout_token', token);
+    const { data: giftIntent, error: giftLookupError } = await giftLookup.maybeSingle();
+    requireSupabaseSuccess(giftLookupError, 'Failed to validate gift checkout token');
+    if (!giftIntent?.id) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId,
+        parentId: paypalOrderId, observedGuildId: meta.guild_id,
+        reason: 'gift_intent_invalid_or_replayed', evidence: { gift_token: token },
+      });
+      return;
+    }
+    meta.gift_intent_id = giftIntent.id;
   }
 
   // A resumed event first follows the capture's unique payment row back to
@@ -1951,6 +2040,9 @@ export async function handlePaymentCaptured(
   validateStagedLicenseDelivery(staged.payload, snapshot.delivery_type_snapshot);
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
+  if (checkoutToken) {
+    await supabase.from('commerce_checkout_intents').update({ status: 'captured' }).eq('token', checkoutToken);
+  }
 
   console.log(
     `[Webhook] Order completed + fulfillment queued: ${order.order_number} for ${meta.discord_id}`,
@@ -1983,8 +2075,15 @@ export async function handleSubscriptionActivated(
     discord_id: string;
   } | null = null;
   let observedGuildId: string | null = null;
+  let checkoutToken: string | null = null;
+  let checkoutSignature: string | null = null;
   try {
-    const raw = JSON.parse(customId ?? '') as unknown;
+    const signed = typeof customId === 'string' ? customId.match(/^v1:([0-9a-f-]{36})\.([a-f0-9]{64})$/i) : null;
+    if (signed) {
+      checkoutToken = signed[1]!;
+      checkoutSignature = signed[2]!;
+    }
+    const raw = checkoutToken ? null : JSON.parse(customId ?? '') as unknown;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
       const custom = raw as Record<string, unknown>;
       observedGuildId = boundedObservedGuildId(
@@ -2028,13 +2127,42 @@ export async function handleSubscriptionActivated(
     return;
   }
 
+  if (checkoutToken) {
+    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+      await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'BILLING.SUBSCRIPTION.ACTIVATED', resourceId: subscriptionId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
+      return;
+    }
+    const { data: checkoutIntent, error: checkoutIntentError } = await supabase
+      .from('commerce_checkout_intents')
+      .select('token, guild_id, customer_id, product_id, plan_id, provider_id, expires_at, status')
+      .eq('token', checkoutToken)
+      .maybeSingle();
+    requireSupabaseSuccess(checkoutIntentError, 'Failed to validate subscription checkout identity');
+    if (!checkoutIntent || checkoutIntent.status === 'cancelled' || (['pending', 'bound'].includes(String(checkoutIntent.status)) && Date.parse(String(checkoutIntent.expires_at)) <= Date.now())
+      || checkoutIntent.provider_id !== subscriptionId || typeof checkoutIntent.plan_id !== 'string') {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'BILLING.SUBSCRIPTION.ACTIVATED', resourceId: subscriptionId,
+        observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken },
+      });
+      return;
+    }
+    meta = {
+      guild_id: String(checkoutIntent.guild_id),
+      product_id: String(checkoutIntent.product_id),
+      plan_id: String(checkoutIntent.plan_id),
+      customer_id: String(checkoutIntent.customer_id),
+      discord_id: '',
+    };
+    observedGuildId = boundedObservedGuildId(meta.guild_id);
+  }
+
   if (
     !meta ||
     !isNonEmptyString(meta.guild_id) ||
     !isNonEmptyString(meta.product_id) ||
     !isNonEmptyString(meta.plan_id) ||
     !isNonEmptyString(meta.customer_id) ||
-    !isNonEmptyString(meta.discord_id)
+    (!checkoutToken && !isNonEmptyString(meta.discord_id))
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -2103,7 +2231,7 @@ export async function handleSubscriptionActivated(
     !customer
     || customer.id !== meta.customer_id
     || customer.guild_id !== meta.guild_id
-    || customer.discord_id !== meta.discord_id
+    || (!checkoutToken && customer.discord_id !== meta.discord_id)
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -2119,6 +2247,7 @@ export async function handleSubscriptionActivated(
     });
     return;
   }
+  if (checkoutToken) meta.discord_id = customer.discord_id;
 
   if (!order) {
     firstProviderContract = await requireAuthoritativeSubscriptionAmount(subscriptionId);
@@ -2619,6 +2748,9 @@ export async function handleSubscriptionActivated(
 
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
+  if (checkoutToken) {
+    await supabase.from('commerce_checkout_intents').update({ status: 'captured' }).eq('token', checkoutToken);
+  }
 
   console.log(
     `[Webhook] Subscription activated + fulfillment queued: ${subscriptionId} for ${meta.discord_id}`,

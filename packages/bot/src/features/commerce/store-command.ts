@@ -68,7 +68,7 @@ export async function handleStoreCommand(
 
   const { data: config } = await supabase
     .from('guild_config')
-    .select('product_types_enabled, max_storefront_products')
+    .select('product_types_enabled, max_storefront_products, gifting_enabled')
     .eq('guild_id', guildId)
     .maybeSingle();
   const enabledTypes = new Set<string>(
@@ -78,6 +78,7 @@ export async function handleStoreCommand(
   );
   const maxProducts = Number(config?.max_storefront_products);
   const storefrontLimit = Number.isInteger(maxProducts) && maxProducts >= 1 && maxProducts <= 9 ? maxProducts : 9;
+  const giftingEnabled = config?.gifting_enabled === true;
   const visibleProducts = (products ?? []).filter((product) => productMatchesEnabledType(product as Record<string, unknown>, enabledTypes));
 
   if (visibleProducts.length === 0) {
@@ -106,7 +107,7 @@ export async function handleStoreCommand(
 
   for (const product of visibleProducts.slice(0, storefrontLimit)) {
     const price = (product.price_cents / 100).toFixed(2);
-    const typeLabel = product.type === 'subscription' ? '🔄 Subscription' : '🎁 One-Time';
+    const typeLabel = product.type === 'subscription' ? '🔄 Subscription' : product.type === 'free' ? '🆓 Free' : '🎁 One-Time';
 
     // Product cards keep attribution off — the header already carries it.
     embeds.push(
@@ -123,16 +124,19 @@ export async function handleStoreCommand(
       ),
     );
 
-    // Buy button
-    rows.push(
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`store:buy:${product.id}`)
-          .setLabel(`Buy ${product.name} — $${price}`)
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji('🛒'),
-      ),
+    const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(product.type === 'free' && product.price_cents === 0 ? `store:claim:${product.id}` : `store:buy:${product.id}`)
+        .setLabel(product.type === 'free' && product.price_cents === 0 ? `Claim ${product.name}` : `Buy ${product.name} — $${price}`)
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji(product.type === 'free' ? '🎁' : '🛒'),
     );
+    if (giftingEnabled && product.type === 'one_time' && product.price_cents > 0) {
+      actionRow.addComponents(
+        new ButtonBuilder().setCustomId(`store:gift:${product.id}`).setLabel('Gift').setStyle(ButtonStyle.Secondary).setEmoji('🎁'),
+      );
+    }
+    rows.push(actionRow);
   }
 
   // Discord limits: 10 embeds, 5 action rows

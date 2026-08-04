@@ -966,6 +966,7 @@ export class CommerceFulfillmentService {
           contract,
           begun.attempt,
         );
+        await this.applyGrantedChannelAccess(payload);
       }
     }
     if (!roleDeliveryAlreadySettled && outwardGenerationId === null) {
@@ -982,6 +983,7 @@ export class CommerceFulfillmentService {
 
     // 3. Confirm the role generation before any outward row can be created.
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+    await this.applyGrantedChannelAccess(payload);
 
     // 4. Emit purchase.completed once. A crash after listener acceptance but
     // before the sent marker becomes a manual-review `uncertain`, never resend.
@@ -1054,6 +1056,27 @@ export class CommerceFulfillmentService {
       throw new Error('Existing order entitlement failed identity validation');
     }
     return data.id;
+  }
+
+  /** Apply the frozen channel vector idempotently for the delivery identity. */
+  private async applyGrantedChannelAccess(payload: FulfillmentPayload): Promise<void> {
+    if (payload.granted_channel_ids.length === 0) return;
+    const member = this.guild.members.cache.get(payload.discord_id) ?? await this.guild.members.fetch(payload.discord_id);
+    const me = this.guild.members.me ?? await this.guild.members.fetchMe();
+    if (!me.permissions.has('ManageChannels')) throw new Error('Bot lacks Manage Channels for commerce channel delivery');
+    for (const channelId of payload.granted_channel_ids) {
+      const channel = this.guild.channels.cache.get(channelId);
+      if (!channel || !('permissionOverwrites' in channel)) throw new Error(`Commerce channel ${channelId} is unavailable`);
+      await (channel as import('discord.js').GuildChannel).permissionOverwrites.edit(member.id, { ViewChannel: true }, { reason: `Commerce entitlement ${payload.order_id}` });
+    }
+  }
+
+  private async revokeGrantedChannelAccess(payload: FulfillmentPayload): Promise<void> {
+    for (const channelId of payload.granted_channel_ids) {
+      const channel = this.guild.channels.cache.get(channelId);
+      if (!channel || !('permissionOverwrites' in channel)) continue;
+      await (channel as import('discord.js').GuildChannel).permissionOverwrites.delete(payload.discord_id, `Commerce entitlement revoked ${payload.order_id}`);
+    }
   }
 
   private async validatePayloadCustomerIdentity(payload: FulfillmentPayload): Promise<void> {
@@ -2033,6 +2056,7 @@ export class CommerceFulfillmentService {
 
     // 3. Confirm the role generation before any outward row can be created.
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+    await this.applyGrantedChannelAccess(payload);
 
     // 4. Emit subscription.activated once under the same crash fence.
     const preparedEvent = outwardGenerationId === null
@@ -2136,6 +2160,7 @@ export class CommerceFulfillmentService {
     const outwardGenerationId =
       this.entitlementService.getPurchaseRoleDeliveryOutwardGeneration();
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+    await this.applyGrantedChannelAccess(payload);
     const preparedEvent = outwardGenerationId === null
       ? null
       : this.eventBus.prepareEmitAndWait('subscription.activated', payload.guild_id, {
@@ -2223,6 +2248,7 @@ export class CommerceFulfillmentService {
         return;
       }
     }
+    await this.revokeGrantedChannelAccess(payload);
     const outwardGenerationId = revocation.outwardGenerationId ?? null;
     if (outwardGenerationId === null) {
       result.errors.push(

@@ -15,7 +15,7 @@ import {
   ButtonStyle,
   type ButtonInteraction,
 } from 'discord.js';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
@@ -80,6 +80,10 @@ const CHECKOUT_DELIVERY_TYPES = new Set([
   'mixed',
 ]);
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
+function signCheckoutToken(token: string): string | null {
+  const secret = process.env.PAYPAL_RECONCILE_SECRET || process.env.PAYPAL_CLIENT_SECRET;
+  return secret ? createHmac('sha256', secret).update(`somnibot-checkout:v1:${token}`).digest('hex') : null;
+}
 
 /** Claim a free product through the dedicated idempotent $0 RPC. */
 export async function handleFreeClaimButton(
@@ -90,16 +94,68 @@ export async function handleFreeClaimButton(
   await interaction.deferReply({ ephemeral: true });
   const productId = interaction.customId.replace('store:claim:', '');
   const discordId = interaction.user.id;
-  let { data: customer } = await supabase.from('customers').select('id').eq('guild_id', guildId).eq('discord_id', discordId).maybeSingle();
-  if (!customer) {
-    const inserted = await supabase.from('customers').insert({ guild_id: guildId, discord_id: discordId, discord_username: interaction.user.username }).select('id').single();
-    customer = inserted.data;
+  const { data: product, error: productError } = await supabase
+    .from('products')
+    .select('id, name, type, price_cents, delivery_type, granted_role_ids, granted_channel_ids')
+    .eq('id', productId)
+    .eq('guild_id', guildId)
+    .eq('active', true)
+    .maybeSingle();
+  if (productError || !product || product.type !== 'free' || product.price_cents !== 0
+    || !CHECKOUT_DELIVERY_TYPES.has(String(product.delivery_type))) {
+    await interaction.editReply({ content: '❌ This free product is no longer available.' });
+    return;
   }
+  // The claim must not create durable entitlement/queue evidence when the
+  // connected guild cannot deliver the frozen Discord grants right now.
+  const liveGuild = interaction.guild;
+  const roleIds = Array.isArray(product.granted_role_ids)
+    ? product.granted_role_ids.filter((id: unknown): id is string => typeof id === 'string' && DISCORD_SNOWFLAKE.test(id))
+    : [];
+  const channelIds = Array.isArray(product.granted_channel_ids)
+    ? product.granted_channel_ids.filter((id: unknown): id is string => typeof id === 'string' && DISCORD_SNOWFLAKE.test(id))
+    : [];
+  if (liveGuild && (roleIds.length > 0 || channelIds.length > 0)) {
+    const me = liveGuild.members.me ?? await liveGuild.members.fetchMe().catch(() => null);
+    const highest = me?.roles.highest.position ?? 0;
+    const canManage = me?.permissions.has('ManageRoles') ?? false;
+    const canManageChannels = me?.permissions.has('ManageChannels') ?? false;
+    const problems: string[] = [];
+    for (const roleId of roleIds) {
+      const role = liveGuild.roles.cache.get(roleId);
+      if (!role) problems.push(`role ${roleId} is missing`);
+      else if (role.managed || role.position >= highest || !canManage) problems.push(`role ${roleId} cannot be assigned by the bot`);
+    }
+    for (const channelId of channelIds) {
+      const channel = liveGuild.channels.cache.get(channelId);
+      if (!channel || !channel.isTextBased()) problems.push(`channel ${channelId} is missing or not text-based`);
+      else if (!canManageChannels) problems.push(`the bot is missing Manage Channels permission for ${channelId}`);
+    }
+    if (problems.length > 0) {
+      await raiseOwnerAlert(supabase, guildId, {
+        alertType: 'commerce_undeliverable_benefit', severity: 'critical',
+        title: 'Free product benefits are undeliverable',
+        message: `Free claim for "${product.name}" was refused: ${problems.join('; ')}`,
+        metadata: { product_id: productId, problems },
+      });
+      await interaction.editReply({ content: '❌ This free product cannot be delivered right now. The server owner has been notified.' });
+      return;
+    }
+  }
+  const customerResult = await supabase.from('customers').upsert(
+    { guild_id: guildId, discord_id: discordId, discord_username: interaction.user.username },
+    { onConflict: 'discord_id,guild_id' },
+  ).select('id').single();
+  const customer = customerResult.data;
   if (!customer?.id) {
     await interaction.editReply({ content: '❌ Free claim is temporarily unavailable. Please try again.' });
     return;
   }
-  const { data: claimConfig } = await supabase.from('guild_config').select('free_claim_policy').eq('guild_id', guildId).maybeSingle();
+  const { data: claimConfig, error: claimConfigError } = await supabase.from('guild_config').select('free_claim_policy').eq('guild_id', guildId).maybeSingle();
+  if (claimConfigError) {
+    await interaction.editReply({ content: '⚠️ Free claims are temporarily unavailable. Please try again.' });
+    return;
+  }
   const requestId = claimConfig?.free_claim_policy === 'repeatable'
     ? randomUUID()
     : deterministicUuidV8('somnibot:free-claim:v1', [guildId, discordId, productId]);
@@ -423,10 +479,13 @@ export async function handleBuyButton(
   paypalClientId: string,
   paypalClientSecret: string,
   dashboardUrl: string,
+  giftCheckoutToken?: string,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
-  const productId = interaction.customId.replace('store:buy:', '');
+  const productId = interaction.customId.startsWith('store:gift-buy:')
+    ? (interaction.customId.split(':')[2] ?? '')
+    : interaction.customId.replace('store:buy:', '');
   const discordId = interaction.user.id;
   const discordUsername = interaction.user.username;
 
@@ -477,21 +536,26 @@ export async function handleBuyButton(
     .eq('guild_id', guildId)
     .eq('discord_id', discordId)
     .maybeSingle();
-  const { data: giftRows } = buyerForGift
+  const { data: giftRows } = buyerForGift && giftCheckoutToken
     ? await supabase
       .from('commerce_gift_intents')
-      .select('id, buyer_customer_id, expires_at, status')
+      .select('id, checkout_token, buyer_customer_id, expires_at, status')
       .eq('guild_id', guildId)
       .eq('buyer_customer_id', buyerForGift.id)
       .eq('product_id', productId)
+      .eq('checkout_token', giftCheckoutToken)
       .eq('status', 'pending')
       .gt('expires_at', new Date().toISOString())
       .order('created_at', { ascending: false })
       .limit(1)
     : { data: [] as Array<Record<string, unknown>> };
-  const giftIntentId = Array.isArray(giftRows) && typeof giftRows[0]?.id === 'string'
-    ? giftRows[0].id
+  const giftIntentId = giftCheckoutToken && Array.isArray(giftRows) && typeof giftRows[0]?.checkout_token === 'string'
+    ? giftRows[0].checkout_token
     : null;
+  if (giftCheckoutToken && !giftIntentId) {
+    await interaction.editReply({ content: '❌ This gift checkout has expired or is no longer available. Create a new gift intent.' });
+    return;
+  }
 
   // BUYABILITY guard — enforce the checkout column of the compliance
   // decision matrix (packages/dashboard/src/lib/api/commerce-income-wall.ts):
@@ -662,7 +726,7 @@ export async function handleBuyButton(
     return;
   }
 
-  if (existingCustomer) {
+  if (existingCustomer && !giftIntentId) {
     const { data: existing, error: entitlementLookupError } = await supabase
       .from('entitlements')
       .select('id')
@@ -766,6 +830,27 @@ export async function handleBuyButton(
     return;
   }
 
+  // PayPal receives only this opaque handle; all tenant/product/customer/gift
+  // identity remains in the service-role checkout-intent ledger.
+  const checkoutToken = randomUUID();
+  const checkoutSignature = signCheckoutToken(checkoutToken);
+  if (!checkoutSignature) {
+    await interaction.editReply({ content: '❌ Checkout signing is temporarily unavailable. Please try again later.' });
+    return;
+  }
+  const { error: checkoutIntentError } = await supabase.from('commerce_checkout_intents').insert({
+    token: checkoutToken,
+    guild_id: guildId,
+    customer_id: customerId,
+    product_id: productId,
+    gift_checkout_token: giftIntentId,
+  });
+  if (checkoutIntentError) {
+    log.error('Failed to persist checkout identity:', checkoutIntentError.message);
+    await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
+    return;
+  }
+
   const price = (product.price_cents / 100).toFixed(2);
   // Post-checkout destinations MUST be publicly reachable: the buyer is a
   // Discord customer, not a dashboard admin. `/store` lives under
@@ -804,15 +889,7 @@ export async function handleBuyButton(
             value: price,
           },
           description: product.name,
-          // V5 Audit [2.1]: Use short keys to stay well within PayPal's
-          // 127-character custom_id limit. Previous long keys totalled ~110 chars.
-          custom_id: JSON.stringify({
-            g: guildId,
-            p: productId,
-            c: customerId,
-            d: discordId,
-            ...(giftIntentId ? { gi: giftIntentId } : {}),
-          }),
+          custom_id: `v1:${checkoutToken}.${checkoutSignature}`,
         },
       ],
       application_context: {
@@ -841,6 +918,7 @@ export async function handleBuyButton(
     }
 
     const orderData = await orderRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
+    await supabase.from('commerce_checkout_intents').update({ provider_id: orderData.id, status: 'bound' }).eq('token', checkoutToken);
     const approvalLink = orderData.links?.find((l) => l.rel === 'approve');
 
     if (!isPayPalApprovalUrl(approvalLink?.href)) {
@@ -916,6 +994,10 @@ export async function handleBuyButton(
       return;
     }
 
+    if (pendingOrder && typeof pendingOrder === 'object' && 'id' in pendingOrder && typeof (pendingOrder as { id?: unknown }).id === 'string') {
+      await supabase.from('commerce_checkout_intents').update({ order_id: (pendingOrder as { id: string }).id }).eq('token', checkoutToken);
+    }
+
     await interaction.editReply({
       embeds: [
         brandedEmbed(brandKit, {
@@ -978,17 +1060,12 @@ export async function handleBuyButton(
       });
       return;
     }
+    await supabase.from('commerce_checkout_intents').update({ plan_id: plan.id }).eq('token', checkoutToken);
 
     // Create PayPal subscription
     const subPayload = {
       plan_id: plan.paypal_plan_id,
-      custom_id: JSON.stringify({
-        guild_id: guildId,
-        product_id: productId,
-        plan_id: plan.id,
-        customer_id: customerId,
-        discord_id: discordId,
-      }),
+      custom_id: `v1:${checkoutToken}.${checkoutSignature}`,
       application_context: {
         brand_name: brandName,
         locale: 'en-US',
@@ -1015,6 +1092,7 @@ export async function handleBuyButton(
     }
 
     const subData = await subRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
+    await supabase.from('commerce_checkout_intents').update({ provider_id: subData.id, status: 'bound' }).eq('token', checkoutToken);
     const approvalLink = subData.links?.find((l) => l.rel === 'approve');
 
     if (!isPayPalApprovalUrl(approvalLink?.href)) {
@@ -1086,6 +1164,10 @@ export async function handleBuyButton(
         content: '❌ Checkout could not be safely recorded. No subscription link was opened; please try again.',
       });
       return;
+    }
+
+    if (pendingOrder && typeof pendingOrder === 'object' && 'id' in pendingOrder && typeof (pendingOrder as { id?: unknown }).id === 'string') {
+      await supabase.from('commerce_checkout_intents').update({ order_id: (pendingOrder as { id: string }).id }).eq('token', checkoutToken);
     }
 
     await interaction.editReply({
