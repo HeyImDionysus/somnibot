@@ -169,6 +169,25 @@ describe('POST /api/setup finalize', () => {
     expect(mock._query.upsert).not.toHaveBeenCalled();
   });
 
+  it('redacts raw Supabase Management API error bodies during finalize', async () => {
+    configureReadyPayPalEnv();
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: false,
+      error: 'Supabase Management API error (500): access_token=should-not-reach-browser',
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toBe('Discord auth provider could not be configured. Check server logs or retry with a valid Management API token.');
+    expect(body.authError).toBe(body.error);
+    expect(JSON.stringify(body)).not.toContain('should-not-reach-browser');
+  });
+
   it('does not lock setup when browser Supabase public env is missing', async () => {
     process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
     process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
@@ -1534,8 +1553,8 @@ describe('POST /api/setup verify-discord before Supabase is configured', () => {
     expect(finalizeResponse.status).toBe(200);
     expect(mock._query.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: 'discord_bot_token',
-        value: 'discord-bot-token',
+        key: 'discord_bot_token_configured',
+        value: 'true',
         section: 'discord',
       }),
       { onConflict: 'key' },
@@ -1550,8 +1569,8 @@ describe('POST /api/setup verify-discord before Supabase is configured', () => {
     );
     expect(mock._query.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: 'discord_client_secret',
-        value: 'discord-client-secret',
+        key: 'discord_client_secret_configured',
+        value: 'true',
         section: 'discord',
       }),
       { onConflict: 'key' },
@@ -1641,7 +1660,7 @@ describe('GET /api/setup status', () => {
     instanceSettingsTable.limit.mockResolvedValueOnce({
       data: [
         { key: 'discord_application_id', value: '123456789012345678' },
-        { key: 'discord_client_secret', value: 'discord-client-secret' },
+        { key: 'discord_client_secret_configured', value: 'true' },
       ],
     });
 
