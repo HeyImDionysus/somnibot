@@ -433,6 +433,10 @@ const escalationConfig = z.object({
   escalation_chain: z.array(z.record(z.unknown())).optional(),
   mod_log_channel_id: snowflake.optional().nullable(),
   infraction_expiry_days: z.number().int().min(0).max(3650).optional(),
+  appeals_enabled: z.boolean().optional(),
+  appeal_cooldown_hours: z.number().int().min(1).max(168).optional(),
+  appeal_review_channel_id: snowflake.optional().nullable(),
+  dm_on_action: z.boolean().optional(),
 });
 
 // ── Giveaway schemas ────────────────────────────────
@@ -752,8 +756,10 @@ const musicConfig = z.object({
   // auto_destroy caps at 120 to match the route's ceiling (Math.min(120, ...)).
   music_auto_leave_minutes: z.number().int().min(1).max(60).optional(),
   music_auto_destroy_minutes: z.number().int().min(1).max(120).optional(),
-  // V5 Audit §6.P3a — validate max queue length (bot default 500, hard cap 10 000)
-  max_queue_length: z.number().int().min(1).max(10_000).optional(),
+  // V5 Audit §6.P3a — validate max queue length (catalog default/hard cap 5 000)
+  max_queue_length: z.number().int().min(1).max(5_000).optional(),
+  allow_duplicates: z.boolean().optional(),
+  per_user_queue_cap: z.number().int().min(1).max(500).optional(),
   // Fairness controls (catalog: music.json)
   vote_skip_threshold_percent: z.number().int().min(1).max(100).optional(),
   self_skip_enabled: z.boolean().optional(),

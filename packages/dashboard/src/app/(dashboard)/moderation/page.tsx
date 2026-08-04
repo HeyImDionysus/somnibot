@@ -31,12 +31,34 @@ interface AntiRaidConfig {
   anti_raid_join_window_seconds: number;
   anti_raid_account_age_days: number;
   anti_raid_action: 'kick' | 'ban' | 'lockdown';
+  anti_raid_auto_unban: boolean;
+  anti_raid_containment_ladder: Array<{ stage: number; action: 'kick' | 'ban' | 'lockdown'; ban_delete_seconds?: number }>;
+  anti_raid_raid_cooldown_minutes: number;
   anti_raid_log_channel_id: string | null;
 }
 
 interface MessageLogConfig {
   message_log_enabled: boolean;
   message_log_channel_id: string | null;
+  message_log_edits_enabled: boolean;
+  message_log_deletes_enabled: boolean;
+  message_log_ignored_channel_ids: string[];
+  message_log_config_cache_ttl_ms: number;
+  data_export_enabled: boolean;
+}
+
+interface AutomodConfig {
+  automod_enabled: boolean;
+  automod_mode: 'observe' | 'enforce';
+  automod_message_budget_ms: number;
+  automod_regex_budget_ms: number;
+}
+
+interface AppealsConfig {
+  appeals_enabled: boolean;
+  appeal_cooldown_hours: number;
+  appeal_review_channel_id: string | null;
+  dm_on_action: boolean;
 }
 
 interface StarboardConfig {
@@ -53,12 +75,34 @@ const DEFAULT_ANTI_RAID: AntiRaidConfig = {
   anti_raid_join_window_seconds: 10,
   anti_raid_account_age_days: 7,
   anti_raid_action: 'kick',
+  anti_raid_auto_unban: true,
+  anti_raid_containment_ladder: [{ stage: 1, action: 'kick' }, { stage: 2, action: 'lockdown' }],
+  anti_raid_raid_cooldown_minutes: 5,
   anti_raid_log_channel_id: null,
 };
 
 const DEFAULT_MESSAGE_LOG: MessageLogConfig = {
   message_log_enabled: false,
   message_log_channel_id: null,
+  message_log_edits_enabled: true,
+  message_log_deletes_enabled: true,
+  message_log_ignored_channel_ids: [],
+  message_log_config_cache_ttl_ms: 60000,
+  data_export_enabled: true,
+};
+
+const DEFAULT_AUTOMOD: AutomodConfig = {
+  automod_enabled: true,
+  automod_mode: 'observe',
+  automod_message_budget_ms: 500,
+  automod_regex_budget_ms: 250,
+};
+
+const DEFAULT_APPEALS: AppealsConfig = {
+  appeals_enabled: true,
+  appeal_cooldown_hours: 24,
+  appeal_review_channel_id: null,
+  dm_on_action: true,
 };
 
 const DEFAULT_STARBOARD: StarboardConfig = {
@@ -98,6 +142,8 @@ export default function ModerationPage() {
   const [config, setConfig] = useState<ModerationConfig | null>(null);
   const [antiRaid, setAntiRaid] = useState<AntiRaidConfig>(DEFAULT_ANTI_RAID);
   const [messageLog, setMessageLog] = useState<MessageLogConfig>(DEFAULT_MESSAGE_LOG);
+  const [automod, setAutomod] = useState<AutomodConfig>(DEFAULT_AUTOMOD);
+  const [appeals, setAppeals] = useState<AppealsConfig>(DEFAULT_APPEALS);
   const [starboard, setStarboard] = useState<StarboardConfig>(DEFAULT_STARBOARD);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -123,11 +169,31 @@ export default function ModerationPage() {
           anti_raid_join_window_seconds: gc.anti_raid_join_window_seconds ?? 10,
           anti_raid_account_age_days: gc.anti_raid_account_age_days ?? 7,
           anti_raid_action: gc.anti_raid_action ?? 'kick',
+          anti_raid_auto_unban: gc.anti_raid_auto_unban ?? true,
+          anti_raid_containment_ladder: Array.isArray(gc.anti_raid_containment_ladder) ? gc.anti_raid_containment_ladder : DEFAULT_ANTI_RAID.anti_raid_containment_ladder,
+          anti_raid_raid_cooldown_minutes: gc.anti_raid_raid_cooldown_minutes ?? 5,
           anti_raid_log_channel_id: gc.anti_raid_log_channel_id ?? null,
         });
         setMessageLog({
           message_log_enabled: gc.message_log_enabled ?? false,
           message_log_channel_id: gc.message_log_channel_id ?? null,
+          message_log_edits_enabled: gc.message_log_edits_enabled ?? true,
+          message_log_deletes_enabled: gc.message_log_deletes_enabled ?? true,
+          message_log_ignored_channel_ids: Array.isArray(gc.message_log_ignored_channel_ids) ? gc.message_log_ignored_channel_ids : [],
+          message_log_config_cache_ttl_ms: gc.message_log_config_cache_ttl_ms ?? 60000,
+          data_export_enabled: gc.data_export_enabled ?? true,
+        });
+        setAutomod({
+          automod_enabled: gc.automod_enabled ?? true,
+          automod_mode: gc.automod_mode === 'enforce' ? 'enforce' : 'observe',
+          automod_message_budget_ms: gc.automod_message_budget_ms ?? 500,
+          automod_regex_budget_ms: gc.automod_regex_budget_ms ?? 250,
+        });
+        setAppeals({
+          appeals_enabled: gc.appeals_enabled ?? true,
+          appeal_cooldown_hours: gc.appeal_cooldown_hours ?? 24,
+          appeal_review_channel_id: gc.appeal_review_channel_id ?? null,
+          dm_on_action: gc.dm_on_action ?? true,
         });
         setStarboard({
           starboard_enabled: gc.starboard_enabled ?? true,
@@ -178,6 +244,8 @@ export default function ModerationPage() {
         body: JSON.stringify({
           ...antiRaid,
           ...messageLog,
+          ...automod,
+          ...appeals,
           ...starboard,
         }),
       });
@@ -534,7 +602,7 @@ export default function ModerationPage() {
                 <input
                   type="number"
                   min={5}
-                  max={300}
+                  max={120}
                   value={antiRaid.anti_raid_join_window_seconds}
                   onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_join_window_seconds: parseInt(e.target.value) || 10 })}
                   className="mt-2 w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
@@ -552,6 +620,17 @@ export default function ModerationPage() {
                   className="mt-2 w-24 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
                 />
               </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3 border-t border-discord-border-subtle pt-4">
+              <label className="flex items-center gap-3 text-sm text-discord-text-secondary"><input type="checkbox" checked={antiRaid.anti_raid_auto_unban}
+                onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_auto_unban: e.target.checked })} className="accent-discord-accent" /> Auto-unban raid bans after cooldown</label>
+              <label className="text-sm text-discord-text-secondary">Raid cooldown (minutes)
+                <input type="number" min={1} max={60} value={antiRaid.anti_raid_raid_cooldown_minutes}
+                  onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_raid_cooldown_minutes: Math.max(1, Math.min(60, parseInt(e.target.value, 10) || 1)) })}
+                  className="mt-2 block w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" /></label>
+              <label className="text-sm text-discord-text-secondary">Containment ladder (JSON)
+                <textarea value={JSON.stringify(antiRaid.anti_raid_containment_ladder)} onChange={(e) => { try { const ladder = JSON.parse(e.target.value); if (Array.isArray(ladder)) setAntiRaid({ ...antiRaid, anti_raid_containment_ladder: ladder }); } catch { /* wait for valid JSON */ } }}
+                  className="mt-2 block h-20 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 font-mono text-xs text-discord-text-primary" /></label>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
@@ -600,7 +679,7 @@ export default function ModerationPage() {
         </div>
 
         {messageLog.message_log_enabled && (
-          <div className="max-w-md">
+          <div className="space-y-4">
             <ChannelPicker
               label="Log Channel"
               hint="Channel where edited and deleted messages are logged."
@@ -609,8 +688,63 @@ export default function ModerationPage() {
               placeholder="Select log channel…"
               allowNone
             />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="flex items-center gap-3 text-sm text-discord-text-secondary"><input type="checkbox" checked={messageLog.message_log_edits_enabled} onChange={(e) => setMessageLog({ ...messageLog, message_log_edits_enabled: e.target.checked })} className="accent-discord-accent" /> Log message edits</label>
+              <label className="flex items-center gap-3 text-sm text-discord-text-secondary"><input type="checkbox" checked={messageLog.message_log_deletes_enabled} onChange={(e) => setMessageLog({ ...messageLog, message_log_deletes_enabled: e.target.checked })} className="accent-discord-accent" /> Log message deletes</label>
+              <label className="text-sm text-discord-text-secondary">Config cache TTL (ms)
+                <input type="number" min={0} max={3600000} value={messageLog.message_log_config_cache_ttl_ms} onChange={(e) => setMessageLog({ ...messageLog, message_log_config_cache_ttl_ms: Math.max(0, Math.min(3600000, parseInt(e.target.value, 10) || 0)) })} className="mt-2 block w-40 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" /></label>
+              <label className="flex items-center gap-3 text-sm text-discord-text-secondary"><input type="checkbox" checked={messageLog.data_export_enabled} onChange={(e) => setMessageLog({ ...messageLog, data_export_enabled: e.target.checked })} className="accent-discord-accent" /> Enable member data export</label>
+              <label className="text-sm text-discord-text-secondary sm:col-span-2">Ignored channel IDs (comma separated)
+                <input type="text" value={messageLog.message_log_ignored_channel_ids.join(', ')} onChange={(e) => setMessageLog({ ...messageLog, message_log_ignored_channel_ids: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} className="mt-2 block w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" /></label>
+            </div>
           </div>
         )}
+      </section>
+
+      {/* Auto-Moderation */}
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div><h2 className="text-lg font-medium text-discord-text-primary">Auto-Moderation</h2>
+            <p className="mt-1 text-sm text-discord-text-muted">Scan enabled rules within bounded per-message and per-regex budgets.</p></div>
+          <button onClick={() => setAutomod({ ...automod, automod_enabled: !automod.automod_enabled })}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full ${automod.automod_enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}>
+            <span className={`inline-block h-5 w-5 rounded-full bg-white transform ${automod.automod_enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <label className="text-sm text-discord-text-secondary">Mode
+            <select value={automod.automod_mode} onChange={(e) => setAutomod({ ...automod, automod_mode: e.target.value as AutomodConfig['automod_mode'] })}
+              className="mt-2 block w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary">
+              <option value="observe">Observe (log only)</option><option value="enforce">Enforce actions</option>
+            </select>
+          </label>
+          <label className="text-sm text-discord-text-secondary">Message rule budget (ms)
+            <input type="number" min={100} max={2000} value={automod.automod_message_budget_ms} onChange={(e) => setAutomod({ ...automod, automod_message_budget_ms: Math.max(100, Math.min(2000, parseInt(e.target.value, 10) || 100)) })}
+              className="mt-2 block w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" />
+          </label>
+          <label className="text-sm text-discord-text-secondary">Regex evaluation budget (ms)
+            <input type="number" min={50} max={250} value={automod.automod_regex_budget_ms} onChange={(e) => setAutomod({ ...automod, automod_regex_budget_ms: Math.max(50, Math.min(250, parseInt(e.target.value, 10) || 50)) })}
+              className="mt-2 block w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" />
+          </label>
+        </div>
+      </section>
+
+      {/* Appeals */}
+      <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
+        <div className="flex items-center justify-between"><div><h2 className="text-lg font-medium text-discord-text-primary">Infraction Appeals</h2>
+          <p className="mt-1 text-sm text-discord-text-muted">Keep a member-respectful appeal path available for every moderation action.</p></div>
+          <button onClick={() => setAppeals({ ...appeals, appeals_enabled: !appeals.appeals_enabled })}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full ${appeals.appeals_enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}>
+            <span className={`inline-block h-5 w-5 rounded-full bg-white transform ${appeals.appeals_enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button></div>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <label className="text-sm text-discord-text-secondary">Appeal cooldown (hours)
+            <input type="number" min={1} max={168} value={appeals.appeal_cooldown_hours} onChange={(e) => setAppeals({ ...appeals, appeal_cooldown_hours: Math.max(1, Math.min(168, parseInt(e.target.value, 10) || 1)) })}
+              className="mt-2 block w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" /></label>
+          <ChannelPicker label="Appeal Review Channel" hint="Falls back to the moderation log when empty." value={appeals.appeal_review_channel_id}
+            onChange={(v) => setAppeals({ ...appeals, appeal_review_channel_id: (v as string) || null })} placeholder="Select review channel…" allowNone />
+          <label className="flex items-center gap-3 text-sm text-discord-text-secondary"><input type="checkbox" checked={appeals.dm_on_action} onChange={(e) => setAppeals({ ...appeals, dm_on_action: e.target.checked })} className="accent-discord-accent" /> DM members on moderation actions</label>
+        </div>
       </section>
 
       {/* Starboard */}

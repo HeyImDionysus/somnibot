@@ -19,6 +19,9 @@ interface MusicConfig {
   dj_role_id: string | null;
   music_auto_leave_minutes: number;
   music_auto_destroy_minutes: number;
+  max_queue_length: number;
+  allow_duplicates: boolean;
+  per_user_queue_cap: number;
   vote_skip_threshold_percent: number;
   self_skip_enabled: boolean;
   requester_move_enabled: boolean;
@@ -38,6 +41,9 @@ const DEFAULT_CONFIG: MusicConfig = {
   dj_role_id: null,
   music_auto_leave_minutes: 5,
   music_auto_destroy_minutes: 30,
+  max_queue_length: 5000,
+  allow_duplicates: true,
+  per_user_queue_cap: 50,
   vote_skip_threshold_percent: 50,
   self_skip_enabled: true,
   requester_move_enabled: true,
@@ -237,8 +243,28 @@ export default function MusicSettingsPage() {
               </div>
             </div>
 
-            {/* Ghost controls for max_queue_length and allow_duplicates removed in V29 —
-                these columns were dropped from the DB in V18 and the API doesn't read/write them. */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Maximum Queue Length</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">Maximum tracks held for this guild (1–5,000).</p>
+                <input type="number" min={1} max={5000} value={config.max_queue_length}
+                  onChange={(e) => updateField('max_queue_length', Math.max(1, Math.min(5000, parseInt(e.target.value, 10) || 1)))}
+                  className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Per-User Queue Cap</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">Maximum queued tracks attributed to one requester (1–500).</p>
+                <input type="number" min={1} max={500} value={config.per_user_queue_cap}
+                  onChange={(e) => updateField('per_user_queue_cap', Math.max(1, Math.min(500, parseInt(e.target.value, 10) || 1)))}
+                  className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none" />
+              </div>
+            </div>
+            <label className="flex items-start gap-3 cursor-pointer pt-2 border-t border-discord-border-subtle">
+              <input type="checkbox" checked={config.allow_duplicates}
+                onChange={(e) => updateField('allow_duplicates', e.target.checked)} className="mt-1 accent-discord-accent" />
+              <span><span className="block text-sm font-medium text-discord-text-secondary">Allow duplicate tracks</span>
+                <span className="block text-xs text-discord-text-muted">When off, a track already in the queue cannot be requested again.</span></span>
+            </label>
           </div>
 
           {/* Fairness Controls */}

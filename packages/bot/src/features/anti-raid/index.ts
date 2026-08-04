@@ -43,6 +43,8 @@ interface AntiRaidConfig {
   anti_raid_action: 'kick' | 'ban' | 'lockdown';
   anti_raid_auto_unban: boolean;
   anti_raid_ban_delete_seconds: number;
+  anti_raid_containment_ladder: Array<{ stage: number; action: 'kick' | 'ban' | 'lockdown'; ban_delete_seconds?: number }>;
+  anti_raid_raid_cooldown_minutes: number;
   anti_raid_log_channel_id: string | null;
   mod_log_channel_id: string | null;
   /** White-label brand kit projected from the same cached guild_config row. */
@@ -53,7 +55,7 @@ const CONFIG_TTL = 60_000;
 // V5 Audit §6.4 — Per-guild config cache instead of global singleton
 const _configCache = new Map<string, { config: AntiRaidConfig; time: number }>();
 
-const RAID_MODE_COOLDOWN = 5 * 60_000; // Auto-deactivate after 5 minutes
+const DEFAULT_RAID_MODE_COOLDOWN = 5 * 60_000;
 
 // ── V5 Audit §14.6 — In-memory fallback when Valkey is unavailable ──
 // Prevents anti-raid from silently failing if Valkey goes down.
@@ -127,12 +129,12 @@ function pruneStaleMemoryEntries(): void {
   }
   // Prune raid mode: remove guilds past cooldown
   for (const [guildId, activated] of _memoryRaidMode) {
-    if (now - activated >= RAID_MODE_COOLDOWN) _memoryRaidMode.delete(guildId);
+    if (now - activated >= 60 * 60_000) _memoryRaidMode.delete(guildId);
   }
   // Prune raid banned: remove guilds past cooldown + 60s (matches Valkey TTL)
   for (const [guildId] of _memoryRaidBanned) {
     const raidActivated = _memoryRaidMode.get(guildId);
-    if (!raidActivated || now - raidActivated >= RAID_MODE_COOLDOWN + 60_000) {
+    if (!raidActivated || now - raidActivated >= 60 * 60_000) {
       _memoryRaidBanned.delete(guildId);
     }
   }
@@ -182,7 +184,7 @@ export async function loadConfig(supabase: SupabaseClient, guildId: string): Pro
   const { data } = await supabase
     .from('guild_config')
     .select(
-      `anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_auto_unban, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id, ${BRAND_KIT_COLUMNS}`,
+      `anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_auto_unban, anti_raid_ban_delete_seconds, anti_raid_containment_ladder, anti_raid_raid_cooldown_minutes, anti_raid_log_channel_id, mod_log_channel_id, ${BRAND_KIT_COLUMNS}`,
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -195,6 +197,10 @@ export async function loadConfig(supabase: SupabaseClient, guildId: string): Pro
     anti_raid_action: data?.anti_raid_action ?? 'kick',
     anti_raid_auto_unban: data?.anti_raid_auto_unban ?? true,
     anti_raid_ban_delete_seconds: data?.anti_raid_ban_delete_seconds ?? 86400,
+    anti_raid_containment_ladder: Array.isArray(data?.anti_raid_containment_ladder)
+      ? (data.anti_raid_containment_ladder as AntiRaidConfig['anti_raid_containment_ladder'])
+      : [{ stage: 1, action: (data?.anti_raid_action ?? 'kick') as AntiRaidConfig['anti_raid_action'] }],
+    anti_raid_raid_cooldown_minutes: data?.anti_raid_raid_cooldown_minutes ?? 5,
     anti_raid_log_channel_id: data?.anti_raid_log_channel_id ?? null,
     mod_log_channel_id: data?.mod_log_channel_id ?? null,
     brandKit: brandKitFromConfig(data ?? null, undefined),
@@ -203,6 +209,22 @@ export async function loadConfig(supabase: SupabaseClient, guildId: string): Pro
   // V5 Audit P2-4: Cap the config cache the same way memory fallback Maps are capped
   capMap(_configCache, MAX_MEMORY_GUILDS);
   return config;
+}
+
+function raidCooldownMs(config: AntiRaidConfig): number {
+  return Math.max(1, Math.min(60, config.anti_raid_raid_cooldown_minutes || 5)) * 60_000;
+}
+
+function containmentFor(config: AntiRaidConfig, joinCount: number): { action: AntiRaidConfig['anti_raid_action']; banDeleteSeconds: number } {
+  const ladder = [...(config.anti_raid_containment_ladder ?? [])]
+    .filter((stage) => Number.isInteger(stage.stage) && stage.stage >= 1)
+    .sort((a, b) => a.stage - b.stage);
+  const stageNumber = Math.max(1, Math.min(ladder.length || 1, Math.floor(joinCount / Math.max(config.anti_raid_join_threshold, 1))));
+  const selected = ladder.find((stage) => stage.stage === stageNumber) ?? ladder[ladder.length - 1];
+  return {
+    action: selected?.action ?? config.anti_raid_action,
+    banDeleteSeconds: selected?.ban_delete_seconds ?? config.anti_raid_ban_delete_seconds,
+  };
 }
 
 function getAccountAgeDays(member: GuildMember): number {
@@ -305,7 +327,7 @@ async function recordJoinAndCount(guildId: string, windowMs: number): Promise<nu
  * Check if raid mode is active for a guild.
  * V5 Audit §14.6 — Falls back to in-memory state if Valkey is unavailable.
  */
-async function isRaidModeActive(guildId: string): Promise<boolean> {
+async function isRaidModeActive(guildId: string, cooldownMs = DEFAULT_RAID_MODE_COOLDOWN): Promise<boolean> {
   try {
     const valkey = getValkey();
     const val = await valkey.get(raidModeKey(guildId));
@@ -314,7 +336,7 @@ async function isRaidModeActive(guildId: string): Promise<boolean> {
     // Valkey unavailable — check in-memory state
     const activated = _memoryRaidMode.get(guildId);
     if (!activated) return false;
-    return Date.now() - activated < RAID_MODE_COOLDOWN;
+    return Date.now() - activated < cooldownMs;
   }
 }
 
@@ -326,6 +348,7 @@ async function activateRaidMode(
   guildId: string,
   supabase?: SupabaseClient,
   triggerJoins = 0,
+  cooldownMs = DEFAULT_RAID_MODE_COOLDOWN,
 ): Promise<void> {
   // Durable mirror FIRST: Valkey expires in 5 minutes and dies with the
   // process, so a restart mid-raid would otherwise drop containment, strand
@@ -337,7 +360,7 @@ async function activateRaidMode(
         guild_id: guildId,
         activated_at: new Date().toISOString(),
         trigger_joins: triggerJoins,
-        expires_at: new Date(Date.now() + RAID_MODE_COOLDOWN).toISOString(),
+        expires_at: new Date(Date.now() + cooldownMs).toISOString(),
         updated_at: new Date().toISOString(),
       }, { onConflict: 'guild_id' });
     } catch (err) {
@@ -347,7 +370,7 @@ async function activateRaidMode(
 
   try {
     const valkey = getValkey();
-    await valkey.set(raidModeKey(guildId), String(Date.now()), 'PX', RAID_MODE_COOLDOWN);
+    await valkey.set(raidModeKey(guildId), String(Date.now()), 'PX', cooldownMs);
   } catch {
     // Valkey unavailable — store in memory
     _memoryRaidMode.set(guildId, Date.now());
@@ -418,12 +441,13 @@ export async function processAntiRaid(
   const joinCount = await recordJoinAndCount(guild.id, windowMs);
 
   // Check raid mode state
-  const raidActive = await isRaidModeActive(guild.id);
+  const raidActive = await isRaidModeActive(guild.id, raidCooldownMs(config));
+  const containment = containmentFor(config, joinCount);
 
   // V5 Audit §8.1: Auto-unban raid-banned users when raid mode expires (ban mode).
   // Gated behind anti_raid_auto_unban toggle (defaults to true).
   // Runs in background via setImmediate so it doesn't block the join handler.
-  if (!raidActive && config.anti_raid_action === 'ban' && config.anti_raid_auto_unban) {
+  if (!raidActive && containment.action === 'ban' && config.anti_raid_auto_unban) {
     setImmediate(() => {
       processRaidUnbans(guild, config, eventBus).catch((err) => {
         log.error('Background raid unban failed', { error: (err as Error)?.message ?? err });
@@ -432,7 +456,7 @@ export async function processAntiRaid(
   }
 
   // V6 Audit §8.6: Restore verification level + invites when raid mode expires
-  if (!raidActive && config.anti_raid_action === 'lockdown') {
+  if (!raidActive && containment.action === 'lockdown') {
     try {
       const valkey = getValkey();
       const prevLevelKey = `antiraid:prevlevel:${guild.id}`;
@@ -468,13 +492,13 @@ export async function processAntiRaid(
 
   // Check if threshold exceeded — activate raid mode
   if (joinCount >= config.anti_raid_join_threshold && !raidActive) {
-    await activateRaidMode(guild.id, supabase, joinCount);
+    await activateRaidMode(guild.id, supabase, joinCount, raidCooldownMs(config));
 
     const embed = new EmbedBuilder()
       .setTitle('🚨 RAID DETECTED')
       .setDescription(
         `**${joinCount} joins** in the last ${config.anti_raid_join_window_seconds}s (threshold: ${config.anti_raid_join_threshold}).\n\n` +
-        `Action: **${config.anti_raid_action}** • Raid mode will auto-deactivate after 5 minutes of calm.`,
+        `Action: **${containment.action}** • Raid mode will auto-deactivate after ${config.anti_raid_raid_cooldown_minutes} minute(s) of calm.`,
       )
       .setTimestamp();
 
@@ -484,7 +508,7 @@ export async function processAntiRaid(
       joinCount,
       threshold: config.anti_raid_join_threshold,
       windowSeconds: config.anti_raid_join_window_seconds,
-      action: config.anti_raid_action,
+      action: containment.action,
     });
   }
 
@@ -492,7 +516,7 @@ export async function processAntiRaid(
   const shouldAct = raidActive || joinCount >= config.anti_raid_join_threshold;
   if (shouldAct) {
     try {
-      const action = config.anti_raid_action;
+      const action = containment.action;
 
       if (action === 'kick' || action === 'ban') {
         await member.send({
@@ -502,9 +526,9 @@ export async function processAntiRaid(
         }).catch((e: unknown) => { log.warn('Action failed:', (e as Error)?.message ?? e); });
 
         if (action === 'ban') {
-          await member.ban({ reason: 'Anti-raid: Join flood detected', deleteMessageSeconds: config.anti_raid_ban_delete_seconds });
+          await member.ban({ reason: 'Anti-raid: Join flood detected', deleteMessageSeconds: containment.banDeleteSeconds });
           // V5 Audit §8.2: Track banned user for auto-unban when raid cools down
-          await trackRaidBan(guild.id, member.id);
+          await trackRaidBan(guild.id, member.id, raidCooldownMs(config));
         } else {
           await member.kick('Anti-raid: Join flood detected');
         }
@@ -654,9 +678,9 @@ export async function processAntiRaid(
         }
       }
     } catch (err) {
-      log.error(`Failed to ${config.anti_raid_action} during raid:`, err);
+      log.error(`Failed to ${containment.action} during raid:`, err);
       eventBus?.emit('anti_raid.action_failed', guild.id, {
-        action: config.anti_raid_action,
+        action: containment.action,
         userId: member.id,
         error: String(err),
       });
@@ -664,10 +688,10 @@ export async function processAntiRaid(
         supabase,
         guild,
         'anti_raid_action_failed',
-        `Anti-raid ${config.anti_raid_action} failed during a raid`,
-        `Anti-raid tried to ${config.anti_raid_action} <@${member.id}> (${member.user.tag}) during an active raid but the action failed: ${String(err)}. ` +
+        `Anti-raid ${containment.action} failed during a raid`,
+        `Anti-raid tried to ${containment.action} <@${member.id}> (${member.user.tag}) during an active raid but the action failed: ${String(err)}. ` +
           'Check the bot\'s moderation permissions and role position.',
-        { action: config.anti_raid_action, member_id: member.id, error: String(err) },
+        { action: containment.action, member_id: member.id, error: String(err) },
       );
     }
   }
@@ -746,13 +770,13 @@ async function restoreLockdownInvites(guild: Guild, config: AntiRaidConfig, even
 /**
  * V5 Audit §8.2: Track a user banned during raid mode for later auto-unban.
  */
-async function trackRaidBan(guildId: string, userId: string): Promise<void> {
+async function trackRaidBan(guildId: string, userId: string, cooldownMs = DEFAULT_RAID_MODE_COOLDOWN): Promise<void> {
   try {
     const valkey = getValkey();
     const key = raidBannedKey(guildId);
     await valkey.sadd(key, userId);
     // Set TTL slightly longer than raid cooldown so the set survives until cleanup
-    await valkey.pexpire(key, RAID_MODE_COOLDOWN + 60_000);
+    await valkey.pexpire(key, cooldownMs + 60_000);
   } catch {
     // Fallback to in-memory
     let set = _memoryRaidBanned.get(guildId);

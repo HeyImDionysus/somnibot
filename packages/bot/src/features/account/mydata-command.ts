@@ -38,6 +38,15 @@ export async function handleMyDataCommand(
   await interaction.deferReply({ ephemeral: true });
 
   try {
+    const { data: config } = await client.supabase
+      .from('guild_config')
+      .select('data_export_enabled')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    if (config?.data_export_enabled === false) {
+      await interaction.editReply({ content: '❌ Data exports are currently disabled by this server owner.' });
+      return;
+    }
     const data = await collectMemberData(client, guildId, userId);
 
     const jsonStr = JSON.stringify(data, null, 2);

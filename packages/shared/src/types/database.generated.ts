@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 248 migration files in packages/supabase/migrations/
+ * Source: 249 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -429,6 +429,17 @@ export interface DbGuildConfig {
   diagnostics_guided_mode: boolean;
   automation_mass_action_threshold: number;
   economy_market_max_price_per_unit: number;
+  anti_raid_containment_ladder: Json;
+  anti_raid_raid_cooldown_minutes: number;
+  appeals_enabled: boolean;
+  appeal_cooldown_hours: number;
+  appeal_review_channel_id: string | null;
+  dm_on_action: boolean;
+  message_log_config_cache_ttl_ms: number;
+  data_export_enabled: boolean;
+  max_queue_length: number;
+  allow_duplicates: boolean;
+  per_user_queue_cap: number;
 }
 
 export interface DbInstanceSettings {

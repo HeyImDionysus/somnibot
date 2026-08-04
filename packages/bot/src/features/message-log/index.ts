@@ -36,17 +36,19 @@ interface MessageLogConfig {
   message_log_edits_enabled: boolean;
   message_log_deletes_enabled: boolean;
   message_log_ignored_channel_ids: string[];
+  message_log_config_cache_ttl_ms: number;
+  data_export_enabled: boolean;
   /** White-label brand kit projected from the same cached guild_config row. */
   brandKit: BrandKit;
 }
 
-const CONFIG_TTL = 60_000;
+const DEFAULT_CONFIG_TTL = 60_000;
 // Per-guild cache: a single-process bot serves many guilds. A module-global entry
 // let the first guild's message-log config ({enabled, channel_id}) serve every
 // other guild for the whole TTL — so a second guild's edits/deletes resolved the
 // wrong (globally-unique) channel id and were silently dropped (missed forensic
 // capture), and a disabled guild could transiently inherit an enabled config.
-const _configCache = new Map<string, { config: MessageLogConfig; time: number }>();
+const _configCache = new Map<string, { config: MessageLogConfig; time: number; ttl: number }>();
 
 // Last config we emitted an audit event for, per guild. Kept SEPARATE from the
 // TTL cache (which invalidateMessageLogCache clears) so we can diff a freshly
@@ -84,7 +86,9 @@ function configsEqual(a: MessageLogConfig, b: MessageLogConfig): boolean {
     a.message_log_channel_id === b.message_log_channel_id &&
     a.message_log_edits_enabled === b.message_log_edits_enabled &&
     a.message_log_deletes_enabled === b.message_log_deletes_enabled &&
-    a.message_log_ignored_channel_ids.join(',') === b.message_log_ignored_channel_ids.join(',')
+    a.message_log_ignored_channel_ids.join(',') === b.message_log_ignored_channel_ids.join(',') &&
+    a.message_log_config_cache_ttl_ms === b.message_log_config_cache_ttl_ms &&
+    a.data_export_enabled === b.data_export_enabled
   );
 }
 
@@ -155,13 +159,13 @@ async function notifyMessageLogDegraded(client: SomniClient, guildId: string, er
 export async function loadConfig(client: SomniClient, guildId: string): Promise<MessageLogConfig> {
   const now = Date.now();
   const cached = _configCache.get(guildId);
-  if (cached && now - cached.time < CONFIG_TTL) {
+  if (cached && cached.ttl > 0 && now - cached.time < cached.ttl) {
     return cached.config;
   }
 
   const { data, error } = await client.supabase
     .from('guild_config')
-    .select(`message_log_enabled, message_log_channel_id, message_log_edits_enabled, message_log_deletes_enabled, message_log_ignored_channel_ids, ${BRAND_KIT_COLUMNS}`)
+    .select(`message_log_enabled, message_log_channel_id, message_log_edits_enabled, message_log_deletes_enabled, message_log_ignored_channel_ids, message_log_config_cache_ttl_ms, data_export_enabled, ${BRAND_KIT_COLUMNS}`)
     .eq('guild_id', guildId)
     .maybeSingle();
 
@@ -176,6 +180,8 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
       message_log_edits_enabled: true,
       message_log_deletes_enabled: true,
       message_log_ignored_channel_ids: [],
+      message_log_config_cache_ttl_ms: DEFAULT_CONFIG_TTL,
+      data_export_enabled: true,
       brandKit: defaultBrandKit(),
     };
   }
@@ -206,11 +212,13 @@ export async function loadConfig(client: SomniClient, guildId: string): Promise<
     message_log_ignored_channel_ids: Array.isArray(data?.message_log_ignored_channel_ids)
       ? (data.message_log_ignored_channel_ids as string[])
       : [],
+    message_log_config_cache_ttl_ms: Math.max(0, Math.min(3_600_000, Number(data?.message_log_config_cache_ttl_ms ?? DEFAULT_CONFIG_TTL))),
+    data_export_enabled: data?.data_export_enabled ?? true,
     brandKit: brandKitFromConfig(data ?? null, undefined),
   };
   // Emit an audit event when the persisted config actually changed.
   maybeAuditConfigChange(client, guildId, config);
-  _configCache.set(guildId, { config, time: now });
+  _configCache.set(guildId, { config, time: now, ttl: config.message_log_config_cache_ttl_ms });
   return config;
 }
 

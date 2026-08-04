@@ -64,8 +64,10 @@ export const appealCommand = new SlashCommandBuilder()
 
 const SUBMIT_ERROR_COPY: Record<SubmitAppealError, string> = {
   invalid_reason: '❌ Please provide a reason (up to 1000 characters).',
+  appeals_disabled: '❌ Appeals are currently disabled for this server.',
   infraction_not_found: '❌ No infraction with that ID exists in this server.',
   not_appellant: '❌ You can only appeal infractions issued against your own account.',
+  cooldown: '⏳ Please wait for the appeal cooldown before submitting another appeal for this infraction.',
   already_pending: '⏳ You already have a pending appeal for that infraction.',
   db_error: '❌ Something went wrong filing your appeal. Please try again later.',
 };
@@ -115,6 +117,28 @@ export async function handleAppealCommand(
     }
 
     log.info('Appeal submitted', { guildId, infractionId, appellant: interaction.user.id });
+    // Route the review copy to the owner-selected channel, falling back to the
+    // moderation log so an appeal is never invisible when no dedicated channel
+    // has been configured.
+    try {
+      const { data: settings } = await client.supabase
+        .from('guild_config')
+        .select('appeal_review_channel_id, mod_log_channel_id')
+        .eq('guild_id', guildId)
+        .maybeSingle();
+      const channelId = settings?.appeal_review_channel_id || settings?.mod_log_channel_id;
+      const channel = channelId ? interaction.guild?.channels.cache.get(channelId) : null;
+      if (channel && 'send' in channel) {
+        const reviewEmbed = new EmbedBuilder()
+          .setTitle('📬 New moderation appeal')
+          .setDescription(`A member has submitted an appeal for infraction \`${infractionId}\`.`)
+          .addFields({ name: 'Member', value: `<@${interaction.user.id}>`, inline: true }, { name: 'Reason', value: reason.slice(0, 1024) })
+          .setTimestamp();
+        await (channel as { send: (payload: unknown) => Promise<unknown> }).send({ embeds: [reviewEmbed] });
+      }
+    } catch (err) {
+      log.warn('Could not post appeal to review channel', { guildId, error: String(err) });
+    }
     const expiresLine = result.appeal.expires_at
       ? `\nIf it isn’t reviewed, it will expire <t:${Math.floor(new Date(result.appeal.expires_at).getTime() / 1000)}:R>.`
       : '';
