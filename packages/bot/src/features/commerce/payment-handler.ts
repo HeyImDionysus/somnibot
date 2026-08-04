@@ -768,9 +768,10 @@ export async function handleBuyButton(
       return;
     }
     let inFlight: InFlightCheckout = { state: 'clear' };
-    if (repeatPurchasePolicy === 'unique') {
-      inFlight = await inspectInFlightCheckout(supabase, guildId, existingCustomer.id, productId);
-    }
+    // The active-order uniqueness fence applies to every repeat policy. A
+    // prior checkout whose approval was exposed must be resumed, even when
+    // the product allows repeat purchases (for example after editReply failed).
+    inFlight = await inspectInFlightCheckout(supabase, guildId, existingCustomer.id, productId);
     if (inFlight.state === 'unavailable') {
       await replyCheckoutUnavailable(interaction, supabase, guildId);
       return;

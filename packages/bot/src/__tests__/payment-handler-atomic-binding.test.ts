@@ -148,8 +148,9 @@ describe('atomic paid checkout intent binding', () => {
     expect(handlerSource).toContain("'commerce_reap_unexposed_paid_checkouts_for_product'");
     expect(handlerSource).not.toContain("update({ provider_id:");
     expect(handlerSource).not.toContain("update({ plan_id:");
+    expect(handlerSource).toContain('inFlight = await inspectInFlightCheckout');
     expect(handlerSource.indexOf("'commerce_reap_unexposed_paid_checkouts_for_product'")).toBeLessThan(
-      handlerSource.indexOf("if (repeatPurchasePolicy === 'unique')"),
+      handlerSource.indexOf('inFlight = await inspectInFlightCheckout'),
     );
   });
 });
