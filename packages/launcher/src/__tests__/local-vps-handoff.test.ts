@@ -170,4 +170,85 @@ describe('local to VPS runtime handoff', () => {
     expect(output.blockedReason).toContain('could not be proven stopped');
     expect(restoreLocal).not.toHaveBeenCalled();
   });
+
+  it.each([
+    'start-vps-valkey',
+    'restore-transferred-valkey',
+    'start-stack',
+  ])('quiesces a partially-started remote stack when no local runtime was active and %s fails', async (failedCommandId) => {
+    const quiesce = vi.fn().mockResolvedValue(true);
+    const restoreLocal = vi.fn();
+    const output = await runLocalToVpsHandoff({
+      localWasRunning: false,
+      stopLocal: vi.fn(),
+      quiesceVpsAfterFailure: quiesce,
+      restoreLocal,
+      executeDeployment: async () => ({
+        ...result('failure'),
+        commandStates: [{
+          commandId: failedCommandId,
+          executable: 'ssh',
+          redactedDisplay: 'ssh ...',
+          status: 'failed',
+        }],
+      }),
+    });
+
+    expect(quiesce).toHaveBeenCalledOnce();
+    expect(restoreLocal).not.toHaveBeenCalled();
+    expect(output.state).toBe('failure');
+    expect(output.logs).toEqual([]);
+  });
+
+  it('reports an observable hard block when first-deployment remote cleanup is unproven', async () => {
+    const output = await runLocalToVpsHandoff({
+      localWasRunning: false,
+      stopLocal: vi.fn(),
+      quiesceVpsAfterFailure: vi.fn().mockRejectedValue(new Error('SSH unavailable')),
+      restoreLocal: vi.fn(),
+      executeDeployment: async () => ({
+        ...result('retry'),
+        commandStates: [{
+          commandId: 'start-stack',
+          executable: 'docker',
+          redactedDisplay: 'docker compose up -d',
+          status: 'success',
+        }],
+      }),
+    });
+
+    expect(output.state).toBe('failure');
+    expect(output.canRetry).toBe(false);
+    expect(output.blockedReason).toContain('could not be proven stopped');
+    expect(output.logs.at(-1)).toMatchObject({ code: 'vps-runtime-quiesce-unproven' });
+  });
+
+  it('cleans up a thrown first-deployment failure before propagating it', async () => {
+    const quiesce = vi.fn().mockResolvedValue(true);
+    const restoreLocal = vi.fn();
+    await expect(runLocalToVpsHandoff({
+      localWasRunning: false,
+      stopLocal: vi.fn(),
+      quiesceVpsAfterFailure: quiesce,
+      restoreLocal,
+      executeDeployment: async () => { throw new Error('start-stack runner crashed'); },
+    })).rejects.toThrow('start-stack runner crashed');
+    expect(quiesce).toHaveBeenCalledOnce();
+    expect(restoreLocal).not.toHaveBeenCalled();
+  });
+
+  it('aggregates a thrown deployment failure with an unproven cleanup failure', async () => {
+    const quiesce = vi.fn().mockResolvedValue(false);
+    await expect(runLocalToVpsHandoff({
+      localWasRunning: false,
+      stopLocal: vi.fn(),
+      quiesceVpsAfterFailure: quiesce,
+      restoreLocal: vi.fn(),
+      executeDeployment: async () => { throw new Error('compose failed'); },
+    })).rejects.toMatchObject({
+      name: 'AggregateError',
+      message: 'VPS deployment failed and remote cleanup was not proven.',
+    });
+    expect(quiesce).toHaveBeenCalledOnce();
+  });
 });

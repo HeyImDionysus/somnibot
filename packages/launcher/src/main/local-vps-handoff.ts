@@ -85,7 +85,45 @@ export async function runLocalToVpsHandoff(options: {
 }): Promise<VpsDeploymentExecutionResult> {
   if (!options.localWasRunning) {
     await options.prepareVpsState?.();
-    return options.executeDeployment();
+
+    // A first deployment can still leave a partially-started VPS stack behind
+    // (for example after Valkey restore or compose startup).  The local
+    // runtime was not active, so there is nothing to restore, but the remote
+    // owner must be quiesced before returning a retryable result.  Without
+    // this branch a stopped launcher can orphan the remote runtime and its
+    // maintenance lock indefinitely.
+    let result: VpsDeploymentExecutionResult;
+    try {
+      result = await options.executeDeployment();
+    } catch (error) {
+      const remoteQuiesced = await options.quiesceVpsAfterFailure().catch(() => false);
+      if (!remoteQuiesced) {
+        throw new AggregateError(
+          [error, new Error('The failed VPS stack could not be proven stopped.')],
+          'VPS deployment failed and remote cleanup was not proven.',
+        );
+      }
+      throw error;
+    }
+    if (result.state === 'success') return result;
+
+    const remoteQuiesced = await options.quiesceVpsAfterFailure(result).catch(() => false);
+    if (remoteQuiesced) return result;
+
+    return {
+      ...result,
+      state: 'failure',
+      canRetry: false,
+      blockedReason: 'The failed VPS stack could not be proven stopped. No local runtime was active, so the remote runtime remains blocked until an operator verifies cleanup.',
+      logs: [
+        ...result.logs,
+        {
+          level: 'error',
+          code: 'vps-runtime-quiesce-unproven',
+          message: 'The failed VPS runtime may still be active; no local runtime was restarted.',
+        },
+      ],
+    };
   }
 
   try {
