@@ -57,7 +57,7 @@ BEGIN
      )
    FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN RETURN; END IF;
-  v_token := pg_catalog.gen_random_uuid();
+  v_token := gen_random_uuid();
   UPDATE public.commerce_provider_money_recovery
      SET status = 'processing',
          lease_token = v_token,

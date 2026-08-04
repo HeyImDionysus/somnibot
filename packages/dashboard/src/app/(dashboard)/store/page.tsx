@@ -29,7 +29,6 @@ interface Product {
   currency: string;
   granted_role_ids: string[];
   granted_channel_ids: string[];
-  granted_channel_ids: string[];
   active: boolean;
   sort_order: number;
   metadata: Record<string, unknown>;

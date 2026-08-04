@@ -6,6 +6,7 @@ const root = resolve(import.meta.dirname, '..', '..', '..', '..');
 const payment = readFileSync(resolve(root, 'packages/bot/src/features/commerce/payment-handler.ts'), 'utf8');
 const interaction = readFileSync(resolve(root, 'packages/bot/src/events/interaction-handler.ts'), 'utf8');
 const migration = readFileSync(resolve(root, 'packages/supabase/migrations/20260804137000_free_claims_gift_intents.sql'), 'utf8');
+const recoveryRoute = readFileSync(resolve(root, 'packages/dashboard/src/app/api/paypal/recovery/route.ts'), 'utf8');
 
 describe('commerce free/gift rails', () => {
   it('uses bounded opaque PayPal custom ids for every checkout type', () => {
@@ -33,5 +34,7 @@ describe('commerce free/gift rails', () => {
     expect(migration).toContain('idx_commerce_checkout_intents_gift_open');
     expect(migration).toContain('gift intent id already exists');
     expect(migration).toContain("pay.status='completed'");
+    expect(recoveryRoute).toContain('executeProviderMoneyRecovery');
+    expect(recoveryRoute).toContain('x-paypal-reconcile-secret');
   });
 });
