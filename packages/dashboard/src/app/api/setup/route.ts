@@ -872,6 +872,8 @@ export async function POST(request: NextRequest) {
         // Auto-configure Discord OAuth in Supabase if we have the access token
         const authResult = await ensureDiscordAuthProvider({
           callbackUrls: getRuntimeAuthCallbackUrls(authProviderRuntimeCallbacks ?? resolveRuntimeCallbackConfig()),
+          discordClientId: clientId,
+          discordClientSecret: clientSecret.trim(),
         });
         if (authResult.success) {
           console.log(
@@ -974,6 +976,8 @@ export async function POST(request: NextRequest) {
   if (action === 'configure-auth') {
     const result = await ensureDiscordAuthProvider({
       callbackUrls: getRuntimeAuthCallbackUrls(authProviderRuntimeCallbacks ?? resolveRuntimeCallbackConfig()),
+      ...(typeof body.clientId === 'string' ? { discordClientId: body.clientId } : {}),
+      ...(typeof body.clientSecret === 'string' ? { discordClientSecret: body.clientSecret } : {}),
     });
     return NextResponse.json(result);
   }
@@ -1138,6 +1142,8 @@ export async function POST(request: NextRequest) {
     const authResult = await ensureDiscordAuthProvider({
       accessToken: submittedSupabaseAccessToken,
       callbackUrls: getRuntimeAuthCallbackUrls(runtimeCallbacks),
+      ...(credentials.discord_application_id ? { discordClientId: credentials.discord_application_id } : {}),
+      ...(credentials.discord_client_secret ? { discordClientSecret: credentials.discord_client_secret } : {}),
     });
     if (!authResult.success) {
       const publicAuthError = redactAuthProviderError(authResult.error);

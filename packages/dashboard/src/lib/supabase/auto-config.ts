@@ -35,6 +35,9 @@ interface DashboardUrlEnv {
 
 interface AutoConfigOptions {
   accessToken?: string;
+  /** Ephemeral setup submission; never persisted here or logged. */
+  discordClientId?: string;
+  discordClientSecret?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
   /** Runtime callback URLs displayed/required by the setup surface. */
@@ -273,12 +276,12 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
  * Read Discord credentials from runtime env vars. Persisted configured markers
  * intentionally cannot substitute for the live client secret.
  */
-async function getDiscordCredentials(): Promise<{
+async function getDiscordCredentials(options?: AutoConfigOptions): Promise<{
   clientId: string | null;
   clientSecret: string | null;
 }> {
-  let clientId = process.env.DISCORD_APPLICATION_ID || null;
-  let clientSecret = process.env.DISCORD_CLIENT_SECRET || null;
+  let clientId = options?.discordClientId?.trim() || process.env.DISCORD_APPLICATION_ID || null;
+  let clientSecret = options?.discordClientSecret?.trim() || process.env.DISCORD_CLIENT_SECRET || null;
 
   if (clientId && clientSecret) {
     return { clientId, clientSecret };
@@ -348,7 +351,7 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     };
 
     if (!providerEnabled) {
-      const { clientId, clientSecret } = await getDiscordCredentials();
+      const { clientId, clientSecret } = await getDiscordCredentials(options);
       if (!clientId || !clientSecret) {
         return {
           success: false,
