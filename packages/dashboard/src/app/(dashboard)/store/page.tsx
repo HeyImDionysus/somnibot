@@ -586,6 +586,7 @@ export default function StorePage() {
             <label className="text-xs text-discord-text-muted">Webhook verify attempts<input type="number" min={1} max={10} value={paypalVerifyAttempts} onChange={(e) => setPaypalVerifyAttempts(Number(e.target.value) || 1)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
           </div>
           <button onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy} className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</button>
+        </div>
 
         <div className="border-t border-discord-border-subtle pt-4 space-y-4">
           <h3 className="text-sm font-semibold text-discord-text-primary">Storefront policy</h3>
