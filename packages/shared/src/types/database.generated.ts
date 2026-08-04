@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 254 migration files in packages/supabase/migrations/
+ * Source: 256 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -751,6 +751,8 @@ export interface DbAutomation {
   updated_at: string;
   rate_limit_per_user: number | null;
   rate_limit_window_seconds: number | null;
+  preview_hash: string | null;
+  previewed_at: string | null;
 }
 
 export interface DbAutomationExecution {
