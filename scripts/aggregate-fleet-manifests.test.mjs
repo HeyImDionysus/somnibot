@@ -12,13 +12,13 @@ const domainIds = catalog.categories.flatMap((category) =>
 
 const candidateSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
-function writeFleet(directory, gateMode = 'none') {
+function writeFleet(directory, gateMode = 'none', sha = candidateSha) {
   writeFileSync(path.join(directory, 'unrelated-diagnostic.json'), '{}');
   for (let shard = 1; shard <= 4; shard += 1) {
     const assignedDomainIds = domainIds.filter((_id, position) => position % 4 === shard - 1);
     writeFileSync(path.join(directory, `fleet-shard-${shard}.json`), JSON.stringify({
       schemaVersion: 2,
-      candidateSha,
+      candidateSha: sha,
       shard: `${shard}/4`,
       assignedDomainIds,
       results: assignedDomainIds.map((id, position) => ({
@@ -49,7 +49,7 @@ function writeReceipt(directory, sha = candidateSha) {
   }));
 }
 
-function runAggregate(directory, proofDirectory) {
+function runAggregate(directory, proofDirectory, expectedSha = candidateSha) {
   return spawnSync(process.execPath, [
     'scripts/aggregate-fleet-manifests.mjs',
     directory,
@@ -57,6 +57,7 @@ function runAggregate(directory, proofDirectory) {
   ], {
     cwd: process.cwd(),
     encoding: 'utf8',
+    env: { ...process.env, SOMNIBOT_CANDIDATE_SHA: expectedSha },
   });
 }
 
@@ -117,6 +118,34 @@ test('rejects a proof receipt from a different candidate', () => {
     const run = runAggregate(directory, directory);
     assert.notEqual(run.status, 0);
     assert.match(run.stderr, /proof receipt candidate mismatch/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects manifests that agree with each other but not the expected candidate', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-stale-head-'));
+  try {
+    writeFleet(directory, 'none', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+    const run = runAggregate(directory);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /do not match the expected candidate SHA/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects incomplete domain results even when no failure is declared', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-incomplete-'));
+  try {
+    writeFleet(directory);
+    const file = path.join(directory, 'fleet-shard-1.json');
+    const manifest = JSON.parse(readFileSync(file, 'utf8'));
+    manifest.results[0].pass = 0;
+    writeFileSync(file, JSON.stringify(manifest));
+    const run = runAggregate(directory);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /must report exactly 84 assertion cells/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

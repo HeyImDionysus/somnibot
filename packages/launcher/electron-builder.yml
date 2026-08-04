@@ -40,6 +40,7 @@ extraResources:
       - "**/*"
 
 win:
+  artifactName: "${productName}-Setup-${version}.${ext}"
   # Windows signing is intentionally optional for this release. Keep resource
   # editing/metadata enabled while producing a verifiably unsigned artifact.
   signExecutable: false
@@ -49,6 +50,7 @@ win:
   icon: build/icon.ico
 
 linux:
+  artifactName: "${productName}-${version}.${ext}"
   target:
     - target: AppImage
       arch: [x64]

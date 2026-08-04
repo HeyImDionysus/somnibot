@@ -23,6 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const LAUNCHER_DIR = path.join(ROOT, 'packages', 'launcher');
 const STAGING = path.join(LAUNCHER_DIR, '.resources');
+const RELEASE_DIR = path.join(LAUNCHER_DIR, 'release');
 
 /* ── Parse CLI args ────────────────────────────────────────────────── */
 
@@ -423,6 +424,11 @@ function stageDashboard() {
 function buildElectron() {
   console.log('\n⚡ Building Electron app...\n');
 
+  // Release metadata must describe only artifacts produced by this invocation.
+  // In particular, never let an older launcher version survive into checksum,
+  // updater-manifest, or upload discovery.
+  rmSync(RELEASE_DIR, { recursive: true, force: true });
+
   // Build launcher TypeScript (src/main/*.ts → dist/main/*.js)
   runPnpm(['--filter', '@somnibot/launcher', 'run', 'build']);
 
@@ -460,15 +466,14 @@ function buildElectron() {
 /* ── Step 5: Summary ───────────────────────────────────────────────── */
 
 function printSummary() {
-  const releaseDir = path.join(LAUNCHER_DIR, 'release');
-  if (!existsSync(releaseDir)) return;
+  if (!existsSync(RELEASE_DIR)) return;
 
   console.log('\n📁 Output files:\n');
-  const files = readdirSync(releaseDir).filter(
+  const files = readdirSync(RELEASE_DIR).filter(
     (f) => !f.startsWith('.') && !f.endsWith('.blockmap'),
   );
   for (const f of files) {
-    const size = statSync(path.join(releaseDir, f)).size;
+    const size = statSync(path.join(RELEASE_DIR, f)).size;
     console.log(`   ${f}  (${formatMB(size)})`);
   }
   console.log(`\n   Location: packages/launcher/release/`);

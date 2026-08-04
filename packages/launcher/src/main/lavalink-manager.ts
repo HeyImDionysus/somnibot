@@ -23,6 +23,8 @@ import {
   shouldRecoverManagedProcess,
 } from './process-manager-guards.js';
 import { probeLavalinkReady, waitForServiceReady } from './service-readiness.js';
+import { getConfig, saveConfig } from './config-store.js';
+import { stopChildProcess } from './managed-child-stop.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -138,6 +140,12 @@ export function isLavalinkJarPresent(): boolean {
 
 export function getLavalinkPid(): number | null {
   return lavalinkProcess?.pid ?? null;
+}
+
+function persistLavalinkPid(pid: number | null): void {
+  const lastPids = getConfig().lastPids
+    ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  saveConfig({ lastPids: { ...lastPids, lavalink: pid } });
 }
 
 /* ------------------------------------------------------------------ */
@@ -336,6 +344,7 @@ export async function startLavalink(): Promise<{
     });
 
     lavalinkProcess = proc;
+    persistLavalinkPid(proc.pid ?? null);
     let resolved = false;
 
     const onData = (chunk: Buffer) => {
@@ -364,6 +373,7 @@ export async function startLavalink(): Promise<{
       if (stableTimer) clearTimeout(stableTimer);
       stableTimer = null;
       lavalinkProcess = null;
+      persistLavalinkPid(null);
       setStatus('error', msg);
       broadcastLavalinkStatus();
       if (!resolved) {
@@ -379,6 +389,7 @@ export async function startLavalink(): Promise<{
       if (stableTimer) clearTimeout(stableTimer);
       stableTimer = null;
       lavalinkProcess = null;
+      persistLavalinkPid(null);
       if (currentStatus !== 'offline') {
         const msg = code ? `Lavalink exited with code ${code}` : 'Lavalink stopped';
         setStatus(code ? 'error' : 'offline', code ? msg : '');
@@ -430,34 +441,9 @@ export function stopLavalink(): Promise<void> {
 
   if (!processToStop) return Promise.resolve();
 
-  stopPromise = new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(forceKillTimer);
-      processToStop.removeListener('exit', onExit);
-      processToStop.removeListener('error', onError);
-      if (lavalinkProcess === processToStop) lavalinkProcess = null;
-      resolve();
-    };
-    const onExit = () => finish();
-    const onError = () => finish();
-    const forceKillTimer = setTimeout(() => {
-      try {
-        processToStop.kill('SIGKILL');
-      } catch {
-        // The process may have exited between SIGTERM and the force kill.
-      }
-      finish();
-    }, 5_000);
-    processToStop.once('exit', onExit);
-    processToStop.once('error', onError);
-    try {
-      processToStop.kill('SIGTERM');
-    } catch {
-      finish();
-    }
+  stopPromise = stopChildProcess(processToStop, { serviceName: 'Lavalink' }).then(() => {
+    if (lavalinkProcess === processToStop) lavalinkProcess = null;
+    persistLavalinkPid(null);
   }).finally(() => {
     stopPromise = null;
   });

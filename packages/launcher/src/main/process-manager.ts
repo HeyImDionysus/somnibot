@@ -20,6 +20,7 @@ import os from 'node:os';
 import { promisify } from 'node:util';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
+import { stopChildProcess } from './managed-child-stop.js';
 import {
   PROCESS_RESTART_MAX_ATTEMPTS,
   PROCESS_RESTART_STABLE_WINDOW_MS,
@@ -129,40 +130,7 @@ let stopPromise: Promise<void> | null = null;
  * launcher-owned resources.
  */
 function stopManagedChild(child: ChildProcess | null): Promise<void> {
-  if (!child) return Promise.resolve();
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-
-  // Recovery and log listeners belong to the normal running lifecycle. They
-  // must not restart the child or race the shutdown promise once termination
-  // has been requested.
-  child.removeAllListeners();
-
-  return new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(forceKillTimer);
-      child.removeListener('close', onClose);
-      resolve();
-    };
-    const onClose = () => finish();
-    const forceKillTimer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // The child may have exited between the liveness check and the kill.
-      }
-      finish();
-    }, 5_000);
-
-    child.once('close', onClose);
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      finish();
-    }
-  });
+  return stopChildProcess(child, { serviceName: 'SomniBot bot/dashboard child' });
 }
 
 function clearBotReadyTimeout(): void {
@@ -875,7 +843,9 @@ export function stopAll(): Promise<void> {
     if (dashboardProcess === dashboardToStop) dashboardProcess = null;
 
     // Clear stored PIDs only after both children have actually stopped.
-    saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
+    const persistedPids = getConfig().lastPids
+      ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+    saveConfig({ lastPids: { ...persistedPids, bot: null, dashboard: null } });
     broadcastStatus();
   }).finally(() => {
     stopPromise = null;

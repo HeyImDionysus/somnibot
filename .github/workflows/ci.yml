@@ -770,7 +770,7 @@ jobs:
   aggregate-fleet:
     name: 🧭 Aggregate strict 46-domain fleet
     if: always()
-    needs: test-fleet
+    needs: [test-live, test-fleet]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

@@ -27,6 +27,8 @@ import {
   shouldRecoverManagedProcess,
 } from './process-manager-guards.js';
 import { probeValkeyReady, waitForServiceReady } from './service-readiness.js';
+import { getConfig, saveConfig } from './config-store.js';
+import { stopChildProcess } from './managed-child-stop.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -142,6 +144,12 @@ export function isValkeyBinaryPresent(): boolean {
 
 export function getValkeyPid(): number | null {
   return valkeyProcess?.pid ?? null;
+}
+
+function persistValkeyPid(pid: number | null): void {
+  const lastPids = getConfig().lastPids
+    ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  saveConfig({ lastPids: { ...lastPids, valkey: pid } });
 }
 
 /* ------------------------------------------------------------------ */
@@ -387,6 +395,7 @@ export async function startValkey(): Promise<{
     });
 
     valkeyProcess = proc;
+    persistValkeyPid(proc.pid ?? null);
     let resolved = false;
 
     const onData = (chunk: Buffer) => {
@@ -428,6 +437,7 @@ export async function startValkey(): Promise<{
       if (stableTimer) clearTimeout(stableTimer);
       stableTimer = null;
       valkeyProcess = null;
+      persistValkeyPid(null);
       setStatus('error', msg);
       broadcastValkeyStatus();
       if (!resolved) {
@@ -443,6 +453,7 @@ export async function startValkey(): Promise<{
       if (stableTimer) clearTimeout(stableTimer);
       stableTimer = null;
       valkeyProcess = null;
+      persistValkeyPid(null);
       if (currentStatus !== 'offline') {
         const msg = code ? `Valkey/Redis exited with code ${code}` : 'Valkey/Redis stopped';
         setStatus(code ? 'error' : 'offline', code ? msg : '');
@@ -495,34 +506,9 @@ export function stopValkey(): Promise<void> {
 
   if (!processToStop) return Promise.resolve();
 
-  stopPromise = new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(forceKillTimer);
-      processToStop.removeListener('exit', onExit);
-      processToStop.removeListener('error', onError);
-      if (valkeyProcess === processToStop) valkeyProcess = null;
-      resolve();
-    };
-    const onExit = () => finish();
-    const onError = () => finish();
-    const forceKillTimer = setTimeout(() => {
-      try {
-        processToStop.kill('SIGKILL');
-      } catch {
-        // The process may have exited between SIGTERM and the force kill.
-      }
-      finish();
-    }, 5_000);
-    processToStop.once('exit', onExit);
-    processToStop.once('error', onError);
-    try {
-      processToStop.kill('SIGTERM');
-    } catch {
-      finish();
-    }
+  stopPromise = stopChildProcess(processToStop, { serviceName: 'Valkey' }).then(() => {
+    if (valkeyProcess === processToStop) valkeyProcess = null;
+    persistValkeyPid(null);
   }).finally(() => {
     stopPromise = null;
   });

@@ -115,6 +115,7 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('staleCleanup.ok');
     expect(main).toContain('dialog.showErrorBox(');
     expect(main).toContain('const staleCleanup = await cleanupStaleProcesses();');
+    expect(main).toMatch(/if \(!staleCleanup\.ok\) \{[\s\S]*?app\.quit\(\);[\s\S]*?return;/);
     expect(configBridge).toContain('delete sanitized.lastPids;');
     expect(processManager).toContain('let stopPromise: Promise<void> | null = null;');
     expect(lavalink).toContain('export function stopLavalink(): Promise<void>');

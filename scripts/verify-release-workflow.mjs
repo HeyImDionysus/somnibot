@@ -29,12 +29,34 @@ assert.match(releaseWorkflow, /actions\/workflows\/ci\.yml\/runs/, 'green main C
 assert.match(releaseWorkflow, /Record Windows Authenticode status \(optional\)/);
 assert.match(releaseWorkflow, /windowsSigningRequired = \$false/);
 assert.match(releaseWorkflow, /Verify checksum and optional Authenticode status after download/);
+assert.match(releaseWorkflow, /Validate packaged release contract/);
+assert.match(releaseWorkflow, /verify-linux-appimage:/);
+assert.match(releaseWorkflow, /Verify checksum, version, updater metadata, and provenance after download/);
+assert.match(releaseWorkflow, /Downloaded Windows provenance is not bound to the validated release candidate/);
+assert.match(releaseWorkflow, /Downloaded Linux provenance is not bound to the validated release candidate/);
+assert.match(releaseWorkflow, /Embedded release source SHA does not match the validated main tag/);
+assert.match(releaseWorkflow, /Stale launcher 0\.1\.0 output survived into the release directory/);
 assert.doesNotMatch(releaseWorkflow, /WINDOWS_CODESIGN_PFX_BASE64|signtool sign/, 'release must not require a signing certificate');
 assert.match(releaseWorkflow, /SHA256SUMS-\$\{\{ matrix\.artifact \}\}/);
 assert.match(releaseWorkflow, /provenance-\$\{\{ matrix\.artifact \}\}\.json/);
 assert.doesNotMatch(releaseWorkflow, /macos-latest|\.dmg|--mac/, 'release workflow must not publish macOS');
 assert.match(builderConfig, /target: nsis/);
 assert.match(builderConfig, /target: AppImage/);
+assert.match(
+  builderConfig,
+  /^  artifactName: "\$\{productName\}-Setup-\$\{version\}\.\$\{ext\}"$/m,
+  'Windows installer and updater metadata must share one filesystem-safe filename',
+);
+assert.match(
+  builderConfig,
+  /^  artifactName: "\$\{productName\}-\$\{version\}\.\$\{ext\}"$/m,
+  'Linux release metadata must advertise the exact AppImage filename',
+);
+assert.match(
+  buildScript,
+  /rmSync\(RELEASE_DIR, \{ recursive: true, force: true \}\)/,
+  'launcher packaging must remove stale generated release outputs before building',
+);
 assert.match(
   builderConfig,
   /^executableName: SomniBot$/m,

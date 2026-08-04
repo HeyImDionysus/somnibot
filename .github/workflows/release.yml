@@ -100,6 +100,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
 
+      - name: Validate packaged release contract
+        shell: pwsh
+        env:
+          RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = 'packages/launcher/release'
+          $expectedName = if ('${{ matrix.artifact }}' -eq 'windows') { 'SomniBot-Setup-1.0.0.exe' } else { 'SomniBot-1.0.0.AppImage' }
+          $primary = @(Get-ChildItem $releaseDir -File | Where-Object { $_.Name -eq $expectedName })
+          if ($primary.Count -ne 1) { throw "Expected exactly one $expectedName artifact, found $($primary.Count)." }
+          if (@(Get-ChildItem $releaseDir -File | Where-Object { $_.Name -match '0\.1\.0' }).Count -ne 0) {
+            throw 'Stale launcher 0.1.0 output survived into the release directory.'
+          }
+
+          $metadataName = if ('${{ matrix.artifact }}' -eq 'windows') { 'latest.yml' } else { 'latest-linux.yml' }
+          $metadata = Get-Content (Join-Path $releaseDir $metadataName) -Raw
+          if ($metadata -notmatch '(?m)^version:\s*1\.0\.0\s*$') { throw "$metadataName does not advertise version 1.0.0." }
+          if ($metadata -notmatch [regex]::Escape($expectedName)) { throw "$metadataName does not advertise $expectedName." }
+
+          $source = Get-Content 'packages/launcher/dist/main/release-source.json' -Raw | ConvertFrom-Json
+          if ($source.repositoryRef -ne $env:RELEASE_SHA) { throw 'Embedded release source SHA does not match the validated main tag.' }
+
       - name: Record Windows Authenticode status (optional)
         if: matrix.artifact == 'windows'
         shell: pwsh
@@ -165,7 +187,7 @@ jobs:
           retention-days: 30
 
   verify-windows-installer:
-    needs: build
+    needs: [validate-release, build]
     runs-on: windows-latest
     steps:
       - name: Download Windows artifact
@@ -176,6 +198,9 @@ jobs:
 
       - name: Verify checksum and optional Authenticode status after download
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+          RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           $installer = @(Get-ChildItem artifact -Filter '*.exe' -File)
@@ -193,8 +218,52 @@ jobs:
             throw "Downloaded installer has an invalid Authenticode state: $($signature.Status)."
           }
 
+          $provenance = Get-Content 'artifact/provenance-windows.json' -Raw | ConvertFrom-Json
+          if ($provenance.releaseTag -ne $env:RELEASE_TAG -or $provenance.sourceSha -ne $env:RELEASE_SHA -or $provenance.platform -ne 'windows') {
+            throw 'Downloaded Windows provenance is not bound to the validated release candidate.'
+          }
+          if (@($provenance.files) -notcontains $installer[0].Name) { throw 'Windows provenance does not list the installer.' }
+
+  verify-linux-appimage:
+    needs: [validate-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: somnibot-linux
+          path: artifact
+
+      - name: Verify checksum, version, updater metadata, and provenance after download
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+          RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appImage = @(Get-ChildItem artifact -Filter '*.AppImage' -File)
+          if ($appImage.Count -ne 1) { throw "Expected one Linux AppImage, found $($appImage.Count)." }
+          if ($appImage[0].Name -ne 'SomniBot-1.0.0.AppImage') { throw "Unexpected Linux artifact name: $($appImage[0].Name)." }
+
+          $checksum = Get-Content 'artifact/SHA256SUMS-linux' | Where-Object { $_ -match [regex]::Escape("*$($appImage[0].Name)") }
+          if (@($checksum).Count -ne 1) { throw 'AppImage checksum entry is missing or ambiguous.' }
+          if ($checksum -notmatch '^([a-fA-F0-9]{64}) \*.+$') { throw 'AppImage checksum entry is malformed.' }
+          $expectedHash = $Matches[1]
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $appImage[0].FullName).Hash
+          if ($actualHash -ne $expectedHash) { throw 'Downloaded AppImage checksum does not match.' }
+
+          $metadata = Get-Content 'artifact/latest-linux.yml' -Raw
+          if ($metadata -notmatch '(?m)^version:\s*1\.0\.0\s*$' -or $metadata -notmatch [regex]::Escape($appImage[0].Name)) {
+            throw 'Downloaded Linux updater metadata does not match the AppImage.'
+          }
+          $provenance = Get-Content 'artifact/provenance-linux.json' -Raw | ConvertFrom-Json
+          if ($provenance.releaseTag -ne $env:RELEASE_TAG -or $provenance.sourceSha -ne $env:RELEASE_SHA -or $provenance.platform -ne 'linux') {
+            throw 'Downloaded Linux provenance is not bound to the validated release candidate.'
+          }
+          if (@($provenance.files) -notcontains $appImage[0].Name) { throw 'Linux provenance does not list the AppImage.' }
+
   release:
-    needs: [validate-release, build, verify-windows-installer]
+    needs: [validate-release, build, verify-windows-installer, verify-linux-appimage]
     runs-on: ubuntu-latest
 
     steps:

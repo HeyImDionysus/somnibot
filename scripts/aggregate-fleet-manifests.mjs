@@ -8,9 +8,16 @@ import { fileURLToPath } from 'node:url';
 
 const manifestDirectory = process.argv[2];
 const proofDirectory = process.argv[3];
+const expectedCandidateSha = process.argv[4]?.trim()
+  || process.env.SOMNIBOT_CANDIDATE_SHA?.trim();
 if (!manifestDirectory) {
-  throw new Error('Usage: node scripts/aggregate-fleet-manifests.mjs <manifest-directory> [proof-directory]');
+  throw new Error('Usage: node scripts/aggregate-fleet-manifests.mjs <manifest-directory> [proof-directory] [expected-candidate-sha]');
 }
+assert.match(
+  expectedCandidateSha ?? '',
+  /^[0-9a-f]{40}$/i,
+  'fleet aggregate requires the expected exact 40-character candidate SHA',
+);
 
 const files = readdirSync(manifestDirectory)
   .filter((file) => /^(?:fleet-)?shard-[1-4]\.json$/.test(file))
@@ -22,7 +29,8 @@ const candidateShas = new Set(manifests.map((manifest) => manifest.candidateSha)
 assert.equal(candidateShas.size, 1, 'all fleet manifests must identify the same candidate SHA');
 const [candidateSha] = candidateShas;
 assert.equal(typeof candidateSha, 'string', 'fleet manifests must identify their candidate SHA');
-assert.ok(candidateSha.length > 0, 'fleet candidate SHA must not be empty');
+assert.match(candidateSha, /^[0-9a-f]{40}$/i, 'fleet manifests must identify an exact 40-character candidate SHA');
+assert.equal(candidateSha.toLowerCase(), expectedCandidateSha.toLowerCase(), 'fleet manifests do not match the expected candidate SHA');
 
 const receiptFiles = proofDirectory
   ? readdirSync(proofDirectory).filter((file) => /^fleet-proof-.+\.json$/.test(file)).sort()
@@ -58,6 +66,7 @@ assert.deepEqual(seenShardLabels, expectedShardLabels, 'manifests must be one ea
 const domainIds = [];
 const invalidResults = [];
 const availableGateKeys = new Set();
+const expectedAssertionCellsPerDomain = 84;
 for (const manifest of manifests) {
   assert.equal(manifest.schemaVersion, 2, `unsupported manifest from shard ${manifest.shard}`);
   assert.ok(Array.isArray(manifest.assignedDomainIds), `missing assignment for shard ${manifest.shard}`);
@@ -69,6 +78,14 @@ for (const manifest of manifests) {
   );
   domainIds.push(...manifest.assignedDomainIds);
   for (const result of manifest.results) {
+    for (const count of [result.pass, result.gated, result.fail]) {
+      assert.ok(Number.isInteger(count) && count >= 0, `${manifest.shard}/${result.id} has an invalid assertion count`);
+    }
+    assert.equal(
+      result.pass + result.gated + result.fail,
+      expectedAssertionCellsPerDomain,
+      `${manifest.shard}/${result.id} must report exactly ${expectedAssertionCellsPerDomain} assertion cells`,
+    );
     const gates = Array.isArray(result.gates) ? result.gates : [];
     const gateKeys = new Set(gates.map((gate) => `${result.id}\0${gate.scenario}\0${gate.class}`));
     assert.equal(

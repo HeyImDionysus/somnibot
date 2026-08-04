@@ -2312,6 +2312,9 @@ app.whenReady().then(async () => {
       'SomniBot could not reclaim a previous service',
       `Startup was stopped because these persisted service processes could not be safely identified or terminated: ${staleCleanup.unresolved.join(', ')}. Close the conflicting process and retry.`,
     );
+    // Release the single-instance lock instead of leaving a hidden launcher
+    // that prevents the owner from retrying after resolving the conflict.
+    app.quit();
     return;
   }
 

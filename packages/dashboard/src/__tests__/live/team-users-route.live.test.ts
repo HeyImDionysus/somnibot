@@ -37,14 +37,17 @@ const INVITEE = '223456789012345695';
 function writeFleetProofReceipt(): void {
   const directory = process.env.SOMNIBOT_FLEET_PROOF_DIR?.trim();
   if (!directory) return;
+  const candidateSha = process.env.SOMNIBOT_CANDIDATE_SHA?.trim()
+    || process.env.GITHUB_SHA?.trim();
+  if (!candidateSha || !/^[0-9a-f]{40}$/i.test(candidateSha)) {
+    throw new Error('Fleet proof receipt requires an exact 40-character candidate SHA.');
+  }
   mkdirSync(directory, { recursive: true });
   writeFileSync(
     path.join(directory, 'fleet-proof-administration-team-management-def-audit.json'),
     `${JSON.stringify({
       schemaVersion: 1,
-      candidateSha: process.env.SOMNIBOT_CANDIDATE_SHA?.trim()
-        || process.env.GITHUB_SHA?.trim()
-        || 'local',
+      candidateSha: candidateSha.toLowerCase(),
       domainId: 'administration-team-management',
       proofs: [{
         scenario: 'DEF',
