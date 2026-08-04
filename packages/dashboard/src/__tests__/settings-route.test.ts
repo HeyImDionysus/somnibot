@@ -111,6 +111,16 @@ describe('PUT /api/settings', () => {
     expect(upsertArg[1]).toMatchObject({ key: 'discord_application_id', value: '444555666', section: 'discord' });
   });
 
+  it('rejects launcher-only or unknown secret keys instead of writing them as plaintext', async () => {
+    const res = await putSettings({
+      section: 'deployment',
+      values: { vps_nextauth_secret: 'must-not-be-written' },
+    });
+
+    expect(res.status).toBe(400);
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
+
   it('stores submitted secrets only as project-bound encrypted rows', async () => {
     vi.stubEnv('SUPABASE_URL', 'https://project.supabase.co');
     vi.stubEnv('SUPABASE_SECRET_KEY', 'service-role-test-key');

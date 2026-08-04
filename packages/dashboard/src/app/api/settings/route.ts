@@ -81,6 +81,7 @@ const ENV_MAP: Record<string, string[]> = {
   lavalink_password: ['LAVALINK_PASSWORD'],
   valkey_url: ['VALKEY_URL', 'REDIS_URL'],
 };
+const ALLOWED_SETTING_KEYS = new Set(Object.keys(ENV_MAP));
 
 function getEnvValue(key: string): string | null {
   const envNames = ENV_MAP[key];
@@ -238,6 +239,13 @@ export async function PUT(request: NextRequest) {
     const now = new Date().toISOString();
     const writableEntries = Object.entries(values)
       .filter(([, value]) => !value.includes('••••') && value.trim() !== '');
+    const unsupportedKey = writableEntries.find(([key]) => !ALLOWED_SETTING_KEYS.has(key))?.[0];
+    if (unsupportedKey) {
+      return NextResponse.json(
+        { error: `Unsupported installation setting: ${unsupportedKey}` },
+        { status: 400 },
+      );
+    }
     if (writableEntries.some(([key]) => key === 'supabase_secret_key')) {
       return NextResponse.json(
         { error: 'The Supabase bootstrap secret must be changed through the encrypted launcher setup.' },
