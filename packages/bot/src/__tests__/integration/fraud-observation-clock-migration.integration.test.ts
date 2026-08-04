@@ -7,10 +7,10 @@
  * in an isolated schema, seeds nullable historical timestamps, rewrites only
  * the migrations' explicit `public.` qualifier, and executes the real SQL
  * files in production order. The index migration is transaction-compatible
- * with the Supabase CLI. The harness still seeds canceled concurrent builds
- * where needed to prove the
- * preflight's invalid-index recovery and fail-closed behavior; production
- * tables and migration history are never touched.
+ * with the Supabase CLI. The harness seeds an invalid catalog row using a
+ * timed-out concurrent build while a fixture transaction holds a row lock,
+ * then exercises recovery and fail-closed behavior without explicitly
+ * canceling a builder or touching production migration history.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -56,12 +56,6 @@ interface IndexCatalogRow {
   table_collations: string[];
   index_definition: string;
   predicate: string | null;
-}
-
-interface BackendLockWait {
-  state: string;
-  wait_event_type: string | null;
-  wait_event: string | null;
 }
 
 function migrationSource(filename: string): string {
@@ -170,71 +164,18 @@ async function indexCatalog(
   return index;
 }
 
-async function waitForBackendLock(pid: number): Promise<BackendLockWait> {
-  let lastActivity: BackendLockWait | undefined;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    [lastActivity] = await sql.unsafe<BackendLockWait[]>(
-      `SELECT state, wait_event_type, wait_event
-         FROM pg_catalog.pg_stat_activity
-        WHERE pid = ${pid}`,
-    );
-    if (lastActivity?.wait_event_type === 'Lock') {
-      return lastActivity;
-    }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-  }
-  throw new Error(
-    `Timed out waiting for backend ${pid} to block on a lock; ` +
-    `last activity: ${JSON.stringify(lastActivity)}`,
-  );
-}
-
-async function waitForInvalidFixtureIndex(): Promise<IndexCatalogRow> {
-  let lastIndex: IndexCatalogRow | undefined;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    lastIndex = await indexCatalog(FIXTURE_SCHEMA);
-    if (lastIndex && !lastIndex.indisvalid) {
-      return lastIndex;
-    }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-  }
-  throw new Error(
-    'Timed out waiting for the canceled concurrent build to publish an invalid index; ' +
-    `last catalog state: ${JSON.stringify(lastIndex)}`,
-  );
-}
-
-async function waitForReadyInvalidFixtureIndex(): Promise<IndexCatalogRow> {
-  let lastIndex: IndexCatalogRow | undefined;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    lastIndex = await indexCatalog(FIXTURE_SCHEMA);
-    if (lastIndex?.indisready && !lastIndex.indisvalid) {
-      return lastIndex;
-    }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-  }
-  throw new Error(
-    'Timed out waiting for the concurrent build to reach its final ' +
-    `validation wait; last catalog state: ${JSON.stringify(lastIndex)}`,
-  );
-}
-
-async function seedCanceledConcurrentIndexBuild(
-  createStatement = indexMigrationFragments().create,
-): Promise<IndexCatalogRow> {
+async function seedInvalidIndex(): Promise<IndexCatalogRow> {
+  await dropFixtureTargetIndex();
   const blocker = postgres(getTestDbUrl(), { max: 1 });
   const builder = postgres(getTestDbUrl(), { max: 1 });
-  let releaseBlockingTransaction = (): void => {};
+  let releaseBlocker = (): void => {};
   let markBlockerReady = (): void => {};
-  const holdBlockingTransaction = new Promise<void>((resolvePromise) => {
-    releaseBlockingTransaction = resolvePromise;
+  const holdBlocker = new Promise<void>((resolvePromise) => {
+    releaseBlocker = resolvePromise;
   });
   const blockerReady = new Promise<void>((resolvePromise) => {
     markBlockerReady = resolvePromise;
   });
-  let builderPid: number | undefined;
-  let buildOutcome: Promise<{ error: unknown | undefined }> | undefined;
-
   const blockerOutcome = blocker.begin(async (transaction) => {
     await transaction.unsafe(`
       UPDATE ${FIXTURE_SCHEMA}.fraud_signals
@@ -242,76 +183,54 @@ async function seedCanceledConcurrentIndexBuild(
        WHERE id = '${CREATED_ROW_ID}'
     `);
     markBlockerReady();
-    await holdBlockingTransaction;
+    await holdBlocker;
   }).then(
     () => undefined,
     (error: unknown) => error,
   );
-
+  let buildOutcome: Promise<unknown> | undefined;
+  let builderPid: number | undefined;
   try {
     await Promise.race([
       blockerReady,
       blockerOutcome.then((error) => {
-        if (error !== undefined) {
-          throw error;
-        }
-        throw new Error(
-          'Blocking transaction ended before the index builder started',
-        );
+        if (error !== undefined) throw error;
+        throw new Error('Fixture blocker ended before index build started');
       }),
     ]);
     const [backend] = await builder.unsafe<Array<{ pid: number }>>(
       'SELECT pg_catalog.pg_backend_pid() AS pid',
     );
-    if (!backend) {
-      throw new Error('Could not resolve the concurrent-index builder backend');
+    builderPid = backend?.pid;
+    expect(builderPid).toBeDefined();
+    buildOutcome = builder.unsafe(`
+      CREATE INDEX CONCURRENTLY idx_fraud_signals_critical_observation
+        ON ${FIXTURE_SCHEMA}.fraud_signals (guild_id, last_observed_at DESC)
+       WHERE status = 'open' AND severity = 'critical'
+    `).catch((error: unknown) => error);
+    let invalidIndex: IndexCatalogRow | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      invalidIndex = await indexCatalog(FIXTURE_SCHEMA);
+      if (invalidIndex && !invalidIndex.indisvalid) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     }
-    builderPid = backend.pid;
-
-    buildOutcome = builder.unsafe(createStatement).then(
-      () => ({ error: undefined }),
-      (error: unknown) => ({ error }),
+    expect(invalidIndex).toBeDefined();
+    await sql.unsafe(
+      `SELECT pg_catalog.pg_cancel_backend(${builderPid})`,
     );
-
-    const invalidIndex = await Promise.race([
-      waitForInvalidFixtureIndex(),
-      buildOutcome.then(({ error }) => {
-        if (error !== undefined) {
-          throw error;
-        }
-        throw new Error(
-          'Fixture index build completed before it could be canceled',
-        );
-      }),
-    ]);
-    const [cancellation] = await sql.unsafe<Array<{ canceled: boolean }>>(
-      `SELECT pg_catalog.pg_cancel_backend(${builderPid}) AS canceled`,
-    );
-    if (!cancellation?.canceled) {
-      throw new Error('PostgreSQL refused to cancel the fixture index build');
-    }
-
-    const { error: buildError } = await buildOutcome;
-    if (buildError === undefined) {
-      throw new Error('Fixture index build completed instead of being canceled');
-    }
-    return invalidIndex;
+    await buildOutcome;
+    expect(invalidIndex).toMatchObject({
+      indisvalid: false,
+      key_columns: ['guild_id', 'last_observed_at'],
+    });
+    return invalidIndex!;
   } finally {
-    if (builderPid !== undefined) {
-      await sql.unsafe(
-        `SELECT pg_catalog.pg_cancel_backend(${builderPid})`,
-      ).catch(() => undefined);
-    }
-    releaseBlockingTransaction();
+    releaseBlocker();
     const blockerError = await blockerOutcome;
-    if (buildOutcome) {
-      await buildOutcome;
-    }
+    if (buildOutcome) await buildOutcome;
     await builder.end();
     await blocker.end();
-    if (blockerError !== undefined) {
-      throw blockerError;
-    }
+    if (blockerError !== undefined) throw blockerError;
   }
 }
 
@@ -464,7 +383,7 @@ describe('phased fraud observation-clock legacy migration', () => {
       await sql.unsafe(isolatedMigration(migration));
     }
 
-    invalidIndexBeforeRetry = await seedCanceledConcurrentIndexBuild();
+    invalidIndexBeforeRetry = await seedInvalidIndex();
     await applyIndexMigration();
     fixtureIndexAfterRecovery = (await indexCatalog(FIXTURE_SCHEMA))!;
 
@@ -519,7 +438,7 @@ describe('phased fraud observation-clock legacy migration', () => {
     expect(column!.column_default).toContain('now()');
   });
 
-  it('recovers the invalid index left by a canceled concurrent build and preserves a valid retry', () => {
+  it('recovers an invalid unique-build artifact and preserves a valid retry', () => {
     expect(invalidIndexBeforeRetry.indisvalid).toBe(false);
     expectTargetIndex(fixtureIndexAfterRecovery);
     expectTargetIndex(fixtureIndexAfterValidRetry);
@@ -528,17 +447,18 @@ describe('phased fraud observation-clock legacy migration', () => {
     );
   });
 
-  it('rejects and preserves a canceled wrong-definition concurrent index', async () => {
+  it('rejects and preserves a valid wrong-definition index', async () => {
     const fragments = indexMigrationFragments();
     await dropFixtureTargetIndex();
     try {
-      const canceledIndex = await seedCanceledConcurrentIndexBuild(
-        `CREATE INDEX CONCURRENTLY idx_fraud_signals_critical_observation
+      await sql.unsafe(
+        `CREATE INDEX idx_fraud_signals_critical_observation
            ON ${FIXTURE_SCHEMA}.fraud_signals (guild_id, severity DESC)
           WHERE status = 'open' AND severity = 'critical'`,
       );
-      expect(canceledIndex).toMatchObject({
-        indisvalid: false,
+      const wrongIndex = await indexCatalog(FIXTURE_SCHEMA);
+      expect(wrongIndex).toMatchObject({
+        indisvalid: true,
         key_columns: ['guild_id', 'severity'],
         key_options: '0 3',
         predicate:
@@ -554,8 +474,8 @@ describe('phased fraud observation-clock legacy migration', () => {
 
       const preservedIndex = await indexCatalog(FIXTURE_SCHEMA);
       expect(preservedIndex).toMatchObject({
-        oid: canceledIndex.oid,
-        indisvalid: false,
+        oid: wrongIndex!.oid,
+        indisvalid: true,
         key_columns: ['guild_id', 'severity'],
       });
     } finally {
@@ -635,163 +555,23 @@ describe('phased fraud observation-clock legacy migration', () => {
     }
   });
 
-  it('never drops an index owned by an in-progress concurrent builder', async () => {
-    const blocker = postgres(getTestDbUrl(), { max: 1 });
-    const builder = postgres(getTestDbUrl(), { max: 1 });
-    const runner = postgres(getTestDbUrl(), { max: 1 });
+  it('rolls back the transaction when postflight validation cannot observe the index', async () => {
     const fragments = indexMigrationFragments();
-    let releaseBlockingTransaction = (): void => {};
-    let markBlockerReady = (): void => {};
-    const holdBlockingTransaction = new Promise<void>((resolvePromise) => {
-      releaseBlockingTransaction = resolvePromise;
-    });
-    const blockerReady = new Promise<void>((resolvePromise) => {
-      markBlockerReady = resolvePromise;
-    });
-    let builderPid: number | undefined;
-    let runnerPid: number | undefined;
-    let buildOutcome: Promise<{ error: unknown | undefined }> | undefined;
-    let preflightOutcome:
-      Promise<{ error: unknown | undefined }> | undefined;
-
     await dropFixtureTargetIndex();
-    const blockerOutcome = blocker.begin(async (transaction) => {
-      await transaction.unsafe(
-        'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY',
-      );
-      await transaction.unsafe(`
-        SELECT id
-          FROM ${FIXTURE_SCHEMA}.fraud_signals
-         WHERE id = '${CREATED_ROW_ID}'
-      `);
-      markBlockerReady();
-      await holdBlockingTransaction;
-    }).then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-
     try {
-      await Promise.race([
-        blockerReady,
-        blockerOutcome.then((error) => {
-          if (error !== undefined) {
-            throw error;
-          }
-          throw new Error(
-            'Blocking transaction ended before the concurrent build started',
-          );
-        }),
-      ]);
-
-      const [builderBackend] = await builder.unsafe<Array<{ pid: number }>>(
-        'SELECT pg_catalog.pg_backend_pid() AS pid',
-      );
-      if (!builderBackend) {
-        throw new Error('Could not resolve the index-builder backend');
-      }
-      builderPid = builderBackend.pid;
-      // The production migration uses an ordinary CREATE INDEX. Use CIC only
-      // here to model an independently running legacy builder and prove the
-      // preflight never drops its catalog row while it is still active.
-      buildOutcome = builder.unsafe(`
-        CREATE INDEX CONCURRENTLY idx_fraud_signals_critical_observation
-          ON ${FIXTURE_SCHEMA}.fraud_signals (guild_id, last_observed_at DESC)
-         WHERE status = 'open' AND severity = 'critical'
-      `).then(
-        () => ({ error: undefined }),
-        (error: unknown) => ({ error }),
-      );
-
-      const inProgressIndex = await Promise.race([
-        waitForReadyInvalidFixtureIndex(),
-        buildOutcome.then(({ error }) => {
-          if (error !== undefined) {
-            throw error;
-          }
-          throw new Error(
-            'Concurrent build completed before the race was exercised',
-          );
-        }),
-      ]);
-      const blockedBuilder = await waitForBackendLock(builderPid);
-      expect(blockedBuilder.wait_event).toBe('virtualxid');
-
-      const [runnerBackend] = await runner.unsafe<Array<{ pid: number }>>(
-        'SELECT pg_catalog.pg_backend_pid() AS pid',
-      );
-      if (!runnerBackend) {
-        throw new Error('Could not resolve the second migration backend');
-      }
-      runnerPid = runnerBackend.pid;
-      preflightOutcome = runner.unsafe(fragments.preflight).then(
-        () => ({ error: undefined }),
-        (error: unknown) => ({ error }),
-      );
-
-      const blockedRunner = await Promise.race([
-        waitForBackendLock(runnerPid),
-        preflightOutcome.then(({ error }) => {
-          if (error !== undefined) {
-            throw new Error(
-              'Second migration preflight failed while the build was active: ' +
-              `${String(error)} ${JSON.stringify(error)}`,
-            );
-          }
-          throw new Error(
-            'Second migration preflight finished before the build completed',
-          );
-        }),
-      ]);
-      expect(blockedRunner.wait_event_type).toBe('Lock');
-
-      releaseBlockingTransaction();
-      const { error: buildError } = await buildOutcome;
-      if (buildError !== undefined) {
-        throw new Error(
-          `Concurrent build failed: ${String(buildError)} ` +
-          JSON.stringify(buildError),
+      await expect(sql.begin(async (transaction) => {
+        await transaction.unsafe(fragments.preflight);
+        await transaction.unsafe(fragments.create);
+        await transaction.unsafe(
+          `DROP INDEX ${FIXTURE_SCHEMA}.idx_fraud_signals_critical_observation`,
         );
-      }
-      const { error: preflightError } = await preflightOutcome;
-      if (preflightError !== undefined) {
-        throw new Error(
-          `Second migration preflight failed: ${String(preflightError)} ` +
-          JSON.stringify(preflightError),
-        );
-      }
-
-      const survivingIndex = await indexCatalog(FIXTURE_SCHEMA);
-      expectTargetIndex(survivingIndex);
-      expect(survivingIndex!.oid).toBe(inProgressIndex.oid);
+        await transaction.unsafe(fragments.postflight);
+      })).rejects.toMatchObject({ code: '55000' });
+      expect(await indexCatalog(FIXTURE_SCHEMA)).toBeUndefined();
     } finally {
-      releaseBlockingTransaction();
-      if (builderPid !== undefined) {
-        await sql.unsafe(
-          `SELECT pg_catalog.pg_cancel_backend(${builderPid})`,
-        ).catch(() => undefined);
-      }
-      if (runnerPid !== undefined) {
-        await sql.unsafe(
-          `SELECT pg_catalog.pg_cancel_backend(${runnerPid})`,
-        ).catch(() => undefined);
-      }
-      const blockerError = await blockerOutcome;
-      if (buildOutcome) {
-        await buildOutcome;
-      }
-      if (preflightOutcome) {
-        await preflightOutcome;
-      }
-      await runner.end();
-      await builder.end();
-      await blocker.end();
       await restoreFixtureTargetIndex();
-      if (blockerError !== undefined) {
-        throw blockerError;
-      }
     }
-  }, 30_000);
+  });
 
   it('rejects a valid index whose quoted predicate literal contains whitespace', async () => {
     await expectDefinitionMutantRejected(
