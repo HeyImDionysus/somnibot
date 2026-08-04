@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   runLocalToVpsHandoff,
   shouldTransferLocalValkeyState,
@@ -17,6 +17,12 @@ function result(state: VpsDeploymentExecutionResult['state']): VpsDeploymentExec
     manualBlockReasons: [],
   };
 }
+
+// The liveness-denied case replaces process.kill. Always restore it so later
+// launcher lifecycle tests observe the real process probe implementation.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('local state transfer selection', () => {
   it('transfers persisted local state after a launcher restart but never uploads stale VPS-era state', () => {
