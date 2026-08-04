@@ -1244,6 +1244,13 @@ TYPE_OVERRIDES: dict[tuple[str, str], str] = {
     ("commerce_fulfillment_outward_intents", "state"): (
         "'sending' | 'sent' | 'uncertain' | 'superseded'"
     ),
+    # commerce_provider_money_recovery — CHECK widened by
+    # 20260804140000_provider_money_recovery_upgrade.sql after the table's
+    # initial CREATE statement. Keep the generated drift snapshot aligned with
+    # every state the leased recovery worker persists.
+    ("commerce_provider_money_recovery", "status"): (
+        "'pending' | 'processing' | 'refunded' | 'resolved' | 'manual_review'"
+    ),
     # orders
     ("orders", "status"): "'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review'",
     # license_validations — CHECK widened by

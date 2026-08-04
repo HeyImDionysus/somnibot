@@ -1816,7 +1816,7 @@ export interface DbCommerceProviderMoneyRecovery {
   provider_parent_id: string | null;
   guild_id: string | null;
   reason: string;
-  status: 'pending' | 'refunded' | 'resolved';
+  status: 'pending' | 'processing' | 'refunded' | 'resolved' | 'manual_review';
   attempts: number;
   next_retry_at: string | null;
   created_at: string;
