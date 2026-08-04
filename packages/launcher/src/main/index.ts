@@ -158,18 +158,24 @@ const activeVpsDeployment = new VpsDeploymentRunGate();
 function shutdownManagedServices(): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
 
-  shutdownPromise = (async () => {
+  const attempt = (async () => {
     stopLocalValkeyBackupSchedule();
-    await stopAll();
-    await stopLavalink();
-    await stopValkey();
+    const results = await Promise.allSettled([stopAll(), stopLavalink(), stopValkey()]);
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'One or more managed services did not stop.');
+    }
     sessionToken = null;
     lastStartedPayPalConfig = null;
-  })().catch((error) => {
-    console.error('[Launcher] Managed-service shutdown failed:', error);
+  })();
+  const trackedAttempt = attempt.finally(() => {
+    shutdownPromise = null;
   });
+  shutdownPromise = trackedAttempt;
 
-  return shutdownPromise;
+  return trackedAttempt;
 }
 
 function requestQuitAfterManagedShutdown(): void {
@@ -178,6 +184,13 @@ function requestQuitAfterManagedShutdown(): void {
   void shutdownManagedServices().then(() => {
     shutdownComplete = true;
     app.quit();
+  }).catch((error) => {
+    console.error('[Launcher] Managed-service shutdown failed:', error);
+    quitRequestInFlight = false;
+    dialog.showErrorBox(
+      'SomniBot could not stop every managed service',
+      'The launcher is staying open because one or more managed services could not be confirmed stopped. Retry after resolving the process conflict.',
+    );
   });
 }
 /**

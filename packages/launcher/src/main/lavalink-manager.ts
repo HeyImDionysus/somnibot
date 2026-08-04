@@ -143,9 +143,15 @@ export function getLavalinkPid(): number | null {
 }
 
 function persistLavalinkPid(pid: number | null): void {
-  const lastPids = getConfig().lastPids
+  const config = getConfig();
+  const lastPids = config.lastPids
     ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
-  saveConfig({ lastPids: { ...lastPids, lavalink: pid } });
+  const lastPidStartedAt = config.lastPidStartedAt
+    ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  saveConfig({
+    lastPids: { ...lastPids, lavalink: pid },
+    lastPidStartedAt: { ...lastPidStartedAt, lavalink: pid === null ? null : Date.now() },
+  });
 }
 
 /* ------------------------------------------------------------------ */

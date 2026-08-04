@@ -12,6 +12,7 @@ type ImportableStringField = Exclude<keyof LauncherConfig,
   | 'firstRunComplete'
   | 'lavalinkEnabled'
   | 'lastPids'
+  | 'lastPidStartedAt'
 >;
 
 const ENV_TO_CONFIG: Readonly<Record<string, ImportableStringField>> = {

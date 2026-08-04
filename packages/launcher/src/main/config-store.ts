@@ -94,6 +94,8 @@ export interface LauncherConfig {
 
   // ── Phase 6: Stale process tracking (PIDs from last run) ──
   lastPids: { bot: number | null; dashboard: number | null; lavalink: number | null; valkey: number | null };
+  /** Wall-clock launch witnesses used to reject reused or planted PIDs. */
+  lastPidStartedAt?: { bot: number | null; dashboard: number | null; lavalink: number | null; valkey: number | null };
 }
 
 const DEFAULTS: LauncherConfig = {
@@ -128,6 +130,7 @@ const DEFAULTS: LauncherConfig = {
   firstRunComplete: false,
   lavalinkEnabled: false,
   lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
+  lastPidStartedAt: { bot: null, dashboard: null, lavalink: null, valkey: null },
 };
 
 const store = new Store<LauncherConfig>({
@@ -345,6 +348,7 @@ function getConfigSnapshot(): Partial<LauncherConfig> {
     firstRunComplete: storedOrUndefined('firstRunComplete', false),
     lavalinkEnabled: storedOrUndefined('lavalinkEnabled', false),
     lastPids: storedOrUndefined('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),
+    lastPidStartedAt: storedOrUndefined('lastPidStartedAt', { bot: null, dashboard: null, lavalink: null, valkey: null }),
   };
 }
 
@@ -385,6 +389,7 @@ export function getConfig(): LauncherConfig {
     firstRunComplete: store.get('firstRunComplete', false),
     lavalinkEnabled: store.get('lavalinkEnabled', false),
     lastPids: store.get('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),
+    lastPidStartedAt: store.get('lastPidStartedAt', { bot: null, dashboard: null, lavalink: null, valkey: null }),
   };
 }
 

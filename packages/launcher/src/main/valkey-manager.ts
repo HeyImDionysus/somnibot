@@ -147,9 +147,15 @@ export function getValkeyPid(): number | null {
 }
 
 function persistValkeyPid(pid: number | null): void {
-  const lastPids = getConfig().lastPids
+  const config = getConfig();
+  const lastPids = config.lastPids
     ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
-  saveConfig({ lastPids: { ...lastPids, valkey: pid } });
+  const lastPidStartedAt = config.lastPidStartedAt
+    ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  saveConfig({
+    lastPids: { ...lastPids, valkey: pid },
+    lastPidStartedAt: { ...lastPidStartedAt, valkey: pid === null ? null : Date.now() },
+  });
 }
 
 /* ------------------------------------------------------------------ */

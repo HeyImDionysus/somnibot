@@ -117,6 +117,10 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('const staleCleanup = await cleanupStaleProcesses();');
     expect(main).toMatch(/if \(!staleCleanup\.ok\) \{[\s\S]*?app\.quit\(\);[\s\S]*?return;/);
     expect(configBridge).toContain('delete sanitized.lastPids;');
+    expect(configBridge).toContain('delete sanitized.lastPidStartedAt;');
+    expect(processManager).toContain('processMatchesStartWitness');
+    expect(main).toContain('Promise.allSettled([stopAll(), stopLavalink(), stopValkey()])');
+    expect(main).toContain('The launcher is staying open because one or more managed services could not be confirmed stopped.');
     expect(processManager).toContain('let stopPromise: Promise<void> | null = null;');
     expect(lavalink).toContain('export function stopLavalink(): Promise<void>');
     expect(valkey).toContain('export function stopValkey(): Promise<void>');

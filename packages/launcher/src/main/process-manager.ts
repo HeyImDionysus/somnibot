@@ -327,6 +327,43 @@ async function readProcessCommandLine(pid: number): Promise<string | null> {
   }
 }
 
+async function readProcessStartedAt(pid: number): Promise<number | null> {
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+        ],
+        { timeout: 3_000, maxBuffer: 16 * 1024 },
+      );
+      const parsed = Date.parse(String(stdout).trim());
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    const { stdout } = await execFileAsync(
+      'ps',
+      ['-o', 'lstart=', '-p', String(pid)],
+      { timeout: 3_000, maxBuffer: 16 * 1024 },
+    );
+    const parsed = Date.parse(String(stdout).trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function processMatchesStartWitness(pid: number, expectedStartedAt: number): Promise<boolean> {
+  const observedStartedAt = await readProcessStartedAt(pid);
+  // ps reports whole seconds on Unix; spawn-to-persist delay is normally only
+  // milliseconds. Ten seconds tolerates scheduling delay without accepting a
+  // later PID reuse.
+  return observedStartedAt !== null && Math.abs(observedStartedAt - expectedStartedAt) <= 10_000;
+}
+
 function expectedProcessIdentityMarker(name: StaleProcessName): string {
   switch (name) {
     case 'bot':
@@ -365,7 +402,9 @@ export interface StaleProcessCleanupResult {
 export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult> {
   const cfg = getConfig();
   const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  const startedAt = cfg.lastPidStartedAt ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
   const nextPids = { ...pids };
+  const nextStartedAt = { ...startedAt };
 
   const stalePids: Array<[StaleProcessName, number]> = [];
   const unresolved: string[] = [];
@@ -382,6 +421,7 @@ export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult
       }
       if (liveness === 'dead') {
         nextPids[name as StaleProcessName] = null;
+        nextStartedAt[name as StaleProcessName] = null;
         continue;
       }
       if (liveness === 'unknown') {
@@ -394,6 +434,22 @@ export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult
         unresolved.push(name);
         continue;
       }
+      const expectedStartedAt = startedAt[name as StaleProcessName];
+      if (typeof expectedStartedAt !== 'number'
+        || !Number.isFinite(expectedStartedAt)
+        || !await processMatchesStartWitness(pid, expectedStartedAt)) {
+        console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process start witness is missing or changed.`);
+        unresolved.push(name);
+        continue;
+      }
+      // Revalidate both independent witnesses immediately before signaling to
+      // narrow the inspection/signal window and fail closed on PID reuse.
+      if (!await processMatchesExpectedIdentity(name as StaleProcessName, pid)
+        || !await processMatchesStartWitness(pid, expectedStartedAt)) {
+        console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process identity changed during inspection.`);
+        unresolved.push(name);
+        continue;
+      }
       console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
       try {
         process.kill(pid, 'SIGTERM');
@@ -401,6 +457,7 @@ export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult
       } catch (error) {
         if (processErrorCode(error) === 'ESRCH') {
           nextPids[name as StaleProcessName] = null;
+          nextStartedAt[name as StaleProcessName] = null;
         } else {
           console.warn(`[ProcessMgr] Could not terminate stale ${name} PID ${pid}; preserving it.`);
           unresolved.push(name);
@@ -408,6 +465,7 @@ export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult
       }
     } else if (pid !== null) {
       nextPids[name as StaleProcessName] = null;
+      nextStartedAt[name as StaleProcessName] = null;
     }
   }
 
@@ -416,13 +474,16 @@ export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult
     exited: await waitForStaleProcessExit(pid),
   })));
   for (const result of exited) {
-    if (result.exited) nextPids[result.name] = null;
+    if (result.exited) {
+      nextPids[result.name] = null;
+      nextStartedAt[result.name] = null;
+    }
     else unresolved.push(result.name);
   }
 
   // Clear only records proven dead. Ambiguous or unkillable records remain so
   // the next launch cannot silently forget a service it failed to reclaim.
-  saveConfig({ lastPids: nextPids });
+  saveConfig({ lastPids: nextPids, lastPidStartedAt: nextStartedAt });
   return { ok: unresolved.length === 0, unresolved: [...new Set(unresolved)] };
 }
 
@@ -794,8 +855,10 @@ function stopHeartbeatMonitor(): void {
 function persistPid(name: 'bot' | 'dashboard', pid: number | null): void {
   const cfg = getConfig();
   const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  const startedAt = cfg.lastPidStartedAt ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
   pids[name] = pid;
-  saveConfig({ lastPids: pids });
+  startedAt[name] = pid === null ? null : Date.now();
+  saveConfig({ lastPids: pids, lastPidStartedAt: startedAt });
 }
 
 /* ------------------------------------------------------------------ */
@@ -845,7 +908,12 @@ export function stopAll(): Promise<void> {
     // Clear stored PIDs only after both children have actually stopped.
     const persistedPids = getConfig().lastPids
       ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
-    saveConfig({ lastPids: { ...persistedPids, bot: null, dashboard: null } });
+    const persistedStartedAt = getConfig().lastPidStartedAt
+      ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+    saveConfig({
+      lastPids: { ...persistedPids, bot: null, dashboard: null },
+      lastPidStartedAt: { ...persistedStartedAt, bot: null, dashboard: null },
+    });
     broadcastStatus();
   }).finally(() => {
     stopPromise = null;

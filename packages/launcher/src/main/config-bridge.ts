@@ -31,6 +31,7 @@ export function sanitizeConfigPatchForStorage<T extends Partial<LauncherConfig>>
   // renderer round-trip: a compromised page must not be able to plant a PID
   // that startup cleanup will later consider launcher-owned.
   delete sanitized.lastPids;
+  delete sanitized.lastPidStartedAt;
   for (const key of SENSITIVE_CONFIG_KEYS) {
     if (sanitized[key] === MASKED_SECRET) {
       delete sanitized[key];
