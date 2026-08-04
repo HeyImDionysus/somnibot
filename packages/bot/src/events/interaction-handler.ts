@@ -260,7 +260,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
         client.eventBus.emit('button.clicked', interaction.guild!.id, {
           interactionId: interaction.id,
           discordId: interaction.user.id,
-          discord_username: interaction.user.username,
+          username: interaction.user.username,
           buttonId: interaction.customId,
           channelId: interaction.channelId ?? '',
           messageId: interaction.message?.id ?? '',

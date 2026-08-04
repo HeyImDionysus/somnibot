@@ -20,6 +20,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { deterministicUuidV8 } from '../../utils/deterministic-uuid.js';
 
 const log = createLogger('PaymentHandler');
 
