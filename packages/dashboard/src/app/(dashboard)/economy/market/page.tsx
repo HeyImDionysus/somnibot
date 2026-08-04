@@ -11,7 +11,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
-import { Store, ShoppingCart } from 'lucide-react';
+import { ShieldCheck, Store, ShoppingCart } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -184,6 +184,36 @@ export default function MarketPage() {
               max={2147483647}
             />
           </label>
+        </div>
+      </div>
+
+      {/*
+       * This is a policy, not an owner setting.  The bot rejects every item
+       * flagged `tradeable=false` before the listing RPC, and the atomic
+       * Supabase RPC repeats that guard for callers that bypass the bot.  Keep
+       * this surface explicit so owners understand why there is no toggle.
+       */}
+      <div
+        data-control-id="commerce-items-market-locked"
+        data-policy-state="locked"
+        className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-6"
+      >
+        <div className="flex items-start gap-3">
+          <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" aria-hidden="true" />
+          <div className="min-w-0 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-semibold text-discord-text-primary">Commerce items: market locked</h2>
+              <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-200">Locked on</span>
+            </div>
+            <p className="text-sm text-discord-text-secondary">
+              Items flagged <code>tradeable=false</code> — including real-money commerce grants — can never be listed on the player market.
+              This anti-laundering wall is permanent and is not an owner-configurable setting.
+            </p>
+            <ul className="list-disc space-y-1 pl-5 text-xs text-discord-text-muted">
+              <li>The bot rejects the listing before any inventory is decremented.</li>
+              <li>The atomic database listing RPC repeats the same guard for defense in depth.</li>
+            </ul>
+          </div>
         </div>
       </div>
 
