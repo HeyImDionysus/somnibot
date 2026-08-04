@@ -37,6 +37,8 @@ interface AutoConfigOptions {
   accessToken?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Runtime callback URLs displayed/required by the setup surface. */
+  callbackUrls?: string[];
 }
 
 /**
@@ -113,6 +115,29 @@ export function getDashboardCallbackUrls(env?: DashboardUrlEnv): string[] {
   return [...new Set(bases)].map((base) => `${base}/api/auth/callback`);
 }
 
+function normalizeCallbackUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    parsed.hash = '';
+    parsed.search = '';
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return null;
+  }
+}
+
+function getRequiredCallbackUrls(options?: AutoConfigOptions): string[] {
+  const runtimeCallbacks = (options?.callbackUrls || [])
+    .map(normalizeCallbackUrl)
+    .filter((url): url is string => Boolean(url));
+  return [...new Set([...getDashboardCallbackUrls(), ...runtimeCallbacks])];
+}
+
 function getAutoConfigAbortSignal(options?: AutoConfigOptions): AbortSignal | undefined {
   return options?.signal ?? (options?.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined);
 }
@@ -151,14 +176,20 @@ function getAllowListEntries(config: Record<string, unknown>): string[] {
     : [];
 }
 
-function getMissingCallbackUrls(config: Record<string, unknown>): string[] {
+function getMissingCallbackUrls(
+  config: Record<string, unknown>,
+  callbackUrls = getDashboardCallbackUrls(),
+): string[] {
   const allowListEntries = getAllowListEntries(config);
-  return getDashboardCallbackUrls().filter((callbackUrl) => !allowListEntries.includes(callbackUrl));
+  return callbackUrls.filter((callbackUrl) => !allowListEntries.includes(callbackUrl));
 }
 
-function buildAllowList(config: Record<string, unknown>) {
+function buildAllowList(
+  config: Record<string, unknown>,
+  callbackUrls = getDashboardCallbackUrls(),
+) {
   const allowListEntries = getAllowListEntries(config);
-  for (const callbackUrl of getMissingCallbackUrls(config)) {
+  for (const callbackUrl of getMissingCallbackUrls(config, callbackUrls)) {
     allowListEntries.push(callbackUrl);
   }
 
@@ -166,6 +197,7 @@ function buildAllowList(config: Record<string, unknown>) {
 }
 
 export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions): Promise<DiscordAuthProviderStatus> {
+  const callbackUrls = getRequiredCallbackUrls(options);
   if (isManualDiscordAuthProviderConfigured()) {
     return {
       ready: true,
@@ -182,7 +214,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       ready: false,
       providerEnabled: false,
       callbackAllowListReady: false,
-      missingCallbackUrls: getDashboardCallbackUrls(),
+      missingCallbackUrls: callbackUrls,
       manualConfigured: false,
       error: 'Could not extract Supabase project ref from URL',
     };
@@ -194,7 +226,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       ready: false,
       providerEnabled: false,
       callbackAllowListReady: false,
-      missingCallbackUrls: getDashboardCallbackUrls(),
+      missingCallbackUrls: callbackUrls,
       manualConfigured: false,
       error: 'SUPABASE_ACCESS_TOKEN not set',
     };
@@ -207,7 +239,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
         ready: false,
         providerEnabled: false,
         callbackAllowListReady: false,
-        missingCallbackUrls: getDashboardCallbackUrls(),
+        missingCallbackUrls: callbackUrls,
         manualConfigured: false,
         error: current.error,
       };
@@ -215,7 +247,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
 
     const providerEnabled = current.config.external_discord_enabled === true
       || current.config.EXTERNAL_DISCORD_ENABLED === true;
-    const missingCallbackUrls = getMissingCallbackUrls(current.config);
+    const missingCallbackUrls = getMissingCallbackUrls(current.config, callbackUrls);
     const callbackAllowListReady = missingCallbackUrls.length === 0;
 
     return {
@@ -230,7 +262,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       ready: false,
       providerEnabled: false,
       callbackAllowListReady: false,
-      missingCallbackUrls: getDashboardCallbackUrls(),
+      missingCallbackUrls: callbackUrls,
       manualConfigured: false,
       error: `Failed to check Discord auth provider: ${err}`,
     };
@@ -300,20 +332,21 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
   }
 
   try {
+    const callbackUrls = getRequiredCallbackUrls(options);
     const current = await fetchAuthConfig(projectRef, accessToken, options);
     const currentConfig = current.ok ? current.config : {};
     const providerEnabled = current.ok && (
       currentConfig.external_discord_enabled === true
       || currentConfig.EXTERNAL_DISCORD_ENABLED === true
     );
-    const allowListReady = current.ok && getMissingCallbackUrls(currentConfig).length === 0;
+    const allowListReady = current.ok && getMissingCallbackUrls(currentConfig, callbackUrls).length === 0;
 
     if (providerEnabled && allowListReady) {
       return { success: true, alreadyConfigured: true };
     }
 
     const patchBody: Record<string, string | boolean> = {
-      uri_allow_list: buildAllowList(currentConfig),
+      uri_allow_list: buildAllowList(currentConfig, callbackUrls),
     };
 
     if (!providerEnabled) {
@@ -339,12 +372,34 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(patchBody),
+        signal: getAutoConfigAbortSignal(options),
       },
     );
 
     if (!res.ok) {
       const errBody = await res.text();
       return { success: false, error: `Supabase Management API error (${res.status}): ${errBody}` };
+    }
+
+    const verified = await fetchAuthConfig(projectRef, accessToken, options);
+    if (!verified.ok) {
+      return {
+        success: false,
+        error: `Supabase Management API accepted the auth config update, but verification failed: ${verified.error}`,
+      };
+    }
+
+    const verifiedProviderEnabled = verified.config.external_discord_enabled === true
+      || verified.config.EXTERNAL_DISCORD_ENABLED === true;
+    const verifiedMissingCallbackUrls = getMissingCallbackUrls(verified.config, callbackUrls);
+    if (!verifiedProviderEnabled || verifiedMissingCallbackUrls.length > 0) {
+      const missing = verifiedMissingCallbackUrls.length > 0
+        ? ` Missing callback URLs: ${verifiedMissingCallbackUrls.join(', ')}.`
+        : '';
+      return {
+        success: false,
+        error: `Supabase Management API accepted the auth config update, but verification did not prove Discord auth readiness.${missing}`,
+      };
     }
 
     console.log(

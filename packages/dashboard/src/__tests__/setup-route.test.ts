@@ -940,6 +940,7 @@ describe('POST /api/setup finalize', () => {
     expect(res.status).toBe(200);
     expect(ensureDiscordAuthProvider).toHaveBeenCalledWith({
       accessToken: 'setup-provided-token',
+      callbackUrls: [],
     });
     expect(mock._query.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1717,6 +1718,7 @@ describe('GET /api/setup status', () => {
 
     expect(getDiscordAuthProviderStatus).toHaveBeenCalledWith({
       timeoutMs: 3_000,
+      callbackUrls: [],
     });
   });
 

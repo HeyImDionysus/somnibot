@@ -195,6 +195,13 @@ describe('Supabase Discord auth auto-config', () => {
       .mockResolvedValueOnce({
         ok: true,
         text: async () => '',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          uri_allow_list: 'https://existing.example.com/api/auth/callback,https://dashboard.example.com/api/auth/callback',
+        }),
       });
 
     vi.stubGlobal('fetch', fetchMock);
@@ -202,7 +209,7 @@ describe('Supabase Discord auth auto-config', () => {
     const result = await ensureDiscordAuthProvider();
 
     expect(result).toEqual({ success: true, alreadyConfigured: false });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
 
     const patchRequest = fetchMock.mock.calls[1];
     expect(patchRequest[0]).toBe(
@@ -239,6 +246,13 @@ describe('Supabase Discord auth auto-config', () => {
       .mockResolvedValueOnce({
         ok: true,
         text: async () => '',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          uri_allow_list: 'https://existing.example.com/api/auth/callback,https://dashboard.example.com/api/auth/callback,http://localhost:3000/api/auth/callback',
+        }),
       });
 
     vi.stubGlobal('fetch', fetchMock);
@@ -246,7 +260,7 @@ describe('Supabase Discord auth auto-config', () => {
     const result = await ensureDiscordAuthProvider();
 
     expect(result).toEqual({ success: true, alreadyConfigured: false });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
 
     const patchRequest = fetchMock.mock.calls[1];
     expect(patchRequest[0]).toBe(
@@ -262,5 +276,46 @@ describe('Supabase Discord auth auto-config', () => {
     expect(body.external_discord_enabled).toBe(true);
     expect(body.external_discord_client_id).toBe('123456789012345678');
     expect(body.external_discord_secret).toBe('discord-client-secret');
+  });
+
+  it('fails closed when a successful PATCH does not persist every runtime callback', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_ACCESS_TOKEN = 'supabase-management-token';
+    process.env.NEXT_PUBLIC_APP_URL = 'https://dashboard.example.com/';
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          uri_allow_list: 'https://dashboard.example.com/api/auth/callback',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => '',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          uri_allow_list: 'https://dashboard.example.com/api/auth/callback',
+        }),
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider({
+      callbackUrls: ['http://localhost:3456/api/auth/callback'],
+    });
+
+    expect(result).toMatchObject({ success: false });
+    expect(result.error).toContain('verification did not prove Discord auth readiness');
+    expect(result.error).toContain('http://localhost:3456/api/auth/callback');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const patchRequest = fetchMock.mock.calls[1];
+    expect(JSON.parse(String(patchRequest[1]?.body)).uri_allow_list).toContain(
+      'http://localhost:3456/api/auth/callback',
+    );
   });
 });

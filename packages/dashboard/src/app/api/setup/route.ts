@@ -332,6 +332,14 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
   };
 }
 
+function getRuntimeAuthCallbackUrls(runtimeCallbacks: RuntimeCallbackConfig): string[] {
+  return [...new Set(
+    [runtimeCallbacks.publicCallbackBaseUrl, runtimeCallbacks.operatorDashboardUrl]
+      .filter((base): base is string => Boolean(base))
+      .map((base) => `${base}/api/auth/callback`),
+  )];
+}
+
 function resolveSetupPayPalWebhookStatus(
   runtimeCallbacks: RuntimeCallbackConfig,
   env: NodeJS.ProcessEnv = process.env,
@@ -735,6 +743,7 @@ export async function GET(req: NextRequest) {
 
   const authProviderStatus = await getDiscordAuthProviderStatus({
     timeoutMs: SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS,
+    callbackUrls: getRuntimeAuthCallbackUrls(runtimeCallbacks),
   });
   status.discordAuthProviderReady = authProviderStatus.ready;
   status.discordAuthConfigured = authProviderStatus.ready;
@@ -848,7 +857,9 @@ export async function POST(request: NextRequest) {
         console.log('[Setup] ✅ Discord credentials saved to instance_settings');
 
         // Auto-configure Discord OAuth in Supabase if we have the access token
-        const authResult = await ensureDiscordAuthProvider();
+        const authResult = await ensureDiscordAuthProvider({
+          callbackUrls: getRuntimeAuthCallbackUrls(authProviderRuntimeCallbacks ?? resolveRuntimeCallbackConfig()),
+        });
         if (authResult.success) {
           console.log(
             authResult.alreadyConfigured
@@ -948,7 +959,9 @@ export async function POST(request: NextRequest) {
 
   // Step 4: Configure Discord OAuth in Supabase (can be called independently)
   if (action === 'configure-auth') {
-    const result = await ensureDiscordAuthProvider();
+    const result = await ensureDiscordAuthProvider({
+      callbackUrls: getRuntimeAuthCallbackUrls(authProviderRuntimeCallbacks ?? resolveRuntimeCallbackConfig()),
+    });
     return NextResponse.json(result);
   }
 
@@ -1111,6 +1124,7 @@ export async function POST(request: NextRequest) {
     // Ensure Discord auth provider is configured
     const authResult = await ensureDiscordAuthProvider({
       accessToken: submittedSupabaseAccessToken,
+      callbackUrls: getRuntimeAuthCallbackUrls(runtimeCallbacks),
     });
     if (!authResult.success) {
       const publicAuthError = redactAuthProviderError(authResult.error);
