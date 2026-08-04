@@ -15,6 +15,7 @@ import {
   ButtonStyle,
   type ButtonInteraction,
 } from 'discord.js';
+import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
@@ -78,6 +79,47 @@ const CHECKOUT_DELIVERY_TYPES = new Set([
   'mixed',
 ]);
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
+
+/** Claim a free product through the dedicated idempotent $0 RPC. */
+export async function handleFreeClaimButton(
+  interaction: ButtonInteraction,
+  supabase: SupabaseClient,
+  guildId: string,
+): Promise<void> {
+  await interaction.deferReply({ ephemeral: true });
+  const productId = interaction.customId.replace('store:claim:', '');
+  const discordId = interaction.user.id;
+  let { data: customer } = await supabase.from('customers').select('id').eq('guild_id', guildId).eq('discord_id', discordId).maybeSingle();
+  if (!customer) {
+    const inserted = await supabase.from('customers').insert({ guild_id: guildId, discord_id: discordId, discord_username: interaction.user.username }).select('id').single();
+    customer = inserted.data;
+  }
+  if (!customer?.id) {
+    await interaction.editReply({ content: '❌ Free claim is temporarily unavailable. Please try again.' });
+    return;
+  }
+  const { data: claimConfig } = await supabase.from('guild_config').select('free_claim_policy').eq('guild_id', guildId).maybeSingle();
+  const requestId = claimConfig?.free_claim_policy === 'repeatable'
+    ? randomUUID()
+    : deterministicUuidV8('somnibot:free-claim:v1', [guildId, discordId, productId]);
+  const { data, error } = await supabase.rpc('commerce_claim_free_product', {
+    p_request_id: requestId, p_guild_id: guildId, p_customer_id: customer.id, p_product_id: productId,
+  });
+  if (error) {
+    await interaction.editReply({ content: '❌ This free claim could not be completed. Please try again later.' });
+    return;
+  }
+  const row = Array.isArray(data) ? data[0] as Record<string, unknown> | undefined : undefined;
+  if (row?.disposition === 'already-claimed') {
+    await interaction.editReply({ content: 'ℹ️ You have already claimed this product.' });
+    return;
+  }
+  if (row?.disposition !== 'claimed' || typeof row.entitlement_id !== 'string') {
+    await interaction.editReply({ content: '❌ Free claim evidence was incomplete; nothing was granted.' });
+    return;
+  }
+  await interaction.editReply({ content: '✅ Free product claimed. Your entitlement is now active.' });
+}
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TIMESTAMPTZ_PATTERN =
@@ -424,6 +466,32 @@ export async function handleBuyButton(
     String(commerceConfig?.repeat_purchase_policy),
   ) ? String(commerceConfig?.repeat_purchase_policy) : 'unique';
 
+  // A previously validated gift intent is intentionally discovered by its
+  // opaque id in the server-side ledger; it is never trusted from a client
+  // supplied recipient or price.  The short-lived row is carried into the
+  // PayPal custom_id metadata below and revalidated by the signed webhook.
+  const { data: buyerForGift } = await supabase
+    .from('customers')
+    .select('id')
+    .eq('guild_id', guildId)
+    .eq('discord_id', discordId)
+    .maybeSingle();
+  const { data: giftRows } = buyerForGift
+    ? await supabase
+      .from('commerce_gift_intents')
+      .select('id, buyer_customer_id, expires_at, status')
+      .eq('guild_id', guildId)
+      .eq('buyer_customer_id', buyerForGift.id)
+      .eq('product_id', productId)
+      .eq('status', 'pending')
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+    : { data: [] as Array<Record<string, unknown>> };
+  const giftIntentId = Array.isArray(giftRows) && typeof giftRows[0]?.id === 'string'
+    ? giftRows[0].id
+    : null;
+
   // BUYABILITY guard — enforce the checkout column of the compliance
   // decision matrix (packages/dashboard/src/lib/api/commerce-income-wall.ts):
   // only priced one-time products and subscription products may start a
@@ -742,6 +810,7 @@ export async function handleBuyButton(
             p: productId,
             c: customerId,
             d: discordId,
+            ...(giftIntentId ? { gi: giftIntentId } : {}),
           }),
         },
       ],

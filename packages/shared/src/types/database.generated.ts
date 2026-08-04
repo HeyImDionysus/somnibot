@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 253 migration files in packages/supabase/migrations/
+ * Source: 254 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1650,6 +1650,15 @@ export interface DbCommerceDownloadDeliveries {
   delivered_at: string;
 }
 
+export interface DbCommerceFreeClaims {
+  request_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  order_id: string;
+  created_at: string;
+}
+
 export interface DbCommerceFulfillmentClaims {
   guild_id: string;
   customer_id: string;
@@ -1684,6 +1693,19 @@ export interface DbCommerceFulfillmentOutwardIntents {
   uncertain_at: string | null;
   last_error: string | null;
   updated_at: string;
+}
+
+export interface DbCommerceGiftIntents {
+  id: string;
+  guild_id: string;
+  buyer_customer_id: string;
+  recipient_discord_id: string;
+  product_id: string;
+  status: 'pending' | 'fulfilled' | 'cancelled';
+  fulfilled_order_id: string | null;
+  created_at: string;
+  fulfilled_at: string | null;
+  expires_at: string;
 }
 
 export interface DbCommerceLegacySubscriptionGrantContracts {

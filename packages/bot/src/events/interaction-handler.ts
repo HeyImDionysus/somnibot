@@ -8,7 +8,8 @@
  * and slash commands (via command-registry + inline feature-gated dispatch).
  */
 
-import { EmbedBuilder } from 'discord.js';
+import { ActionRowBuilder, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+import { randomUUID } from 'node:crypto';
 import type { Interaction } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../client.js';
@@ -259,7 +260,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
         client.eventBus.emit('button.clicked', interaction.guild!.id, {
           interactionId: interaction.id,
           discordId: interaction.user.id,
-          username: interaction.user.username,
+          discord_username: interaction.user.username,
           buttonId: interaction.customId,
           channelId: interaction.channelId ?? '',
           messageId: interaction.message?.id ?? '',
@@ -297,6 +298,33 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith(MODAL_PREFIX.setup)) {
         await handleSetupModal(interaction, client);
+        return;
+      }
+      if (interaction.customId.startsWith('store:gift-submit:')) {
+        const productId = interaction.customId.replace('store:gift-submit:', '');
+        const recipientId = interaction.fields.getTextInputValue('recipient_discord_id').trim();
+        if (!/^\d{17,20}$/.test(recipientId) || recipientId === interaction.user.id) {
+          await interaction.reply({ content: '❌ Enter a different valid Discord user ID.', ephemeral: true });
+          return;
+        }
+        if (!interaction.guild) {
+          await interaction.reply({ content: '❌ Gifts can only be sent inside the server.', ephemeral: true });
+          return;
+        }
+        try {
+          await interaction.guild.members.fetch(recipientId);
+        } catch {
+          await interaction.reply({ content: '❌ That recipient is not a member of this server.', ephemeral: true });
+          return;
+        }
+        const customer = await client.supabase.from('customers').select('id').eq('guild_id', guildId).eq('discord_id', interaction.user.id).maybeSingle();
+        if (!customer.data?.id) {
+          await interaction.reply({ content: '❌ Start a store purchase first so your buyer account can be verified.', ephemeral: true });
+          return;
+        }
+        const giftId = randomUUID();
+        const { error } = await client.supabase.rpc('commerce_create_gift_intent', { p_id: giftId, p_guild_id: guildId, p_buyer_customer_id: customer.data.id, p_product_id: productId, p_recipient_discord_id: recipientId });
+        await interaction.reply({ content: error ? '❌ Gifting is unavailable for this product.' : '✅ Gift recipient verified and intent recorded. Complete the associated checkout to deliver it.', ephemeral: true });
         return;
       }
       const guild = interaction.guild;

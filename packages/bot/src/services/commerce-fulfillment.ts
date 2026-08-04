@@ -87,6 +87,11 @@ export interface FulfillmentPayload {
   guild_id: string;
   customer_id: string;
   discord_id: string;
+  /** Gift deliveries retain buyer identity while granting the recipient. */
+  recipient_customer_id?: string;
+  recipient_discord_id?: string;
+  gift_intent_id?: string;
+  free_claim?: boolean;
   product_id: string;
   product_name: string;
   order_id: string;
@@ -848,7 +853,8 @@ export class CommerceFulfillmentService {
       throw new Error('One-time fulfillment payload failed entitlement type validation');
     }
     const temporaryRoleGrants = normalizeTemporaryRoleGrants(payload.temporary_role_grants);
-    const orderStatus = await this.validatePayloadOrderSnapshot(payload, temporaryRoleGrants);
+    const freeClaim = payload.free_claim === true;
+    const orderStatus = await this.validatePayloadOrderSnapshot(payload, temporaryRoleGrants, freeClaim);
     if (orderStatus !== 'completed' && orderStatus !== 'pending_review') {
       requireTerminalOrderStatus(orderStatus);
       const terminalEntitlementId = await this.findOrderEntitlement(payload);
@@ -856,10 +862,34 @@ export class CommerceFulfillmentService {
       await this.finishTerminalRoleDelivery(payload, terminalEntitlementId);
     }
     await this.validatePayloadCustomerIdentity(payload);
-    const claim = await this.claimInitialPaidFulfillment(payload);
-    if (claim === 'held') {
-      result.paidFulfillmentHeld = true;
-      return;
+    // Arbitrate the paid order against the buyer before switching the
+    // delivery identity to the recipient. Gift rows have their own atomic
+    // intent claim and must not be treated as a second buyer entitlement.
+    const giftDelivery = Boolean(payload.recipient_customer_id || payload.gift_intent_id);
+    if (!giftDelivery && !freeClaim) {
+      const claim = await this.claimInitialPaidFulfillment(payload);
+      if (claim === 'held') {
+        result.paidFulfillmentHeld = true;
+        return;
+      }
+    }
+    if (payload.recipient_customer_id || payload.recipient_discord_id || payload.gift_intent_id) {
+      if (typeof payload.recipient_customer_id !== 'string' || typeof payload.recipient_discord_id !== 'string' || typeof payload.gift_intent_id !== 'string') {
+        throw new Error('Gift fulfillment buyer identity is malformed');
+      }
+      const { data: recipient, error: recipientError } = await this.supabase
+        .from('customers')
+        .select('id, guild_id, discord_id')
+        .eq('id', payload.recipient_customer_id)
+        .eq('guild_id', payload.guild_id)
+        .maybeSingle();
+      if (recipientError || !recipient || recipient.discord_id !== payload.recipient_discord_id) {
+        throw new Error('Gift recipient identity is missing or mismatched');
+      }
+      // The webhook has already validated buyer/payment identity; the queue
+      // contract now runs the sanctioned fulfillment pipeline as the recipient.
+      // Keep buyer_customer_id only as immutable audit metadata.
+      payload = { ...payload, customer_id: recipient.id, discord_id: recipient.discord_id };
     }
     if (orderStatus !== 'completed') {
       requireTerminalOrderStatus(orderStatus);
@@ -878,6 +908,8 @@ export class CommerceFulfillmentService {
         licenseKeyId: payload.license_key_id,
         discordId: payload.discord_id,
         type: 'one_time',
+        // Free claims persist their manual entitlement atomically in the RPC;
+        // this branch is only a defensive replay fallback for a missing row.
         source: 'purchase',
         grantedRoleIds: payload.granted_role_ids,
         grantedChannelIds: payload.granted_channel_ids,
@@ -1015,7 +1047,7 @@ export class CommerceFulfillmentService {
       || typeof data.status !== 'string'
       || !['active', 'pending', 'grace_period', 'suspended', 'expired', 'cancelled']
         .includes(data.status)
-      || data.source !== 'purchase'
+      || (data.source !== 'purchase' && !(payload.free_claim === true && data.source === 'manual'))
       || !isSameUniqueStringSet(data.granted_role_ids, payload.granted_role_ids)
       || !isSameUniqueStringSet(data.granted_channel_ids, payload.granted_channel_ids)
     ) {
@@ -1047,6 +1079,7 @@ export class CommerceFulfillmentService {
   private async validatePayloadOrderSnapshot(
     payload: FulfillmentPayload,
     temporaryRoleGrants: Array<{ role_id: string; duration_seconds: number }>,
+    freeClaim = false,
   ): Promise<string> {
     const { data, error } = await this.supabase
       .from('orders')
@@ -1067,7 +1100,7 @@ export class CommerceFulfillmentService {
       || !hasExactPayPalSubscriptionIdentity(data.paypal_subscription_id, payload)
       || data.amount_cents !== payload.amount_cents
       || data.currency !== payload.currency
-      || (data.source !== 'purchase' && data.source !== null)
+      || (data.source !== 'purchase' && !(freeClaim && data.source === 'manual') && data.source !== null)
       || typeof data.status !== 'string'
       || !KNOWN_ORDER_STATUSES.includes(data.status)
     ) {

@@ -1482,6 +1482,7 @@ export async function handlePaymentCaptured(
     product_id: string;
     customer_id: string;
     discord_id: string;
+    gift_intent_id?: string;
   } | null = null;
   let observedGuildId: string | null = null;
 
@@ -1499,6 +1500,7 @@ export async function handlePaymentCaptured(
             product_id: String(custom.p),
             customer_id: String(custom.c),
             discord_id: String(custom.d),
+            ...(typeof custom.gi === 'string' ? { gift_intent_id: custom.gi } : {}),
           };
         } else {
           meta = {
@@ -1506,6 +1508,7 @@ export async function handlePaymentCaptured(
             product_id: String(custom.product_id ?? ''),
             customer_id: String(custom.customer_id ?? ''),
             discord_id: String(custom.discord_id ?? ''),
+            ...(typeof custom.gift_intent_id === 'string' ? { gift_intent_id: custom.gift_intent_id } : {}),
           };
         }
       }
@@ -1780,6 +1783,34 @@ export async function handlePaymentCaptured(
     currency: captureCurrency,
   })) return;
 
+  let deliveryCustomerId = order.customer_id;
+  let deliveryDiscordId = meta.discord_id;
+  if (meta.gift_intent_id) {
+    const { data: giftClaim, error: giftError } = await supabase.rpc('commerce_claim_gift_fulfillment', {
+      p_intent_id: meta.gift_intent_id,
+      p_order_id: order.id,
+      p_guild_id: order.guild_id,
+      p_buyer_customer_id: order.customer_id,
+      p_product_id: order.product_id,
+    });
+    if (giftError || !Array.isArray(giftClaim) || giftClaim.length !== 1
+      || typeof giftClaim[0]?.recipient_customer_id !== 'string'
+      || typeof giftClaim[0]?.recipient_discord_id !== 'string') {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId,
+        eventType: 'PAYMENT.CAPTURE.COMPLETED',
+        resourceId: paypalCaptureId,
+        parentId: paypalOrderId,
+        observedGuildId: order.guild_id,
+        reason: 'gift_intent_invalid_or_replayed',
+        evidence: { gift_intent_id: meta.gift_intent_id, order_id: order.id },
+      });
+      return;
+    }
+    deliveryCustomerId = giftClaim[0].recipient_customer_id;
+    deliveryDiscordId = giftClaim[0].recipient_discord_id;
+  }
+
   const expected: FulfillmentExpectation = {
     idempotencyKey: `paypal:capture:${paypalCaptureId}:fulfill_purchase`,
     action: 'fulfill_purchase',
@@ -1793,6 +1824,7 @@ export async function handlePaymentCaptured(
             guild_id: order.guild_id,
             customer_id: order.customer_id,
             discord_id: meta.discord_id,
+            ...(meta.gift_intent_id ? { recipient_customer_id: deliveryCustomerId, recipient_discord_id: deliveryDiscordId, gift_intent_id: meta.gift_intent_id } : {}),
             product_id: order.product_id,
             order_id: order.id,
             order_number: order.order_number,
@@ -1824,7 +1856,7 @@ export async function handlePaymentCaptured(
     });
     return;
   }
-  if (amountMatches) {
+  if (amountMatches && !meta.gift_intent_id) {
     // The database claim is the atomic double-fulfillment boundary. It must run
     // before a random licence key or staged queue payload is created. Historical
     // PayPal links can arrive concurrently, so a JavaScript entitlement read is
@@ -1860,6 +1892,7 @@ export async function handlePaymentCaptured(
       guild_id: order.guild_id,
       customer_id: order.customer_id,
       discord_id: meta.discord_id,
+      ...(meta.gift_intent_id ? { recipient_customer_id: deliveryCustomerId, recipient_discord_id: deliveryDiscordId, gift_intent_id: meta.gift_intent_id } : {}),
       product_id: order.product_id,
       product_name: productName,
       order_id: order.id,
