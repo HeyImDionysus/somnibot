@@ -16,6 +16,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = REPO_ROOT / "packages" / "supabase" / "migrations"
+LICENSE_OWNER_MIGRATION = MIGRATIONS / "20260804138000_license_owner_controls.sql"
 
 _UPSERT_RETURN = re.compile(
     r"(?ims)^\s*ON\s+CONFLICT\b(?P<body>.{0,2000}?)\bRETURN\b(?!ING)"
@@ -105,6 +106,35 @@ class MigrationSqlSyntaxTests(unittest.TestCase):
             for path in sorted(MIGRATIONS.glob("*.sql"))
         }
         self.assertEqual({name: matches for name, matches in offenders.items() if matches}, {})
+
+    def test_license_prefix_upgrade_repairs_legacy_rows_before_check(self) -> None:
+        """Legacy invalid prefixes must be normalized before CHECK validation.
+
+        This is the migration-order proof for an upgrade database containing a
+        pre-existing invalid key_prefix.  The UPDATE's predicate is exhaustive
+        for the final CHECK grammar, so every row reaches constraint validation
+        in a valid state while fresh installs still use the SMNI default.
+        """
+
+        migration = LICENSE_OWNER_MIGRATION.read_text(encoding="utf-8")
+        sanitize = migration.index(
+            "UPDATE public.product_license_config\n"
+            "SET key_prefix = 'SMNI'\n"
+            "WHERE key_prefix IS NULL OR key_prefix !~ '^[A-Z]{2,8}$';"
+        )
+        constraint = migration.index(
+            "ALTER TABLE public.product_license_config\n"
+            "  DROP CONSTRAINT IF EXISTS product_license_config_key_prefix_check,\n"
+            "  ADD CONSTRAINT product_license_config_key_prefix_check"
+        )
+        self.assertLess(sanitize, constraint)
+        self.assertIn("CHECK (key_prefix ~ '^[A-Z]{2,8}$')", migration[constraint:])
+
+        grammar = re.compile(r"^[A-Z]{2,8}$")
+        for valid in ("AB", "SMNI", "ABCDEFGH"):
+            self.assertRegex(valid, grammar)
+        for invalid in ("aB", "A", "ABCDEFGHI", "AB-1", ""):
+            self.assertNotRegex(invalid, grammar)
 
 
 if __name__ == "__main__":

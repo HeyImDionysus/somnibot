@@ -8,14 +8,14 @@
 ALTER TABLE public.product_license_config
   ADD COLUMN IF NOT EXISTS key_prefix TEXT NOT NULL DEFAULT 'SMNI';
 
+UPDATE public.product_license_config
+SET key_prefix = 'SMNI'
+WHERE key_prefix IS NULL OR key_prefix !~ '^[A-Z]{2,8}$';
+
 ALTER TABLE public.product_license_config
   DROP CONSTRAINT IF EXISTS product_license_config_key_prefix_check,
   ADD CONSTRAINT product_license_config_key_prefix_check
     CHECK (key_prefix ~ '^[A-Z]{2,8}$');
-
-UPDATE public.product_license_config
-SET key_prefix = 'SMNI'
-WHERE key_prefix IS NULL OR key_prefix !~ '^[A-Z]{2,8}$';
 
 -- Keep the validation lookup the single SDK configuration delivery surface.
 CREATE OR REPLACE FUNCTION public.license_validate_lookup(
