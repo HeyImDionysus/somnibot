@@ -654,6 +654,8 @@ const licenseConfig = z.object({
   tier: z.string().max(64).optional(),
   watermark_config: z.record(z.unknown()).optional().nullable(),
   require_discord_guild_membership: z.boolean().optional(),
+  rotation_policy: z.enum(['rotate-and-invalidate', 'disabled']).optional(),
+  self_service_device_removal: z.boolean().optional(),
 });
 
 // ── Setup schemas ───────────────────────────────────

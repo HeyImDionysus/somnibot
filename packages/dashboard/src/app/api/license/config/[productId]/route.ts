@@ -32,6 +32,8 @@ const LICENSE_CONFIG_COLUMNS = [
   'tier',
   'watermark_config',
   'require_discord_guild_membership',
+  'rotation_policy',
+  'self_service_device_removal',
 ] as const;
 
 /** Structural equality good enough for scalars, string arrays and small JSON. */
@@ -123,6 +125,8 @@ export async function GET(
         tier: null,
         watermark_config: null,
         require_discord_guild_membership: true,
+        rotation_policy: 'rotate-and-invalidate',
+        self_service_device_removal: true,
       },
     });
   }
@@ -157,6 +161,8 @@ export async function PUT(
     tier,
     watermark_config,
     require_discord_guild_membership,
+    rotation_policy,
+    self_service_device_removal,
   } = body;
 
   const written: Record<string, unknown> = {
@@ -169,6 +175,8 @@ export async function PUT(
     tier: tier ?? null,
     watermark_config: watermark_config ?? null,
     require_discord_guild_membership: require_discord_guild_membership ?? true,
+    rotation_policy: rotation_policy ?? 'rotate-and-invalidate',
+    self_service_device_removal: self_service_device_removal ?? true,
   };
 
   // Tenancy gate, BEFORE the write. Resolving the product here used to serve
@@ -205,7 +213,7 @@ export async function PUT(
     return dbError(error, 'license/config');
   }
 
-  // The upsert always writes all eight columns, so listing them all would
+  // The upsert always writes all configured columns, so listing them all would
   // describe every save as changing everything. Report only what really moved.
   const changed = before
     ? LICENSE_CONFIG_COLUMNS.filter((column) => !sameValue(before[column], written[column]))

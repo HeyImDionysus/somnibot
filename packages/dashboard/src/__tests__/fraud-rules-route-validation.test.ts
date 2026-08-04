@@ -39,11 +39,11 @@ beforeEach(() => {
 });
 
 describe('POST /api/fraud/rules validation', () => {
-  it('rejects detector types that the runtime does not evaluate', async () => {
+  it('rejects detector configs outside the runtime safety range', async () => {
     const response = await POST(request({
-      name: 'Inert device rule',
+      name: 'Invalid device rule',
       rule_type: 'device_limit',
-      config: { threshold: 3 },
+      config: { threshold: 1 },
       auto_action: 'flag',
     }));
 

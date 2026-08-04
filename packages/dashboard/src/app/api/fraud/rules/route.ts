@@ -12,12 +12,11 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
-import { velocityRuleConfigSchema } from '@/lib/fraud-rule-config';
+import { fraudRuleConfigSchemas, FRAUD_RULE_TYPES, type FraudRuleType } from '@/lib/fraud-rule-config';
 
-// Only expose detectors that production actually evaluates. Historical rows
-// of other constrained types remain readable but cannot be presented as live
-// controls until their runtime detector exists.
-const fraudRuleType = z.literal('velocity_limit');
+const fraudRuleType = z.enum(FRAUD_RULE_TYPES);
+const configForType = (type: FraudRuleType, value: unknown) =>
+  fraudRuleConfigSchemas[type].safeParse(value);
 
 const fraudRuleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -26,7 +25,7 @@ const fraudRuleCreate = z.object({
   // string accepted here died later as a raw 23514 the owner could not act on.
   rule_type: fraudRuleType,
   enabled: z.boolean().default(true),
-  config: velocityRuleConfigSchema,
+  config: z.record(z.unknown()),
   auto_action: z.literal('flag').default('flag'),
 });
 
@@ -36,7 +35,7 @@ const fraudRuleUpdate = z.object({
   description: z.string().max(500).optional().nullable(),
   rule_type: fraudRuleType.optional(),
   enabled: z.boolean().optional(),
-  config: velocityRuleConfigSchema.optional(),
+  config: z.record(z.unknown()).optional(),
   auto_action: z.literal('flag').optional(),
 });
 
@@ -69,6 +68,8 @@ export async function POST(request: NextRequest) {
     const parsed = await parseBody(request, fraudRuleCreate);
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
+    const configResult = configForType(body.rule_type, body.config);
+    if (!configResult.success) return NextResponse.json({ error: configResult.error.issues[0]?.message ?? 'Invalid fraud rule configuration.' }, { status: 400 });
     const admin = createAdminSupabase();
 
     const { data, error } = await admin
@@ -140,6 +141,12 @@ export async function PATCH(request: NextRequest) {
     if (body.auto_action !== undefined) updates.auto_action = body.auto_action;
 
     const before = await readRowBefore(admin, 'fraud_rules', { id: body.id, guild_id: ctx.guildId });
+    if (body.config !== undefined) {
+      const type = (body.rule_type ?? before?.rule_type) as FraudRuleType;
+      if (!FRAUD_RULE_TYPES.includes(type)) return NextResponse.json({ error: 'Unsupported fraud detector type.' }, { status: 400 });
+      const configResult = configForType(type, body.config);
+      if (!configResult.success) return NextResponse.json({ error: configResult.error.issues[0]?.message ?? 'Invalid fraud rule configuration.' }, { status: 400 });
+    }
 
     const { data, error } = await admin
       .from('fraud_rules')

@@ -20,6 +20,7 @@ import { randomBytes } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { getClientIp } from '@/lib/api/client-ip';
+import { DEFAULT_PAYPAL_POLICY, loadPayPalPolicy, type PayPalPolicy } from '@/lib/paypal-policy';
 import {
   SETUP_WEBHOOK_PROBE_HEADER,
   buildSetupWebhookProbeEcho,
@@ -51,7 +52,6 @@ import {
 
 // ── Main handler ────────────────────────────────────
 
-const WEBHOOK_PROCESSING_STALE_MS = 5 * 60 * 1000;
 const DURABLE_PROVIDER_EVENT_TYPES = new Set([
   'CHECKOUT.ORDER.APPROVED',
   'PAYMENT.CAPTURE.COMPLETED',
@@ -328,12 +328,30 @@ export async function POST(req: NextRequest) {
 
   const rawBody = await req.text();
   const supabase = createAdminSupabase();
+  // The signed payload is still treated as untrusted at this point. We use a
+  // best-effort tenant hint only to select that tenant's bounded verification
+  // retry budget; the payload is parsed and authenticated again below.
+  let paypalPolicy: PayPalPolicy = DEFAULT_PAYPAL_POLICY;
+  try {
+    const hint = JSON.parse(rawBody) as PayPalWebhookEvent;
+    if (hint && typeof hint === 'object' && typeof hint.event_type === 'string'
+      && hint.resource && typeof hint.resource === 'object') {
+      const hintedGuildId = await resolveWebhookGuildId(supabase, hint);
+      paypalPolicy = await loadPayPalPolicy(supabase, hintedGuildId);
+    }
+  } catch {
+    // Signature verification remains the source of truth; malformed hints
+    // simply use the safe default retry budget.
+  }
 
   // V47-C3: accept internal replay POSTs that carry a valid X-Replay-Secret
   const replay = isInternalReplay(req);
 
   if (!replay) {
-    const verification = await verifyWebhookSignature(req, rawBody);
+    const verification = await verifyWebhookSignature(req, rawBody, {
+      maxAttempts: paypalPolicy.webhookVerifyAttempts,
+      environment: paypalPolicy.environment,
+    });
 
     if (verification.outcome === 'unavailable') {
       // W2: verification INFRASTRUCTURE failed (token fetch / verify API
@@ -417,6 +435,9 @@ export async function POST(req: NextRequest) {
     if (claimCheckError || claimIsCurrent !== true) {
       return NextResponse.json({ error: 'Replay claim is no longer current' }, { status: 409 });
     }
+    paypalPolicy = await loadPayPalPolicy(supabase, parsedReplayGuildId.success
+      ? parsedReplayGuildId.data
+      : null);
   }
   const shouldRecordEventResult = Boolean(eventId) || !replay;
   let retryingFailedEvent = replay && req.headers.get('x-webhook-retrying-failed-event') === '1';
@@ -424,6 +445,7 @@ export async function POST(req: NextRequest) {
   if (!replay) {
     try {
       webhookGuildId = await resolveWebhookGuildId(supabase, event);
+      paypalPolicy = await loadPayPalPolicy(supabase, webhookGuildId);
     } catch (err) {
       console.error('[Webhook] Failed to resolve webhook guild:', err);
       return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
@@ -497,13 +519,13 @@ export async function POST(req: NextRequest) {
         }
         const processedAt = Date.parse(String(existing?.processed_at ?? ''));
         const isStale = Number.isFinite(processedAt) &&
-          Date.now() - processedAt >= WEBHOOK_PROCESSING_STALE_MS;
+          Date.now() - processedAt >= paypalPolicy.webhookStaleProcessingMs;
 
         if (!isStale) {
           return NextResponse.json({ status: 'processing' }, { status: 409 });
         }
 
-        const staleBefore = new Date(Date.now() - WEBHOOK_PROCESSING_STALE_MS).toISOString();
+        const staleBefore = new Date(Date.now() - paypalPolicy.webhookStaleProcessingMs).toISOString();
         if (!RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type)) {
           const { error: markError } = await supabase
             .from('webhook_events')
@@ -620,12 +642,14 @@ export async function POST(req: NextRequest) {
       case 'PAYMENT.CAPTURE.REVERSED':
         await handleCaptureRefunded(supabase, event.resource, event.event_type, {
           retryingFailedEvent,
+          legacyUsdSaleTolerance: paypalPolicy.legacyUsdSaleTolerance,
         });
         break;
       case 'PAYMENT.SALE.REFUNDED':
       case 'PAYMENT.SALE.REVERSED':
         await handleSaleRefunded(supabase, event.resource, event.event_type, {
           retryingFailedEvent,
+          legacyUsdSaleTolerance: paypalPolicy.legacyUsdSaleTolerance,
         });
         break;
       // Finding 9: these used to fall to `default:`, log "Unhandled event",

@@ -255,6 +255,11 @@ export interface DbGuildConfig {
   music_auto_destroy_minutes: number;
   store_enabled: boolean;
   grace_period_days: number;
+  paypal_legacy_usd_sale_tolerance: boolean;
+  paypal_environment: 'sandbox' | 'live';
+  paypal_refund_strategy: 'provider-first' | 'local-first';
+  paypal_webhook_stale_processing_ms: number;
+  paypal_webhook_verify_attempts: number;
   stats_enabled: boolean;
   stats_update_interval_minutes: number;
   temp_channels_enabled: boolean;
@@ -1253,6 +1258,8 @@ export interface DbProductLicenseConfig {
   updated_at: string;
   // V19 Audit: added missing schema fields
   device_policy: string | null;
+  rotation_policy: 'rotate-and-invalidate' | 'disabled';
+  self_service_device_removal: boolean;
 }
 
 export interface DbLicenseSession {

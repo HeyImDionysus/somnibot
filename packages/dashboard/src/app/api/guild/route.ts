@@ -111,7 +111,15 @@ const guildConfigPatchSchema = z.object({
   ticket_transcript_enabled: z.boolean().optional(),
   ticket_dm_transcript: z.boolean().optional(),
   // V28: Commerce grace period (was in schema + bot but never exposed in dashboard)
-  grace_period_days: z.number().int().min(0).max(90).optional(),
+  grace_period_days: z.number().int().min(1).max(30).optional(),
+  // Commerce core PayPal policy. Environment is intentionally explicit and
+  // defaults to sandbox in the database; selecting live never supplies
+  // credentials or performs a live-money call by itself.
+  paypal_legacy_usd_sale_tolerance: z.boolean().optional(),
+  paypal_environment: z.enum(['sandbox', 'live']).optional(),
+  paypal_refund_strategy: z.enum(['provider-first', 'local-first']).optional(),
+  paypal_webhook_stale_processing_ms: z.number().int().min(60000).max(86400000).optional(),
+  paypal_webhook_verify_attempts: z.number().int().min(1).max(10).optional(),
   // V31: Economy Core
   economy_enabled: z.boolean().optional(),
   currency_name: z.string().min(1).max(32).optional(),

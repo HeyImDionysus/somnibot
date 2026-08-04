@@ -3003,6 +3003,7 @@ export async function handleSubscriptionPayment(
 
 export interface RefundHandlerOptions {
   retryingFailedEvent?: boolean;
+  legacyUsdSaleTolerance?: boolean;
 }
 
 export async function handleCaptureRefunded(
@@ -3292,7 +3293,8 @@ async function handleExternalPaymentRefunded(
   // stating an amount without the confirming cumulative total stays
   // fail-closed — the payload then lacks its own proof of the sale's real
   // currency.
-  const legacyUsdMislabelTolerated = resourceType === 'sale'
+  const legacyUsdMislabelTolerated = options.legacyUsdSaleTolerance !== false
+    && resourceType === 'sale'
     && paymentCurrency === 'USD'
     && resolvedAmounts.refundAmountCents != null
     && resolvedAmounts.refundAmountCents > 0

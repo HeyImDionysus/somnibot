@@ -2,12 +2,10 @@
 
 import { useMemo, useState } from 'react';
 import { invalidateFraudCache } from '@/lib/fraud-data-cache';
-import { velocityRuleConfigError } from '@/lib/fraud-rule-config';
+import { FRAUD_RULE_TYPES, fraudRuleConfigError, type FraudRuleType } from '@/lib/fraud-rule-config';
 
-export const FRAUD_RULE_TYPES = ['velocity_limit'] as const;
-
-export function isSupportedFraudRuleType(value: string): value is 'velocity_limit' {
-  return value === 'velocity_limit';
+export function isSupportedFraudRuleType(value: string): value is FraudRuleType {
+  return (FRAUD_RULE_TYPES as readonly string[]).includes(value);
 }
 
 export interface EditableFraudRule {
@@ -26,15 +24,21 @@ interface Props {
   onSaved(): void | Promise<void>;
 }
 
-const DEFAULT_CONFIG: Record<(typeof FRAUD_RULE_TYPES)[number], Record<string, unknown>> = {
+const DEFAULT_CONFIG: Record<FraudRuleType, Record<string, unknown>> = {
   velocity_limit: { threshold: 5, window_minutes: 60 },
+  device_limit: { threshold: 3 },
+  failed_payment: { threshold: 3 },
+  ip_mismatch: { threshold: 5 },
+  critical_incident: { threshold: 3 },
 };
 
 export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
   const editing = Boolean(rule);
   const [name, setName] = useState(rule?.name ?? '');
   const [description, setDescription] = useState(rule?.description ?? '');
-  const [ruleType, setRuleType] = useState<'velocity_limit'>('velocity_limit');
+  const [ruleType, setRuleType] = useState<FraudRuleType>(
+    isSupportedFraudRuleType(rule?.rule_type ?? '') ? rule!.rule_type as FraudRuleType : 'velocity_limit',
+  );
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
   const [configText, setConfigText] = useState(
     JSON.stringify(rule?.config ?? DEFAULT_CONFIG.velocity_limit, null, 2),
@@ -45,11 +49,11 @@ export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
   const configError = useMemo(() => {
     try {
       const parsed = JSON.parse(configText) as unknown;
-      return velocityRuleConfigError(parsed);
+      return fraudRuleConfigError(ruleType, parsed);
     } catch {
       return 'Configuration must be valid JSON.';
     }
-  }, [configText]);
+  }, [configText, ruleType]);
 
   const submit = async () => {
     if (!name.trim()) {
@@ -100,8 +104,7 @@ export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
             {editing ? 'Edit detection rule' : 'Create detection rule'}
           </h3>
           <p className="mt-1 text-xs text-discord-text-muted">
-            Purchase velocity is the detector currently evaluated at runtime.
-            Matching signals are flagged for operator review.
+            Tune the detector threshold used by the live runtime. Matching signals are flagged for operator review.
           </p>
         </div>
         <button type="button" onClick={onCancel} className="text-sm text-discord-text-muted hover:text-white">
@@ -124,7 +127,7 @@ export function FraudRuleForm({ rule, onCancel, onSaved }: Props) {
           <select
             value={ruleType}
             onChange={(event) => {
-              const next = event.target.value as (typeof FRAUD_RULE_TYPES)[number];
+              const next = event.target.value as FraudRuleType;
               setRuleType(next);
               if (!editing) setConfigText(JSON.stringify(DEFAULT_CONFIG[next], null, 2));
             }}

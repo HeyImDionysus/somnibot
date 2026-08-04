@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 250 migration files in packages/supabase/migrations/
+ * Source: 251 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -440,6 +440,11 @@ export interface DbGuildConfig {
   max_queue_length: number;
   allow_duplicates: boolean;
   per_user_queue_cap: number;
+  paypal_legacy_usd_sale_tolerance: boolean;
+  paypal_environment: string;
+  paypal_refund_strategy: string;
+  paypal_webhook_stale_processing_ms: number;
+  paypal_webhook_verify_attempts: number;
   audit_export_row_limit: number;
   audit_flush_interval_ms: number;
   automation_dm_cooldown_seconds: number;
@@ -1082,6 +1087,8 @@ export interface DbProductLicenseConfig {
   created_at: string;
   updated_at: string;
   device_policy: 'evict_oldest' | 'reject';
+  rotation_policy: string;
+  self_service_device_removal: boolean;
   sdk_cache_ttl_ms: number;
 }
 

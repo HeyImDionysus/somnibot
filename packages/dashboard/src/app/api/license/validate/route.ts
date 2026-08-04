@@ -446,6 +446,37 @@ interface FraudCheckFailure {
   error: string;
 }
 
+const LICENSE_FRAUD_DEFAULTS = {
+  deviceAbuseMultiplier: 3,
+  ipMismatchThreshold: 5,
+  criticalIncidentThreshold: 3,
+};
+
+async function loadLicenseFraudThresholds(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+): Promise<typeof LICENSE_FRAUD_DEFAULTS> {
+  const result = { ...LICENSE_FRAUD_DEFAULTS };
+  try {
+    const { data } = await supabase
+      .from('fraud_rules')
+      .select('rule_type, config, enabled')
+      .eq('guild_id', guildId)
+      .eq('enabled', true)
+      .limit(100);
+    for (const rule of data ?? []) {
+      const value = Number((rule.config as Record<string, unknown> | null)?.threshold);
+      if (!Number.isInteger(value) || value <= 0) continue;
+      if (rule.rule_type === 'device_limit' && value >= 2 && value <= 10) result.deviceAbuseMultiplier = value;
+      if (rule.rule_type === 'ip_mismatch' && value >= 2 && value <= 100) result.ipMismatchThreshold = value;
+      if (rule.rule_type === 'critical_incident' && value >= 1 && value <= 50) result.criticalIncidentThreshold = value;
+    }
+  } catch {
+    // Fraud checks are advisory and never block license validation.
+  }
+  return result;
+}
+
 /**
  * Run all fraud checks and surface any failures.
  *
@@ -461,9 +492,10 @@ async function runFraudChecks(
   maxDevices: number,
   discordId: string | null,
 ): Promise<void> {
+  const thresholds = await loadLicenseFraudThresholds(supabase, guildId);
   const checks = [
-    { name: 'device_abuse', run: () => checkDeviceAbuse(supabase, guildId, licenseKeyId, maxDevices, discordId) },
-    { name: 'ip_mismatch', run: () => checkIPMismatch(supabase, guildId, licenseKeyId, discordId) },
+    { name: 'device_abuse', run: () => checkDeviceAbuse(supabase, guildId, licenseKeyId, maxDevices, discordId, thresholds.deviceAbuseMultiplier) },
+    { name: 'ip_mismatch', run: () => checkIPMismatch(supabase, guildId, licenseKeyId, discordId, thresholds.ipMismatchThreshold) },
   ];
 
   const settled = await Promise.allSettled(checks.map((c) => c.run()));
@@ -479,7 +511,7 @@ async function runFraudChecks(
   });
 
   try {
-    await checkCriticalFraudThreshold(supabase, guildId);
+    await checkCriticalFraudThreshold(supabase, guildId, thresholds.criticalIncidentThreshold);
   } catch (err) {
     failures.push({
       check: 'critical_fraud_threshold',
@@ -672,6 +704,7 @@ async function checkDeviceAbuse(
   licenseKeyId: string,
   maxDevices: number,
   discordId: string | null,
+  multiplier = DEVICE_ABUSE_HIGH_RATIO,
 ): Promise<void> {
   const since = new Date(Date.now() - DEVICE_ABUSE_WINDOW_MS).toISOString();
 
@@ -693,13 +726,13 @@ async function checkDeviceAbuse(
   const activeDevices = rows.filter((s) => s.active).length;
   const evictedInWindow = rows.filter((s) => s.deactivation_reason === 'device_limit').length;
 
-  if (devicesInWindow <= maxDevices * DEVICE_ABUSE_HIGH_RATIO) return;
+  if (devicesInWindow <= maxDevices * multiplier) return;
 
   const windowDays = Math.round(DEVICE_ABUSE_WINDOW_MS / (24 * 60 * 60 * 1000));
   await upsertOpenFraudSignal(supabase, {
     guildId,
     signalType: 'device_abuse',
-    severity: devicesInWindow > maxDevices * DEVICE_ABUSE_CRITICAL_RATIO ? 'critical' : 'high',
+    severity: devicesInWindow > maxDevices * (multiplier + 2) ? 'critical' : 'high',
     entityType: 'license_key',
     entityId: licenseKeyId,
     discordId,
@@ -709,6 +742,7 @@ async function checkDeviceAbuse(
       devices_in_window: devicesInWindow,
       window_days: windowDays,
       max_devices: maxDevices,
+      multiplier,
       ratio: devicesInWindow / maxDevices,
       // Context for the operator: under evict_oldest `active_sessions` is
       // pinned at max_devices, so a high device count with a pinned seat count
@@ -725,6 +759,7 @@ async function checkIPMismatch(
   guildId: string,
   licenseKeyId: string,
   discordId: string | null,
+  threshold = 5,
 ): Promise<void> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
@@ -741,16 +776,16 @@ async function checkIPMismatch(
 
   const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
 
-  if (uniqueIPs.size >= 5) {
+  if (uniqueIPs.size >= threshold) {
     await upsertOpenFraudSignal(supabase, {
       guildId,
       signalType: 'ip_mismatch',
-      severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
+      severity: uniqueIPs.size >= threshold * 2 ? 'critical' : 'medium',
       entityType: 'license_key',
       entityId: licenseKeyId,
       discordId,
       description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
-      evidence: { unique_ips: uniqueIPs.size, window_hours: 24 },
+      evidence: { unique_ips: uniqueIPs.size, threshold, window_hours: 24 },
     });
   }
 }
@@ -765,6 +800,7 @@ async function checkIPMismatch(
 async function checkCriticalFraudThreshold(
   supabase: ReturnType<typeof createAdminSupabase>,
   guildId: string,
+  threshold = 3,
 ): Promise<void> {
   // Errors are thrown to the caller (runFraudChecks), which logs and alerts —
   // still fire-and-forget, so incident creation cannot break license validation.
@@ -782,7 +818,7 @@ async function checkCriticalFraudThreshold(
     throw new Error(`fraud signal count query failed: ${countError.message}`);
   }
 
-  if (!count || count < 3) return;
+  if (!count || count < threshold) return;
 
   // Check if we already created an incident for this burst
   const { data: existing, error: existingError } = await supabase

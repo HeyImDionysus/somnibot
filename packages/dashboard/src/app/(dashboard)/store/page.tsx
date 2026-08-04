@@ -58,6 +58,8 @@ interface LicenseConfig {
   offline_grace_period_seconds: number;
   feature_flags: string[];
   require_discord_guild_membership: boolean;
+  rotation_policy: 'rotate-and-invalidate' | 'disabled';
+  self_service_device_removal: boolean;
 }
 
 const emptyForm: {
@@ -132,6 +134,14 @@ export default function StorePage() {
   const [togglingPaypal, setTogglingPaypal] = useState(false);
   const [gracePeriodDays, setGracePeriodDays] = useState(3);
   const [savingGrace, setSavingGrace] = useState(false);
+  const [rotationPolicy, setRotationPolicy] = useState<'rotate-and-invalidate' | 'disabled'>('rotate-and-invalidate');
+  const [selfServiceDeviceRemoval, setSelfServiceDeviceRemoval] = useState(true);
+  const [paypalLegacyTolerance, setPaypalLegacyTolerance] = useState(true);
+  const [paypalEnvironment, setPaypalEnvironment] = useState<'sandbox' | 'live'>('sandbox');
+  const [paypalRefundStrategy, setPaypalRefundStrategy] = useState<'provider-first' | 'local-first'>('provider-first');
+  const [paypalStaleMs, setPaypalStaleMs] = useState(300000);
+  const [paypalVerifyAttempts, setPaypalVerifyAttempts] = useState(3);
+  const [savingPaypalPolicy, setSavingPaypalPolicy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -147,6 +157,11 @@ export default function StorePage() {
         setStoreEnabled(guildJson.config.store_enabled ?? false);
         setPaypalEnabled(guildJson.config.paypal_enabled ?? false);
         setGracePeriodDays(guildJson.config.grace_period_days ?? 3);
+        setPaypalLegacyTolerance(guildJson.config.paypal_legacy_usd_sale_tolerance ?? true);
+        setPaypalEnvironment(guildJson.config.paypal_environment ?? 'sandbox');
+        setPaypalRefundStrategy(guildJson.config.paypal_refund_strategy ?? 'provider-first');
+        setPaypalStaleMs(guildJson.config.paypal_webhook_stale_processing_ms ?? 300000);
+        setPaypalVerifyAttempts(guildJson.config.paypal_webhook_verify_attempts ?? 3);
       }
     } finally {
       setLoading(false);
@@ -175,6 +190,30 @@ export default function StorePage() {
     }
   };
 
+  const savePaypalPolicy = async () => {
+    setSavingPaypalPolicy(true);
+    try {
+      const response = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paypal_legacy_usd_sale_tolerance: paypalLegacyTolerance,
+          paypal_environment: paypalEnvironment,
+          paypal_refund_strategy: paypalRefundStrategy,
+          paypal_webhook_stale_processing_ms: Math.max(60000, Math.min(86400000, paypalStaleMs)),
+          paypal_webhook_verify_attempts: Math.max(1, Math.min(10, paypalVerifyAttempts)),
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok || body.error) throw new Error(body.error ?? 'save failed');
+      toast({ title: 'PayPal policy saved', variant: 'success' });
+    } catch {
+      toast({ title: 'Failed to save PayPal policy', variant: 'error' });
+    } finally {
+      setSavingPaypalPolicy(false);
+    }
+  };
+
   const togglePaypalEnabled = async (value: boolean) => {
     setTogglingPaypal(true);
     try {
@@ -200,7 +239,7 @@ export default function StorePage() {
   const saveGracePeriod = async (value: number) => {
     setSavingGrace(true);
     try {
-      const clamped = Math.max(0, Math.min(30, value));
+      const clamped = Math.max(1, Math.min(30, value));
       const res = await fetch('/api/guild', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -224,6 +263,8 @@ export default function StorePage() {
 
   const openCreate = () => {
     setForm(emptyForm);
+    setRotationPolicy('rotate-and-invalidate');
+    setSelfServiceDeviceRemoval(true);
     setEditingId(null);
     setShowForm(true);
   };
@@ -239,6 +280,9 @@ export default function StorePage() {
       granted_role_ids: p.granted_role_ids,
       active: p.active,
     });
+    const licenseConfig = p.product_license_config?.[0];
+    setRotationPolicy(licenseConfig?.rotation_policy ?? 'rotate-and-invalidate');
+    setSelfServiceDeviceRemoval(licenseConfig?.self_service_device_removal ?? true);
     setEditingId(p.id);
     setShowForm(true);
   };
@@ -281,6 +325,18 @@ export default function StorePage() {
         return;
       }
 
+      const productId = json.data?.id ?? editingId;
+      if (productId && (form.delivery_type === 'license_key' || form.delivery_type === 'mixed')) {
+        const configRes = await fetch(`/api/license/config/${productId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rotation_policy: rotationPolicy, self_service_device_removal: selfServiceDeviceRemoval }),
+        });
+        if (!configRes.ok) {
+          toast({ title: 'Product saved, but license policy was not saved', variant: 'error' });
+          return;
+        }
+      }
       setShowForm(false);
       toast({ title: editingId ? 'Product updated' : 'Product created', variant: 'success' });
       load();
@@ -432,7 +488,7 @@ export default function StorePage() {
           <div className="flex items-center gap-2">
             <input
               type="number"
-              min={0}
+              min={1}
               max={30}
               value={gracePeriodDays}
               onChange={(e) => setGracePeriodDays(parseInt(e.target.value) || 0)}
@@ -447,6 +503,20 @@ export default function StorePage() {
               {savingGrace ? '…' : 'Save'}
             </button>
           </div>
+        </div>
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4 space-y-3">
+          <div>
+            <span className="text-sm font-medium text-discord-text-primary">PayPal processing policy</span>
+            <p className="text-xs text-discord-text-muted">Sandbox is the default. These controls never expose credentials or initiate a live payment.</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="text-xs text-discord-text-muted">Environment<select value={paypalEnvironment} onChange={(e) => setPaypalEnvironment(e.target.value as 'sandbox' | 'live')} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"><option value="sandbox">Sandbox</option><option value="live">Live (credentials required)</option></select></label>
+            <label className="text-xs text-discord-text-muted">Refund strategy<select value={paypalRefundStrategy} onChange={(e) => setPaypalRefundStrategy(e.target.value as 'provider-first' | 'local-first')} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"><option value="provider-first">Provider first</option><option value="local-first">Local first (manual review)</option></select></label>
+            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={paypalLegacyTolerance} onChange={(e) => setPaypalLegacyTolerance(e.target.checked)} /> Allow legacy USD sale tolerance</label>
+            <label className="text-xs text-discord-text-muted">Stale processing window (ms)<input type="number" min={60000} max={86400000} value={paypalStaleMs} onChange={(e) => setPaypalStaleMs(Number(e.target.value) || 60000)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
+            <label className="text-xs text-discord-text-muted">Webhook verify attempts<input type="number" min={1} max={10} value={paypalVerifyAttempts} onChange={(e) => setPaypalVerifyAttempts(Number(e.target.value) || 1)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
+          </div>
+          <button onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy} className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</button>
         </div>
       </div>
 
@@ -552,6 +622,28 @@ export default function StorePage() {
                 placeholder="Product description"
               />
             </div>
+            {(form.delivery_type === 'license_key' || form.delivery_type === 'mixed') && (
+              <div className="sm:col-span-2 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4">
+                <h3 className="text-sm font-semibold text-discord-text-primary">License recovery controls</h3>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="text-xs text-discord-text-muted">
+                    Rotation policy
+                    <select
+                      value={rotationPolicy}
+                      onChange={(e) => setRotationPolicy(e.target.value as 'rotate-and-invalidate' | 'disabled')}
+                      className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"
+                    >
+                      <option value="rotate-and-invalidate">Rotate and invalidate old key</option>
+                      <option value="disabled">Disable self-service rotation</option>
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-2 pt-5 text-sm text-discord-text-secondary">
+                    <input type="checkbox" checked={selfServiceDeviceRemoval} onChange={(e) => setSelfServiceDeviceRemoval(e.target.checked)} />
+                    Allow buyers to remove their own devices
+                  </label>
+                </div>
+              </div>
+            )}
             <div>
               <RolePicker
                 label="Granted Roles"

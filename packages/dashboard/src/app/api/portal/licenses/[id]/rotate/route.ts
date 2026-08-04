@@ -119,7 +119,7 @@ export async function POST(
   // anything else, so a customer cannot probe for other customers' key ids.
   const { data: key, error: lookupError } = await admin
     .from('license_keys')
-    .select('id, status, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency), products(name)')
+    .select('id, status, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency), products(name, product_license_config(rotation_policy))')
     .eq('id', licenseKeyId)
     .eq('customer_id', portalSession.customer_id)
     .eq('guild_id', portalSession.guild_id)
@@ -128,6 +128,11 @@ export async function POST(
   if (lookupError) return dbError(lookupError, 'portal/licenses/rotate');
   if (!key) {
     return NextResponse.json({ error: 'Licence not found' }, { status: 404 });
+  }
+
+  const productConfig = (key.products as { product_license_config?: Array<{ rotation_policy?: string }> } | null)?.product_license_config?.[0];
+  if (productConfig?.rotation_policy === 'disabled') {
+    return NextResponse.json({ error: 'Key rotation is disabled for this product.' }, { status: 403 });
   }
 
   // Do not short-circuit revoked rows here. A committed rotation revokes its
