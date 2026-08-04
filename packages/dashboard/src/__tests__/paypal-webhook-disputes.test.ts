@@ -244,6 +244,10 @@ function withDeniedOrder(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `clearAllMocks` preserves implementations and queued `mock*Once` values.
+  // Re-arm the policy mock per test so a recovery environment cannot leak into
+  // the next case when this suite is run in a shared Vitest worker.
+  vi.mocked(loadPayPalPolicy).mockReset().mockResolvedValue({ environment: 'sandbox' } as never);
   ops = [];
   rpcResolvers = {};
   resolvers = {
