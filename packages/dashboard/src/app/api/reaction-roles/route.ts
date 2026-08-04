@@ -18,6 +18,27 @@ import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
+const reactionRoleStyles = ['reaction', 'buttons', 'select-menu'] as const;
+type ReactionRoleStyle = typeof reactionRoleStyles[number];
+
+async function readDefaultStyle(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+): Promise<ReactionRoleStyle> {
+  try {
+    const { data } = await supabase
+      .from('guild_config')
+      .select('default_style')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    return reactionRoleStyles.includes(data?.default_style as ReactionRoleStyle)
+      ? data.default_style as ReactionRoleStyle
+      : 'buttons';
+  } catch {
+    return 'buttons';
+  }
+}
+
 const reactionRoleUpdate = z.object({
   id: z.string().uuid(),
   channel_id: snowflake.optional(),
@@ -50,7 +71,11 @@ export async function GET() {
     return dbError(error, 'reaction-roles');
   }
 
-  return NextResponse.json({ success: true, data: data ?? [] });
+  // Return the resolved guild surface alongside legacy rows. The table keeps
+  // explicit reaction mappings, while clients can route newly-created panels
+  // through the configured reaction/button/select-menu surface.
+  const default_style = await readDefaultStyle(supabase, guildId);
+  return NextResponse.json({ success: true, data: data ?? [], default_style });
 }
 
 export async function POST(req: NextRequest) {
@@ -62,6 +87,7 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
+  const default_style = await readDefaultStyle(supabase, guildId);
   const parsed = await parseBody(req, schemas.reactionRole.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
@@ -136,7 +162,7 @@ export async function POST(req: NextRequest) {
     after: data as Record<string, unknown> | null,
   }, supabase);
 
-  return NextResponse.json({ success: true, data });
+  return NextResponse.json({ success: true, data, default_style });
 }
 
 export async function PUT(req: NextRequest) {
@@ -184,7 +210,8 @@ export async function PUT(req: NextRequest) {
     match: { id: body.id, guild_id: guildId },
   }, supabase);
 
-  return NextResponse.json({ success: true, data });
+  const default_style = await readDefaultStyle(supabase, guildId);
+  return NextResponse.json({ success: true, data, default_style });
 }
 
 export async function DELETE(req: NextRequest) {
