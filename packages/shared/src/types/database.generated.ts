@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 256 migration files in packages/supabase/migrations/
+ * Source: 257 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1640,6 +1640,21 @@ export interface DbCommerceCheckoutDeactivationProofs {
   proved_at: string;
 }
 
+export interface DbCommerceCheckoutIntents {
+  token: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string | null;
+  gift_checkout_token: string | null;
+  provider_id: string | null;
+  order_id: string | null;
+  status: 'pending' | 'bound' | 'captured' | 'cancelled';
+  created_at: string;
+  expires_at: string;
+  cancel_reason: string | null;
+}
+
 export interface DbCommerceDownloadDeliveries {
   id: string;
   guild_id: string;
@@ -1709,6 +1724,7 @@ export interface DbCommerceGiftIntents {
   created_at: string;
   fulfilled_at: string | null;
   expires_at: string;
+  checkout_token: string;
 }
 
 export interface DbCommerceLegacySubscriptionGrantContracts {
@@ -1792,6 +1808,22 @@ export interface DbCommerceProviderIncidents {
   evidence: Json;
   alert_id: string | null;
   created_at: string;
+}
+
+export interface DbCommerceProviderMoneyRecovery {
+  webhook_event_id: string;
+  provider_resource_id: string | null;
+  provider_parent_id: string | null;
+  guild_id: string | null;
+  reason: string;
+  status: 'pending' | 'refunded' | 'resolved';
+  attempts: number;
+  next_retry_at: string | null;
+  created_at: string;
+  resolved_at: string | null;
+  max_attempts: number;
+  lease_token: string | null;
+  leased_until: string | null;
 }
 
 export interface DbCommercePurchaseCelebrations {
