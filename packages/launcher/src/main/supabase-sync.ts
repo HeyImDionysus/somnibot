@@ -198,6 +198,9 @@ const RESTORE_SETTING_KEYS = [
   ...new Set([
     ...Object.values(RESTORE_SETTINGS_MAP),
     ...Object.keys(RESTORE_ALIASES),
+    // Dashboard/Discord setup stores the complete connection URL encrypted;
+    // launcher state separates its password from the reusable template.
+    'supabase_db_url_encrypted',
     // Older setup flows stored the derived callback but not the launcher's
     // local public base. Recover the base from this exact endpoint contract.
     'paypal_webhook_url',
@@ -258,6 +261,25 @@ export function parseSyncRows(
         }
       } catch {
         // Ignore malformed legacy callback rows instead of replacing local state.
+      }
+      continue;
+    }
+
+    if (row.key === 'supabase_db_url_encrypted' && row.value) {
+      const decrypted = decryptCloudSecret(row.value, row.key, cloudKey)
+        ?? decryptCloudSecret(row.value, 'supabase_db_url_template_encrypted', cloudKey);
+      if (decrypted) {
+        try {
+          const databaseUrl = new URL(decrypted);
+          if (databaseUrl.protocol === 'postgres:' || databaseUrl.protocol === 'postgresql:') {
+            const password = decodeURIComponent(databaseUrl.password);
+            if (password) credentials.supabaseDbPassword = password;
+            databaseUrl.password = '';
+            credentials.supabaseDbUrlTemplate = databaseUrl.toString();
+          }
+        } catch {
+          // Malformed encrypted connection values fail closed.
+        }
       }
       continue;
     }

@@ -171,6 +171,21 @@ describe('parseSyncRows', () => {
       { key: 'supabase_db_url', value: 'postgresql://postgres@db.example.test:5432/postgres' },
     ], SYNC_SECRET, PROJECT_ORIGIN)).toEqual({});
   });
+
+  it('restores the encrypted setup database URL into a password and password-free template', () => {
+    const source = pushCredentials({
+      supabaseDbUrlTemplate: 'postgresql://postgres:encoded%20password@db.example.test:5432/postgres',
+    });
+    const row = buildSyncRows(source, SYNC_SECRET, PROJECT_ORIGIN)
+      .find((candidate) => candidate.key === 'supabase_db_url_template_encrypted')!;
+    const restored = parseSyncRows([
+      { key: 'supabase_db_url_encrypted', value: row.value },
+    ], SYNC_SECRET, PROJECT_ORIGIN);
+
+    expect(restored.supabaseDbPassword).toBe('encoded password');
+    expect(restored.supabaseDbUrlTemplate).not.toContain('encoded%20password');
+    expect(restored.supabaseDbUrlTemplate).toContain('db.example.test:5432/postgres');
+  });
 });
 
 describe('maskRestoredCredentials', () => {

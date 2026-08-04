@@ -41,6 +41,14 @@ const SECRET_FIELDS = new Set([
   'valkey_url',
   'supabase_access_token',
   'supabase_db_url',
+  'supabase_db_password',
+  'paypal_webhook_proof_key',
+  'tailscale_auth_key',
+  'vps_csrf_secret',
+  'vps_nextauth_secret',
+  'vps_webhook_replay_secret',
+  'vps_valkey_password',
+  'vps_lavalink_password',
 ]);
 
 const ENCRYPTED_SECRET_FIELDS = new Set([
