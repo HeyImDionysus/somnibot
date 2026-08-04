@@ -223,6 +223,7 @@ export async function PUT(req: NextRequest) {
 
   if (before?.message_id && before?.role_id) {
     await supabase.from('button_roles').update({
+      panel_id: updates.message_id ?? before.message_id,
       channel_id: updates.channel_id ?? before.channel_id,
       label: updates.emoji ?? before.emoji,
       emoji: updates.emoji ?? before.emoji,
