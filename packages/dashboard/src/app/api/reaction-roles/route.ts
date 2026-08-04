@@ -31,8 +31,9 @@ async function readDefaultStyle(
       .select('default_style')
       .eq('guild_id', guildId)
       .maybeSingle();
-    return reactionRoleStyles.includes(data?.default_style as ReactionRoleStyle)
-      ? data.default_style as ReactionRoleStyle
+    const configuredStyle = data?.default_style;
+    return reactionRoleStyles.includes(configuredStyle as ReactionRoleStyle)
+      ? configuredStyle as ReactionRoleStyle
       : 'buttons';
   } catch {
     return 'buttons';
