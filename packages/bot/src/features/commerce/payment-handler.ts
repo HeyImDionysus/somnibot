@@ -881,6 +881,7 @@ export async function handleBuyButton(
         ? product.currency.toUpperCase()
         : null;
     if (!productCurrency) {
+      await cancelCheckoutIntent('invalid product billing currency');
       await interaction.editReply({
         content: '❌ This product has an invalid billing currency and cannot be purchased.',
       });
@@ -1009,6 +1010,7 @@ export async function handleBuyButton(
             }),
           ],
         });
+        await cancelCheckoutIntent('concurrent checkout reservation blocked');
         return;
       }
       log.error('Failed to persist one-time checkout order:', pendingOrderError?.message ?? 'identity mismatch');
@@ -1067,6 +1069,7 @@ export async function handleBuyButton(
     );
     if (planError) {
       log.error('Subscription checkout plan selection failed:', planError.message);
+      await cancelCheckoutIntent('subscription plan selection failed');
       await interaction.editReply({
         content: '❌ Subscription plan verification failed. Please try again.',
       });
@@ -1082,6 +1085,7 @@ export async function handleBuyButton(
       || typeof plan.paypal_plan_id !== 'string'
       || plan.paypal_plan_id.trim().length === 0
     ) {
+      await cancelCheckoutIntent('active subscription plan missing');
       await interaction.editReply({ content: '❌ No active subscription plan found for this product.' });
       return;
     }
@@ -1090,6 +1094,7 @@ export async function handleBuyButton(
         ? plan.currency.toUpperCase()
         : null;
     if (!planCurrency) {
+      await cancelCheckoutIntent('invalid subscription billing currency');
       await interaction.editReply({
         content: '❌ This subscription has an invalid billing currency and cannot be purchased.',
       });
@@ -1209,6 +1214,7 @@ export async function handleBuyButton(
             }),
           ],
         });
+        await cancelCheckoutIntent('concurrent subscription reservation blocked');
         return;
       }
       log.error('Failed to persist subscription checkout order:', pendingOrderError?.message ?? 'identity mismatch');

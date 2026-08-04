@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 
 import { getPayPalRuntimeConfig, getPayPalToken, type PayPalRuntimeConfig } from '@/lib/paypal';
+import { applyPayPalPolicyEnvironment, loadPayPalPolicy } from '@/lib/paypal-policy';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError, apiServerError } from '@/lib/api/response';
@@ -131,8 +132,8 @@ async function createPayPalCatalogProduct(
   name: string,
   description: string | null,
   type: 'one_time' | 'subscription',
+  paypalConfig: PayPalRuntimeConfig,
 ): Promise<PayPalSyncResult> {
-  const paypalConfig = await getPayPalRuntimeConfig();
   const readinessError = paypalReadinessError(paypalConfig, 'paid products');
   if (readinessError) {
     return { ok: false, error: readinessError };
@@ -199,8 +200,8 @@ async function createPayPalBillingPlan(
   currency: string,
   intervalUnit: string,
   intervalCount: number,
+  paypalConfig: PayPalRuntimeConfig,
 ): Promise<PayPalSyncResult> {
-  const paypalConfig = await getPayPalRuntimeConfig();
   const readinessError = paypalReadinessError(paypalConfig, 'subscription plans');
   if (readinessError) {
     return { ok: false, error: readinessError };
@@ -414,11 +415,16 @@ export async function POST(req: NextRequest) {
   }
 
   let paypalProductId: string | null = null;
+  let tenantPayPalConfig: PayPalRuntimeConfig | null = null;
   if (requiresPayPal) {
+    const runtimeConfig = await getPayPalRuntimeConfig();
+    const paypalPolicy = await loadPayPalPolicy(supabase, guildId);
+    tenantPayPalConfig = applyPayPalPolicyEnvironment(runtimeConfig, paypalPolicy.environment);
     const paypalProduct = await createPayPalCatalogProduct(
       name,
       description ?? null,
       type === 'subscription' ? 'subscription' : 'one_time',
+      tenantPayPalConfig,
     );
     if (!paypalProduct.ok) {
       return paypalNotReadyResponse(paypalProduct.error);
@@ -426,7 +432,7 @@ export async function POST(req: NextRequest) {
     paypalProductId = paypalProduct.id;
   }
 
-  if (type === 'subscription' && requiresPayPal && paypalProductId) {
+  if (type === 'subscription' && requiresPayPal && paypalProductId && tenantPayPalConfig) {
     for (const plan of preparedPlans) {
       const paypalPlan = await createPayPalBillingPlan(
         paypalProductId,
@@ -435,6 +441,7 @@ export async function POST(req: NextRequest) {
         currency ?? 'USD',
         plan.intervalUnit,
         plan.intervalCount,
+        tenantPayPalConfig,
       );
       if (!paypalPlan.ok) {
         return paypalNotReadyResponse(paypalPlan.error);

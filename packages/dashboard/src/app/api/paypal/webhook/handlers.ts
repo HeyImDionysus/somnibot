@@ -375,7 +375,11 @@ export async function executeProviderMoneyRecovery(
   if (!token) throw new Error('PayPal recovery token unavailable');
   const response = await fetch(`${config.apiBase}/v2/payments/captures/${encodeURIComponent(row.provider_resource_id)}/refund`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': `recovery-${createHash('sha256').update(recoveryId).digest('hex')}`,
+    },
     body: JSON.stringify({}),
     signal: AbortSignal.timeout(10_000),
   });
