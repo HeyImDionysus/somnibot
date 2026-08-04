@@ -42,10 +42,14 @@ export function applyPayPalPolicyEnvironment<T extends { apiBase: string; sandbo
   environment: unknown,
 ): T {
   const resolved = resolvePayPalEnvironment(environment);
+  // A saved/env sandbox marker is evidence that the available credentials are
+  // sandbox credentials. Never point those credentials at live PayPal, even
+  // when a stale or conflicting policy row requests live mode.
+  const effective = resolved === 'live' && config.sandbox === true ? 'sandbox' : resolved;
   return {
     ...config,
-    apiBase: paypalApiBaseForEnvironment(resolved),
-    sandbox: resolved === 'sandbox',
+    apiBase: paypalApiBaseForEnvironment(effective),
+    sandbox: effective === 'sandbox',
   };
 }
 

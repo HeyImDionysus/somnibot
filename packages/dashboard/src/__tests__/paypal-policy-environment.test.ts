@@ -17,9 +17,16 @@ describe('applyPayPalPolicyEnvironment', () => {
   });
 
   it('uses live only when the guild policy explicitly selects live', () => {
-    expect(applyPayPalPolicyEnvironment(config, 'live')).toMatchObject({
+    expect(applyPayPalPolicyEnvironment({ ...config, sandbox: false }, 'live')).toMatchObject({
       apiBase: 'https://api-m.paypal.com',
       sandbox: false,
+    });
+  });
+
+  it('never sends sandbox-marked credentials to the live host', () => {
+    expect(applyPayPalPolicyEnvironment(config, 'live')).toMatchObject({
+      apiBase: 'https://api-m.sandbox.paypal.com',
+      sandbox: true,
     });
   });
 
