@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS public.commerce_checkout_intents (
   expires_at timestamptz NOT NULL DEFAULT (now() + interval '45 minutes')
 );
 ALTER TABLE public.commerce_checkout_intents ADD COLUMN IF NOT EXISTS plan_id uuid;
+ALTER TABLE public.commerce_checkout_intents ADD COLUMN IF NOT EXISTS cancel_reason text;
 ALTER TABLE public.commerce_checkout_intents ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.commerce_checkout_intents FROM PUBLIC, anon, authenticated;
 DROP POLICY IF EXISTS service_role_all ON public.commerce_checkout_intents;
@@ -78,10 +79,14 @@ CREATE TABLE IF NOT EXISTS public.commerce_provider_money_recovery (
   guild_id text,
   reason text NOT NULL,
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','refunded','resolved')),
+  attempts integer NOT NULL DEFAULT 0,
+  next_retry_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   resolved_at timestamptz
 );
 ALTER TABLE public.commerce_provider_money_recovery ALTER COLUMN provider_resource_id DROP NOT NULL;
+ALTER TABLE public.commerce_provider_money_recovery ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE public.commerce_provider_money_recovery ADD COLUMN IF NOT EXISTS next_retry_at timestamptz;
 ALTER TABLE public.commerce_provider_money_recovery ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.commerce_provider_money_recovery FROM PUBLIC, anon, authenticated;
 DROP POLICY IF EXISTS service_role_all ON public.commerce_provider_money_recovery;

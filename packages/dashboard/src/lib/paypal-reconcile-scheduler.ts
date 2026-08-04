@@ -27,6 +27,7 @@ import {
   recordScheduledReconciliationFailure,
   runPayPalReconciliation,
 } from '@/lib/paypal-reconciliation';
+import { sweepProviderMoneyRecovery } from '@/app/api/paypal/webhook/handlers';
 
 /** Matches the bot's reconciliation cadence. */
 const INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -49,6 +50,13 @@ export async function runScheduledPayPalReconciliationOnce(): Promise<
   running = true;
   try {
     const supabase = createAdminSupabase();
+    const recoveryResults = await sweepProviderMoneyRecovery(supabase, 20);
+    const recoveryFailures = recoveryResults.filter((entry) => entry.error);
+    if (recoveryFailures.length > 0) {
+      console.error(
+        `[PayPalReconcile] ${recoveryFailures.length} provider recovery task(s) remain retryable/manual`,
+      );
+    }
     const result = await runPayPalReconciliation(supabase, {
       leaseMs: DEFAULT_LEASE_MS,
       cooldownMs: DEFAULT_COOLDOWN_MS,

@@ -850,6 +850,14 @@ export async function handleBuyButton(
     await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
     return;
   }
+  const cancelCheckoutIntent = async (reason: string): Promise<void> => {
+    const { error } = await supabase
+      .from('commerce_checkout_intents')
+      .update({ status: 'cancelled', cancel_reason: reason })
+      .eq('token', checkoutToken)
+      .in('status', ['pending', 'bound']);
+    if (error) log.warn('Failed to cancel abandoned checkout intent', { reason, detail: error.message });
+  };
 
   const price = (product.price_cents / 100).toFixed(2);
   // Post-checkout destinations MUST be publicly reachable: the buyer is a
@@ -918,10 +926,21 @@ export async function handleBuyButton(
     }
 
     const orderData = await orderRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
-    await supabase.from('commerce_checkout_intents').update({ provider_id: orderData.id, status: 'bound' }).eq('token', checkoutToken);
+    const { error: providerBindError } = await supabase
+      .from('commerce_checkout_intents')
+      .update({ provider_id: orderData.id, status: 'bound' })
+      .eq('token', checkoutToken)
+      .eq('status', 'pending');
+    if (providerBindError) {
+      log.error('Failed to bind PayPal order to checkout ledger:', providerBindError.message);
+      await cancelCheckoutIntent('provider order binding failed');
+      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
+      return;
+    }
     const approvalLink = orderData.links?.find((l) => l.rel === 'approve');
 
     if (!isPayPalApprovalUrl(approvalLink?.href)) {
+      await cancelCheckoutIntent('provider approval link missing');
       await interaction.editReply({ content: '❌ Failed to get checkout URL.' });
       return;
     }
@@ -991,11 +1010,22 @@ export async function handleBuyButton(
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No payment link was opened; please try again.',
       });
+      await cancelCheckoutIntent('pending order persistence failed');
       return;
     }
 
     if (pendingOrder && typeof pendingOrder === 'object' && 'id' in pendingOrder && typeof (pendingOrder as { id?: unknown }).id === 'string') {
-      await supabase.from('commerce_checkout_intents').update({ order_id: (pendingOrder as { id: string }).id }).eq('token', checkoutToken);
+      const { error: orderBindError } = await supabase
+        .from('commerce_checkout_intents')
+        .update({ order_id: (pendingOrder as { id: string }).id })
+        .eq('token', checkoutToken)
+        .eq('status', 'bound');
+      if (orderBindError) {
+        log.error('Failed to bind pending order to checkout ledger:', orderBindError.message);
+        await cancelCheckoutIntent('pending order binding failed');
+        await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
+        return;
+      }
     }
 
     await interaction.editReply({
@@ -1092,10 +1122,21 @@ export async function handleBuyButton(
     }
 
     const subData = await subRes.json() as { id: string; links?: Array<{ rel: string; href: string }> };
-    await supabase.from('commerce_checkout_intents').update({ provider_id: subData.id, status: 'bound' }).eq('token', checkoutToken);
+    const { error: providerBindError } = await supabase
+      .from('commerce_checkout_intents')
+      .update({ provider_id: subData.id, status: 'bound' })
+      .eq('token', checkoutToken)
+      .eq('status', 'pending');
+    if (providerBindError) {
+      log.error('Failed to bind PayPal subscription to checkout ledger:', providerBindError.message);
+      await cancelCheckoutIntent('provider subscription binding failed');
+      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
+      return;
+    }
     const approvalLink = subData.links?.find((l) => l.rel === 'approve');
 
     if (!isPayPalApprovalUrl(approvalLink?.href)) {
+      await cancelCheckoutIntent('provider subscription approval link missing');
       await interaction.editReply({ content: '❌ Failed to get checkout URL.' });
       return;
     }
@@ -1163,11 +1204,22 @@ export async function handleBuyButton(
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No subscription link was opened; please try again.',
       });
+      await cancelCheckoutIntent('pending subscription order persistence failed');
       return;
     }
 
     if (pendingOrder && typeof pendingOrder === 'object' && 'id' in pendingOrder && typeof (pendingOrder as { id?: unknown }).id === 'string') {
-      await supabase.from('commerce_checkout_intents').update({ order_id: (pendingOrder as { id: string }).id }).eq('token', checkoutToken);
+      const { error: orderBindError } = await supabase
+        .from('commerce_checkout_intents')
+        .update({ order_id: (pendingOrder as { id: string }).id })
+        .eq('token', checkoutToken)
+        .eq('status', 'bound');
+      if (orderBindError) {
+        log.error('Failed to bind pending subscription order to checkout ledger:', orderBindError.message);
+        await cancelCheckoutIntent('pending subscription order binding failed');
+        await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
+        return;
+      }
     }
 
     await interaction.editReply({

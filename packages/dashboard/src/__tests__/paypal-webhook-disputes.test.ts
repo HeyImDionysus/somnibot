@@ -38,6 +38,18 @@ vi.mock('@/lib/paypal', () => ({
   isRetriablePayPalStatus: (s: number) => s >= 500 || s === 429 || s === 408,
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));
+vi.mock('@/lib/paypal-policy', () => ({
+  loadPayPalPolicy: vi.fn().mockResolvedValue({ environment: 'sandbox' }),
+  applyPayPalPolicyEnvironment: (config: Record<string, unknown>, environment: string) => ({
+    ...config,
+    apiBase: environment === 'live' && config.sandbox !== true
+      ? 'https://api-m.paypal.com'
+      : 'https://api-m.sandbox.paypal.com',
+    sandbox: environment !== 'live' || config.sandbox === true,
+  }),
+  paypalApiBaseForEnvironment: (environment: string) =>
+    environment === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com',
+}));
 vi.mock('@/lib/api/rate-limit', () => ({
   rateLimits: {
     paypalWebhook: vi.fn().mockResolvedValue({ limited: false, remaining: 1, retryAfterMs: 0 }),
@@ -51,8 +63,10 @@ import {
   resolveDisputeId,
   resolveDisputedTransactionIds,
   resolveStrictDisputedTransactionIds,
+  executeProviderMoneyRecovery,
 } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { loadPayPalPolicy } from '@/lib/paypal-policy';
 import {
   PAYPAL_HANDLED_WEBHOOK_EVENT_TYPES,
   PAYPAL_INTENTIONALLY_EXCLUDED_WEBHOOK_EVENTS,
@@ -719,5 +733,96 @@ describe('route dispatch', () => {
     );
     expect(opsFor('webhook_events', 'upsert')[0]!.payload)
       .not.toHaveProperty('guild_id');
+  });
+});
+
+describe('provider money recovery consumer', () => {
+  const recoveryRow = (overrides: Record<string, unknown> = {}) => ({
+    webhook_event_id: 'evt-recovery-1',
+    provider_resource_id: 'CAPTURE-1',
+    provider_parent_id: 'ORDER-1',
+    guild_id: GUILD_ID,
+    reason: 'provider_identity_malformed',
+    attempts: 1,
+    max_attempts: 5,
+    lease_token: '11111111-1111-4111-8111-111111111111',
+    ...overrides,
+  });
+
+  function configureClaim(row: Record<string, unknown> | null) {
+    rpcResolvers.commerce_claim_provider_money_recovery = () => ({
+      data: row ? [row] : [],
+      error: null,
+    });
+    resolvers['commerce_provider_money_recovery.update'] = () => ({
+      data: row ? [{ webhook_event_id: row.webhook_event_id }] : [],
+      error: null,
+    });
+  }
+
+  it('claims once and refunds against the guild sandbox host', async () => {
+    configureClaim(recoveryRow());
+    vi.mocked(loadPayPalPolicy).mockResolvedValueOnce({ environment: 'sandbox' } as never);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('refunded');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api-m.sandbox.paypal.com/v2/payments/captures/CAPTURE-1/refund',
+      expect.any(Object),
+    );
+  });
+
+  it('isolates a live guild recovery from sandbox defaults', async () => {
+    configureClaim(recoveryRow());
+    vi.mocked(loadPayPalPolicy).mockResolvedValueOnce({ environment: 'live' } as never);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('refunded');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api-m.paypal.com/v2/payments/captures/CAPTURE-1/refund',
+      expect.any(Object),
+    );
+  });
+
+  it('returns retry after a provider failure and escalates at max attempts', async () => {
+    configureClaim(recoveryRow({ attempts: 2, max_attempts: 5 }));
+    vi.mocked(loadPayPalPolicy).mockResolvedValueOnce({ environment: 'sandbox' } as never);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 503 })));
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('retry');
+
+    configureClaim(recoveryRow({ attempts: 5, max_attempts: 5 }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 503 })));
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('manual_review');
+  });
+
+  it('marks a malformed capture with no provider id for manual review without refunding', async () => {
+    configureClaim(recoveryRow({ provider_resource_id: null }));
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'))
+      .resolves.toBe('manual_review');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not refund when a concurrent worker owns the lease', async () => {
+    let calls = 0;
+    rpcResolvers.commerce_claim_provider_money_recovery = () => ({
+      data: calls++ === 0 ? [recoveryRow()] : [],
+      error: null,
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const results = await Promise.all([
+      executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'),
+      executeProviderMoneyRecovery(supabase as never, 'evt-recovery-1'),
+    ]);
+    expect(results).toContain('retry');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

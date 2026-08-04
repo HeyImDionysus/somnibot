@@ -8,7 +8,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
-import { applyPayPalPolicyEnvironment, type PayPalEnvironment } from '@/lib/paypal-policy';
+import { applyPayPalPolicyEnvironment, loadPayPalPolicy, type PayPalEnvironment } from '@/lib/paypal-policy';
 import { isCanonicalPayPalResourceId } from '@/lib/paypal-resource-id';
 import {
   paypalCaptureResourceSchema,
@@ -317,6 +317,122 @@ async function recordProviderMoneyIncident(
       requireSupabaseSuccess(recoveryError, 'Failed to persist provider money recovery task');
     }
   }
+}
+
+/** Idempotent operator/cron consumer for malformed captures. */
+export async function executeProviderMoneyRecovery(
+  supabase: AdminSupabase,
+  recoveryId: string,
+): Promise<'refunded' | 'retry' | 'manual_review'> {
+  const { data: claimed, error: claimError } = await supabase.rpc(
+    'commerce_claim_provider_money_recovery',
+    { p_webhook_event_id: recoveryId },
+  );
+  requireSupabaseSuccess(claimError, 'Failed to claim provider money recovery task');
+  const row = Array.isArray(claimed) && claimed.length === 1 ? claimed[0] : null;
+  // A concurrent worker owns the lease (or the row is already terminal). It
+  // must not issue a second provider refund or write a duplicate audit row.
+  if (!row) return 'retry';
+  const leaseToken = typeof row.lease_token === 'string' ? row.lease_token : null;
+  if (!leaseToken) throw new Error('Provider recovery claim returned no lease token');
+  const finish = async (values: Record<string, unknown>): Promise<boolean> => {
+    const { data, error } = await supabase
+      .from('commerce_provider_money_recovery')
+      .update(values)
+      .eq('webhook_event_id', recoveryId)
+      .eq('status', 'processing')
+      .eq('lease_token', leaseToken)
+      .select('webhook_event_id');
+    requireSupabaseSuccess(error, 'Failed to finalize provider money recovery task');
+    return Array.isArray(data) && data.length === 1;
+  };
+  if (!row.provider_resource_id) {
+    const transitioned = await finish({
+      status: 'manual_review',
+      resolved_at: new Date().toISOString(),
+      leased_until: null,
+    });
+    if (transitioned && typeof row.guild_id === 'string' && row.guild_id.length > 0) {
+      await supabase.from('audit_logs').insert({
+        guild_id: row.guild_id,
+        actor_type: 'system',
+        actor_id: 'paypal-recovery',
+        action: 'commerce.provider_money_recovery_manual_review',
+        target_type: 'provider_capture',
+        target_id: recoveryId,
+        details: { webhook_event_id: recoveryId, reason: 'missing_provider_resource_id' },
+      });
+    }
+    return 'manual_review';
+  }
+  const runtimeConfig = await getPayPalRuntimeConfig();
+  const policy = await loadPayPalPolicy(supabase, typeof row.guild_id === 'string' ? row.guild_id : null);
+  // Recovery is tenant-routed: never let a sandbox guild's malformed capture
+  // hit the live endpoint (or vice versa), even when process env defaults are
+  // shared across all guilds.
+  const config = applyPayPalPolicyEnvironment(runtimeConfig, policy.environment);
+  const token = await getPayPalToken(config);
+  if (!token) throw new Error('PayPal recovery token unavailable');
+  const response = await fetch(`${config.apiBase}/v2/payments/captures/${encodeURIComponent(row.provider_resource_id)}/refund`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+  });
+  if (response.ok || response.status === 409) {
+    const transitioned = await finish({ status: 'refunded', resolved_at: new Date().toISOString(), leased_until: null });
+    if (!transitioned) return 'retry';
+    if (typeof row.guild_id === 'string' && row.guild_id.length > 0) {
+      await supabase.from('audit_logs').insert({ guild_id: row.guild_id, actor_type: 'system', actor_id: 'paypal-recovery', action: 'commerce.provider_money_refunded', target_type: 'provider_capture', target_id: row.provider_resource_id, details: { webhook_event_id: recoveryId } });
+    }
+    return 'refunded';
+  }
+  const attempts = Number(row.attempts ?? 0);
+  const maxAttempts = Number(row.max_attempts ?? 5);
+  const terminal = attempts >= maxAttempts;
+  const transitioned = await finish({
+    status: terminal ? 'manual_review' : 'pending',
+    next_retry_at: terminal ? null : new Date(Date.now() + 60_000).toISOString(),
+    leased_until: null,
+    resolved_at: terminal ? new Date().toISOString() : null,
+  });
+  if (transitioned && terminal && typeof row.guild_id === 'string' && row.guild_id.length > 0) {
+    await supabase.from('audit_logs').insert({
+      guild_id: row.guild_id,
+      actor_type: 'system',
+      actor_id: 'paypal-recovery',
+      action: 'commerce.provider_money_recovery_manual_review',
+      target_type: 'provider_capture',
+      target_id: row.provider_resource_id,
+      details: { webhook_event_id: recoveryId, attempts, max_attempts, provider_status: response.status },
+    });
+  }
+  return terminal ? 'manual_review' : 'retry';
+}
+
+/** Run a bounded provider-money recovery sweep under the same leased consumer
+ * used by the operator endpoint. Concurrent schedulers safely skip processing
+ * rows already claimed by another worker. */
+export async function sweepProviderMoneyRecovery(
+  supabase: AdminSupabase,
+  limit = 20,
+): Promise<Array<{ id: string; result?: string; error?: string }>> {
+  const { data: rows, error } = await supabase
+    .from('commerce_provider_money_recovery')
+    .select('webhook_event_id')
+    .in('status', ['pending', 'processing'])
+    .limit(Math.min(Math.max(limit, 1), 100));
+  requireSupabaseSuccess(error, 'Failed to list provider money recovery tasks');
+  const results: Array<{ id: string; result?: string; error?: string }> = [];
+  for (const row of rows ?? []) {
+    if (!row || typeof row.webhook_event_id !== 'string') continue;
+    try {
+      results.push({ id: row.webhook_event_id, result: await executeProviderMoneyRecovery(supabase, row.webhook_event_id) });
+    } catch (recoveryError) {
+      results.push({
+        id: row.webhook_event_id,
+        error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+      });
+    }
+  }
+  return results;
 }
 
 function verifyCheckoutSignature(token: string, signature: string): boolean {
