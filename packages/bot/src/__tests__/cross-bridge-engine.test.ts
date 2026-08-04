@@ -70,6 +70,9 @@ describe('CrossFeatureBridge', () => {
   let guild: any;
   let valkey: any;
 
+  // Module loading can exceed Vitest's 10s default when the complete bot
+  // suite is cold-starting many workers in parallel; this is setup time, not
+  // a relaxed assertion or retry.
   beforeEach(async () => {
     vi.clearAllMocks();
     ({ CrossFeatureBridge } = await import('../services/cross-feature-bridge.js'));
@@ -81,7 +84,7 @@ describe('CrossFeatureBridge', () => {
       level_unlock_configs: [{ feature_key: 'fishing', unlock_message: 'You unlocked fishing!' }],
     });
     bridge = new CrossFeatureBridge(guild, supa, eventBus, valkey);
-  });
+  }, 30_000);
 
   it('constructor creates bridge', () => {
     expect(bridge).toBeDefined();

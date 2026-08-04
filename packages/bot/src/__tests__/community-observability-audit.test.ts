@@ -82,7 +82,7 @@ describe('community-giveaways audit', () => {
 
     expect(eventBus.emit).toHaveBeenCalledWith('giveaway.paused', 'g1',
       expect.objectContaining({ giveawayId: 'gw1', actorId: 'mod1' }));
-  });
+  }, 30_000);
 
   it('emits giveaway.failed and writes an owner alert when create fails', async () => {
     const { GiveawayManager } = await import('../features/giveaways/giveaway-manager.js');
