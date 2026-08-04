@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   canonicalSupabaseProjectOrigin,
+  shouldStopManagedLocalStackBeforeLeaseWait,
   hasSupabaseProjectOriginChanged,
   readRuntimeLeaseStatus,
   RuntimeLeaseStatusUnavailableError,
@@ -16,6 +17,13 @@ function response(payload: unknown, status = 200): Response {
 }
 
 describe('launcher runtime lease client', () => {
+  it('stops only a managed local stack before waiting for lease release', () => {
+    expect(shouldStopManagedLocalStackBeforeLeaseWait({ active: true, activeMode: 'regular-local' }, true)).toBe(true);
+    expect(shouldStopManagedLocalStackBeforeLeaseWait({ active: true, activeMode: 'regular-local' }, false)).toBe(false);
+    expect(shouldStopManagedLocalStackBeforeLeaseWait({ active: true, activeMode: 'vps' }, true)).toBe(false);
+    expect(shouldStopManagedLocalStackBeforeLeaseWait({ active: false }, true)).toBe(false);
+  });
+
   it('reads only the active runtime mode and expiry through the guarded RPC', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(response([{
       active: true,

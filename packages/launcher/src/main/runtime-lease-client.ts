@@ -8,6 +8,19 @@ export interface RuntimeLeaseStatus {
   leaseExpiresAt?: string;
 }
 
+/**
+ * An active regular-local lease with a managed local stack requires an
+ * orderly local stop before waiting for the database lease to clear. This
+ * does not claim lease ownership; the subsequent inactive read remains the
+ * fail-closed authority for both same-launcher and foreign leases.
+ */
+export function shouldStopManagedLocalStackBeforeLeaseWait(
+  status: RuntimeLeaseStatus,
+  localStackRunning: boolean,
+): boolean {
+  return status.active && status.activeMode === 'regular-local' && localStackRunning;
+}
+
 export class RuntimeLeaseStatusUnavailableError extends Error {
   constructor(readonly reason: 'not-installed' | 'unavailable', message: string) {
     super(message);

@@ -386,6 +386,9 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('saveConfig(sanitizeRendererConfigPatch(config))');
     expect(main).toContain("savedConfig.lastSuccessfulRuntimeMode === 'vps'");
     expect(main).toContain("!leaseStatus.active && savedConfig.lastSuccessfulRuntimeMode !== 'vps'");
+    expect(main).toContain("shouldStopManagedLocalStackBeforeLeaseWait(leaseStatus, isRunning())");
+    expect(main).toContain('await stopManagedLocalStack();');
+    expect(main).toContain('const localResult = await runLocalSetupAutomation(sanitizedPatch);');
     expect(main).toContain('waitForVpsBotReadyAfter(vpsPlan.target.publicBaseUrl, recoveryStartedAt)');
     expect(main).toContain('installIncomingLocalValkeySnapshot(transferredValkeyPath!)');
     expect(main).toContain('type PayPalRuntimeConfig = Pick<');

@@ -121,6 +121,7 @@ import {
   hasSupabaseProjectOriginChanged,
   readRuntimeLeaseStatus,
   RuntimeLeaseStatusUnavailableError,
+  shouldStopManagedLocalStackBeforeLeaseWait,
   validateSupabaseCredentialPairing,
   waitForRuntimeLease,
 } from './runtime-lease-client.js';
@@ -1319,6 +1320,18 @@ async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch)
     return localResult;
   }
   if (leaseStatus.activeMode === 'regular-local') {
+    if (shouldStopManagedLocalStackBeforeLeaseWait(leaseStatus, isRunning())) {
+      try {
+        await stopManagedLocalStack();
+      } catch (error) {
+        return {
+          ok: false,
+          stage: 'runtime-ownership',
+          message: 'The existing local SomniBot stack could not be stopped safely.',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
     try {
       await waitForRuntimeLease(
         () => readRuntimeLeaseStatus(localConfig.supabaseUrl, localConfig.supabaseSecretKey),

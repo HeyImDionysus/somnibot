@@ -73,6 +73,7 @@ class PayPalApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
   ) {
     super(message);
     this.name = 'PayPalApiError';
@@ -167,7 +168,10 @@ async function paypalRequest<T>(
   });
   const json = await readJson(response);
   if (!response.ok) {
-    throw new PayPalApiError(safePayPalError(response.status, json), response.status);
+    const code = json && typeof json === 'object' && typeof (json as { name?: unknown }).name === 'string'
+      ? (json as { name: string }).name
+      : undefined;
+    throw new PayPalApiError(safePayPalError(response.status, json), response.status, code);
   }
   return json as T;
 }
@@ -223,14 +227,94 @@ async function listWebhooks(
   apiBase: string,
   token: string,
   fetchImpl: typeof fetch,
+  anchorType: 'APPLICATION' | 'ACCOUNT' = 'APPLICATION',
 ): Promise<PayPalWebhook[]> {
+  const path = anchorType === 'APPLICATION'
+    ? '/v1/notifications/webhooks'
+    : '/v1/notifications/webhooks?anchor_type=ACCOUNT';
   const response = await paypalRequest<PayPalWebhookListResponse>(
     apiBase,
-    '/v1/notifications/webhooks',
+    path,
     { token },
     fetchImpl,
   );
   return response.webhooks || [];
+}
+
+function isWebhookUrlConflict(error: unknown): error is PayPalApiError {
+  return error instanceof PayPalApiError
+    && error.code === 'WEBHOOK_URL_ALREADY_EXISTS';
+}
+
+async function findWebhookByUrlAcrossAnchors(
+  apiBase: string,
+  token: string,
+  webhookUrl: string,
+  fetchImpl: typeof fetch,
+  applicationWebhooks?: PayPalWebhook[],
+): Promise<PayPalWebhook | null> {
+  const application = applicationWebhooks ?? await listWebhooks(apiBase, token, fetchImpl, 'APPLICATION');
+  const applicationMatch = application.find(webhook => webhookUrlMatches(webhook, webhookUrl));
+  if (applicationMatch) return applicationMatch;
+
+  const account = await listWebhooks(apiBase, token, fetchImpl, 'ACCOUNT');
+  return account.find(webhook => webhookUrlMatches(webhook, webhookUrl)) || null;
+}
+
+async function reconcileDiscoveredWebhook(
+  apiBase: string,
+  token: string,
+  webhook: PayPalWebhook,
+  webhookUrl: string,
+  fetchImpl: typeof fetch,
+): Promise<EnsurePayPalWebhookResult> {
+  // The URL already exists, so only reconcile event subscriptions. Replacing
+  // the discovered URL string with the requested normalized value prevents a
+  // trailing-slash representation from generating another URL patch.
+  const existing = { ...webhook, url: webhookUrl };
+  if (!configuredEventTypesMatch(existing)) {
+    await updateWebhook(apiBase, token, existing, webhookUrl, fetchImpl);
+    return result('updated', 'Updated the existing PayPal webhook event subscriptions.', webhookUrl, apiBase, {
+      webhookId: existing.id,
+    });
+  }
+  return result('already-configured', 'Found an existing PayPal webhook for this callback URL.', webhookUrl, apiBase, {
+    webhookId: existing.id,
+  });
+}
+
+async function updateWebhookWithConflictRecovery(
+  apiBase: string,
+  token: string,
+  webhook: PayPalWebhook,
+  webhookUrl: string,
+  fetchImpl: typeof fetch,
+  successMessage: string,
+  applicationWebhooks?: PayPalWebhook[],
+): Promise<EnsurePayPalWebhookResult> {
+  try {
+    await updateWebhook(apiBase, token, webhook, webhookUrl, fetchImpl);
+    return result('updated', successMessage, webhookUrl, apiBase, {
+      webhookId: webhook.id,
+    });
+  } catch (err) {
+    if (!isWebhookUrlConflict(err)) throw err;
+    const matchingWebhook = await findWebhookByUrlAcrossAnchors(
+      apiBase,
+      token,
+      webhookUrl,
+      fetchImpl,
+      applicationWebhooks,
+    );
+    if (!matchingWebhook) {
+      throw new PayPalApiError(
+        'PayPal reports that this webhook URL already exists, but the existing webhook could not be discovered in the application or account scopes.',
+        err.status,
+        err.code,
+      );
+    }
+    return reconcileDiscoveredWebhook(apiBase, token, matchingWebhook, webhookUrl, fetchImpl);
+  }
 }
 
 function webhookNeedsUpdate(webhook: PayPalWebhook, webhookUrl: string): boolean {
@@ -340,34 +424,61 @@ export async function ensurePayPalWebhook(
       : null;
     if (existingById) {
       if (webhookNeedsUpdate(existingById, webhookUrl)) {
-        await updateWebhook(apiBase, token, existingById, webhookUrl, fetchImpl);
-        return result('updated', 'Updated the existing PayPal webhook URL and event subscriptions.', webhookUrl, apiBase, {
-          webhookId: existingById.id,
-        });
+        return await updateWebhookWithConflictRecovery(
+          apiBase,
+          token,
+          existingById,
+          webhookUrl,
+          fetchImpl,
+          'Updated the existing PayPal webhook URL and event subscriptions.',
+        );
       }
       return result('already-configured', 'PayPal webhook is already configured for this callback URL and event catalog.', webhookUrl, apiBase, {
         webhookId: existingById.id,
       });
     }
 
-    const matchingWebhook = (await listWebhooks(apiBase, token, fetchImpl))
-      .find(webhook => webhookUrlMatches(webhook, webhookUrl));
+    const applicationWebhooks = await listWebhooks(apiBase, token, fetchImpl);
+    const matchingWebhook = applicationWebhooks.find(webhook => webhookUrlMatches(webhook, webhookUrl));
     if (matchingWebhook) {
       if (webhookNeedsUpdate(matchingWebhook, webhookUrl)) {
-        await updateWebhook(apiBase, token, matchingWebhook, webhookUrl, fetchImpl);
-        return result('updated', 'Updated the matching PayPal webhook event subscriptions.', webhookUrl, apiBase, {
-          webhookId: matchingWebhook.id,
-        });
+        return await updateWebhookWithConflictRecovery(
+          apiBase,
+          token,
+          matchingWebhook,
+          webhookUrl,
+          fetchImpl,
+          'Updated the matching PayPal webhook event subscriptions.',
+          applicationWebhooks,
+        );
       }
       return result('already-configured', 'Found an existing PayPal webhook for this callback URL.', webhookUrl, apiBase, {
         webhookId: matchingWebhook.id,
       });
     }
 
-    const created = await createWebhook(apiBase, token, webhookUrl, fetchImpl);
-    return result('created', 'Created a PayPal webhook for this callback URL.', webhookUrl, apiBase, {
-      webhookId: created.id,
-    });
+    try {
+      const created = await createWebhook(apiBase, token, webhookUrl, fetchImpl);
+      return result('created', 'Created a PayPal webhook for this callback URL.', webhookUrl, apiBase, {
+        webhookId: created.id,
+      });
+    } catch (err) {
+      if (!isWebhookUrlConflict(err)) throw err;
+      const matchingWebhook = await findWebhookByUrlAcrossAnchors(
+        apiBase,
+        token,
+        webhookUrl,
+        fetchImpl,
+      );
+      if (!matchingWebhook) {
+        throw new PayPalApiError(
+          'PayPal reports that this webhook URL already exists, but the existing webhook could not be discovered in the application or account scopes.',
+          err.status,
+          err.code,
+        );
+      }
+      return await reconcileDiscoveredWebhook(apiBase, token, matchingWebhook, webhookUrl, fetchImpl);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return result('failed', 'PayPal webhook setup failed.', webhookUrl, apiBase, {
