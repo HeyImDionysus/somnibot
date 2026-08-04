@@ -9,6 +9,8 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 import { handleBuyButton } from '../features/commerce/payment-handler.js';
 
 const migration = readFileSync(new URL('../../../supabase/migrations/20260804142000_atomic_paid_checkout_intent_binding.sql', import.meta.url), 'utf8');
+const recoveryMigration = readFileSync(new URL('../../../supabase/migrations/20260804143000_paid_checkout_exposure_recovery.sql', import.meta.url), 'utf8');
+const handlerSource = readFileSync(new URL('../features/commerce/payment-handler.ts', import.meta.url), 'utf8');
 
 function interaction(customId = 'store:buy:prod-1') {
   return {
@@ -19,7 +21,7 @@ function interaction(customId = 'store:buy:prod-1') {
   } as any;
 }
 
-function makeSupabase(productType: 'one_time' | 'subscription') {
+function makeSupabase(productType: 'one_time' | 'subscription', bothAtomicResponsesLost = false) {
   const product = {
     id: '00000000-0000-4000-8000-000000000001', guild_id: 'guild-1', active: true,
     type: productType, price_cents: 500, name: 'VIP', delivery_type: 'access_pass',
@@ -38,7 +40,7 @@ function makeSupabase(productType: 'one_time' | 'subscription') {
     if (name === 'generate_order_number') return { data: 'ORD-1', error: null };
     if (name === 'commerce_create_and_bind_active_paid_checkout') {
       atomicCalls += 1;
-      if (atomicCalls === 1) return { data: null, error: { code: '08006', message: 'connection closed after commit' } };
+      if (bothAtomicResponsesLost || atomicCalls === 1) return { data: null, error: { code: '08006', message: 'connection closed after commit' } };
       const subscription = productType === 'subscription';
       return {
         data: {
@@ -69,6 +71,7 @@ function makeSupabase(productType: 'one_time' | 'subscription') {
         if (table === 'products') return { data: product, error: null };
         if (table === 'customers') return { data: customerReads++ === 0 ? null : null, error: null };
         if (table === 'guild_config') return { data: null, error: null };
+        if (table === 'commerce_checkout_intents' && operation === 'update') return { data: { token: 'checkout-token' }, error: null };
         return { data: null, error: null };
       }),
       single: vi.fn(async () => ({ data: { id: '00000000-0000-4000-8000-000000000004' }, error: null })),
@@ -101,9 +104,20 @@ describe('atomic paid checkout intent binding', () => {
       const atomic = rpcCalls.filter(([name]) => name === 'commerce_create_and_bind_active_paid_checkout');
       expect(atomic).toHaveLength(2);
       expect(atomic[0][1]).toMatchObject({ p_checkout_token: expect.any(String), p_guild_id: 'guild-1' });
+      expect(rpcCalls.some(([name]) => name === 'commerce_mark_paid_checkout_exposed')).toBe(true);
+      expect(rpcCalls.some(([name]) => name === 'commerce_reap_unexposed_paid_checkout')).toBe(false);
       expect(rpcCalls.some(([name]) => name === 'commerce_create_active_paid_checkout')).toBe(false);
       expect(rpcCalls.some(([name]) => name === 'commerce_deactivate_pending_checkout')).toBe(false);
     }
+  });
+
+  it('reaps a committed but provably unexposed checkout when both RPC responses are lost', async () => {
+    const { supabase, rpcCalls } = makeSupabase('one_time', true);
+    vi.stubGlobal('fetch', paypalFetch());
+    await handleBuyButton(interaction(), supabase, 'guild-1', 'https://api.paypal.example', 'id', 'secret', 'https://dashboard.example');
+    expect(rpcCalls.filter(([name]) => name === 'commerce_create_and_bind_active_paid_checkout')).toHaveLength(2);
+    expect(rpcCalls.some(([name]) => name === 'commerce_reap_unexposed_paid_checkout')).toBe(true);
+    expect(rpcCalls.some(([name]) => name === 'commerce_mark_paid_checkout_exposed')).toBe(false);
   });
 
   it('ships service-role-only locking, exact identity checks, and a rollback-on-zero-row contract', () => {
@@ -118,5 +132,15 @@ describe('atomic paid checkout intent binding', () => {
     expect(migration).toContain('REVOKE ALL ON FUNCTION');
     expect(migration).toContain('GRANT EXECUTE ON FUNCTION');
     expect(migration).toContain(') TO service_role;');
+    expect(recoveryMigration).toContain('approval_exposed_at');
+    expect(recoveryMigration).toContain('commerce_mark_paid_checkout_exposed');
+    expect(recoveryMigration).toContain('commerce_reap_unexposed_paid_checkout');
+    expect(recoveryMigration).toContain('commerce_reap_unexposed_paid_checkouts_for_product');
+    expect(recoveryMigration).toContain("'approval_link_not_exposed'");
+    expect(recoveryMigration).toContain("'disposition', 'exposed'");
+    expect(handlerSource).toContain("'commerce_reap_unexposed_paid_checkouts_for_product'");
+    expect(handlerSource.indexOf("'commerce_reap_unexposed_paid_checkouts_for_product'")).toBeLessThan(
+      handlerSource.indexOf("if (repeatPurchasePolicy === 'unique')"),
+    );
   });
 });

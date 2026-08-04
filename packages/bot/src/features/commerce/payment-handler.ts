@@ -756,9 +756,21 @@ export async function handleBuyButton(
     }
 
     // DOUBLE-CHARGE guard — one live checkout per customer per product.
-    const inFlight = repeatPurchasePolicy === 'unique'
-      ? await inspectInFlightCheckout(supabase, guildId, existingCustomer.id, productId)
-      : { state: 'clear' as const };
+    const recoverySweep = await supabase.rpc('commerce_reap_unexposed_paid_checkouts_for_product', {
+      p_guild_id: guildId,
+      p_customer_id: existingCustomer.id,
+      p_product_id: productId,
+      p_reason: 'pre-checkout unexposed recovery sweep',
+    });
+    if (recoverySweep.error) {
+      log.error('Failed to inspect/recover unexposed checkout state:', recoverySweep.error.message);
+      await replyCheckoutUnavailable(interaction, supabase, guildId);
+      return;
+    }
+    let inFlight: InFlightCheckout = { state: 'clear' };
+    if (repeatPurchasePolicy === 'unique') {
+      inFlight = await inspectInFlightCheckout(supabase, guildId, existingCustomer.id, productId);
+    }
     if (inFlight.state === 'unavailable') {
       await replyCheckoutUnavailable(interaction, supabase, guildId);
       return;
@@ -875,6 +887,45 @@ export async function handleBuyButton(
       .in('status', ['pending', 'bound']);
     if (error) log.warn('Failed to cancel abandoned checkout intent', { reason, detail: error.message });
   };
+  const reapUnexposedCheckout = async (
+    providerKind: 'capture' | 'subscription',
+    providerId: string,
+    planId: string | null,
+    orderId: string | null,
+    reason: string,
+  ): Promise<void> => {
+    const { error } = await supabase.rpc('commerce_reap_unexposed_paid_checkout', {
+      p_checkout_token: checkoutToken,
+      p_guild_id: guildId,
+      p_customer_id: customerId,
+      p_product_id: productId,
+      p_plan_id: planId,
+      p_provider_kind: providerKind,
+      p_provider_id: providerId,
+      p_order_id: orderId,
+      p_reason: reason,
+    });
+    if (error) log.warn('Failed to reap uncertain unexposed checkout', { reason, detail: error.message });
+  };
+  const markCheckoutExposed = async (
+    providerKind: 'capture' | 'subscription',
+    providerId: string,
+    planId: string | null,
+    orderId: string,
+  ): Promise<boolean> => {
+    const { error } = await supabase.rpc('commerce_mark_paid_checkout_exposed', {
+      p_checkout_token: checkoutToken,
+      p_guild_id: guildId,
+      p_customer_id: customerId,
+      p_product_id: productId,
+      p_plan_id: planId,
+      p_provider_kind: providerKind,
+      p_provider_id: providerId,
+      p_order_id: orderId,
+    });
+    if (error) log.error('Failed to mark checkout approval as exposed:', error.message);
+    return !error;
+  };
   const price = (product.price_cents / 100).toFixed(2);
   // Post-checkout destinations MUST be publicly reachable: the buyer is a
   // Discord customer, not a dashboard admin. `/store` lives under
@@ -958,6 +1009,19 @@ export async function handleBuyButton(
       await interaction.editReply({ content: '❌ Failed to create payment. Please try again.' });
       return;
     }
+    const { data: providerBindRow, error: providerBindError } = await supabase
+      .from('commerce_checkout_intents')
+      .update({ provider_id: orderData.id, status: 'bound' })
+      .eq('token', checkoutToken)
+      .eq('status', 'pending')
+      .select('token')
+      .maybeSingle();
+    if (providerBindError || !providerBindRow) {
+      log.error('Failed to bind PayPal order to checkout ledger:', providerBindError?.message ?? 'no row updated');
+      await cancelCheckoutIntent('provider order binding failed');
+      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
+      return;
+    }
     const approvalLink = orderData.links?.find((l) => l.rel === 'approve');
 
     if (!isPayPalApprovalUrl(approvalLink?.href)) {
@@ -1033,7 +1097,15 @@ export async function handleBuyButton(
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No payment link was opened; please try again.',
       });
-      await cancelCheckoutIntent('pending order persistence failed');
+      await reapUnexposedCheckout('capture', orderData.id, null, null, 'atomic checkout response uncertain');
+      return;
+    }
+
+    if (!(await markCheckoutExposed(
+      'capture', orderData.id, null, (pendingOrder as PendingCheckoutOrder).id,
+    ))) {
+      await reapUnexposedCheckout('capture', orderData.id, null, (pendingOrder as PendingCheckoutOrder).id, 'approval exposure mark failed');
+      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
       return;
     }
 
@@ -1102,6 +1174,19 @@ export async function handleBuyButton(
       });
       return;
     }
+    const { data: planBindRow, error: planBindError } = await supabase
+      .from('commerce_checkout_intents')
+      .update({ plan_id: plan.id })
+      .eq('token', checkoutToken)
+      .eq('status', 'pending')
+      .select('token')
+      .maybeSingle();
+    if (planBindError || !planBindRow) {
+      log.error('Failed to bind subscription plan to checkout ledger:', planBindError?.message ?? 'no row updated');
+      await cancelCheckoutIntent('subscription plan binding failed');
+      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
+      return;
+    }
     // Create PayPal subscription
     const subPayload = {
       plan_id: plan.paypal_plan_id,
@@ -1145,6 +1230,19 @@ export async function handleBuyButton(
     if (!subData || typeof subData.id !== 'string' || subData.id.length === 0) {
       await cancelCheckoutIntent('provider subscription response malformed');
       await interaction.editReply({ content: '❌ Failed to create subscription. Please try again.' });
+      return;
+    }
+    const { data: providerBindRow, error: providerBindError } = await supabase
+      .from('commerce_checkout_intents')
+      .update({ provider_id: subData.id, status: 'bound' })
+      .eq('token', checkoutToken)
+      .eq('status', 'pending')
+      .select('token')
+      .maybeSingle();
+    if (providerBindError || !providerBindRow) {
+      log.error('Failed to bind PayPal subscription to checkout ledger:', providerBindError?.message ?? 'no row updated');
+      await cancelCheckoutIntent('provider subscription binding failed');
+      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
       return;
     }
     const approvalLink = subData.links?.find((l) => l.rel === 'approve');
@@ -1220,7 +1318,15 @@ export async function handleBuyButton(
       await interaction.editReply({
         content: '❌ Checkout could not be safely recorded. No subscription link was opened; please try again.',
       });
-      await cancelCheckoutIntent('pending subscription order persistence failed');
+      await reapUnexposedCheckout('subscription', subData.id, plan.id, null, 'atomic subscription response uncertain');
+      return;
+    }
+
+    if (!(await markCheckoutExposed(
+      'subscription', subData.id, plan.id, (pendingOrder as PendingCheckoutOrder).id,
+    ))) {
+      await reapUnexposedCheckout('subscription', subData.id, plan.id, (pendingOrder as PendingCheckoutOrder).id, 'subscription approval exposure mark failed');
+      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
       return;
     }
 
