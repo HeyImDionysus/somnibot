@@ -253,6 +253,12 @@ async function recordProviderMoneyIncident(
     observedGuildId?: unknown;
     reason: ProviderIncidentReason;
     evidence: Record<string, unknown>;
+    /**
+     * Capture incidents normally enqueue the provider recovery/refund lane.
+     * Ledger-finalization failures happen after fulfillment is released, so
+     * callers can persist the alert/incident without authorizing a refund.
+     */
+    enqueueRecovery?: boolean;
   },
 ): Promise<void> {
   if (
@@ -303,7 +309,7 @@ async function recordProviderMoneyIncident(
   ) {
     throw new Error('Provider money incident returned malformed durable identity');
   }
-  if (input.eventType === 'PAYMENT.CAPTURE.COMPLETED') {
+  if (input.eventType === 'PAYMENT.CAPTURE.COMPLETED' && input.enqueueRecovery !== false) {
     const { error: recoveryError } = await supabase
       .from('commerce_provider_money_recovery')
       .insert({
@@ -354,6 +360,7 @@ export async function markCheckoutIntentCaptured(
     parentId: input.providerParentId,
     observedGuildId: input.guildId,
     reason: 'checkout_identity_missing_or_mismatched',
+    enqueueRecovery: false,
     evidence: {
       checkout_token: input.checkoutToken,
       transition: 'captured',

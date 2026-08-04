@@ -106,7 +106,8 @@ describe('markCheckoutIntentCaptured', () => {
         p_incident_reason: 'checkout_identity_missing_or_mismatched',
       }),
     );
-    expect(supabase.recoveryInsert).toHaveBeenCalledTimes(1);
+    expect(supabase.recoveryInsert).not.toHaveBeenCalled();
+    expect(supabase.from).not.toHaveBeenCalledWith('commerce_provider_money_recovery');
   });
 
   it('records an incident and rejects on a transition error so the webhook can retry', async () => {
@@ -119,7 +120,8 @@ describe('markCheckoutIntentCaptured', () => {
       'database unavailable',
     );
     expect(supabase.rpc).toHaveBeenCalledTimes(1);
-    expect(supabase.recoveryInsert).toHaveBeenCalledTimes(1);
+    expect(supabase.recoveryInsert).not.toHaveBeenCalled();
+    expect(supabase.from).not.toHaveBeenCalledWith('commerce_provider_money_recovery');
   });
 
   it('supports the subscription activation identity without a parent order id', async () => {
