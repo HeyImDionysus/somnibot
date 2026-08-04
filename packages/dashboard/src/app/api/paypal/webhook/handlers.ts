@@ -200,6 +200,7 @@ type ProviderMoneyEventType =
 
 type ProviderIncidentReason =
   | 'provider_identity_malformed'
+  | 'checkout_identity_missing_or_mismatched'
   | 'custom_identity_missing_or_malformed'
   | 'customer_identity_missing_or_mismatched'
   | 'order_identity_missing_or_ambiguous'
