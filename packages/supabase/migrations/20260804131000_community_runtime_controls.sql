@@ -124,7 +124,7 @@ BEGIN
   new_level := public.level_for_guild_xp(p_guild_id, new_xp);
   INSERT INTO public.member_levels(guild_id, member_id, xp, level, total_messages, voice_minutes, updated_at)
   VALUES (p_guild_id,p_member_id,new_xp,new_level,0,0,now())
-  ON CONFLICT (guild_id,member_id) DO UPDATE SET xp=EXCLUDED.xp, level=EXCLUDED.level, updated_at=now()
+  ON CONFLICT (guild_id,member_id) DO UPDATE SET xp=EXCLUDED.xp, level=EXCLUDED.level, updated_at=now();
   RETURN jsonb_build_object('new_xp',new_xp,'old_level',old_level,'new_level',new_level,'leveled_up',new_level > old_level);
 END; $$;
 REVOKE ALL ON FUNCTION public.set_member_xp(text,text,integer) FROM PUBLIC, anon, authenticated;

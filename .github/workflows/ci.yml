@@ -1142,6 +1142,7 @@ jobs:
       - name: Fail on DB type drift
         run: |
           set -euo pipefail
+          python3 scripts/test_migration_sql_syntax.py
           python3 scripts/test_generate_db_types.py
           # --check regenerates in memory and exits non-zero if the committed
           # snapshot differs from a fresh generation. The generator resolves the
