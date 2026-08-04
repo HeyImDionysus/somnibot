@@ -59,7 +59,10 @@ vi.mock('../features/achievements/index.js', () => ({ unregisterAchievementsMana
 vi.mock('../features/profiles/index.js', () => ({ unregisterProfilesManager: vi.fn() }));
 vi.mock('../features/trivia/index.js', () => ({ unregisterTriviaManager: vi.fn() }));
 vi.mock('../features/temp-channels/index.js', () => ({}));
-vi.mock('../features/reaction-roles/index.js', () => ({}));
+vi.mock('../features/reaction-roles/index.js', () => ({
+  loadReactionRoles: vi.fn(),
+  deployButtonRolePanelsForGuild: vi.fn(),
+}));
 vi.mock('../features/custom-commands/index.js', () => ({}));
 vi.mock('../features/automations/index.js', () => ({}));
 vi.mock('../features/scheduled-messages/index.js', () => ({}));

@@ -69,7 +69,10 @@ vi.mock('../features/commerce/index.js', () => ({ EntitlementService: class {} }
 vi.mock('../features/music/index.js', () => ({ MusicPlayerManager: class {} }));
 vi.mock('../features/tickets/index.js', () => ({ reloadTicketConfig: vi.fn() }));
 vi.mock('../features/automations/index.js', () => ({ AutomationEngine: class { reload = vi.fn() } }));
-vi.mock('../features/reaction-roles/index.js', () => ({ loadReactionRoles: vi.fn() }));
+vi.mock('../features/reaction-roles/index.js', () => ({
+  loadReactionRoles: vi.fn(),
+  deployButtonRolePanelsForGuild: vi.fn(),
+}));
 vi.mock('../features/giveaways/index.js', () => ({ GiveawayManager: class {} }));
 vi.mock('../features/temp-channels/index.js', () => ({ TempChannelManager: class {} }));
 vi.mock('../features/scheduled-messages/index.js', () => ({ ScheduledMessageRunner: class {} }));
