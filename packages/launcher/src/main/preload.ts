@@ -144,6 +144,7 @@ export interface SomniBotAPI {
     secretKeyReady?: boolean;
     publishableKeyReady?: boolean;
     databasePasswordReady?: boolean;
+    databaseConnectionReady?: boolean;
     databasePasswordGenerationError?: string;
     error?: string;
   }>;

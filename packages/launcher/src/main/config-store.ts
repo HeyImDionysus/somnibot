@@ -50,6 +50,8 @@ export interface LauncherConfig {
   supabasePublishableKey: string;
   /** Direct Postgres connection URL — required for running DB migrations. */
   supabaseDbPassword: string;
+  /** Password-free Supavisor session endpoint discovered from the Management API. */
+  supabaseDbUrlTemplate?: string;
   /** Optional Supabase Management API token for auth-provider setup. */
   supabaseAccessToken: string;
   /** Operator confirmation that Discord auth provider and callback allow-list are configured manually. */
@@ -108,6 +110,7 @@ const DEFAULTS: LauncherConfig = {
   supabaseSecretKey: '',
   supabasePublishableKey: '',
   supabaseDbPassword: '',
+  supabaseDbUrlTemplate: '',
   supabaseAccessToken: '',
   supabaseDiscordAuthProviderConfigured: false,
   paypalClientId: '',
@@ -150,6 +153,7 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
   'discordClientSecret',
   'supabaseSecretKey',
   'supabaseDbPassword',
+  'supabaseDbUrlTemplate',
   'supabaseAccessToken',
   'paypalClientSecret',
   'paypalWebhookId',
@@ -324,6 +328,7 @@ function getConfigSnapshot(): Partial<LauncherConfig> {
     supabaseSecretKey: getSensitive('supabaseSecretKey'),
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
     supabaseDbPassword: getSensitive('supabaseDbPassword'),
+    supabaseDbUrlTemplate: getSensitive('supabaseDbUrlTemplate'),
     supabaseAccessToken: getSensitive('supabaseAccessToken'),
     supabaseDiscordAuthProviderConfigured: storedOrUndefined('supabaseDiscordAuthProviderConfigured', false),
     paypalClientId: store.get('paypalClientId', ''),
@@ -365,6 +370,7 @@ export function getConfig(): LauncherConfig {
     supabaseSecretKey: getSensitive('supabaseSecretKey'),
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
     supabaseDbPassword: getSensitive('supabaseDbPassword'),
+    supabaseDbUrlTemplate: getSensitive('supabaseDbUrlTemplate'),
     supabaseAccessToken: getSensitive('supabaseAccessToken'),
     supabaseDiscordAuthProviderConfigured: store.get('supabaseDiscordAuthProviderConfigured', false),
     paypalClientId: store.get('paypalClientId', ''),
@@ -485,7 +491,7 @@ export function buildEnvVars(
 
     // Database — direct Postgres access for migrations.
     // Construct the connection URL from the project ref + user-supplied password.
-    ...buildDbUrlEnv(config.supabaseUrl, config.supabaseDbPassword),
+    ...buildDbUrlEnv(config.supabaseUrl, config.supabaseDbPassword, config.supabaseDbUrlTemplate),
 
     // Production mode
     NODE_ENV: 'production',

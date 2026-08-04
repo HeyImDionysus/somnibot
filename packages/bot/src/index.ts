@@ -21,6 +21,7 @@ import { connectValkey } from './services/valkey.js';
 import { startDeployListener } from './deploy/deploy-listener.js';
 import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
+import { requireSuccessfulMigrations } from './services/migration-startup-gate.js';
 import { initGuildFeatures, registerGuildCommands } from './guild-init.js';
 import { startHealthServer, setAwaitingSetup } from './services/health-server.js';
 import { startDashboardSupervisor, stopDashboardSupervisor } from './services/dashboard-supervisor.js';
@@ -74,14 +75,8 @@ async function main(): Promise<void> {
   log.info('━━━ SomniBot v0.5.0 — Starting ━━━');
 
   // 0. Auto-migrate database on first boot
-  try {
-    const migrationResult = await runMigrations();
-    if (migrationResult.ran && migrationResult.errors.length > 0) {
-      log.error('Migration errors — some features may not work');
-    }
-  } catch (err) {
-    log.warn('Migration check failed (non-fatal)', { error: String(err) });
-  }
+  const migrationResult = await runMigrations();
+  requireSuccessfulMigrations(migrationResult.errors);
 
   // 0.5. Load missing config from instance_settings DB table
   try {

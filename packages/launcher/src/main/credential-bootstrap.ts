@@ -13,6 +13,7 @@ const RECOVERABLE_STRING_FIELDS = [
   'discordGuildId',
   'supabasePublishableKey',
   'supabaseDbPassword',
+  'supabaseDbUrlTemplate',
   'supabaseAccessToken',
   'paypalClientId',
   'paypalClientSecret',

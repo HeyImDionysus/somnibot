@@ -88,6 +88,17 @@ describe('Launcher Config', () => {
     });
   });
 
+  it('prefers a discovered IPv4 session-pooler template for migrations', () => {
+    expect(buildDbUrlEnv(
+      'https://runnerproof.supabase.co',
+      'p@ss word',
+      'postgresql://postgres.runnerproof@aws-0-ca-central-1.pooler.supabase.com:5432/postgres',
+    )).toEqual({
+      SUPABASE_DB_URL:
+        'postgresql://postgres.runnerproof:p%40ss%20word@aws-0-ca-central-1.pooler.supabase.com:5432/postgres',
+    });
+  });
+
   it('does not synthesize a database URL without both a project ref and password', () => {
     expect(buildDbUrlEnv('https://example.com', 'secret')).toEqual({});
     expect(buildDbUrlEnv('https://runnerproof.supabase.co.evil.example', 'secret'))

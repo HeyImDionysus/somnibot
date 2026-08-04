@@ -60,6 +60,15 @@ interface RawApiKey {
   key?: unknown;
 }
 
+interface RawPoolerConfig {
+  database_type?: unknown;
+  db_user?: unknown;
+  db_host?: unknown;
+  db_port?: unknown;
+  db_name?: unknown;
+  pool_mode?: unknown;
+}
+
 function normalizedToken(token: string): string {
   return token.trim();
 }
@@ -194,6 +203,56 @@ export async function getSupabaseProjectCredentials(
       ...(secretKey ? { secretKey } : {}),
       ...(publishableKey ? { publishableKey } : {}),
     },
+  };
+}
+
+/**
+ * Read the project's IPv4-capable Supavisor endpoint. The returned template
+ * deliberately contains no password; the encrypted database password is
+ * inserted only when a bot/VPS child environment is materialized.
+ */
+export async function getSupabaseSessionPoolerTemplate(
+  token: string,
+  ref: string,
+  options: ManagementApiOptions = {},
+): Promise<SupabaseManagementResult<{ connectionTemplate: string }>> {
+  const normalizedRef = projectRef(ref);
+  if (!normalizedRef) return { ok: false, error: 'Supabase project reference is invalid.' };
+
+  const response = await requestJson<RawPoolerConfig[]>(
+    token,
+    `/v1/projects/${encodeURIComponent(normalizedRef)}/config/database/pooler`,
+    'retrieving the project database connection endpoint',
+    options,
+  );
+  if (!response.ok) return response;
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  const sessionRows = rows.filter((row) => (
+    row.database_type === 'PRIMARY'
+    && row.pool_mode === 'session'
+    && Number(row.db_port) === 5432
+  ));
+  if (sessionRows.length !== 1) {
+    return { ok: false, error: 'Supabase did not return one unambiguous primary session-pooler endpoint for this project.' };
+  }
+  const session = sessionRows[0];
+  const host = typeof session.db_host === 'string' ? session.db_host.trim().toLowerCase() : '';
+  const rawUser = typeof session.db_user === 'string' ? session.db_user.trim() : '';
+  const database = typeof session.db_name === 'string' && session.db_name.trim()
+    ? session.db_name.trim()
+    : 'postgres';
+  if (!/^[a-z0-9.-]+\.pooler\.supabase\.com$/.test(host)) {
+    return { ok: false, error: 'Supabase did not return a trusted session-pooler host for this project.' };
+  }
+  if (!/^[a-zA-Z0-9_.-]+$/.test(rawUser) || !/^[a-zA-Z0-9_-]+$/.test(database)) {
+    return { ok: false, error: 'Supabase returned invalid session-pooler connection metadata.' };
+  }
+
+  const user = rawUser.includes('.') ? rawUser : `${rawUser}.${normalizedRef}`;
+  return {
+    ok: true,
+    connectionTemplate: `postgresql://${encodeURIComponent(user)}@${host}:5432/${encodeURIComponent(database)}`,
   };
 }
 

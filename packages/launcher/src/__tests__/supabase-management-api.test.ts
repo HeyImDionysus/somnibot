@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   getSupabaseProjectCredentials,
+  getSupabaseSessionPoolerTemplate,
   listSupabaseProjects,
   updateSupabaseDatabasePassword,
 } from '../main/supabase-management-api.js';
@@ -131,5 +132,62 @@ describe('Supabase Management API project discovery', () => {
       body: JSON.stringify({ password: 'a'.repeat(32) }),
     });
     expect(JSON.stringify(result)).not.toContain('a'.repeat(32));
+  });
+
+  it('returns a password-free IPv4 session-pooler template', async () => {
+    const result = await getSupabaseSessionPoolerTemplate('sbp-test-token', 'project-ref', {
+      baseUrl: 'https://management.test',
+      fetchImpl: async (input) => {
+        expect(String(input)).toBe('https://management.test/v1/projects/project-ref/config/database/pooler');
+        return response([{
+          database_type: 'PRIMARY',
+          db_user: 'postgres',
+          db_host: 'aws-0-ca-central-1.pooler.supabase.com',
+          db_port: 5432,
+          db_name: 'postgres',
+          pool_mode: 'session',
+        }]);
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      connectionTemplate: 'postgresql://postgres.project-ref@aws-0-ca-central-1.pooler.supabase.com:5432/postgres',
+    });
+    expect(JSON.stringify(result)).not.toContain('sbp-test-token');
+  });
+
+  it('rejects a transaction-pooler endpoint instead of relabeling it as session mode', async () => {
+    const result = await getSupabaseSessionPoolerTemplate('sbp-test-token', 'project-ref', {
+      fetchImpl: async () => response([{
+        database_type: 'PRIMARY',
+        db_user: 'postgres',
+        db_host: 'aws-0-ca-central-1.pooler.supabase.com',
+        db_port: 6543,
+        db_name: 'postgres',
+        pool_mode: 'transaction',
+      }]),
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: 'Supabase did not return one unambiguous primary session-pooler endpoint for this project.',
+    });
+  });
+
+  it('rejects an untrusted pooler host', async () => {
+    const result = await getSupabaseSessionPoolerTemplate('sbp-test-token', 'project-ref', {
+      fetchImpl: async () => response([{
+        database_type: 'PRIMARY',
+        db_user: 'postgres',
+        db_host: 'pooler.supabase.com.evil.example',
+        db_port: 5432,
+        db_name: 'postgres',
+        pool_mode: 'session',
+      }]),
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: 'Supabase did not return a trusted session-pooler host for this project.',
+    });
   });
 });

@@ -92,6 +92,7 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('fields.supabaseAccessToken.value');
     expect(renderer).toContain('window.somnibot.selectSupabaseProject(ref)');
     expect(renderer).toContain('window.somnibot.generateSupabaseDatabasePassword()');
+    expect(renderer).toContain('database password generated and saved for VPS/direct migrations');
     expect(renderer).toContain('result.databasePasswordReady ?');
     expect(renderer).toContain('if (!result.secretKeyReady) fields.supabaseSecretKey.value = \'\';');
     expect(renderer).toContain('if (!result.publishableKeyReady) fields.supabasePublishableKey.value = \'\';');

@@ -89,7 +89,11 @@ export function materializeVpsDeploymentPlan(
     ]);
   }
 
-  const supabaseDbUrl = buildDbUrlEnv(config.supabaseUrl, config.supabaseDbPassword).SUPABASE_DB_URL;
+  const supabaseDbUrl = buildDbUrlEnv(
+    config.supabaseUrl,
+    config.supabaseDbPassword,
+    config.supabaseDbUrlTemplate,
+  ).SUPABASE_DB_URL;
   if (!supabaseDbUrl) {
     return blockedPlan(plan, ['The saved Supabase URL and database password could not produce a direct database URL.']);
   }

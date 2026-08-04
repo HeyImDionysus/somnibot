@@ -41,6 +41,7 @@ import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupSta
 import { maskRestoredCredentials, pushToSupabaseWithRetry } from './supabase-sync.js';
 import {
   getSupabaseProjectCredentials,
+  getSupabaseSessionPoolerTemplate,
   listSupabaseProjects,
   updateSupabaseDatabasePassword,
 } from './supabase-management-api.js';
@@ -220,6 +221,7 @@ async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
     supabaseSecretKey: config.supabaseSecretKey,
     supabasePublishableKey: config.supabasePublishableKey,
     supabaseDbPassword: config.supabaseDbPassword,
+    supabaseDbUrlTemplate: config.supabaseDbUrlTemplate,
     supabaseAccessToken: config.supabaseAccessToken,
     supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
     paypalClientId: config.paypalClientId,
@@ -872,7 +874,8 @@ async function bootstrapSupabaseFromManagementToken(
   const token = config.supabaseAccessToken.trim();
   const needsHydration = !config.supabaseUrl.trim()
     || !config.supabaseSecretKey.trim()
-    || !config.supabasePublishableKey.trim();
+    || !config.supabasePublishableKey.trim()
+    || (Boolean(config.supabaseDbPassword.trim()) && !config.supabaseDbUrlTemplate?.trim());
   if (!token || !needsHydration) return { ok: true, config, hydrated: false };
 
   const projectRef = getSupabaseProjectRef(config.supabaseUrl);
@@ -907,11 +910,14 @@ async function bootstrapSupabaseFromManagementToken(
       error: 'The Supabase Personal Access Token could not read both project API keys. Grant project API-key read access or use the existing project keys as the manual fallback.',
     };
   }
+  const pooler = await getSupabaseSessionPoolerTemplate(token, selectedProject.ref);
+  if (!pooler.ok) return pooler;
 
   const patch: Partial<LauncherConfig> = {
     supabaseUrl: credentials.credentials.project.url,
     supabaseSecretKey: credentials.credentials.secretKey,
     supabasePublishableKey: credentials.credentials.publishableKey,
+    supabaseDbUrlTemplate: pooler.connectionTemplate,
   };
   saveConfig(patch);
   return { ok: true, config: getConfig(), hydrated: true };
@@ -1941,6 +1947,13 @@ function registerIpcHandlers(): void {
     }
 
     const nextOrigin = result.credentials.project.url;
+    const pooler = await getSupabaseSessionPoolerTemplate(current.supabaseAccessToken, ref);
+    if (!pooler.ok) {
+      return {
+        ok: false,
+        error: `The selected project keys were found, but its IPv4-capable migration endpoint could not be loaded. ${pooler.error}`,
+      };
+    }
     const currentOrigin = current.supabaseUrl.trim().replace(/\/+$/, '').toLowerCase();
     const projectChanged = currentOrigin !== nextOrigin;
     let generatedDatabasePassword: string | undefined;
@@ -1972,6 +1985,7 @@ function registerIpcHandlers(): void {
         ?? (projectChanged ? '' : current.supabasePublishableKey),
       supabaseDbPassword: generatedDatabasePassword
         ?? (projectChanged ? '' : current.supabaseDbPassword),
+      supabaseDbUrlTemplate: pooler.connectionTemplate,
     };
 
     try {
@@ -1990,6 +2004,7 @@ function registerIpcHandlers(): void {
       secretKeyReady: Boolean(result.credentials.secretKey),
       publishableKeyReady: Boolean(result.credentials.publishableKey),
       databasePasswordReady: Boolean(generatedDatabasePassword || patch.supabaseDbPassword),
+      databaseConnectionReady: true,
       ...(databasePasswordGenerationError ? { databasePasswordGenerationError } : {}),
     };
   });

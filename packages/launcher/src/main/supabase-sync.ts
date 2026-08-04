@@ -25,6 +25,7 @@ export interface SyncableCredentials {
   supabaseSecretKey: string;
   supabasePublishableKey: string;
   supabaseDbPassword: string;
+  supabaseDbUrlTemplate?: string;
   supabaseAccessToken: string;
   supabaseDiscordAuthProviderConfigured: boolean;
   paypalClientId: string;
@@ -56,6 +57,7 @@ const RESTORED_SECRET_KEYS: ReadonlySet<keyof RestorableCredentials> = new Set([
   'discordClientSecret',
   'supabaseSecretKey',
   'supabaseDbPassword',
+  'supabaseDbUrlTemplate',
   'supabaseAccessToken',
   'paypalClientSecret',
   'paypalWebhookId',
@@ -105,6 +107,7 @@ const PUSH_SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   supabaseSecretKey: 'supabase_secret_key',
   supabasePublishableKey: 'supabase_publishable_key',
   supabaseDbPassword: 'supabase_db_password',
+  supabaseDbUrlTemplate: 'supabase_db_url_template',
   supabaseAccessToken: 'supabase_access_token',
   supabaseDiscordAuthProviderConfigured: 'supabase_discord_auth_provider_configured',
   paypalClientId: 'paypal_client_id',

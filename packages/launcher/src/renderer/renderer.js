@@ -1359,6 +1359,7 @@ btnGenerateSupabaseDbPassword.addEventListener('click', async () => {
     applyConfigToForm(await window.somnibot.getConfig());
     await refreshSetupStatus();
     supabaseDbPasswordStatus.textContent = 'A new database password was generated and saved. Restart or redeploy any direct Postgres installation.';
+    setSupabaseProjectStatus('Selected project credentials are loaded; database password generated and saved for VPS/direct migrations.');
     showMessage('success', 'Supabase database password generated and saved to SomniBot.');
   } catch (err) {
     supabaseDbPasswordStatus.textContent = `Password generation failed: ${err.message || err}`;

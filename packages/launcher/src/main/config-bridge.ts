@@ -7,6 +7,7 @@ export const SENSITIVE_CONFIG_KEYS = [
   'discordClientSecret',
   'supabaseSecretKey',
   'supabaseDbPassword',
+  'supabaseDbUrlTemplate',
   'supabaseAccessToken',
   'paypalClientSecret',
   'paypalWebhookId',
