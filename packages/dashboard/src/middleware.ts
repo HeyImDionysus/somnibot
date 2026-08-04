@@ -220,16 +220,11 @@ export async function middleware(request: NextRequest) {
   // Generate per-request CSP nonce
   const nonce = generateNonce();
 
-  // ── Local mode: bypass Supabase entirely ──
-  const localResponse = handleLocalAuth(request, nonce);
-  if (localResponse) {
-    applyCspHeaders(localResponse, nonce);
-    return localResponse;
-  }
-
-  // Health checks must not depend on Supabase auth/session refresh. If this
-  // route touches remote auth before the health handler runs, a production
-  // auth outage can turn the monitor endpoint into a platform 500.
+  // Health probes are machine-to-machine requests and do not retain the
+  // launcher-local session cookie. They must bypass local auth before it can
+  // redirect a first request back to the identical URL to set that cookie.
+  // Otherwise Node's fetch follows the self-redirect until its redirect limit
+  // is exhausted and the launcher can never prove an otherwise healthy stack.
   if (
     ['/api/health', '/api/health/live'].includes(request.nextUrl.pathname) &&
     (request.method === 'GET' || request.method === 'HEAD')
@@ -237,6 +232,13 @@ export async function middleware(request: NextRequest) {
     const healthResponse = nextWithNonce(request, nonce);
     applyCspHeaders(healthResponse, nonce);
     return healthResponse;
+  }
+
+  // ── Local mode: bypass Supabase entirely ──
+  const localResponse = handleLocalAuth(request, nonce);
+  if (localResponse) {
+    applyCspHeaders(localResponse, nonce);
+    return localResponse;
   }
 
   if (hasValidReconcileSchedulerSecret(request)) {

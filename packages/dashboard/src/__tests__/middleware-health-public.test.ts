@@ -52,6 +52,19 @@ describe('middleware health access', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
+  it('allows launcher health probes in local mode without a session cookie', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'launcher-session-token';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
   it('allows unauthenticated container supervision to reach /api/health/live', async () => {
     mockCreateServerClient.mockImplementation(() => {
       throw new Error('liveness checks must not depend on Supabase auth');
