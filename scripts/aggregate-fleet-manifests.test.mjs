@@ -49,11 +49,12 @@ function writeReceipt(directory, sha = candidateSha) {
   }));
 }
 
-function runAggregate(directory, proofDirectory, expectedSha = candidateSha) {
+function runAggregate(directory, proofDirectory, expectedSha = candidateSha, extraArgs = []) {
   return spawnSync(process.execPath, [
     'scripts/aggregate-fleet-manifests.mjs',
     directory,
     ...(proofDirectory ? [proofDirectory] : []),
+    ...extraArgs,
   ], {
     cwd: process.cwd(),
     encoding: 'utf8',
@@ -92,6 +93,20 @@ test('rejects a declared gate until an exact external receipt exists', () => {
     const run = runAggregate(directory);
     assert.notEqual(run.status, 0);
     assert.match(run.stderr, /fleet has failed, gated, errored, or unresolved domains/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('machine validation preserves unresolved gates without calling them release proof', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-machine-'));
+  try {
+    writeFleet(directory, 'declared');
+    const run = runAggregate(directory, directory, candidateSha, ['--allow-unresolved']);
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /Fleet structure validated: 46 unique domains/);
+    assert.match(run.stdout, /1 external proof receipt\(s\) remain required before release/);
+    assert.doesNotMatch(run.stdout, /Fleet aggregate passed/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

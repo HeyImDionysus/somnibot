@@ -27,6 +27,7 @@ window.addEventListener('beforeunload', () => {
 
 export interface SomniBotAPI {
   // Config
+  waitForStartupReady: () => Promise<void>;
   getConfig: () => Promise<Record<string, unknown>>;
   saveConfig: (config: Record<string, unknown>) => Promise<void>;
   importExistingEnv: () => Promise<{
@@ -271,6 +272,7 @@ export interface SomniBotAPI {
 
 contextBridge.exposeInMainWorld('somnibot', {
   // Config
+  waitForStartupReady: () => ipcRenderer.invoke('wait-for-startup-ready'),
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config: Record<string, unknown>) => ipcRenderer.invoke('save-config', config),
   importExistingEnv: () => ipcRenderer.invoke('import-existing-env'),

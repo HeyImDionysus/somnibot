@@ -10,7 +10,15 @@ import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { getConfig, saveConfig, buildEnvVars, setKeychainFallbackListener, type LauncherConfig } from './config-store.js';
+import {
+  getConfig,
+  saveConfig,
+  buildEnvVars,
+  migrateCurrentPlaintextSecrets,
+  migrateLegacyConfig,
+  setKeychainFallbackListener,
+  type LauncherConfig,
+} from './config-store.js';
 import { writeLauncherAuditLog, resolveLauncherGuildId, type LauncherAuditEntry } from './audit-log.js';
 import {
   REGULAR_LOCAL_OPERATOR_DASHBOARD_URL,
@@ -148,6 +156,11 @@ let closeDecisionInFlight = false;
 let shutdownPromise: Promise<void> | null = null;
 let shutdownComplete = false;
 let quitRequestInFlight = false;
+let resolveStartupReady: (() => void) | null = null;
+const startupReady = new Promise<void>((resolve) => {
+  resolveStartupReady = resolve;
+});
+let startupStage = 'waiting-for-electron-ready';
 const activeVpsDeployment = new VpsDeploymentRunGate();
 
 /**
@@ -775,6 +788,13 @@ async function startLocalStack(
   config: LauncherConfig,
   options: { forceRestart?: boolean } = {},
 ): Promise<{ ok: boolean; error?: string }> {
+  const cancelled = () => launcherQuitRequested;
+  const cancelAndStop = async (): Promise<{ ok: false; error: string }> => {
+    await Promise.allSettled([stopAll(), stopLavalink(), stopValkey()]);
+    return { ok: false, error: 'Launcher shutdown was requested during local startup.' };
+  };
+  if (cancelled()) return { ok: false, error: 'Launcher shutdown is already in progress.' };
+
   const running = isRunning();
   if (running && !options.forceRestart) {
     return { ok: true };
@@ -792,6 +812,7 @@ async function startLocalStack(
   if (running) {
     await stopAll();
     lastStartedPayPalConfig = null;
+    if (cancelled()) return cancelAndStop();
   }
 
   const portFree = running
@@ -803,6 +824,7 @@ async function startLocalStack(
       error: 'The local dashboard port is already in use. Close the application using that port, or restart your computer and try again. See diagnostics for implementation details.',
     };
   }
+  if (cancelled()) return cancelAndStop();
 
   const vkResult = await startValkey();
   if (!vkResult.ok) {
@@ -812,6 +834,7 @@ async function startLocalStack(
       error: `Valkey/Redis is required for production-safe local operation and did not become ready: ${vkResult.error ?? 'unknown error'}`,
     };
   }
+  if (cancelled()) return cancelAndStop();
 
   const preparedSecrets = ensurePersistedVpsSecrets(config);
   const runtimeConfig = preparedSecrets.config;
@@ -830,6 +853,7 @@ async function startLocalStack(
         error: `Lavalink is enabled but did not become ready: ${llResult.error ?? 'unknown error'}`,
       };
     }
+    if (cancelled()) return cancelAndStop();
   }
 
   startLocalValkeyBackupSchedule((result) => {
@@ -846,7 +870,9 @@ async function startLocalStack(
 
   sessionToken = crypto.randomBytes(32).toString('hex');
   const envVars = buildEnvVars(runtimeConfig, sessionToken);
+  if (cancelled()) return cancelAndStop();
   await startAll(envVars);
+  if (cancelled()) return cancelAndStop();
   lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(runtimeConfig);
 
   void queueLauncherCredentialSync(runtimeConfig);
@@ -1666,6 +1692,9 @@ async function createWindow(showWhenReady = true): Promise<void> {
 
 function registerIpcHandlers(): void {
   // ── Config ──
+  ipcMain.handle('wait-for-startup-ready', async () => {
+    await startupReady;
+  });
   ipcMain.handle('get-config', () => {
     const config = getConfig();
     return maskConfigSecrets({
@@ -2346,6 +2375,23 @@ function registerIpcHandlers(): void {
 /* ------------------------------------------------------------------ */
 
 app.whenReady().then(async () => {
+  startupStage = 'credential-store-initialization';
+  // Register the failure sensor before the first credential read. Linux
+  // safeStorage is only reliable after app readiness, so legacy migration is
+  // deliberately deferred from module initialization to this point.
+  setKeychainFallbackListener(() => {
+    recordLauncherAudit({
+      action: 'launcher.keychain.unavailable',
+      category: 'security',
+      targetType: 'credential_store',
+      details: { fallback: 'refused', platform: process.platform },
+      success: false,
+      errorMessage: 'OS keychain (safeStorage) unavailable — credential access was refused.',
+    });
+  });
+  migrateCurrentPlaintextSecrets();
+  migrateLegacyConfig();
+
   // Phase 6: Clean up stale processes from a previous crash
   const staleCleanup = await cleanupStaleProcesses();
   if (!staleCleanup.ok) {
@@ -2359,21 +2405,14 @@ app.whenReady().then(async () => {
     return;
   }
 
-  // [infrastructure-launcher] Persist a durable audit row if the OS keychain is
-  // unavailable and credential access is refused fail-closed.
-  setKeychainFallbackListener(() => {
-    recordLauncherAudit({
-      action: 'launcher.keychain.unavailable',
-      category: 'security',
-      targetType: 'credential_store',
-      details: { fallback: 'refused', platform: process.platform },
-      success: false,
-      errorMessage: 'OS keychain (safeStorage) unavailable — credential access was refused.',
-    });
-  });
-
   registerIpcHandlers();
   let config = getConfig();
+  const requestedBackgroundLaunch = process.argv.includes('--background');
+  // Put the real operator surface on screen before any network-bound recovery,
+  // PayPal, or runtime-lease work. A background autostart remains hidden while
+  // those checks determine whether local auto-run is still safe.
+  await createWindow(!requestedBackgroundLaunch);
+  startupStage = 'credential-recovery';
   const credentialBootstrap = await restoreMissingCredentialsOnStartup(config);
   if (credentialBootstrap.restoredFields.length > 0) {
     saveConfig(credentialBootstrap.patch);
@@ -2396,6 +2435,7 @@ app.whenReady().then(async () => {
       errorMessage: credentialBootstrap.error,
     });
   }
+  startupStage = 'paypal-webhook-reconciliation';
   const startupPayPalWebhook = await reconcileSandboxPayPalWebhookOnStartup(
     config,
     resolvePayPalWebhookUrl(config),
@@ -2428,6 +2468,7 @@ app.whenReady().then(async () => {
   let startupLeaseStatus: Awaited<ReturnType<typeof readRuntimeLeaseStatus>> | undefined;
   let runtimeStatusNotInstalled = false;
   if (config.supabaseUrl.trim() && config.supabaseSecretKey.trim()) {
+    startupStage = 'runtime-ownership-check';
     try {
       startupLeaseStatus = await readRuntimeLeaseStatus(config.supabaseUrl, config.supabaseSecretKey);
     } catch (error) {
@@ -2466,6 +2507,7 @@ app.whenReady().then(async () => {
     && (startupLeaseStatus !== undefined || runtimeStatusNotInstalled);
 
   if (wantsLocalAutoStart && startupLeaseStatus?.activeMode === 'regular-local') {
+    startupStage = 'runtime-lease-wait';
     try {
       await waitForRuntimeLease(
         () => readRuntimeLeaseStatus(config.supabaseUrl, config.supabaseSecretKey),
@@ -2484,16 +2526,22 @@ app.whenReady().then(async () => {
       });
     }
   }
-  if (app.isPackaged) {
+  if (app.isPackaged && (process.platform === 'win32' || process.platform === 'darwin')) {
     app.setLoginItemSettings({
       openAtLogin: wantsLocalAutoStart,
       args: ['--background'],
     });
   }
-  const backgroundLaunch = shouldAutoRunLocal && process.argv.includes('--background');
-  await createWindow(!backgroundLaunch);
+  const backgroundLaunch = shouldAutoRunLocal && requestedBackgroundLaunch;
+  if (requestedBackgroundLaunch && !backgroundLaunch) mainWindow?.show();
 
+  // The operator may close the newly visible window while a network-bound
+  // startup check is still pending. Never start children after shutdown has
+  // begun, and release the renderer gate only for a live launcher instance.
+  if (launcherQuitRequested) return;
   if (shouldAutoRunLocal) {
+    if (launcherQuitRequested) return;
+    startupStage = 'local-autostart';
     const autoStartResult = await startLocalStack(config);
     if (!autoStartResult.ok) {
       recordLauncherAudit({
@@ -2512,6 +2560,11 @@ app.whenReady().then(async () => {
     }
   }
 
+  if (launcherQuitRequested) return;
+  startupStage = 'ready';
+  resolveStartupReady?.();
+  resolveStartupReady = null;
+
   // macOS: re-create window when dock icon is clicked
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -2520,7 +2573,16 @@ app.whenReady().then(async () => {
   });
 
   // Auto-updater — must await so IPC handlers are registered before renderer calls them
+  if (launcherQuitRequested) return;
+  startupStage = 'updater-initialization';
   await initUpdater({ recordAudit: recordLauncherAudit });
+}).catch(() => {
+  console.error(`[Launcher] Fatal startup error during ${startupStage}.`);
+  dialog.showErrorBox(
+    'SomniBot could not start',
+    'The launcher stopped during startup before its control surface was ready. Close any conflicting process and retry.',
+  );
+  app.quit();
 });
 
 // Second instance: focus the existing window

@@ -6,9 +6,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const manifestDirectory = process.argv[2];
-const proofDirectory = process.argv[3];
-const expectedCandidateSha = process.argv[4]?.trim()
+const args = process.argv.slice(2);
+const allowUnresolved = args.includes('--allow-unresolved');
+const positionalArgs = args.filter((arg) => !arg.startsWith('--'));
+const manifestDirectory = positionalArgs[0];
+const proofDirectory = positionalArgs[1];
+const expectedCandidateSha = positionalArgs[2]?.trim()
   || process.env.SOMNIBOT_CANDIDATE_SHA?.trim();
 if (!manifestDirectory) {
   throw new Error('Usage: node scripts/aggregate-fleet-manifests.mjs <manifest-directory> [proof-directory] [expected-candidate-sha]');
@@ -66,6 +69,7 @@ assert.deepEqual(seenShardLabels, expectedShardLabels, 'manifests must be one ea
 const domainIds = [];
 const invalidResults = [];
 const availableGateKeys = new Set();
+let unresolvedGateCount = 0;
 const expectedAssertionCellsPerDomain = 84;
 for (const manifest of manifests) {
   assert.equal(manifest.schemaVersion, 2, `unsupported manifest from shard ${manifest.shard}`);
@@ -95,9 +99,10 @@ for (const manifest of manifests) {
     );
     for (const key of gateKeys) availableGateKeys.add(key);
     const unresolvedGateKeys = [...gateKeys].filter((key) => !provenGateKeys.has(key));
+    unresolvedGateCount += unresolvedGateKeys.length;
     if (
       result.fail !== 0
-      || unresolvedGateKeys.length > 0
+      || (!allowUnresolved && unresolvedGateKeys.length > 0)
       || result.hang
       || result.error
       || (Array.isArray(result.errored) && result.errored.length > 0)
@@ -118,4 +123,11 @@ assert.equal(expectedDomainIds.length, 46, 'the catalog must contain exactly 46 
 assert.deepEqual(new Set(domainIds), new Set(expectedDomainIds), 'fleet manifests omit or add catalog domains');
 assert.deepEqual(invalidResults, [], `fleet has failed, gated, errored, or unresolved domains: ${invalidResults.join(', ')}`);
 
-console.log(`Fleet aggregate passed: 46 unique domains across ${files.length} shards with ${provenGateKeys.size} external proof receipt(s).`);
+if (allowUnresolved) {
+  console.log(
+    `Fleet structure validated: 46 unique domains across ${files.length} shards; `
+    + `${unresolvedGateCount} external proof receipt(s) remain required before release.`,
+  );
+} else {
+  console.log(`Fleet aggregate passed: 46 unique domains across ${files.length} shards with ${provenGateKeys.size} external proof receipt(s).`);
+}

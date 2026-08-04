@@ -35,6 +35,8 @@ export interface GuildEntry {
 }
 
 export interface LauncherConfig {
+  /** One-time marker that current-store plaintext secrets were migrated. */
+  credentialStoreVersion?: number;
   // ── Discord (required) ──
   discordToken: string;
   discordApplicationId: string;
@@ -101,6 +103,7 @@ export interface LauncherConfig {
 }
 
 const DEFAULTS: LauncherConfig = {
+  credentialStoreVersion: 0,
   discordToken: '',
   discordApplicationId: '',
   discordClientSecret: '',
@@ -201,7 +204,14 @@ function notifyKeychainUnavailable(): void {
 
 function isSafeStorageAvailable(): boolean {
   try {
-    return safeStorage.isEncryptionAvailable();
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    // Electron can fall back to `basic_text` when a Linux keyring is absent.
+    // That backend is reversible with a hard-coded key and therefore does not
+    // satisfy SomniBot's encrypted credential-store contract.
+    if (process.platform === 'linux' && safeStorage.getSelectedStorageBackend() === 'basic_text') {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -223,7 +233,7 @@ function encryptSensitive(value: string): string {
 
 /**
  * Decrypt a string that was encrypted via encryptSensitive().
- * Handles both encrypted (base64 of safeStorage buffer) and legacy plaintext values.
+ * Legacy plaintext is handled only by the one-time migration below.
  */
 function decryptSensitive(stored: string): string {
   if (!stored) return '';
@@ -235,10 +245,12 @@ function decryptSensitive(stored: string): string {
     const buf = Buffer.from(stored, 'base64');
     return safeStorage.decryptString(buf);
   } catch {
-    // If decryption fails, the value is likely a legacy plaintext string
-    // (from before safeStorage migration). Return as-is.
+    // Current-store plaintext is migrated exactly once by
+    // migrateCurrentPlaintextSecrets(). After that boundary, malformed or
+    // injected values fail closed and never become runtime credentials.
+    console.warn('[ConfigStore] Stored credential could not be decrypted; refusing to use it.');
+    return '';
   }
-  return stored;
 }
 
 function getSensitive(key: keyof LauncherConfig): string {
@@ -260,7 +272,7 @@ function setSensitive(key: keyof LauncherConfig, value: string): void {
  * legacy file. Both the current safeStorage format and the older electron-
  * store encryptionKey format are supported.
  */
-function migrateLegacyConfig(): void {
+export function migrateLegacyConfig(): void {
   try {
     const appDataPath = app.getPath('appData');
     const current = getConfigSnapshot();
@@ -312,6 +324,30 @@ function migrateLegacyConfig(): void {
   }
 }
 
+/**
+ * Re-encrypt plaintext values written by pre-safeStorage launcher builds.
+ * The migration is bounded by a durable version marker; later decryption
+ * failures are rejected instead of being interpreted as plaintext secrets.
+ */
+export function migrateCurrentPlaintextSecrets(): void {
+  if (store.get('credentialStoreVersion', 0) >= 1) return;
+  if (!isSafeStorageAvailable()) {
+    notifyKeychainUnavailable();
+    return;
+  }
+
+  for (const key of SENSITIVE_KEYS) {
+    const raw = store.get(key, '') as string;
+    if (!raw) continue;
+    try {
+      safeStorage.decryptString(Buffer.from(raw, 'base64'));
+    } catch {
+      setSensitive(key, raw);
+    }
+  }
+  store.set('credentialStoreVersion', 1);
+}
+
 /** Read current values without decrypting sensitive fields twice. */
 function getConfigSnapshot(): Partial<LauncherConfig> {
   const storedOrUndefined = <T>(key: keyof LauncherConfig, fallback: T): T | undefined => (
@@ -357,10 +393,9 @@ function getConfigSnapshot(): Partial<LauncherConfig> {
   };
 }
 
-migrateLegacyConfig();
-
 export function getConfig(): LauncherConfig {
   return {
+    credentialStoreVersion: store.get('credentialStoreVersion', 0),
     discordToken: getSensitive('discordToken'),
     discordApplicationId: store.get('discordApplicationId', ''),
     discordClientSecret: getSensitive('discordClientSecret'),

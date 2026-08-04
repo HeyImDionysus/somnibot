@@ -6,7 +6,7 @@ import {
 } from './supabase-sync.js';
 import { validateDiscordToken, type ValidationResult } from './validators.js';
 
-const RECOVERABLE_STRING_FIELDS = [
+const CORE_RECOVERABLE_STRING_FIELDS = [
   'discordToken',
   'discordApplicationId',
   'discordClientSecret',
@@ -15,16 +15,20 @@ const RECOVERABLE_STRING_FIELDS = [
   'supabaseDbPassword',
   'supabaseDbUrlTemplate',
   'supabaseAccessToken',
+] as const satisfies ReadonlyArray<keyof LauncherConfig>;
+
+const PAYPAL_RECOVERABLE_STRING_FIELDS = [
   'paypalClientId',
   'paypalClientSecret',
   'paypalWebhookId',
   'paypalWebhookProofKey',
-  'publicCallbackBaseUrl',
+] as const satisfies ReadonlyArray<keyof LauncherConfig>;
+
+const VPS_RECOVERABLE_STRING_FIELDS = [
   'vpsDomain',
   'vpsSshHost',
   'vpsSshUser',
   'vpsDeployPath',
-  'tailscaleAuthKey',
   'vpsCsrfSecret',
   'vpsNextAuthSecret',
   'vpsWebhookReplaySecret',
@@ -47,10 +51,24 @@ type PullCredentials = (
 type ValidateDiscordCredential = (token: string) => Promise<ValidationResult>;
 
 export function needsCloudCredentialRestore(config: LauncherConfig): boolean {
-  return RECOVERABLE_STRING_FIELDS.some((field) => {
+  const hasMissing = (fields: ReadonlyArray<keyof LauncherConfig>) => fields.some((field) => {
     const value = config[field];
     return typeof value === 'string' && value.trim().length === 0;
   });
+  if (hasMissing(CORE_RECOVERABLE_STRING_FIELDS)) return true;
+
+  // Optional integrations must not turn every ordinary launcher start into a
+  // cloud recovery request. Once an integration is configured, however, a
+  // missing member of that credential set is recoverable and should be pulled.
+  const paypalConfigured = PAYPAL_RECOVERABLE_STRING_FIELDS.some((field) => {
+    const value = config[field];
+    return typeof value === 'string' && value.trim().length > 0;
+  });
+  if (paypalConfigured && hasMissing(PAYPAL_RECOVERABLE_STRING_FIELDS)) return true;
+  const vpsConfigured = config.runtimeMode === 'vps'
+    || config.lastSuccessfulRuntimeMode === 'vps'
+    || Boolean(config.vpsSshHost.trim() || config.vpsDomain.trim());
+  return vpsConfigured && hasMissing(VPS_RECOVERABLE_STRING_FIELDS);
 }
 
 /**

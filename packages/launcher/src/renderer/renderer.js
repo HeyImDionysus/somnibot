@@ -168,6 +168,13 @@ function applyConfigToForm(config) {
 }
 
 async function init() {
+  // The window is created immediately so startup never looks hung, but its
+  // credential form remains inert until cloud/keychain/runtime reconciliation
+  // has completed. This prevents a stale form snapshot from overwriting a
+  // credential restored during startup.
+  document.body.inert = true;
+  setFieldsDisabled(true);
+
   // Show version
   try {
     const ver = await window.somnibot.getVersion();
@@ -178,6 +185,7 @@ async function init() {
 
   // Load saved config
   try {
+    await window.somnibot.waitForStartupReady();
     const config = await window.somnibot.getConfig();
     applyConfigToForm(config);
     if (isCredentialFormComplete() && navigator.onLine) {
@@ -189,7 +197,10 @@ async function init() {
     }
   } catch (err) {
     console.error('Failed to load config:', err);
+    return;
   }
+  setFieldsDisabled(false);
+  document.body.inert = false;
 
   // Check current status (in case app reconnected)
   await refreshProcessStatus();

@@ -768,7 +768,7 @@ jobs:
         run: cd packages && supabase stop 2>/dev/null || true
 
   aggregate-fleet:
-    name: 🧭 Aggregate strict 46-domain fleet
+    name: 🧭 Validate 46-domain fleet (strict on main)
     if: always()
     needs: [test-live, test-fleet]
     runs-on: ubuntu-latest
@@ -792,8 +792,26 @@ jobs:
           pattern: fleet-proof-*
           path: artifacts/proofs
           merge-multiple: true
-      - name: Prove exact fleet coverage and clean results
-        run: node scripts/aggregate-fleet-manifests.mjs artifacts/fleet artifacts/proofs
+      - name: Load exact-candidate operator acceptance receipts
+        shell: bash
+        run: |
+          evidence_branch="fleet-evidence/${SOMNIBOT_CANDIDATE_SHA}"
+          if git ls-remote --exit-code --heads origin "${evidence_branch}" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "refs/heads/${evidence_branch}"
+            mkdir -p /tmp/somnibot-fleet-evidence
+            git archive FETCH_HEAD fleet-proofs \
+              | tar -xf - -C /tmp/somnibot-fleet-evidence
+            find /tmp/somnibot-fleet-evidence/fleet-proofs \
+              -maxdepth 1 -type f -name 'fleet-proof-*.json' \
+              -exec cp '{}' artifacts/proofs/ ';'
+            echo "Loaded candidate-bound operator receipts from ${evidence_branch}."
+          else
+            echo "No operator receipt branch exists for this candidate yet."
+          fi
+      - name: Validate exact fleet structure and enforce release proof policy
+        run: >-
+          node scripts/aggregate-fleet-manifests.mjs artifacts/fleet artifacts/proofs
+          ${{ github.event_name == 'pull_request' && '--allow-unresolved' || '' }}
       - name: Inventory every unresolved functional fleet gate
         if: always()
         run: node scripts/classify-fleet-gates.mjs artifacts/fleet artifacts/fleet-gate-classification.json

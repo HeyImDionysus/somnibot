@@ -67,6 +67,31 @@ describe('startup credential bootstrap', () => {
     expect(pull).not.toHaveBeenCalled();
   });
 
+  it('does not pull on every regular-local launch for integrations that were never configured', async () => {
+    const pull = vi.fn();
+    const current = config({
+      paypalClientId: '',
+      paypalClientSecret: '',
+      paypalWebhookId: '',
+      paypalWebhookProofKey: '',
+      vpsDomain: '',
+      vpsSshHost: '',
+      vpsSshUser: '',
+      vpsDeployPath: '',
+      tailscaleAuthKey: '',
+      vpsCsrfSecret: '',
+      vpsNextAuthSecret: '',
+      vpsWebhookReplaySecret: '',
+      vpsValkeyPassword: '',
+      vpsLavalinkPassword: '',
+    });
+
+    expect(needsCloudCredentialRestore(current)).toBe(false);
+    const result = await restoreMissingCredentialsOnStartup(current, pull, validDiscord);
+    expect(result.attempted).toBe(false);
+    expect(pull).not.toHaveBeenCalled();
+  });
+
   it('restores only missing values and never overwrites established local credentials', async () => {
     const current = config({
       supabaseDbPassword: '',
