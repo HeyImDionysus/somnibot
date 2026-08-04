@@ -20,8 +20,7 @@ describe('setup flow status', () => {
     const callbackStep = status.steps.find(step => step.id === 'regular-callback');
     expect(callbackStep?.status).toBe('pending');
     expect(callbackStep?.detail).toContain('enable or detect Tailscale Funnel during setup');
-    expect(status.summary.localDashboardUrl).toBe('http://localhost');
-    expect(status.summary.localDashboardUrl).not.toContain(':3456');
+    expect(status.summary.localDashboardUrl).toBe('http://localhost:3456');
     expect(status.summary.publicCallbackUrl).toBe('Not set yet');
     expect(status.summary.diagnostics.operatorDashboardUrl).toBe('http://localhost:3456');
   });

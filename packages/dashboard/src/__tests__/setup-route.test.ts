@@ -432,7 +432,7 @@ describe('POST /api/setup finalize', () => {
     });
   });
 
-  it('persists the database password when a launcher or setup client supplies it', async () => {
+  it('records only a configured marker when a launcher supplies the database password', async () => {
     process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
     process.env.SESSION_TOKEN = 'local-session-token';
     process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
@@ -460,8 +460,8 @@ describe('POST /api/setup finalize', () => {
     expect(res.status).toBe(200);
     expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: 'supabase_db_password',
-        value: 'database-password',
+        key: 'supabase_db_password_configured',
+        value: 'true',
         section: 'supabase',
       }),
       { onConflict: 'key' },
@@ -844,6 +844,7 @@ describe('POST /api/setup finalize', () => {
   });
 
   it('checks bot health against the saved Discord guild before locking setup', async () => {
+    configureReadyPayPalEnv();
     const instanceSettingsTable = registerTable(mock, 'instance_settings');
     instanceSettingsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
     instanceSettingsTable.limit.mockResolvedValueOnce({
@@ -919,7 +920,7 @@ describe('POST /api/setup finalize', () => {
     expect(mock._query.upsert).not.toHaveBeenCalled();
   });
 
-  it('passes a submitted Supabase access token into auth auto-config before locking setup', async () => {
+  it('passes a submitted Supabase access token into auth auto-config without persisting it', async () => {
     configureReadyPayPalEnv();
     configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -944,8 +945,8 @@ describe('POST /api/setup finalize', () => {
     });
     expect(mock._query.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: 'supabase_access_token',
-        value: 'setup-provided-token',
+        key: 'supabase_access_token_configured',
+        value: 'true',
         section: 'supabase',
       }),
       { onConflict: 'key' },
@@ -1133,7 +1134,7 @@ describe('POST /api/setup finalize', () => {
     expect(mock._query.upsert).not.toHaveBeenCalled();
   });
 
-  it('locks setup with previously saved PayPal values after a blocked retry or restart', async () => {
+  it('does not lock setup using previously persisted raw PayPal secrets', async () => {
     const instanceSettingsTable = registerTable(mock, 'instance_settings');
     instanceSettingsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
     instanceSettingsTable.limit.mockResolvedValueOnce({
@@ -1145,7 +1146,6 @@ describe('POST /api/setup finalize', () => {
       ],
       error: null,
     });
-    configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: true,
@@ -1157,20 +1157,13 @@ describe('POST /api/setup finalize', () => {
     }));
     const body = await res.json();
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
     expect(body).toEqual({
-      ok: true,
-      authConfigured: true,
-      authError: null,
-      setupLocked: true,
+      ok: false,
+      error: 'PayPal Client ID and Client Secret are required before setup can finalize.',
+      setupLocked: false,
     });
-    expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: 'setup_completed_at',
-        section: 'system',
-      }),
-      { onConflict: 'key' },
-    );
+    expect(instanceSettingsTable.upsert).not.toHaveBeenCalled();
   });
 
   it('does not lock setup when no Discord guild is detected', async () => {
@@ -1838,7 +1831,7 @@ describe('GET /api/setup status', () => {
     expect(body.paypalWebhookError).toBe('PayPal Client ID and Client Secret are required before setup can finalize.');
   });
 
-  it('reports saved PayPal values as ready after a setup retry or restart', async () => {
+  it('does not treat persisted PayPal secret markers as live runtime credentials', async () => {
     vi.stubEnv('DISCORD_GUILD_ID', 'guild-1');
 
     const guildTable = registerTable(mock, 'guild');
@@ -1861,8 +1854,8 @@ describe('GET /api/setup status', () => {
     instanceSettingsTable.limit.mockResolvedValueOnce({
       data: [
         { key: 'paypal_client_id', value: 'saved-paypal-client-id' },
-        { key: 'paypal_client_secret', value: 'saved-paypal-client-secret' },
-        { key: 'paypal_webhook_id', value: 'WH-SAVED' },
+        { key: 'paypal_client_secret_configured', value: 'true' },
+        { key: 'paypal_webhook_id_configured', value: 'true' },
         { key: 'paypal_webhook_url', value: 'https://dashboard.example.com/api/paypal/webhook' },
       ],
       error: null,
@@ -1876,8 +1869,8 @@ describe('GET /api/setup status', () => {
     expect(body.paypalWebhookUrlReady).toBe(true);
     expect(body.paypalCredentialsConfigured).toBe(true);
     expect(body.paypalWebhookIdConfigured).toBe(true);
-    expect(body.paypalWebhookReady).toBe(true);
-    expect(body.paypalWebhookError).toBeNull();
+    expect(body.paypalWebhookReady).toBe(false);
+    expect(body.paypalWebhookError).toBe('PayPal Client ID and Client Secret are required before setup can finalize.');
     expect(diagnosticsTable.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
     expect(diagnosticsTable.eq).toHaveBeenCalledWith('type', 'health');
   });
@@ -2023,8 +2016,8 @@ describe('POST /api/setup verify-supabase', () => {
     );
     expect(mock._query.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: 'supabase_secret_key',
-        value: 'sb_secret_test',
+        key: 'supabase_secret_key_configured',
+        value: 'true',
         section: 'supabase',
       }),
       { onConflict: 'key' },

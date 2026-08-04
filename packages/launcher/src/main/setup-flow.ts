@@ -490,7 +490,12 @@ function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSum
   return {
     runtimeMode,
     runtimeLabel: runtimeMode === 'vps' ? 'VPS' : 'Regular local',
-    localDashboardUrl: displayUrlWithoutPort(operatorDashboardUrl),
+    // The regular-local dashboard listens on a non-default port, so stripping
+    // it produces an unusable operator URL. VPS summaries still hide their
+    // internal service port behind the public HTTPS origin.
+    localDashboardUrl: runtimeMode === 'vps'
+      ? displayUrlWithoutPort(operatorDashboardUrl)
+      : operatorDashboardUrl,
     publicCallbackUrl: displayUrlWithoutPort(publicCallbackBaseUrl),
     authCallbackUrl: displayUrlWithoutPort(callbacks.authCallbackUrl),
     paypalWebhookUrl: displayUrlWithoutPort(callbacks.paypalWebhookUrl),

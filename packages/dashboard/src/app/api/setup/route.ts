@@ -347,10 +347,10 @@ function resolveSetupPayPalWebhookStatus(
 ): { url: string | null; urlReady: boolean; ready: boolean; error: string | null } {
   const derivedWebhookUrl = normalizeSetupPayPalWebhookUrl(runtimeCallbacks.paypalWebhookUrl);
   const paypalClientId = env['PAYPAL_CLIENT_ID']?.trim() || savedSettings.get('paypal_client_id');
-  const paypalClientSecret = env['PAYPAL_CLIENT_SECRET']?.trim()
-    || (hasConfiguredSetupSecret(savedSettings, 'paypal_client_secret') ? 'configured' : '');
-  const paypalWebhookId = env['PAYPAL_WEBHOOK_ID']?.trim()
-    || (hasConfiguredSetupSecret(savedSettings, 'paypal_webhook_id') ? 'configured' : '');
+  // Persisted markers are display-only. They must never substitute for the
+  // runtime secret or webhook identifier required to make PayPal calls.
+  const paypalClientSecret = env['PAYPAL_CLIENT_SECRET']?.trim();
+  const paypalWebhookId = env['PAYPAL_WEBHOOK_ID']?.trim();
   const paypalCredentialsConfigured = Boolean(paypalClientId && paypalClientSecret);
   const paypalWebhookIdConfigured = Boolean(paypalWebhookId);
 
@@ -427,11 +427,9 @@ function getRequiredPayPalReadinessError(
     || process.env['PAYPAL_CLIENT_ID']?.trim()
     || savedSettings.get('paypal_client_id');
   const paypalClientSecret = credentials.paypal_client_secret?.trim()
-    || process.env['PAYPAL_CLIENT_SECRET']?.trim()
-    || (hasConfiguredSetupSecret(savedSettings, 'paypal_client_secret') ? 'configured' : '');
+    || process.env['PAYPAL_CLIENT_SECRET']?.trim();
   const paypalWebhookId = credentials.paypal_webhook_id?.trim()
-    || process.env['PAYPAL_WEBHOOK_ID']?.trim()
-    || (hasConfiguredSetupSecret(savedSettings, 'paypal_webhook_id') ? 'configured' : '');
+    || process.env['PAYPAL_WEBHOOK_ID']?.trim();
   const paypalWebhookUrl = credentials.paypal_webhook_url?.trim()
     || process.env['PAYPAL_WEBHOOK_URL']?.trim()
     || savedSettings.get('paypal_webhook_url');
