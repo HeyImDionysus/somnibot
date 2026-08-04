@@ -408,7 +408,12 @@ export async function executeProviderMoneyRecovery(
       action: 'commerce.provider_money_recovery_manual_review',
       target_type: 'provider_capture',
       target_id: row.provider_resource_id,
-      details: { webhook_event_id: recoveryId, attempts, max_attempts, provider_status: response.status },
+      details: {
+        webhook_event_id: recoveryId,
+        attempts,
+        max_attempts: maxAttempts,
+        provider_status: response.status,
+      },
     });
   }
   return terminal ? 'manual_review' : 'retry';
