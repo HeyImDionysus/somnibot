@@ -149,6 +149,8 @@ describe('atomic paid checkout intent binding', () => {
     expect(handlerSource).not.toContain("update({ provider_id:");
     expect(handlerSource).not.toContain("update({ plan_id:");
     expect(handlerSource).toContain('inFlight = await inspectInFlightCheckout');
+    expect(handlerSource).toContain("repeatPurchasePolicy !== 'unique' && inFlight.reason === 'active_entitlement'");
+    expect(handlerSource).toContain("inFlight.reason === 'provider_checkout'");
     expect(handlerSource.indexOf("'commerce_reap_unexposed_paid_checkouts_for_product'")).toBeLessThan(
       handlerSource.indexOf('inFlight = await inspectInFlightCheckout'),
     );

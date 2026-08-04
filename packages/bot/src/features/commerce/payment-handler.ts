@@ -776,7 +776,10 @@ export async function handleBuyButton(
       await replyCheckoutUnavailable(interaction, supabase, guildId);
       return;
     }
-    if (inFlight.state === 'blocked') {
+    if (
+      inFlight.state === 'blocked'
+      && !(repeatPurchasePolicy !== 'unique' && inFlight.reason === 'active_entitlement')
+    ) {
       if (inFlight.reason === 'provider_checkout' && inFlight.approvalUrl) {
         await interaction.editReply({
           embeds: [
