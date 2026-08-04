@@ -124,6 +124,17 @@ _TABLE_REF_STOPWORDS = frozenset(
         "lateral",
         "only",
         "set",  # UPDATE <alias> SET ...
+        # PL/pgSQL control-flow / row-lock modifiers that can follow UPDATE
+        # or FOR UPDATE.  They are keywords, never relation names.
+        "loop",
+        "case",
+        "true",
+        "false",
+        "null",
+        "of",
+        "nowait",
+        "skip",
+        "locked",
         "where",
         "values",
         "generate_series",
@@ -728,7 +739,8 @@ def _cte_names(body):
     names = set()
     # WITH [RECURSIVE] name AS  |  , name AS   (the "AS" precedes "(" or a query)
     for m in re.finditer(
-        r"(?:\bWITH\b(?:\s+RECURSIVE)?|,)\s*(?P<cte>[a-zA-Z_]\w*)\s+AS\s*\(",
+        r"(?:\bWITH\b(?:\s+RECURSIVE)?|,)\s*"
+        r"(?P<cte>[a-zA-Z_]\w*)\s+AS\s+(?:(?:NOT\s+)?MATERIALIZED\s+)?\(",
         body,
         re.IGNORECASE,
     ):
@@ -757,13 +769,20 @@ def scan_body(fn, include_tables=False):
     # --- Advisory: unqualified base-table references. ---
     ctes = _cte_names(body)
     table_ctx_re = re.compile(
-        r"\b(?:INSERT\s+INTO|DELETE\s+FROM|UPDATE|FROM|JOIN)\s+"
+        r"\b(?P<ctx>INSERT\s+INTO|DELETE\s+FROM|UPDATE|FROM|JOIN)\s+"
         r"(?P<ref>[a-zA-Z_]\w*)",
         re.IGNORECASE,
     )
     for m in table_ctx_re.finditer(body):
         ref = m.group("ref")
         low = ref.lower()
+        # `IS [NOT] DISTINCT FROM` is a value-comparison operator, not a
+        # relation clause.  Without this guard every parameter/local appearing
+        # on the right side of that operator looks like an unqualified table.
+        if m.group("ctx").upper() == "FROM":
+            before = body[: m.start("ctx")].rstrip()
+            if re.search(r"\bIS\s+(?:NOT\s+)?DISTINCT\s*$", before, re.IGNORECASE):
+                continue
         after = body[m.end():m.end() + 1]
         if after == ".":
             continue  # schema-qualified (FROM public.foo captured "public")
