@@ -893,7 +893,7 @@ export async function handleBuyButton(
     planId: string | null,
     orderId: string | null,
     reason: string,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const { error } = await supabase.rpc('commerce_reap_unexposed_paid_checkout', {
       p_checkout_token: checkoutToken,
       p_guild_id: guildId,
@@ -906,6 +906,7 @@ export async function handleBuyButton(
       p_reason: reason,
     });
     if (error) log.warn('Failed to reap uncertain unexposed checkout', { reason, detail: error.message });
+    return !error;
   };
   const markCheckoutExposed = async (
     providerKind: 'capture' | 'subscription',
@@ -1007,19 +1008,6 @@ export async function handleBuyButton(
     if (!orderData || typeof orderData.id !== 'string' || orderData.id.length === 0) {
       await cancelCheckoutIntent('provider order response malformed');
       await interaction.editReply({ content: '❌ Failed to create payment. Please try again.' });
-      return;
-    }
-    const { data: providerBindRow, error: providerBindError } = await supabase
-      .from('commerce_checkout_intents')
-      .update({ provider_id: orderData.id, status: 'bound' })
-      .eq('token', checkoutToken)
-      .eq('status', 'pending')
-      .select('token')
-      .maybeSingle();
-    if (providerBindError || !providerBindRow) {
-      log.error('Failed to bind PayPal order to checkout ledger:', providerBindError?.message ?? 'no row updated');
-      await cancelCheckoutIntent('provider order binding failed');
-      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
       return;
     }
     const approvalLink = orderData.links?.find((l) => l.rel === 'approve');
@@ -1174,19 +1162,6 @@ export async function handleBuyButton(
       });
       return;
     }
-    const { data: planBindRow, error: planBindError } = await supabase
-      .from('commerce_checkout_intents')
-      .update({ plan_id: plan.id })
-      .eq('token', checkoutToken)
-      .eq('status', 'pending')
-      .select('token')
-      .maybeSingle();
-    if (planBindError || !planBindRow) {
-      log.error('Failed to bind subscription plan to checkout ledger:', planBindError?.message ?? 'no row updated');
-      await cancelCheckoutIntent('subscription plan binding failed');
-      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
-      return;
-    }
     // Create PayPal subscription
     const subPayload = {
       plan_id: plan.paypal_plan_id,
@@ -1230,19 +1205,6 @@ export async function handleBuyButton(
     if (!subData || typeof subData.id !== 'string' || subData.id.length === 0) {
       await cancelCheckoutIntent('provider subscription response malformed');
       await interaction.editReply({ content: '❌ Failed to create subscription. Please try again.' });
-      return;
-    }
-    const { data: providerBindRow, error: providerBindError } = await supabase
-      .from('commerce_checkout_intents')
-      .update({ provider_id: subData.id, status: 'bound' })
-      .eq('token', checkoutToken)
-      .eq('status', 'pending')
-      .select('token')
-      .maybeSingle();
-    if (providerBindError || !providerBindRow) {
-      log.error('Failed to bind PayPal subscription to checkout ledger:', providerBindError?.message ?? 'no row updated');
-      await cancelCheckoutIntent('provider subscription binding failed');
-      await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
       return;
     }
     const approvalLink = subData.links?.find((l) => l.rel === 'approve');

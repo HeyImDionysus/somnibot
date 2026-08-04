@@ -10,6 +10,7 @@ import { handleBuyButton } from '../features/commerce/payment-handler.js';
 
 const migration = readFileSync(new URL('../../../supabase/migrations/20260804142000_atomic_paid_checkout_intent_binding.sql', import.meta.url), 'utf8');
 const recoveryMigration = readFileSync(new URL('../../../supabase/migrations/20260804143000_paid_checkout_exposure_recovery.sql', import.meta.url), 'utf8');
+const noOrderRecoveryMigration = readFileSync(new URL('../../../supabase/migrations/20260804144000_checkout_recovery_no_order_cleanup.sql', import.meta.url), 'utf8');
 const handlerSource = readFileSync(new URL('../features/commerce/payment-handler.ts', import.meta.url), 'utf8');
 
 function interaction(customId = 'store:buy:prod-1') {
@@ -138,7 +139,15 @@ describe('atomic paid checkout intent binding', () => {
     expect(recoveryMigration).toContain('commerce_reap_unexposed_paid_checkouts_for_product');
     expect(recoveryMigration).toContain("'approval_link_not_exposed'");
     expect(recoveryMigration).toContain("'disposition', 'exposed'");
+    expect(noOrderRecoveryMigration).toContain("'cancelled_no_order'");
+    expect(noOrderRecoveryMigration).toContain("status IN ('pending', 'bound')");
+    expect(noOrderRecoveryMigration).toContain("created_at <= pg_catalog.clock_timestamp() - INTERVAL '60 seconds'");
+    expect(noOrderRecoveryMigration).toContain('linked order missing');
+    expect(noOrderRecoveryMigration).toContain('linked order identity mismatch');
+    expect(noOrderRecoveryMigration).toContain('REVOKE ALL ON FUNCTION');
     expect(handlerSource).toContain("'commerce_reap_unexposed_paid_checkouts_for_product'");
+    expect(handlerSource).not.toContain("update({ provider_id:");
+    expect(handlerSource).not.toContain("update({ plan_id:");
     expect(handlerSource.indexOf("'commerce_reap_unexposed_paid_checkouts_for_product'")).toBeLessThan(
       handlerSource.indexOf("if (repeatPurchasePolicy === 'unique')"),
     );
