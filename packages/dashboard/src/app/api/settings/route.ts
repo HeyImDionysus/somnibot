@@ -129,6 +129,10 @@ export async function GET() {
         if (encryptedBaseKey && SECRET_FIELDS.has(encryptedBaseKey) && !values[encryptedBaseKey]) {
           values[encryptedBaseKey] = '••••••••';
           sources[encryptedBaseKey] = 'db';
+        } else if (SECRET_FIELDS.has(row.key)) {
+          // Ignore legacy plaintext secret rows. The migration retires them,
+          // and a stale row must never be treated as usable configuration.
+          continue;
         } else if (row.value && !values[row.key]) {
           // DB value, only if env var isn't already set
           values[row.key] = SECRET_FIELDS.has(row.key) ? maskValue(row.value) : row.value;
