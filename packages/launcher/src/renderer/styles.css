@@ -946,7 +946,7 @@ main::-webkit-scrollbar-thumb:hover {
 .toggle-vis {
   position: absolute;
   right: 8px;
-  bottom: 8px;
+  top: 27px;
   background: none;
   border: none;
   color: var(--text-muted);

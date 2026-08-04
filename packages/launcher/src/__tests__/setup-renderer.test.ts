@@ -23,6 +23,9 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain("btn.textContent = 'Saved'");
     expect(renderer).toContain("input.placeholder = 'Saved securely — type to replace'");
     expect(renderer).toContain("input.dataset.savedSecret === 'true' ? MASKED_SECRET : input.value");
+    const styles = readSourceFile('renderer/styles.css');
+    expect(styles).toMatch(/\.toggle-vis \{[\s\S]*?top: 27px;[\s\S]*?\}/);
+    expect(styles).not.toMatch(/\.toggle-vis \{[\s\S]*?bottom: 8px;[\s\S]*?\}/);
   });
 
   it('shows VPS-ready callback values as first-class setup summary rows', () => {
