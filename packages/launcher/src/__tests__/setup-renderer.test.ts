@@ -83,7 +83,8 @@ describe('launcher setup renderer wiring', () => {
     expect(preload).toContain("ipcRenderer.invoke('supabase:generate-db-password')");
     expect(main).toContain("ipcMain.handle('supabase:discover-projects'");
     expect(main).toContain("saveConfig(sanitized)");
-    expect(main).toContain("listSupabaseProjects(sanitized.supabaseAccessToken ?? '')");
+    expect(main).toContain('sanitized.supabaseAccessToken ?? getConfig().supabaseAccessToken');
+    expect(main).toContain('listSupabaseProjects(effectiveAccessToken)');
     expect(main).toContain("ipcMain.handle('supabase:select-project'");
     expect(main).toContain('secretKeyReady: Boolean(result.credentials.secretKey)');
     expect(main).not.toContain('secretKey: result.credentials.secretKey');

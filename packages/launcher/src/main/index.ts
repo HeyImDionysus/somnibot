@@ -1910,9 +1910,14 @@ function registerIpcHandlers(): void {
     // Persist and consume the same PAT atomically. Previously the renderer
     // swallowed save failures and discovery could silently use stale state.
     const sanitized = sanitizeRendererConfigPatch({ supabaseAccessToken: accessToken });
-    saveConfig(sanitized);
-    void queueLauncherCredentialSync(getConfig());
-    const result = await listSupabaseProjects(sanitized.supabaseAccessToken ?? '');
+    if (sanitized.supabaseAccessToken) {
+      saveConfig(sanitized);
+      void queueLauncherCredentialSync(getConfig());
+    }
+    // A restarted renderer receives only MASKED_SECRET. Resolve that sentinel
+    // to the encrypted main-process value instead of treating it as empty.
+    const effectiveAccessToken = sanitized.supabaseAccessToken ?? getConfig().supabaseAccessToken;
+    const result = await listSupabaseProjects(effectiveAccessToken);
     if (!result.ok) return result;
     return {
       ok: true,
