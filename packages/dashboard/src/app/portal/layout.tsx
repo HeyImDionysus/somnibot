@@ -6,6 +6,7 @@
  */
 import type { Metadata } from 'next';
 import { PortalLogout } from '@/components/portal/portal-logout';
+import { PortalBrand } from '@/components/portal/portal-brand';
 
 export const metadata: Metadata = {
   title: 'Customer Portal — SomniBot',
@@ -19,7 +20,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
       <header className="sticky top-0 z-40 border-b border-discord-border-subtle bg-discord-bg-secondary/95 backdrop-blur">
         <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
           <div className="flex items-center gap-3">
-            <span className="text-lg font-bold text-discord-text-primary">SomniBot</span>
+            <span className="text-lg font-bold text-discord-text-primary"><PortalBrand /></span>
             <span className="rounded-full bg-[#FF1493]/20 px-2 py-0.5 text-xs font-medium text-[#FF1493]">Portal</span>
           </div>
           <nav className="flex items-center gap-1">

@@ -142,14 +142,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
     }
 
-    // Generate signed URL (5 min expiry)
+    const { data: portalConfig } = await admin
+      .from('guild_config')
+      .select('download_link_ttl_ms')
+      .eq('guild_id', session.guild_id)
+      .maybeSingle();
+    const configuredTtl = Number(portalConfig?.download_link_ttl_ms);
+    const linkTtlMs = Number.isSafeInteger(configuredTtl)
+      && configuredTtl >= 60_000
+      && configuredTtl <= 3_600_000
+      ? configuredTtl
+      : 300_000;
+
+    // Generate signed URL with the guild's bounded TTL.
     const url = generateSignedDownloadUrl({
       productId,
       fileId,
       customerId: session.customer_id,
       guildId: session.guild_id,
       entitlementId: selectedEntitlement.id,
-    });
+    }, Math.floor(linkTtlMs / 1000));
 
     // Auditable state change: a signed download link was issued to the buyer.
     await writeCommerceAudit(admin, {

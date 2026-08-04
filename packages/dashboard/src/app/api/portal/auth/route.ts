@@ -171,12 +171,25 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // Guild-scoped portal policy. The migration constrains this value; keep
+      // the runtime fallback bounded so a stale/malformed row can never create
+      // an effectively permanent session.
+      const { data: portalConfig } = await admin
+        .from('guild_config')
+        .select('portal_session_ttl_ms')
+        .eq('guild_id', customer.guild_id)
+        .maybeSingle();
+      const configuredTtl = Number(portalConfig?.portal_session_ttl_ms);
+      const sessionTtlMs = Number.isSafeInteger(configuredTtl)
+        && configuredTtl >= 3_600_000
+        && configuredTtl <= 2_592_000_000
+        ? configuredTtl
+        : 604_800_000;
+
       // Create session
       const token = randomBytes(32).toString('hex');
       const tokenHash = hashToken(token);
-      // I-4: Reduced from 30 days to 7 days. Long-lived tokens without rotation
-      // increase the window for token theft. 7 days balances usability with security.
-      const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+      const expires = new Date(Date.now() + sessionTtlMs);
 
       // V53 Phase 3 (1.9): Enforce max 3 concurrent sessions.
       // If limit reached, auto-revoke the oldest session(s).

@@ -41,6 +41,27 @@ export const GuildConfigSchema = z.object({
 
   // Commerce
   store_enabled: z.boolean().default(false),
+  product_types_enabled: z.array(z.enum([
+    'downloadable', 'license-key', 'discord-perk', 'subscription',
+    'virtual-good', 'ticket-service', 'free',
+  ])).default([
+    'downloadable', 'license-key', 'discord-perk', 'subscription',
+    'virtual-good', 'ticket-service', 'free',
+  ]),
+  repeat_purchase_policy: z.enum(['unique', 'stackable', 'renewable', 'seat-based']).default('unique'),
+  free_claim_policy: z.enum(['one-claim', 'repeatable']).default('one-claim'),
+  gifting_enabled: z.boolean().default(true),
+  public_celebration_enabled: z.boolean().default(false),
+  celebration_channel_id: optionalSnowflake,
+  store_brand_source: z.enum(['guild-profile', 'custom']).default('guild-profile'),
+  max_storefront_products: z.number().int().min(1).max(9).default(9),
+  portal_session_ttl_ms: z.number().int().min(3_600_000).max(2_592_000_000).default(604_800_000),
+  download_link_ttl_ms: z.number().int().min(60_000).max(3_600_000).default(300_000),
+  self_service_cancellation: z.boolean().default(true),
+  cancellation_timing: z.enum(['end-of-term', 'immediate']).default('end-of-term'),
+  refund_requests_enabled: z.boolean().default(true),
+  service_requests_enabled: z.boolean().default(true),
+  portal_brand_source: z.enum(['guild-profile', 'custom']).default('guild-profile'),
 });
 
 export type GuildConfigInput = z.infer<typeof GuildConfigSchema>;

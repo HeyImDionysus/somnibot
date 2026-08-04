@@ -18,7 +18,7 @@ import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 import { discordEmojiSchema, discordSnowflakeSchema } from '@/lib/api/discord-values';
 
-const guildConfigPatchSchema = z.object({
+export const guildConfigPatchSchema = z.object({
   mod_log_channel_id: discordSnowflakeSchema.nullable().optional(),
   welcome_channel_id: discordSnowflakeSchema.nullable().optional(),
   goodbye_channel_id: discordSnowflakeSchema.nullable().optional(),
@@ -106,6 +106,24 @@ const guildConfigPatchSchema = z.object({
   // V26: Commerce toggles
   store_enabled: z.boolean().optional(),
   paypal_enabled: z.boolean().optional(),
+  product_types_enabled: z.array(z.enum([
+    'downloadable', 'license-key', 'discord-perk', 'subscription',
+    'virtual-good', 'ticket-service', 'free',
+  ])).max(7).optional(),
+  repeat_purchase_policy: z.enum(['unique', 'stackable', 'renewable', 'seat-based']).optional(),
+  free_claim_policy: z.enum(['one-claim', 'repeatable']).optional(),
+  gifting_enabled: z.boolean().optional(),
+  public_celebration_enabled: z.boolean().optional(),
+  celebration_channel_id: discordSnowflakeSchema.nullable().optional(),
+  store_brand_source: z.enum(['guild-profile', 'custom']).optional(),
+  max_storefront_products: z.number().int().min(1).max(9).optional(),
+  portal_session_ttl_ms: z.number().int().min(3_600_000).max(2_592_000_000).optional(),
+  download_link_ttl_ms: z.number().int().min(60_000).max(3_600_000).optional(),
+  self_service_cancellation: z.boolean().optional(),
+  cancellation_timing: z.enum(['end-of-term', 'immediate']).optional(),
+  refund_requests_enabled: z.boolean().optional(),
+  service_requests_enabled: z.boolean().optional(),
+  portal_brand_source: z.enum(['guild-profile', 'custom']).optional(),
   // V26: Bot presence
   custom_bot_statuses: z.array(z.string().max(128)).max(20).optional(),
   // V26: Onboarding

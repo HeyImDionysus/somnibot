@@ -142,6 +142,24 @@ export default function StorePage() {
   const [paypalStaleMs, setPaypalStaleMs] = useState(300000);
   const [paypalVerifyAttempts, setPaypalVerifyAttempts] = useState(3);
   const [savingPaypalPolicy, setSavingPaypalPolicy] = useState(false);
+  const [storeControls, setStoreControls] = useState({
+    product_types_enabled: ['downloadable', 'license-key', 'discord-perk', 'subscription', 'virtual-good', 'ticket-service', 'free'],
+    repeat_purchase_policy: 'unique' as 'unique' | 'stackable' | 'renewable' | 'seat-based',
+    free_claim_policy: 'one-claim' as 'one-claim' | 'repeatable',
+    gifting_enabled: true,
+    public_celebration_enabled: false,
+    celebration_channel_id: '',
+    store_brand_source: 'guild-profile' as 'guild-profile' | 'custom',
+    max_storefront_products: 9,
+    portal_session_ttl_ms: 604800000,
+    download_link_ttl_ms: 300000,
+    self_service_cancellation: true,
+    cancellation_timing: 'end-of-term' as 'end-of-term' | 'immediate',
+    refund_requests_enabled: true,
+    service_requests_enabled: true,
+    portal_brand_source: 'guild-profile' as 'guild-profile' | 'custom',
+  });
+  const [savingControl, setSavingControl] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -162,6 +180,24 @@ export default function StorePage() {
         setPaypalRefundStrategy(guildJson.config.paypal_refund_strategy ?? 'provider-first');
         setPaypalStaleMs(guildJson.config.paypal_webhook_stale_processing_ms ?? 300000);
         setPaypalVerifyAttempts(guildJson.config.paypal_webhook_verify_attempts ?? 3);
+        setStoreControls((prev) => ({
+          ...prev,
+          product_types_enabled: guildJson.config.product_types_enabled ?? prev.product_types_enabled,
+          repeat_purchase_policy: guildJson.config.repeat_purchase_policy ?? prev.repeat_purchase_policy,
+          free_claim_policy: guildJson.config.free_claim_policy ?? prev.free_claim_policy,
+          gifting_enabled: guildJson.config.gifting_enabled ?? prev.gifting_enabled,
+          public_celebration_enabled: guildJson.config.public_celebration_enabled ?? prev.public_celebration_enabled,
+          celebration_channel_id: guildJson.config.celebration_channel_id ?? '',
+          store_brand_source: guildJson.config.store_brand_source ?? prev.store_brand_source,
+          max_storefront_products: guildJson.config.max_storefront_products ?? prev.max_storefront_products,
+          portal_session_ttl_ms: guildJson.config.portal_session_ttl_ms ?? prev.portal_session_ttl_ms,
+          download_link_ttl_ms: guildJson.config.download_link_ttl_ms ?? prev.download_link_ttl_ms,
+          self_service_cancellation: guildJson.config.self_service_cancellation ?? prev.self_service_cancellation,
+          cancellation_timing: guildJson.config.cancellation_timing ?? prev.cancellation_timing,
+          refund_requests_enabled: guildJson.config.refund_requests_enabled ?? prev.refund_requests_enabled,
+          service_requests_enabled: guildJson.config.service_requests_enabled ?? prev.service_requests_enabled,
+          portal_brand_source: guildJson.config.portal_brand_source ?? prev.portal_brand_source,
+        }));
       }
     } finally {
       setLoading(false);
@@ -257,6 +293,39 @@ export default function StorePage() {
     } finally {
       setSavingGrace(false);
     }
+  };
+
+  const saveCommerceControl = async <K extends keyof typeof storeControls,>(key: K, value: typeof storeControls[K]) => {
+    setSavingControl(String(key));
+    try {
+      const payload = key === 'celebration_channel_id' && value === '' ? null : value;
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: payload }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.error) {
+        toast({ title: json.error ?? 'Failed to save commerce setting', variant: 'error' });
+        return;
+      }
+      setStoreControls((prev) => ({ ...prev, [key]: value }));
+      toast({ title: 'Commerce setting saved', variant: 'success' });
+    } catch {
+      toast({ title: 'Failed to save commerce setting', variant: 'error' });
+    } finally {
+      setSavingControl(null);
+    }
+  };
+
+  const toggleProductType = (type: string) => {
+    const current = storeControls.product_types_enabled;
+    const next = current.includes(type) ? current.filter((v) => v !== type) : [...current, type];
+    if (next.length === 0) {
+      toast({ title: 'Enable at least one product type', variant: 'error' });
+      return;
+    }
+    void saveCommerceControl('product_types_enabled', next);
   };
 
   useEffect(() => { load(); }, [load]);
@@ -517,6 +586,73 @@ export default function StorePage() {
             <label className="text-xs text-discord-text-muted">Webhook verify attempts<input type="number" min={1} max={10} value={paypalVerifyAttempts} onChange={(e) => setPaypalVerifyAttempts(Number(e.target.value) || 1)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
           </div>
           <button onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy} className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</button>
+
+        <div className="border-t border-discord-border-subtle pt-4 space-y-4">
+          <h3 className="text-sm font-semibold text-discord-text-primary">Storefront policy</h3>
+          <div>
+            <p className="mb-2 text-xs text-discord-text-muted">Product types shown in /store</p>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {['downloadable', 'license-key', 'discord-perk', 'subscription', 'virtual-good', 'ticket-service', 'free'].map((type) => (
+                <label key={type} className="flex items-center gap-2 text-xs text-discord-text-secondary">
+                  <input type="checkbox" checked={storeControls.product_types_enabled.includes(type)} onChange={() => toggleProductType(type)} />
+                  {type}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="text-xs text-discord-text-muted">Repeat purchase policy
+              <select value={storeControls.repeat_purchase_policy} onChange={(e) => void saveCommerceControl('repeat_purchase_policy', e.target.value as typeof storeControls.repeat_purchase_policy)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
+                <option value="unique">Unique</option><option value="stackable">Stackable</option><option value="renewable">Renewable</option><option value="seat-based">Seat-based</option>
+              </select>
+            </label>
+            <label className="text-xs text-discord-text-muted">Free claim policy
+              <select value={storeControls.free_claim_policy} onChange={(e) => void saveCommerceControl('free_claim_policy', e.target.value as typeof storeControls.free_claim_policy)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
+                <option value="one-claim">One claim</option><option value="repeatable">Repeatable</option>
+              </select>
+            </label>
+            <label className="text-xs text-discord-text-muted">Max storefront products
+              <input type="number" min={1} max={9} value={storeControls.max_storefront_products} onChange={(e) => setStoreControls((p) => ({ ...p, max_storefront_products: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('max_storefront_products', storeControls.max_storefront_products)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
+            </label>
+            <label className="text-xs text-discord-text-muted">Store brand source
+              <select value={storeControls.store_brand_source} onChange={(e) => void saveCommerceControl('store_brand_source', e.target.value as typeof storeControls.store_brand_source)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
+                <option value="guild-profile">Guild profile</option><option value="custom">Custom brand kit</option>
+              </select>
+            </label>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.gifting_enabled} onChange={(e) => void saveCommerceControl('gifting_enabled', e.target.checked)} /> Enable gifting</label>
+            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.public_celebration_enabled} onChange={(e) => void saveCommerceControl('public_celebration_enabled', e.target.checked)} /> Public purchase celebrations</label>
+          </div>
+          <label className="block text-xs text-discord-text-muted">Celebration channel ID (leave blank to keep celebrations private)
+            <input value={storeControls.celebration_channel_id} onChange={(e) => setStoreControls((p) => ({ ...p, celebration_channel_id: e.target.value }))} onBlur={() => void saveCommerceControl('celebration_channel_id', storeControls.celebration_channel_id)} placeholder="Discord channel ID" className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
+          </label>
+
+          <h3 className="border-t border-discord-border-subtle pt-4 text-sm font-semibold text-discord-text-primary">Customer portal policy</h3>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="text-xs text-discord-text-muted">Session TTL (ms)
+              <input type="number" min={3600000} max={2592000000} value={storeControls.portal_session_ttl_ms} onChange={(e) => setStoreControls((p) => ({ ...p, portal_session_ttl_ms: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('portal_session_ttl_ms', storeControls.portal_session_ttl_ms)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
+            </label>
+            <label className="text-xs text-discord-text-muted">Download link TTL (ms)
+              <input type="number" min={60000} max={3600000} value={storeControls.download_link_ttl_ms} onChange={(e) => setStoreControls((p) => ({ ...p, download_link_ttl_ms: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('download_link_ttl_ms', storeControls.download_link_ttl_ms)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
+            </label>
+            <label className="text-xs text-discord-text-muted">Cancellation timing
+              <select value={storeControls.cancellation_timing} onChange={(e) => void saveCommerceControl('cancellation_timing', e.target.value as typeof storeControls.cancellation_timing)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
+                <option value="end-of-term">End of term</option><option value="immediate">Immediate</option>
+              </select>
+            </label>
+            <label className="text-xs text-discord-text-muted">Portal brand source
+              <select value={storeControls.portal_brand_source} onChange={(e) => void saveCommerceControl('portal_brand_source', e.target.value as typeof storeControls.portal_brand_source)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
+                <option value="guild-profile">Guild profile</option><option value="custom">Custom brand kit</option>
+              </select>
+            </label>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.self_service_cancellation} onChange={(e) => void saveCommerceControl('self_service_cancellation', e.target.checked)} /> Self-service cancellation</label>
+            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.refund_requests_enabled} onChange={(e) => void saveCommerceControl('refund_requests_enabled', e.target.checked)} /> Refund requests</label>
+            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.service_requests_enabled} onChange={(e) => void saveCommerceControl('service_requests_enabled', e.target.checked)} /> Service requests</label>
+          </div>
+          {savingControl && <p className="text-xs text-discord-text-muted">Saving…</p>}
         </div>
       </div>
 

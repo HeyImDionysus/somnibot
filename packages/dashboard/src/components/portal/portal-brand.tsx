@@ -1,0 +1,17 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+
+export function PortalBrand() {
+  const [brand, setBrand] = useState<{ brandName: string; poweredBy: boolean } | null>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const guild = params.get('guild') || sessionStorage.getItem('portal_guild') || '';
+    if (!guild) return;
+    fetch(`/api/portal/branding?guild=${encodeURIComponent(guild)}`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((value) => value && setBrand(value))
+      .catch(() => undefined);
+  }, []);
+  return <>{brand?.brandName ?? 'Customer Portal'}{brand?.poweredBy ? <span className="sr-only"> Powered by SomniBot</span> : null}</>;
+}

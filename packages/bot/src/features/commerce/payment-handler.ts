@@ -415,6 +415,15 @@ export async function handleBuyButton(
     return;
   }
 
+  const { data: commerceConfig } = await supabase
+    .from('guild_config')
+    .select('repeat_purchase_policy')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  const repeatPurchasePolicy = ['unique', 'stackable', 'renewable', 'seat-based'].includes(
+    String(commerceConfig?.repeat_purchase_policy),
+  ) ? String(commerceConfig?.repeat_purchase_policy) : 'unique';
+
   // BUYABILITY guard — enforce the checkout column of the compliance
   // decision matrix (packages/dashboard/src/lib/api/commerce-income-wall.ts):
   // only priced one-time products and subscription products may start a
@@ -599,7 +608,7 @@ export async function handleBuyButton(
       return;
     }
 
-    if (existing) {
+    if (existing && repeatPurchasePolicy === 'unique') {
       await interaction.editReply({
         embeds: [
           brandedEmbed(brandKit, {
@@ -613,12 +622,9 @@ export async function handleBuyButton(
     }
 
     // DOUBLE-CHARGE guard — one live checkout per customer per product.
-    const inFlight = await inspectInFlightCheckout(
-      supabase,
-      guildId,
-      existingCustomer.id,
-      productId,
-    );
+    const inFlight = repeatPurchasePolicy === 'unique'
+      ? await inspectInFlightCheckout(supabase, guildId, existingCustomer.id, productId)
+      : { state: 'clear' as const };
     if (inFlight.state === 'unavailable') {
       await replyCheckoutUnavailable(interaction, supabase, guildId);
       return;

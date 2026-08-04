@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 252 migration files in packages/supabase/migrations/
+ * Source: 253 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -458,6 +458,21 @@ export interface DbGuildConfig {
   paypal_refund_strategy: string;
   paypal_webhook_stale_processing_ms: number;
   paypal_webhook_verify_attempts: number;
+  product_types_enabled: string[];
+  repeat_purchase_policy: string;
+  free_claim_policy: string;
+  gifting_enabled: boolean;
+  public_celebration_enabled: boolean;
+  celebration_channel_id: string | null;
+  store_brand_source: string;
+  max_storefront_products: number;
+  portal_session_ttl_ms: number;
+  download_link_ttl_ms: number;
+  self_service_cancellation: boolean;
+  cancellation_timing: string;
+  refund_requests_enabled: boolean;
+  service_requests_enabled: boolean;
+  portal_brand_source: string;
   audit_export_row_limit: number;
   audit_flush_interval_ms: number;
   automation_dm_cooldown_seconds: number;
@@ -1751,6 +1766,12 @@ export interface DbCommerceProviderIncidents {
   incident_reason: 'provider_identity_malformed' | 'custom_identity_missing_or_malformed' | 'customer_identity_missing_or_mismatched' | 'order_identity_missing_or_ambiguous' | 'product_identity_missing_or_mismatched' | 'plan_identity_missing_or_mismatched' | 'financial_identity_malformed' | 'subscription_sale_router_failed';
   evidence: Json;
   alert_id: string | null;
+  created_at: string;
+}
+
+export interface DbCommercePurchaseCelebrations {
+  order_id: string;
+  guild_id: string;
   created_at: string;
 }
 

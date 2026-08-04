@@ -21,6 +21,20 @@ export function buildStoreCommand() {
     .setDescription('Browse the server store');
 }
 
+function productMatchesEnabledType(product: Record<string, unknown>, enabled: Set<string>): boolean {
+  const price = Number(product.price_cents ?? 0);
+  const delivery = String(product.delivery_type ?? '');
+  const productType = String(product.type ?? '');
+  if (enabled.has('subscription') && productType === 'subscription') return true;
+  if (enabled.has('free') && productType === 'free' && price === 0) return true;
+  if (enabled.has('downloadable') && ['file', 'link', 'mixed'].includes(delivery)) return true;
+  if (enabled.has('license-key') && delivery === 'license_key') return true;
+  if (enabled.has('discord-perk') && Array.isArray(product.granted_role_ids) && product.granted_role_ids.length > 0) return true;
+  if (enabled.has('virtual-good') && delivery === 'access_pass') return true;
+  if (enabled.has('ticket-service') && delivery === 'ticket_service') return true;
+  return false;
+}
+
 export async function handleStoreCommand(
   interaction: ChatInputCommandInteraction,
   supabase: SupabaseClient,
@@ -52,7 +66,21 @@ export async function handleStoreCommand(
     return;
   }
 
-  if (!products || products.length === 0) {
+  const { data: config } = await supabase
+    .from('guild_config')
+    .select('product_types_enabled, max_storefront_products')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  const enabledTypes = new Set<string>(
+    Array.isArray(config?.product_types_enabled)
+      ? config.product_types_enabled.filter((value: unknown): value is string => typeof value === 'string')
+      : ['downloadable', 'license-key', 'discord-perk', 'subscription', 'virtual-good', 'ticket-service', 'free'],
+  );
+  const maxProducts = Number(config?.max_storefront_products);
+  const storefrontLimit = Number.isInteger(maxProducts) && maxProducts >= 1 && maxProducts <= 9 ? maxProducts : 9;
+  const visibleProducts = (products ?? []).filter((product) => productMatchesEnabledType(product as Record<string, unknown>, enabledTypes));
+
+  if (visibleProducts.length === 0) {
     await interaction.editReply({ content: '🏪 The store is empty right now. Check back later!' });
     return;
   }
@@ -76,7 +104,7 @@ export async function handleStoreCommand(
   applyBrand(headerEmbed, kit, { intent: 'primary' });
   embeds.push(headerEmbed);
 
-  for (const product of products.slice(0, 9)) {
+  for (const product of visibleProducts.slice(0, storefrontLimit)) {
     const price = (product.price_cents / 100).toFixed(2);
     const typeLabel = product.type === 'subscription' ? '🔄 Subscription' : '🎁 One-Time';
 

@@ -549,6 +549,9 @@ export class CommerceFulfillmentService {
       }
 
       result.success = result.errors.length === 0;
+      if (result.success && (payload.fulfillment_type === 'one_time_purchase' || payload.fulfillment_type === 'subscription_activated')) {
+        await this.maybePostPurchaseCelebration(payload);
+      }
     } catch (err) {
       if (err instanceof CommerceOutwardSupersededError) {
         if (this.entitlementService.getActivePurchaseRoleDeliveryAttempt()) {
@@ -610,6 +613,32 @@ export class CommerceFulfillmentService {
       throw new Error('Fulfillment action claim is required for paid role mutation');
     }
     return this.executionContext;
+  }
+
+  /** Post the opt-in public celebration once, without exposing price/payment data. */
+  private async maybePostPurchaseCelebration(payload: FulfillmentPayload): Promise<void> {
+    try {
+      const { data: config } = await this.supabase
+        .from('guild_config')
+        .select('public_celebration_enabled, celebration_channel_id')
+        .eq('guild_id', payload.guild_id)
+        .maybeSingle();
+      if (config?.public_celebration_enabled !== true || typeof config.celebration_channel_id !== 'string') return;
+      const channel = this.guild.channels.cache.get(config.celebration_channel_id);
+      if (!channel || !channel.isTextBased() || !('send' in channel)) return;
+      const { data: marker, error } = await this.supabase
+        .from('commerce_purchase_celebrations')
+        .insert({ order_id: payload.order_id, guild_id: payload.guild_id })
+        .select('order_id')
+        .maybeSingle();
+      if (error || !marker) return;
+      await channel.send({
+        content: `${payload.discord_id ? `<@${payload.discord_id}>` : 'A member'} just picked up ${payload.product_name} from the store — enjoy!`,
+        allowedMentions: { users: payload.discord_id ? [payload.discord_id] : [] },
+      });
+    } catch (error) {
+      log.warn('Public purchase celebration failed (fulfillment remains successful)', { detail: error });
+    }
   }
 
   private requireOutwardSent(

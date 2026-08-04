@@ -67,6 +67,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
     }
 
+    const { data: portalConfig } = await admin
+      .from('guild_config')
+      .select('self_service_cancellation, cancellation_timing')
+      .eq('guild_id', session.guild_id)
+      .maybeSingle();
+    const selfServiceEnabled = portalConfig?.self_service_cancellation !== false;
+    if (!selfServiceEnabled) {
+      return NextResponse.json(
+        { error: 'Self-service cancellation is disabled for this store.' },
+        { status: 403 },
+      );
+    }
+    const cancellationTiming = portalConfig?.cancellation_timing === 'immediate'
+      ? 'immediate'
+      : 'end-of-term';
+
     const rl = await rateLimits.portalData(hashToken(token));
     if (rl.limited) {
       return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
@@ -94,6 +110,11 @@ export async function POST(request: NextRequest) {
     if (!entitlement || entitlement.type !== 'subscription') {
       return NextResponse.json({ error: 'Subscription not found' }, { status: 404 });
     }
+    // Idempotent replay: an immediate cancellation is already revoked, while
+    // an end-of-term cancellation remains active/grace_period.
+    if (entitlement.cancelled_at) {
+      return scheduledResponse(entitlement, true);
+    }
     if (!['active', 'grace_period'].includes(entitlement.status)) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
     }
@@ -105,12 +126,6 @@ export async function POST(request: NextRequest) {
         { error: 'The paid-through date is unavailable. Cancellation was not scheduled.' },
         { status: 409 },
       );
-    }
-
-    // Idempotent: already scheduled → return the single scheduled cancellation
-    // without a second provider call.
-    if (entitlement.cancelled_at) {
-      return scheduledResponse(entitlement, true);
     }
 
     // Cancel the PayPal subscription so it stops renewing. Access continues until
@@ -189,12 +204,16 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Mark the scheduled cancellation. The `.is('cancelled_at', null)` guard makes
-    // the write single-winner under a race; status stays 'active' until expires_at.
+    // Mark cancellation. The `.is('cancelled_at', null)` guard makes the write
+    // single-winner under a race. Immediate policy revokes access now; the
+    // default end-of-term policy keeps the entitlement active through expiry.
     const now = new Date().toISOString();
+    const cancellationUpdate = cancellationTiming === 'immediate'
+      ? { cancelled_at: now, status: 'revoked', expires_at: now, updated_at: now }
+      : { cancelled_at: now, updated_at: now };
     const { data: updated, error: updateError } = await admin
       .from('entitlements')
-      .update({ cancelled_at: now, updated_at: now })
+      .update(cancellationUpdate)
       .eq('id', entitlement.id)
       .eq('customer_id', session.customer_id)
       .is('cancelled_at', null)
@@ -210,8 +229,9 @@ export async function POST(request: NextRequest) {
     if (updated) {
       if (
         updated.id !== entitlement.id
-        || !['active', 'grace_period'].includes(updated.status)
-        || updated.expires_at !== entitlement.expires_at
+        || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(updated.status))
+        || (cancellationTiming === 'immediate' && updated.status !== 'revoked')
+        || (cancellationTiming === 'end-of-term' && updated.expires_at !== entitlement.expires_at)
         || typeof updated.cancelled_at !== 'string'
         || !Number.isFinite(Date.parse(updated.cancelled_at))
       ) {
@@ -235,8 +255,9 @@ export async function POST(request: NextRequest) {
       currentError
       || !current
       || current.id !== entitlement.id
-      || !['active', 'grace_period'].includes(current.status)
-      || current.expires_at !== entitlement.expires_at
+      || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(current.status))
+      || (cancellationTiming === 'immediate' && current.status !== 'revoked')
+      || (cancellationTiming === 'end-of-term' && current.expires_at !== entitlement.expires_at)
       || typeof current.cancelled_at !== 'string'
       || !Number.isFinite(Date.parse(current.cancelled_at))
     ) {
