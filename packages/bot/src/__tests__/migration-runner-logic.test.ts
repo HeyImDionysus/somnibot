@@ -177,7 +177,7 @@ describe('Migration Runner — SQL execution planning', () => {
       .toThrow(/approved nontransactional migration profile/i);
   });
 
-  it('segments the complete fraud observation index migration as DO / CIC / DO', () => {
+  it('keeps the fraud observation index migration transaction-compatible', () => {
     const source = readFileSync(
       resolve(
         dirname(fileURLToPath(import.meta.url)),
@@ -187,15 +187,13 @@ describe('Migration Runner — SQL execution planning', () => {
       'utf8',
     );
 
-    const batches = planMigrationSql(
-      source,
-      APPROVED_NONTRANSACTIONAL_MIGRATION,
-    );
+    const batches = planMigrationSql(source, APPROVED_NONTRANSACTIONAL_MIGRATION);
 
-    expect(batches).toHaveLength(3);
+    expect(batches).toHaveLength(1);
     expect(batches[0]).toContain('DO $fraud_index_recovery$');
-    expect(batches[1].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
-    expect(batches[2]).toContain('DO $fraud_index_postflight$');
+    expect(batches[0]).toContain('CREATE INDEX IF NOT EXISTS');
+    expect(batches[0]).toContain('DO $fraud_index_postflight$');
+    expect(batches[0]).not.toContain('CREATE INDEX CONCURRENTLY');
   });
 
   it('accepts the approved artifact with CRLF checkout line endings', () => {
@@ -209,10 +207,10 @@ describe('Migration Runner — SQL execution planning', () => {
     ).replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
 
     expect(planMigrationSql(source, APPROVED_NONTRANSACTIONAL_MIGRATION))
-      .toHaveLength(3);
+      .toHaveLength(1);
   });
 
-  it('rejects the approved artifact under a different filename', () => {
+  it('does not require a filename-specific nontransactional waiver', () => {
     const source = readFileSync(
       resolve(
         dirname(fileURLToPath(import.meta.url)),
@@ -222,11 +220,11 @@ describe('Migration Runner — SQL execution planning', () => {
       'utf8',
     );
 
-    expect(() => planMigrationSql(source, '20260727034401_renamed.sql'))
-      .toThrow(/approved nontransactional migration profile/i);
+    expect(planMigrationSql(source, '20260727034401_renamed.sql'))
+      .toHaveLength(1);
   });
 
-  it('rejects a one-byte modification to the approved artifact', () => {
+  it('keeps ordinary migration planning stable when comments change', () => {
     const source = readFileSync(
       resolve(
         dirname(fileURLToPath(import.meta.url)),
@@ -236,10 +234,10 @@ describe('Migration Runner — SQL execution planning', () => {
       'utf8',
     );
 
-    expect(() => planMigrationSql(
+    expect(planMigrationSql(
       `${source}\n-- modified`,
       APPROVED_NONTRANSACTIONAL_MIGRATION,
-    )).toThrow(/approved nontransactional migration profile/i);
+    )).toHaveLength(1);
   });
 
   it.each([
