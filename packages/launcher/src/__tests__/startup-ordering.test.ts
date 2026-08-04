@@ -38,7 +38,7 @@ describe('packaged launcher startup ordering', () => {
 
   it('surfaces an unexpected startup failure instead of retaining a hidden lock', () => {
     expect(mainSource).toContain('}).catch(() => {');
-    expect(mainSource).toContain("dialog.showErrorBox(\n    'SomniBot could not start'");
+    expect(mainSource).toMatch(/dialog\.showErrorBox\(\r?\n\s*'SomniBot could not start'/);
   });
 
   it('gates renderer writes and local child startup until reconciliation is safe', () => {
