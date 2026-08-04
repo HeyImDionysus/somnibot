@@ -149,22 +149,25 @@ describe('PayPal webhook service', () => {
     );
   });
 
-  it('recovers a URL conflict when a normalized application match needs an update', async () => {
+  it('recovers a URL conflict when a normalized application match needs an account fallback', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(tokenResponse())
       .mockResolvedValueOnce(jsonResponse({
         webhooks: [webhook('WH-APP', `${baseInput.webhookUrl}/`, ['CHECKOUT.ORDER.APPROVED'])],
       }))
       .mockResolvedValueOnce(webhookUrlConflictResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        webhooks: [webhook('WH-ACCOUNT-MATCH', baseInput.webhookUrl, ['CHECKOUT.ORDER.APPROVED'])],
+      }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     const result = await ensurePayPalWebhook(baseInput, { fetch: fetchImpl as unknown as typeof fetch });
 
-    expect(result).toMatchObject({ ok: true, status: 'updated', webhookId: 'WH-APP' });
+    expect(result).toMatchObject({ ok: true, status: 'updated', webhookId: 'WH-ACCOUNT-MATCH' });
     const calls = fetchImpl.mock.calls;
     expect(calls.filter(([url, init]) => String(url).endsWith('/v1/notifications/webhooks')
       && (init as RequestInit | undefined)?.method === 'POST')).toHaveLength(0);
-    expect(calls.some(([url]) => String(url).includes('anchor_type=ACCOUNT'))).toBe(false);
+    expect(calls.some(([url]) => String(url).includes('anchor_type=ACCOUNT'))).toBe(true);
     expect(calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toBe(false);
     expect((calls.at(-1)?.[1] as RequestInit).body).toBe(JSON.stringify([
       {

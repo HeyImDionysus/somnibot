@@ -252,13 +252,16 @@ async function findWebhookByUrlAcrossAnchors(
   webhookUrl: string,
   fetchImpl: typeof fetch,
   applicationWebhooks?: PayPalWebhook[],
+  excludedWebhookId?: string,
 ): Promise<PayPalWebhook | null> {
   const application = applicationWebhooks ?? await listWebhooks(apiBase, token, fetchImpl, 'APPLICATION');
-  const applicationMatch = application.find(webhook => webhookUrlMatches(webhook, webhookUrl));
+  const applicationMatch = application.find(webhook => webhook.id !== excludedWebhookId
+    && webhookUrlMatches(webhook, webhookUrl));
   if (applicationMatch) return applicationMatch;
 
   const account = await listWebhooks(apiBase, token, fetchImpl, 'ACCOUNT');
-  return account.find(webhook => webhookUrlMatches(webhook, webhookUrl)) || null;
+  return account.find(webhook => webhook.id !== excludedWebhookId
+    && webhookUrlMatches(webhook, webhookUrl)) || null;
 }
 
 async function reconcileDiscoveredWebhook(
@@ -291,6 +294,7 @@ async function updateWebhookWithConflictRecovery(
   fetchImpl: typeof fetch,
   successMessage: string,
   applicationWebhooks?: PayPalWebhook[],
+  excludedWebhookId?: string,
 ): Promise<EnsurePayPalWebhookResult> {
   try {
     await updateWebhook(apiBase, token, webhook, webhookUrl, fetchImpl);
@@ -305,6 +309,7 @@ async function updateWebhookWithConflictRecovery(
       webhookUrl,
       fetchImpl,
       applicationWebhooks,
+      excludedWebhookId,
     );
     if (!matchingWebhook) {
       throw new PayPalApiError(
@@ -431,6 +436,8 @@ export async function ensurePayPalWebhook(
           webhookUrl,
           fetchImpl,
           'Updated the existing PayPal webhook URL and event subscriptions.',
+          undefined,
+          existingById.id,
         );
       }
       return result('already-configured', 'PayPal webhook is already configured for this callback URL and event catalog.', webhookUrl, apiBase, {
@@ -450,6 +457,7 @@ export async function ensurePayPalWebhook(
           fetchImpl,
           'Updated the matching PayPal webhook event subscriptions.',
           applicationWebhooks,
+          matchingWebhook.id,
         );
       }
       return result('already-configured', 'Found an existing PayPal webhook for this callback URL.', webhookUrl, apiBase, {
