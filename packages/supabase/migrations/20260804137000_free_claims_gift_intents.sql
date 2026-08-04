@@ -168,8 +168,15 @@ BEGIN
   IF COALESCE(v_policy,'one-claim') = 'one-claim' AND EXISTS (
     SELECT 1 FROM public.commerce_free_claims f WHERE f.guild_id=p_guild_id AND f.customer_id=p_customer_id AND f.product_id=p_product_id
   ) THEN
-    SELECT o, f.request_id INTO v_existing_order, v_existing_request_id FROM public.orders o JOIN public.commerce_free_claims f ON f.order_id=o.id
+    -- PostgreSQL cannot assign a composite row variable and a scalar from the
+    -- same SELECT target list (`SELECT o, f.request_id INTO ...`).  Fetch the
+    -- order row first, then read its claim request id under the same
+    -- transaction/advisory lock.  The claim predicate is repeated so the
+    -- replay/audit identity remains bound to this exact guild/customer/product.
+    SELECT o.* INTO v_existing_order FROM public.orders o JOIN public.commerce_free_claims f ON f.order_id=o.id
       WHERE f.guild_id=p_guild_id AND f.customer_id=p_customer_id AND f.product_id=p_product_id LIMIT 1;
+    SELECT f.request_id INTO v_existing_request_id FROM public.commerce_free_claims f
+      WHERE f.order_id=v_existing_order.id AND f.guild_id=p_guild_id AND f.customer_id=p_customer_id AND f.product_id=p_product_id;
     IF v_existing_order.id IS NULL OR v_existing_order.guild_id IS DISTINCT FROM p_guild_id OR v_existing_order.customer_id IS DISTINCT FROM p_customer_id OR v_existing_order.product_id IS DISTINCT FROM p_product_id THEN
       RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='existing free claim order identity mismatch';
     END IF;
