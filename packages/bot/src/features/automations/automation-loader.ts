@@ -22,6 +22,7 @@ const log = createLogger('AutomationLoader');
 export interface LoadedAutomation {
   id: string;
   name: string;
+  description: string | null;
   enabled: boolean;
   triggerType: TriggerType;
   triggerConfig: Record<string, unknown>;
@@ -52,7 +53,6 @@ function stableValue(value: unknown): unknown {
 export function automationPreviewHash(row: {
   name: string;
   description: string | null;
-  description?: string | null;
   trigger_type: string;
   trigger_config: Record<string, unknown>;
   conditions: Record<string, unknown>[];
@@ -64,7 +64,6 @@ export function automationPreviewHash(row: {
 }): string {
   const payload = {
     name: row.name,
-    description: row.description ?? null,
     description: row.description ?? null,
     trigger_type: row.trigger_type,
     trigger_config: row.trigger_config ?? {},
@@ -142,6 +141,7 @@ function toLoaded(row: DbAutomation): LoadedAutomation | null {
   return {
     id: row.id,
     name: row.name,
+    description: row.description ?? null,
     enabled: row.enabled,
     triggerType: row.trigger_type,
     triggerConfig: row.trigger_config,

@@ -60,9 +60,15 @@ DECLARE
   needed numeric := 0;
 BEGIN
   SELECT gc.level_curve INTO curve FROM public.guild_config gc WHERE gc.guild_id = p_guild_id;
-  IF curve IS NOT NULL THEN
-    base := COALESCE((curve->>'base')::numeric, base);
-    exponent := COALESCE((curve->>'exponent')::numeric, exponent);
+  IF curve IS NOT NULL AND jsonb_typeof(curve) = 'object' THEN
+    -- Guard every cast: legacy rows can contain arbitrary JSON strings and
+    -- should fall back to the safe defaults instead of aborting XP writes.
+    IF (curve->>'base') ~ '^[0-9]+(\.[0-9]+)?$' THEN
+      base := (curve->>'base')::numeric;
+    END IF;
+    IF (curve->>'exponent') ~ '^[0-9]+(\.[0-9]+)?$' THEN
+      exponent := (curve->>'exponent')::numeric;
+    END IF;
   END IF;
   IF p_xp IS NULL OR p_xp < 0 THEN RETURN 0; END IF;
   WHILE level < 200 LOOP
