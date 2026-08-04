@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   readEnvSupabaseConfig,
+  readInjectedBrowserSupabaseConfig,
   readRuntimePublicSupabaseConfig,
   requireAdminSupabaseConfig,
   requireBrowserSupabaseConfig,
@@ -12,6 +13,7 @@ describe('Supabase runtime config', () => {
 
   afterEach(() => {
     process.env = { ...originalEnv };
+    vi.unstubAllGlobals();
   });
 
   it('reads browser-safe Supabase config from public env only', () => {
@@ -40,6 +42,38 @@ describe('Supabase runtime config', () => {
     delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
     expect(() => requireBrowserSupabaseConfig()).toThrow(SupabaseRuntimeConfigError);
+  });
+
+  it('uses server-rendered public metadata when the packaged browser env is empty', () => {
+    process.env = {
+      ...originalEnv,
+      SUPABASE_SECRET_KEY: 'sb_secret_must_stay_server_only',
+    };
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+    vi.stubGlobal('document', {
+      querySelector(selector: string) {
+        const metadata: Record<string, string> = {
+          'meta[name="somnibot-supabase-url"]': 'https://runtime.supabase.co',
+          'meta[name="somnibot-supabase-publishable-key"]': 'sb_publishable_runtime',
+        };
+        const content = metadata[selector];
+        return content ? { getAttribute: () => content } : null;
+      },
+    });
+
+    expect(readInjectedBrowserSupabaseConfig()).toEqual({
+      url: 'https://runtime.supabase.co',
+      publishableKey: 'sb_publishable_runtime',
+      secretKey: '',
+      sources: { url: 'env', publishableKey: 'env', secretKey: 'missing' },
+    });
+    expect(requireBrowserSupabaseConfig()).toEqual({
+      url: 'https://runtime.supabase.co',
+      publishableKey: 'sb_publishable_runtime',
+      sources: { url: 'env', publishableKey: 'env' },
+    });
   });
 
   it('throws a clear browser-auth block when public env is missing', () => {

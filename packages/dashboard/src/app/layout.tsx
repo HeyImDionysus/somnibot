@@ -1,6 +1,12 @@
 import type { Metadata } from 'next';
 import '@/styles/globals.css';
 import { CsrfBoundary } from '@/components/csrf-boundary';
+import {
+  PUBLIC_SUPABASE_PUBLISHABLE_KEY_META_NAME,
+  PUBLIC_SUPABASE_URL_META_NAME,
+  readEnvSupabaseConfig,
+  readRuntimePublicSupabaseConfig,
+} from '@/lib/supabase/runtime-config';
 
 export const metadata: Metadata = {
   title: 'SomniBot Dashboard',
@@ -27,8 +33,23 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // The launcher resolves setup values at process start, after this bundle was
+  // built.  Materialize only the browser-safe fields in the HTML so client
+  // Supabase creation works without rebuilding the packaged dashboard.  The
+  // server-only secret is intentionally never selected or rendered here.
+  const runtimePublicConfig = readRuntimePublicSupabaseConfig();
+  const serverConfig = readEnvSupabaseConfig();
+  const publicSupabaseUrl = runtimePublicConfig.url || serverConfig.url;
+  const publicSupabasePublishableKey = runtimePublicConfig.publishableKey || serverConfig.publishableKey;
+
   return (
     <html lang="en" className="dark">
+      <head>
+        {publicSupabaseUrl ? <meta name={PUBLIC_SUPABASE_URL_META_NAME} content={publicSupabaseUrl} /> : null}
+        {publicSupabasePublishableKey
+          ? <meta name={PUBLIC_SUPABASE_PUBLISHABLE_KEY_META_NAME} content={publicSupabasePublishableKey} />
+          : null}
+      </head>
       <body className="min-h-screen bg-discord-bg-tertiary text-discord-text-primary antialiased">
         <CsrfBoundary />
         {children}
