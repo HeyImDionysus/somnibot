@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 246 migration files in packages/supabase/migrations/
+ * Source: 248 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -324,8 +324,6 @@ export interface DbGuildConfig {
   economy_fishing_cooldown_seconds: number;
   economy_fishing_junk_chance_pct: number;
   economy_fishing_treasure_chance_pct: number;
-  economy_fishing_collection_reward_enabled: boolean;
-  economy_fishing_collection_reward_coins: number;
   economy_adventures_enabled: boolean;
   economy_adventure_daily_limit: number;
   economy_adventure_ticket_cost: number;
@@ -334,7 +332,6 @@ export interface DbGuildConfig {
   economy_market_fee_pct: number;
   economy_market_listing_days: number;
   economy_market_max_listings: number;
-  economy_market_max_price_per_unit: number;
   economy_trivia_enabled: boolean;
   economy_trivia_cooldown_seconds: number;
   economy_trivia_base_payout: number;
@@ -366,7 +363,6 @@ export interface DbGuildConfig {
   economy_prestige_multiplier_pct: number;
   economy_prestige_min_level: number;
   economy_prestige_min_net_worth: number;
-  economy_prestige_max_level: number;
   economy_pet_decay_interval_hours: number;
   economy_pet_low_stat_threshold: number;
   economy_pet_notify_owner: boolean;
@@ -411,6 +407,9 @@ export interface DbGuildConfig {
   message_log_ignored_channel_ids: string[];
   automod_regex_budget_ms: number;
   automod_message_budget_ms: number;
+  economy_fishing_collection_reward_enabled: boolean;
+  economy_fishing_collection_reward_coins: number;
+  economy_prestige_max_level: number;
   economy_trivia_schedule_enabled: boolean;
   economy_trivia_schedule_interval_minutes: number;
   economy_trivia_schedule_channel_id: string | null;
@@ -429,6 +428,7 @@ export interface DbGuildConfig {
   webhook_error_rate_threshold: number;
   diagnostics_guided_mode: boolean;
   automation_mass_action_threshold: number;
+  economy_market_max_price_per_unit: number;
 }
 
 export interface DbInstanceSettings {
