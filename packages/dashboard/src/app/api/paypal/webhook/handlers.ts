@@ -320,6 +320,55 @@ async function recordProviderMoneyIncident(
   }
 }
 
+/**
+ * Mark a checkout ledger row captured only after the fulfillment carrier has
+ * been durably released. The transition is replay-safe: an already-captured
+ * row is success, while an error or missing row records the provider identity
+ * incident and throws so PayPal retries the webhook instead of silently
+ * claiming a captured payment was accounted for.
+ */
+export async function markCheckoutIntentCaptured(
+  supabase: AdminSupabase,
+  input: {
+    checkoutToken: string;
+    providerResourceId: string;
+    providerParentId?: string | null;
+    guildId: string;
+    eventType: ProviderMoneyEventType;
+    webhookEventId: string;
+  },
+): Promise<void> {
+  const { data, error } = await supabase
+    .from('commerce_checkout_intents')
+    .update({ status: 'captured' })
+    .eq('token', input.checkoutToken)
+    .in('status', ['bound', 'captured'])
+    .select('token, status, provider_id')
+    .maybeSingle();
+  if (!error && data && data.status === 'captured') return;
+
+  await recordProviderMoneyIncident(supabase, {
+    webhookEventId: input.webhookEventId,
+    eventType: input.eventType,
+    resourceId: input.providerResourceId,
+    parentId: input.providerParentId,
+    observedGuildId: input.guildId,
+    reason: 'checkout_identity_missing_or_mismatched',
+    evidence: {
+      checkout_token: input.checkoutToken,
+      transition: 'captured',
+      update_error: error ? formatSupabaseError(error) : null,
+      observed_status: data?.status ?? null,
+    },
+  });
+
+  throw new Error(
+    error
+      ? `Failed to mark checkout intent captured: ${formatSupabaseError(error)}`
+      : 'Checkout intent captured transition returned no durable captured row',
+  );
+}
+
 /** Idempotent operator/cron consumer for malformed captures. */
 export async function executeProviderMoneyRecovery(
   supabase: AdminSupabase,
@@ -2170,7 +2219,14 @@ export async function handlePaymentCaptured(
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
   if (checkoutToken) {
-    await supabase.from('commerce_checkout_intents').update({ status: 'captured' }).eq('token', checkoutToken);
+    await markCheckoutIntentCaptured(supabase, {
+      checkoutToken,
+      providerResourceId: paypalCaptureId,
+      providerParentId: order.paypal_order_id,
+      guildId: order.guild_id,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      webhookEventId,
+    });
   }
 
   console.log(
@@ -2878,7 +2934,13 @@ export async function handleSubscriptionActivated(
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
   if (checkoutToken) {
-    await supabase.from('commerce_checkout_intents').update({ status: 'captured' }).eq('token', checkoutToken);
+    await markCheckoutIntentCaptured(supabase, {
+      checkoutToken,
+      providerResourceId: subscriptionId,
+      guildId: order.guild_id,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      webhookEventId,
+    });
   }
 
   console.log(
