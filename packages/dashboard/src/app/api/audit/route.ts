@@ -35,8 +35,9 @@ export async function GET(req: NextRequest) {
     .select('audit_export_row_limit')
     .eq('guild_id', guildId)
     .maybeSingle();
-  const maxExportRows = Number.isInteger(config?.audit_export_row_limit)
-    ? Math.max(1, Math.min(100_000, config.audit_export_row_limit))
+  const configuredExportRows = Number(config?.audit_export_row_limit);
+  const maxExportRows = Number.isInteger(configuredExportRows)
+    ? Math.max(1, Math.min(100_000, configuredExportRows))
     : DEFAULT_MAX_EXPORT_ROWS;
 
   const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10));

@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
     if (body.permissions && body.permissions.length > maxPermissions) {
       return NextResponse.json({ error: `A role may contain at most ${maxPermissions} permissions` }, { status: 400 });
     }
-    if (config?.rbac_priority_escalation_guard !== false && !ctx.isOwner && body.priority > defaultPriority) {
+    if (config?.rbac_priority_escalation_guard !== false && !ctx.isOwner && body.priority !== undefined && body.priority > defaultPriority) {
       return NextResponse.json({ error: 'Role priority escalation is restricted to the owner' }, { status: 403 });
     }
 

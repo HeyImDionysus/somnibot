@@ -12,12 +12,10 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { notifyBot } from '@/lib/notify-bot';
-import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 import { guildConfigPatchSchema } from '@/lib/guild-config-schema';
-
 
 export async function GET() {
   const auth = await requireGuildOwner();
