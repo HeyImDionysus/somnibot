@@ -27,10 +27,13 @@ _UPSERT_RETURN = re.compile(
 # syntax error while compiling the function.  Keep this guard deliberately
 # narrow: it only matches an unexpanded relation alias as the first SELECT
 # expression and a rowtype variable as the first INTO target.
-_ROWTYPE_DECL = re.compile(r"(?im)\b(?P<name>v_[a-z_]\w*)\s+[^;\n]*?%ROWTYPE\b")
+_ROWTYPE_DECL = re.compile(
+    r"(?im)(?:\bDECLARE\s+|[;\n]\s*)(?P<name>(?!DECLARE\b|BEGIN\b)[a-z_]\w*)\s+"
+    r"[^;\n]*?%ROWTYPE\b"
+)
 _ROWTYPE_MIXED_SELECT_INTO = re.compile(
     r"(?is)\bSELECT\s+(?P<expr>[a-z_]\w*)\s*,\s*[^;]*?\bINTO\s+"
-    r"(?P<target>v_[a-z_]\w*)\s*,"
+    r"(?P<target>[a-z_]\w*)\s*,"
 )
 
 
