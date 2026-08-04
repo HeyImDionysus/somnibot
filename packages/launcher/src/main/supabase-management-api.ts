@@ -233,14 +233,23 @@ export async function getSupabaseSessionPoolerTemplate(
     && row.pool_mode === 'session'
     && Number(row.db_port) === 5432
   ));
-  if (sessionRows.length !== 1) {
-    return { ok: false, error: 'Supabase did not return one unambiguous primary session-pooler endpoint for this project.' };
+  const transactionRows = rows.filter((row) => (
+    row.database_type === 'PRIMARY'
+    && row.pool_mode === 'transaction'
+    && Number(row.db_port) === 6543
+  ));
+  // The Management API commonly returns only the primary transaction config.
+  // Supabase documents the same shared Supavisor host on 5432 for session mode
+  // and 6543 for transaction mode, so that trusted primary row is sufficient
+  // to materialize the migration-safe session endpoint.
+  if (sessionRows.length > 1 || (sessionRows.length === 0 && transactionRows.length !== 1)) {
+    return { ok: false, error: 'Supabase did not return one unambiguous primary shared-pooler endpoint for this project.' };
   }
-  const session = sessionRows[0];
-  const host = typeof session.db_host === 'string' ? session.db_host.trim().toLowerCase() : '';
-  const rawUser = typeof session.db_user === 'string' ? session.db_user.trim() : '';
-  const database = typeof session.db_name === 'string' && session.db_name.trim()
-    ? session.db_name.trim()
+  const pooler = sessionRows[0] ?? transactionRows[0];
+  const host = typeof pooler.db_host === 'string' ? pooler.db_host.trim().toLowerCase() : '';
+  const rawUser = typeof pooler.db_user === 'string' ? pooler.db_user.trim() : '';
+  const database = typeof pooler.db_name === 'string' && pooler.db_name.trim()
+    ? pooler.db_name.trim()
     : 'postgres';
   if (!/^[a-z0-9.-]+\.pooler\.supabase\.com$/.test(host)) {
     return { ok: false, error: 'Supabase did not return a trusted session-pooler host for this project.' };

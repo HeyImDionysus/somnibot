@@ -157,7 +157,7 @@ describe('Supabase Management API project discovery', () => {
     expect(JSON.stringify(result)).not.toContain('sbp-test-token');
   });
 
-  it('rejects a transaction-pooler endpoint instead of relabeling it as session mode', async () => {
+  it('derives the documented session port from a primary shared transaction-pooler row', async () => {
     const result = await getSupabaseSessionPoolerTemplate('sbp-test-token', 'project-ref', {
       fetchImpl: async () => response([{
         database_type: 'PRIMARY',
@@ -169,8 +169,26 @@ describe('Supabase Management API project discovery', () => {
       }]),
     });
     expect(result).toEqual({
+      ok: true,
+      connectionTemplate: 'postgresql://postgres.project-ref@aws-0-ca-central-1.pooler.supabase.com:5432/postgres',
+    });
+  });
+
+  it('rejects ambiguous primary shared-pooler metadata', async () => {
+    const row = {
+      database_type: 'PRIMARY',
+      db_user: 'postgres',
+      db_host: 'aws-0-ca-central-1.pooler.supabase.com',
+      db_port: 6543,
+      db_name: 'postgres',
+      pool_mode: 'transaction',
+    };
+    const result = await getSupabaseSessionPoolerTemplate('sbp-test-token', 'project-ref', {
+      fetchImpl: async () => response([row, row]),
+    });
+    expect(result).toEqual({
       ok: false,
-      error: 'Supabase did not return one unambiguous primary session-pooler endpoint for this project.',
+      error: 'Supabase did not return one unambiguous primary shared-pooler endpoint for this project.',
     });
   });
 
