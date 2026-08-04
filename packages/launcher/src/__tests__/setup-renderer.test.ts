@@ -11,6 +11,20 @@ function readSourceFile(relativePath: string): string {
 }
 
 describe('launcher setup renderer wiring', () => {
+  it('distinguishes encrypted saved secrets from revealable newly entered values', () => {
+    const html = readSourceFile('renderer/index.html');
+    const renderer = readSourceFile('renderer/renderer.js');
+
+    expect(html).toContain('data-target="discordToken" title="Show/hide" type="button"');
+    expect(html).toContain('type="text" id="supabasePublishableKey"');
+    expect(html).toContain('type="text" id="paypalClientId"');
+    expect(renderer).toContain("const MASKED_SECRET = '••••••••'");
+    expect(renderer).toContain('if (config[key] === MASKED_SECRET) markSavedSecret(input)');
+    expect(renderer).toContain("btn.textContent = 'Saved'");
+    expect(renderer).toContain("input.placeholder = 'Saved securely — type to replace'");
+    expect(renderer).toContain("input.dataset.savedSecret === 'true' ? MASKED_SECRET : input.value");
+  });
+
   it('shows VPS-ready callback values as first-class setup summary rows', () => {
     const html = readSourceFile('renderer/index.html');
 

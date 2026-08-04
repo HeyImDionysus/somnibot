@@ -962,6 +962,19 @@ main::-webkit-scrollbar-thumb:hover {
   opacity: 1;
 }
 
+.field input.has-saved-secret {
+  padding-right: 58px;
+}
+
+.toggle-vis.saved,
+.toggle-vis.saved:hover {
+  color: var(--text-success);
+  cursor: default;
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 1;
+}
+
 /* ─── Cloud Restore Banner ─── */
 .restore-banner {
   margin-top: 16px;

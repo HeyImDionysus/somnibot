@@ -10,6 +10,7 @@
 /* ================================================================== */
 
 const $ = (id) => document.getElementById(id);
+const MASKED_SECRET = '••••••••';
 
 const fields = {
   discordToken: $('discordToken'),
@@ -153,6 +154,7 @@ function applyConfigToForm(config) {
       input.checked = Boolean(config[key]);
     } else if (config[key]) {
       input.value = config[key];
+      if (config[key] === MASKED_SECRET) markSavedSecret(input);
     }
   }
   for (const [key, input] of Object.entries(runtimeFields)) {
@@ -198,6 +200,9 @@ async function init() {
     if (!input) continue;
     const eventName = input.type === 'checkbox' ? 'change' : 'input';
     input.addEventListener(eventName, () => {
+      if (input.dataset.savedSecret === 'true' && input.value !== MASKED_SECRET) {
+        clearSavedSecretState(input);
+      }
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(saveConfig, 500);
       input.classList.remove('error', 'valid');
@@ -271,7 +276,9 @@ function collectCredentialConfig() {
   const config = {};
   for (const [key, input] of Object.entries(fields)) {
     if (!input) continue;
-    config[key] = input.type === 'checkbox' ? input.checked : input.value;
+    config[key] = input.type === 'checkbox'
+      ? input.checked
+      : input.dataset.savedSecret === 'true' ? MASKED_SECRET : input.value;
   }
   return config;
 }
@@ -1413,15 +1420,64 @@ btnLavalinkHelp.addEventListener('click', () => {
 /* ================================================================== */
 
 document.querySelectorAll('.toggle-vis').forEach((btn) => {
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     const target = document.getElementById(btn.dataset.target);
-    if (target) {
+    if (target && target.dataset.savedSecret !== 'true') {
       const isPassword = target.type === 'password';
       target.type = isPassword ? 'text' : 'password';
       btn.textContent = isPassword ? '🔒' : '👁';
+      btn.setAttribute('aria-pressed', String(isPassword));
     }
   });
 });
+
+function visibilityButtonFor(input) {
+  return document.querySelector(`.toggle-vis[data-target="${input.id}"]`);
+}
+
+function markSavedSecret(input) {
+  input.dataset.savedSecret = 'true';
+  input.classList.add('has-saved-secret');
+  input.type = 'password';
+  const btn = visibilityButtonFor(input);
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('saved');
+    btn.textContent = 'Saved';
+    btn.title = 'Saved securely. Enter a replacement to change it.';
+    btn.setAttribute('aria-label', `${input.id} is saved securely`);
+    btn.setAttribute('aria-pressed', 'false');
+  }
+}
+
+function clearSavedSecretState(input) {
+  delete input.dataset.savedSecret;
+  input.classList.remove('has-saved-secret');
+  const btn = visibilityButtonFor(input);
+  if (btn) {
+    btn.disabled = false;
+    btn.classList.remove('saved');
+    btn.textContent = '👁';
+    btn.title = 'Show/hide';
+    btn.setAttribute('aria-label', `Show or hide ${input.id}`);
+    btn.setAttribute('aria-pressed', 'false');
+  }
+}
+
+for (const input of Object.values(fields)) {
+  if (!input || input.type === 'checkbox') continue;
+  input.addEventListener('focus', () => {
+    if (input.dataset.savedSecret !== 'true') return;
+    input.value = '';
+    input.placeholder = 'Saved securely — type to replace';
+  });
+  input.addEventListener('blur', () => {
+    if (input.dataset.savedSecret !== 'true' || input.value) return;
+    input.value = MASKED_SECRET;
+  });
+}
 
 /* ================================================================== */
 /*  Log panel                                                          */
