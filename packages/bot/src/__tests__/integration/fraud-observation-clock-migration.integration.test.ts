@@ -7,10 +7,10 @@
  * in an isolated schema, seeds nullable historical timestamps, rewrites only
  * the migrations' explicit `public.` qualifier, and executes the real SQL
  * files in production order. The index migration is transaction-compatible
- * with the Supabase CLI. The harness seeds an invalid catalog row using a
- * timed-out concurrent build while a fixture transaction holds a row lock,
- * then exercises recovery and fail-closed behavior without explicitly
- * canceling a builder or touching production migration history.
+ * with the Supabase CLI. The harness seeds an invalid catalog row by
+ * canceling a concurrent build only after PostgreSQL publishes its catalog
+ * row, then exercises recovery and fail-closed behavior in disposable schema
+ * state; production migration history is never touched.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -162,6 +162,71 @@ async function indexCatalog(
        AND c.relname = 'idx_fraud_signals_critical_observation'
   `);
   return index;
+}
+
+async function waitForIndexState(
+  observer: Sql,
+  predicate: (index: IndexCatalogRow | undefined) => boolean,
+): Promise<IndexCatalogRow | undefined> {
+  let lastIndex: IndexCatalogRow | undefined;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    [lastIndex] = await observer.unsafe<IndexCatalogRow[]>(`
+      SELECT c.oid::TEXT AS oid,
+             i.indisvalid,
+             i.indisready,
+             i.indislive,
+             i.indisexclusion,
+             i.indisunique,
+             am.amname AS access_method,
+             ARRAY(
+               SELECT a.attname
+                 FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, position)
+                 JOIN pg_catalog.pg_attribute a
+                   ON a.attrelid = i.indrelid
+                  AND a.attnum = key.attnum
+                WHERE key.position <= i.indnkeyatts
+                ORDER BY key.position
+             ) AS key_columns,
+             i.indoption::TEXT AS key_options,
+             ARRAY[]::TEXT[] AS opclasses,
+             ARRAY[]::TEXT[] AS index_collations,
+             ARRAY[]::TEXT[] AS table_collations,
+             pg_catalog.pg_get_indexdef(i.indexrelid) AS index_definition,
+             pg_catalog.pg_get_expr(i.indpred, i.indrelid, true) AS predicate
+        FROM pg_catalog.pg_index i
+        JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_catalog.pg_am am ON am.oid = c.relam
+       WHERE n.nspname = '${FIXTURE_SCHEMA}'
+         AND c.relname = 'idx_fraud_signals_critical_observation'
+    `);
+    if (predicate(lastIndex)) return lastIndex;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error(
+    `Timed out waiting for expected index state: ${JSON.stringify(lastIndex)}`,
+  );
+}
+
+async function waitForBackendWait(
+  observer: Sql,
+  pid: number,
+  waitEventType: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const [activity] = await observer.unsafe<Array<{
+      state: string;
+      wait_event_type: string | null;
+      wait_event: string | null;
+    }>>(`
+      SELECT state, wait_event_type, wait_event
+        FROM pg_catalog.pg_stat_activity
+       WHERE pid = ${pid}
+    `);
+    if (activity?.wait_event_type === waitEventType) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error(`Timed out waiting for backend ${pid} to wait on ${waitEventType}`);
 }
 
 async function seedInvalidIndex(): Promise<IndexCatalogRow> {
@@ -572,6 +637,100 @@ describe('phased fraud observation-clock legacy migration', () => {
       await restoreFixtureTargetIndex();
     }
   });
+
+  it('waits for an independent concurrent builder and preserves its valid index', async () => {
+    const blocker = postgres(getTestDbUrl(), { max: 1 });
+    const builder = postgres(getTestDbUrl(), { max: 1 });
+    const runner = postgres(getTestDbUrl(), { max: 1 });
+    const observer = postgres(getTestDbUrl(), { max: 1 });
+    const fragments = indexMigrationFragments();
+    let releaseBlocker = (): void => {};
+    let markBlockerReady = (): void => {};
+    const holdBlocker = new Promise<void>((resolvePromise) => {
+      releaseBlocker = resolvePromise;
+    });
+    const blockerReady = new Promise<void>((resolvePromise) => {
+      markBlockerReady = resolvePromise;
+    });
+    let builderPid: number | undefined;
+    let runnerPid: number | undefined;
+    let buildOutcome: Promise<unknown> | undefined;
+    let preflightOutcome: Promise<unknown> | undefined;
+
+    await dropFixtureTargetIndex();
+    const blockerOutcome = blocker.begin(async (transaction) => {
+      await transaction.unsafe('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      await transaction.unsafe(`
+        SELECT id
+          FROM ${FIXTURE_SCHEMA}.fraud_signals
+         WHERE id = '${CREATED_ROW_ID}'
+      `);
+      markBlockerReady();
+      await holdBlocker;
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    try {
+      await blockerReady;
+      const [builderBackend] = await builder.unsafe<Array<{ pid: number }>>(
+        'SELECT pg_catalog.pg_backend_pid() AS pid',
+      );
+      builderPid = builderBackend!.pid;
+      buildOutcome = builder.unsafe(`
+        CREATE INDEX CONCURRENTLY idx_fraud_signals_critical_observation
+          ON ${FIXTURE_SCHEMA}.fraud_signals (guild_id, last_observed_at DESC)
+         WHERE status = 'open' AND severity = 'critical'
+      `).catch((error: unknown) => error);
+
+      const inProgress = await waitForIndexState(
+        observer,
+        (index) => Boolean(index?.indisready && !index.indisvalid),
+      );
+      expect(inProgress).toBeDefined();
+
+      const [runnerBackend] = await runner.unsafe<Array<{ pid: number }>>(
+        'SELECT pg_catalog.pg_backend_pid() AS pid',
+      );
+      runnerPid = runnerBackend!.pid;
+      preflightOutcome = runner.unsafe(fragments.preflight).catch(
+        (error: unknown) => error,
+      );
+      await waitForBackendWait(observer, runnerPid, 'Lock');
+
+      releaseBlocker();
+      const buildError = await buildOutcome;
+      expect(buildError).toEqual([]);
+      const preflightError = await preflightOutcome;
+      expect(preflightError).toEqual([]);
+
+      const survivingIndex = await indexCatalog(FIXTURE_SCHEMA);
+      expectTargetIndex(survivingIndex);
+      expect(survivingIndex!.oid).toBe(inProgress!.oid);
+    } finally {
+      releaseBlocker();
+      if (builderPid !== undefined) {
+        await sql.unsafe(`SELECT pg_catalog.pg_cancel_backend(${builderPid})`).catch(
+          () => undefined,
+        );
+      }
+      if (runnerPid !== undefined) {
+        await sql.unsafe(`SELECT pg_catalog.pg_cancel_backend(${runnerPid})`).catch(
+          () => undefined,
+        );
+      }
+      const blockerError = await blockerOutcome;
+      if (buildOutcome) await buildOutcome;
+      if (preflightOutcome) await preflightOutcome;
+      await observer.end();
+      await runner.end();
+      await builder.end();
+      await blocker.end();
+      await restoreFixtureTargetIndex();
+      if (blockerError !== undefined) throw blockerError;
+    }
+  }, 30_000);
 
   it('rejects a valid index whose quoted predicate literal contains whitespace', async () => {
     await expectDefinitionMutantRejected(
