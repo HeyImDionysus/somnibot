@@ -157,6 +157,19 @@ describe('middleware health access', () => {
     expect(mockCreateServerClient).not.toHaveBeenCalled();
   });
 
+  it('lets the exact PayPal recovery secret reach its route without Supabase or CSRF', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'recovery-secret-value';
+
+    const res = await runWithoutPublicSupabaseEnv('/api/paypal/recovery', {
+      method: 'POST',
+      headers: { 'x-paypal-reconcile-secret': 'recovery-secret-value' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
   it('does not bypass owner auth when the scheduler secret is wrong', async () => {
     process.env.PAYPAL_RECONCILE_SECRET = 'scheduler-secret-value';
 

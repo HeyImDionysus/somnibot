@@ -168,6 +168,10 @@ function isSessionlessPublicRoute(pathname: string): boolean {
     pathname === '/setup' ||
     pathname.startsWith('/api/setup') ||
     pathname.startsWith('/api/paypal/webhook') ||
+    // Cron/operator recovery authenticates with the dedicated
+    // x-paypal-reconcile-secret header in the route itself. Keep it out of
+    // Supabase session auth so machine callers can reach that gate.
+    pathname === '/api/paypal/recovery' ||
     pathname.startsWith('/api/license/validate') ||
     pathname.startsWith('/api/license/heartbeat') ||
     pathname.startsWith('/api/license/deactivate') ||
