@@ -882,17 +882,21 @@ export async function handleBuyButton(
       log.warn('Cannot deactivate pending checkout without provider identity', { orderId: order.id, reason });
       return;
     }
-    const { error } = await supabase.rpc('commerce_deactivate_pending_checkout', {
-      p_order_id: order.id,
-      p_guild_id: order.guild_id,
-      p_customer_id: order.customer_id,
-      p_product_id: order.product_id,
-      p_provider_kind: providerKind,
-      p_provider_id: providerId,
-      p_proof_kind: 'approval_link_not_exposed',
-      p_proof_reference: reason,
-    });
-    if (error) log.warn('Failed to deactivate abandoned pending checkout', { orderId: order.id, reason, detail: error.message });
+    try {
+      const { error } = await supabase.rpc('commerce_deactivate_pending_checkout', {
+        p_order_id: order.id,
+        p_guild_id: order.guild_id,
+        p_customer_id: order.customer_id,
+        p_product_id: order.product_id,
+        p_provider_kind: providerKind,
+        p_provider_id: providerId,
+        p_proof_kind: 'approval_link_not_exposed',
+        p_proof_reference: reason,
+      });
+      if (error) log.warn('Failed to deactivate abandoned pending checkout', { orderId: order.id, reason, detail: error.message });
+    } catch (error) {
+      log.warn('Failed to deactivate abandoned pending checkout', { orderId: order.id, reason, detail: String(error) });
+    }
   };
 
   const price = (product.price_cents / 100).toFixed(2);
