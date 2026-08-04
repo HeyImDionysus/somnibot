@@ -56,6 +56,12 @@ const STYLE_MAP: Record<string, ButtonStyle> = {
   danger: ButtonStyle.Danger,
 };
 
+function selectMenuEmoji(raw: string): { name?: string; id?: string; animated?: boolean } {
+  const custom = raw.match(/^<(a?):([^:>]+):(\d+)>$/);
+  if (custom) return { animated: custom[1] === 'a', name: custom[2], id: custom[3] };
+  return { name: raw };
+}
+
 /**
  * Handle a button role toggle interaction.
  */
@@ -321,7 +327,7 @@ export async function deployButtonRolesPanel(
     for (const entry of roles.slice(0, 25)) {
       const option = new StringSelectMenuOptionBuilder().setLabel(entry.label.slice(0, 100))
         .setValue(entry.role_id);
-      if (entry.emoji) option.setEmoji(entry.emoji);
+      if (entry.emoji) option.setEmoji(selectMenuEmoji(entry.emoji));
       menu.addOptions(option);
     }
     rows.push(new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(menu));
