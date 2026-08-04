@@ -1867,8 +1867,8 @@ describe('GET /api/setup status', () => {
     expect(res.status).toBe(200);
     expect(body.paypalWebhookUrl).toBe('https://dashboard.example.com/api/paypal/webhook');
     expect(body.paypalWebhookUrlReady).toBe(true);
-    expect(body.paypalCredentialsConfigured).toBe(true);
-    expect(body.paypalWebhookIdConfigured).toBe(true);
+    expect(body.paypalCredentialsConfigured).toBe(false);
+    expect(body.paypalWebhookIdConfigured).toBe(false);
     expect(body.paypalWebhookReady).toBe(false);
     expect(body.paypalWebhookError).toBe('PayPal Client ID and Client Secret are required before setup can finalize.');
     expect(diagnosticsTable.eq).toHaveBeenCalledWith('guild_id', 'guild-1');

@@ -7,6 +7,7 @@
  *   - /api/store/products/route.ts
  */
 import { createAdminSupabase } from './supabase/admin';
+import { decryptCloudCredential } from './cloud-credential-crypto';
 
 const PAYPAL_SANDBOX_API_BASE = 'https://api-m.sandbox.paypal.com';
 const PAYPAL_LIVE_API_BASE = 'https://api-m.paypal.com';
@@ -40,8 +41,8 @@ interface SavedPayPalSetting {
 
 export const PAYPAL_RUNTIME_SETTING_KEYS = [
   'paypal_client_id',
-  'paypal_client_secret',
-  'paypal_webhook_id',
+  'paypal_client_secret_encrypted',
+  'paypal_webhook_id_encrypted',
   'paypal_webhook_url',
   'paypal_sandbox',
   'paypal_api_base',
@@ -153,7 +154,16 @@ async function readSavedPayPalSettings(): Promise<SavedPayPalSetting[]> {
     if (!Array.isArray(data)) {
       throw new Error('saved PayPal settings query returned an invalid result');
     }
-    return data;
+    const secretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    const projectOrigin = supabaseUrl ? new URL(supabaseUrl).origin : '';
+    return data.flatMap((row) => {
+      if (!row.key.endsWith('_encrypted')) return [row];
+      if (!secretKey || !projectOrigin || !row.value) return [];
+      const baseKey = row.key.slice(0, -'_encrypted'.length);
+      const value = decryptCloudCredential(row.value, baseKey, secretKey, projectOrigin);
+      return value ? [{ key: baseKey, value }] : [];
+    });
   } catch (err) {
     throw new Error(
       `saved PayPal settings read failed: ${

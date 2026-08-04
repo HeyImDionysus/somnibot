@@ -161,8 +161,8 @@ async function fetchAuthConfig(projectRef: string, accessToken: string, options?
   );
 
   if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    return { ok: false, error: `Supabase Management API error (${res.status}): ${errBody}` };
+    await res.text().catch(() => '');
+    return { ok: false, error: `Supabase Management API error (${res.status})` };
   }
 
   return { ok: true, config: await res.json() };
@@ -270,7 +270,8 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
 }
 
 /**
- * Read Discord credentials from env vars, falling back to instance_settings.
+ * Read Discord credentials from runtime env vars. Persisted configured markers
+ * intentionally cannot substitute for the live client secret.
  */
 async function getDiscordCredentials(): Promise<{
   clientId: string | null;
@@ -283,22 +284,19 @@ async function getDiscordCredentials(): Promise<{
     return { clientId, clientSecret };
   }
 
-  // Fallback: read from instance_settings
+  // The application ID is not secret and may be recovered from settings.
   try {
     const admin = createAdminSupabase();
     const { data: settings } = await admin
       .from('instance_settings')
       .select('key, value')
-      .in('key', ['discord_application_id', 'discord_client_secret'])
+      .in('key', ['discord_application_id'])
       .limit(1000);
 
     if (settings) {
       for (const row of settings) {
         if (row.key === 'discord_application_id' && row.value && !clientId) {
           clientId = row.value;
-        }
-        if (row.key === 'discord_client_secret' && row.value && !clientSecret) {
-          clientSecret = row.value;
         }
       }
     }
@@ -377,8 +375,8 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     );
 
     if (!res.ok) {
-      const errBody = await res.text();
-      return { success: false, error: `Supabase Management API error (${res.status}): ${errBody}` };
+      await res.text().catch(() => '');
+      return { success: false, error: `Supabase Management API error (${res.status})` };
     }
 
     const verified = await fetchAuthConfig(projectRef, accessToken, options);

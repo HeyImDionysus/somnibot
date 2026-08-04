@@ -71,6 +71,18 @@ describe('local to VPS runtime handoff', () => {
     expect(checks).toBeGreaterThanOrEqual(4);
   });
 
+  it('fails closed when process liveness cannot be proven because the probe is denied', async () => {
+    let now = 0;
+    const denied = Object.assign(new Error('access denied'), { code: 'EPERM' });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => { throw denied; });
+    await expect(waitForProcessIdsToExit([10], {
+      timeoutMs: 200,
+      now: () => now,
+      wait: async () => { now += 100; },
+    })).rejects.toThrow('did not stop');
+    expect(kill).toHaveBeenCalled();
+  });
+
   it('stops local before VPS execution and leaves it stopped after success', async () => {
     const events: string[] = [];
     const output = await runLocalToVpsHandoff({
@@ -85,7 +97,7 @@ describe('local to VPS runtime handoff', () => {
     expect(events).toEqual(['stop-local', 'snapshot-local', 'start-vps']);
   });
 
-  it('restores local without touching the VPS when state preparation fails', async () => {
+  it('does not start a second local stack when stop or state preparation is only partially successful', async () => {
     const events: string[] = [];
     await expect(runLocalToVpsHandoff({
       localWasRunning: true,
@@ -95,7 +107,7 @@ describe('local to VPS runtime handoff', () => {
       restoreLocal: async () => { events.push('restore-local'); },
       executeDeployment: async () => { events.push('start-vps'); return result('success'); },
     })).rejects.toThrow('snapshot invalid');
-    expect(events).toEqual(['stop-local', 'snapshot-local', 'restore-local']);
+    expect(events).toEqual(['stop-local', 'snapshot-local']);
   });
 
   it('restores the prior local runtime when VPS deployment fails', async () => {
@@ -111,7 +123,7 @@ describe('local to VPS runtime handoff', () => {
     expect(output.logs.at(-1)?.code).toBe('local-runtime-restored');
   });
 
-  it('attempts to restore local when stopping it only partially succeeds', async () => {
+  it('does not restore local when stopping it only partially succeeds', async () => {
     const restoreLocal = vi.fn().mockResolvedValue(undefined);
     const executeDeployment = vi.fn();
     await expect(runLocalToVpsHandoff({
@@ -121,7 +133,7 @@ describe('local to VPS runtime handoff', () => {
       restoreLocal,
       executeDeployment,
     })).rejects.toThrow('shutdown deadline exceeded');
-    expect(restoreLocal).toHaveBeenCalledOnce();
+    expect(restoreLocal).not.toHaveBeenCalled();
     expect(executeDeployment).not.toHaveBeenCalled();
   });
 

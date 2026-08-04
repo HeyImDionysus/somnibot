@@ -63,9 +63,8 @@ describe('evaluateSetupGate', () => {
     expect(result.completionConfirmed).toBe(true);
   });
 
-  it('returns "in_progress" when a Discord token exists but setup is not finalized', async () => {
-    // Token present in instance_settings (verify-discord ran) but not finalized.
-    const supabase = makeSupabase({ discord_bot_token: 'a-bot-token' });
+  it('returns "in_progress" when the wizard started but setup is not finalized', async () => {
+    const supabase = makeSupabase({ setup_started_at: '2026-08-04T00:00:00.000Z' });
     const result = await evaluateSetupGate(supabase, baseEnv);
 
     expect(result.state).toBe('in_progress');
@@ -80,10 +79,9 @@ describe('evaluateSetupGate', () => {
   });
 
   it('stays "in_progress" for a launcher-forked mid-wizard boot (env token AND wizard credential row)', async () => {
-    // The desktop launcher forks the bot with DISCORD_TOKEN in env AND syncs
-    // the raw discord_bot_token row to instance_settings. Both present with no
-    // completion row = a setup flow that has not finalized → verification mode.
-    const supabase = makeSupabase({ discord_bot_token: 'a-bot-token' });
+    // The desktop launcher forks the bot with DISCORD_TOKEN in env after the
+    // wizard has persisted its non-secret setup-started marker.
+    const supabase = makeSupabase({ setup_started_at: '2026-08-04T00:00:00.000Z' });
     const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
 
     expect(result.state).toBe('in_progress');
@@ -201,12 +199,12 @@ describe('evaluateSetupGate', () => {
   });
 
   it('boots fully (unconfirmed) when only the wizard-credential read blips and a token is in env', async () => {
-    // setup_completed_at reads cleanly absent, but the discord_bot_token
+    // setup_completed_at reads cleanly absent, but the setup_started_at
     // lookup fails transiently. With a token in env, prefer full boot over
     // gating a possibly env-configured/finalized deployment on a blip — the
     // same philosophy as the completed-row read-failure fallback. Unconfirmed
     // so the completion watcher never transitions on it.
-    const supabase = makeSupabase({}, { errorForKeys: { discord_bot_token: { code: 'PGRST301' } } });
+    const supabase = makeSupabase({}, { errorForKeys: { setup_started_at: { code: 'PGRST301' } } });
     const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
 
     expect(result.state).toBe('complete');
@@ -215,7 +213,7 @@ describe('evaluateSetupGate', () => {
   });
 
   it('stays "not_started" when the wizard-credential read blips and no token is in env', async () => {
-    const supabase = makeSupabase({}, { errorForKeys: { discord_bot_token: { code: 'PGRST301' } } });
+    const supabase = makeSupabase({}, { errorForKeys: { setup_started_at: { code: 'PGRST301' } } });
     const result = await evaluateSetupGate(supabase, {} as any);
 
     expect(result.state).toBe('not_started');

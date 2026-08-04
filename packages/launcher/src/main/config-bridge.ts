@@ -11,7 +11,13 @@ export const SENSITIVE_CONFIG_KEYS = [
   'supabaseAccessToken',
   'paypalClientSecret',
   'paypalWebhookId',
+  'paypalWebhookProofKey',
   'tailscaleAuthKey',
+  'vpsCsrfSecret',
+  'vpsNextAuthSecret',
+  'vpsWebhookReplaySecret',
+  'vpsValkeyPassword',
+  'vpsLavalinkPassword',
 ] as const satisfies readonly (keyof LauncherConfig)[];
 
 /** Return renderer-safe config values without exposing plaintext credentials over IPC. */

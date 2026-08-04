@@ -175,7 +175,9 @@ function shutdownManagedServices(): Promise<void> {
 
   const attempt = (async () => {
     stopLocalValkeyBackupSchedule();
-    const results = await Promise.allSettled([stopAll(), stopLavalink(), stopValkey()]);
+    // Drain the serialized cloud credential snapshot before Electron exits so
+    // an immediate quit cannot strand the next machine on stale state.
+    const results = await Promise.allSettled([credentialSyncTail, stopAll(), stopLavalink(), stopValkey()]);
     const failures = results
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       .map((result) => result.reason);
@@ -283,6 +285,14 @@ let dashboardSetupSnapshotCache: {
 } | null = null;
 
 type LauncherConfigPatch = Partial<LauncherConfig>;
+const RENDERER_WRITABLE_CONFIG_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
+  'discordToken', 'discordApplicationId', 'discordClientSecret', 'discordGuildId', 'guilds',
+  'supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey', 'supabaseDbPassword',
+  'supabaseDbUrlTemplate', 'supabaseAccessToken', 'supabaseDiscordAuthProviderConfigured',
+  'paypalClientId', 'paypalClientSecret', 'paypalWebhookId', 'paypalSandbox',
+  'runtimeMode', 'publicCallbackBaseUrl', 'vpsDomain', 'vpsSshHost', 'vpsSshUser',
+  'vpsDeployPath', 'tailscaleAuthKey', 'firstRunComplete', 'lavalinkEnabled', 'windowBounds',
+]);
 type PayPalRuntimeConfig = Pick<
   LauncherConfig,
   'paypalClientId' | 'paypalClientSecret' | 'paypalWebhookId' | 'paypalSandbox'
@@ -361,7 +371,10 @@ function sanitizePayPalConfigPatch(config: LauncherConfigPatch): LauncherConfigP
 }
 
 function sanitizeRendererConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
-  const sanitized = sanitizePayPalConfigPatch(config);
+  const allowed = Object.fromEntries(
+    Object.entries(config).filter(([key]) => RENDERER_WRITABLE_CONFIG_KEYS.has(key as keyof LauncherConfig)),
+  ) as LauncherConfigPatch;
+  const sanitized = sanitizePayPalConfigPatch(allowed);
   const savedConfig = getConfig();
   const pairingError = validateSupabaseCredentialPairing(savedConfig.supabaseUrl, sanitized);
   if (pairingError) throw new Error(pairingError);

@@ -268,8 +268,9 @@ function setSensitive(key: keyof LauncherConfig, value: string): void {
  * The launcher now sets a stable package identity before loading this module,
  * which correctly prevents future generic-Electron collisions but also moves
  * the electron-store path. Read the old path only when it already exists and
- * merge missing values into the current store; never delete or overwrite the
- * legacy file. Both the current safeStorage format and the older electron-
+ * merge missing values into the current store. Once migration succeeds,
+ * sensitive fields are removed from the legacy store so plaintext copies do
+ * not remain indefinitely; unrelated legacy settings are preserved. Both the current safeStorage format and the older electron-
  * store encryptionKey format are supported.
  */
 export function migrateLegacyConfig(): void {
@@ -283,12 +284,14 @@ export function migrateLegacyConfig(): void {
       if (!existsSync(legacyPath)) continue;
 
       let legacy: Record<string, unknown> | undefined;
+      let legacyStore: Store<Record<string, unknown>> | undefined;
       try {
-        const candidate = new Store<Record<string, unknown>>({
+        legacyStore = new Store<Record<string, unknown>>({
           name: 'config',
           cwd: legacyDirectory,
           clearInvalidConfig: false,
-        }).store;
+        });
+        const candidate = legacyStore.store;
         if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
           throw new Error('legacy config is not an object');
         }
@@ -296,12 +299,13 @@ export function migrateLegacyConfig(): void {
       } catch {
         // Older builds encrypted the whole electron-store with this key.
         try {
-          const candidate = new Store<Record<string, unknown>>({
+          legacyStore = new Store<Record<string, unknown>>({
             name: 'config',
             cwd: legacyDirectory,
             encryptionKey: 'somnibot-launcher-v1',
             clearInvalidConfig: false,
-          }).store;
+          });
+          const candidate = legacyStore.store;
           if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
             throw new Error('legacy config is not an object');
           }
@@ -313,9 +317,20 @@ export function migrateLegacyConfig(): void {
       if (!legacy) continue;
 
       const patch = selectMissingLegacyConfig(current, legacy);
-      if (Object.keys(patch).length === 0) continue;
-      saveConfig(patch);
-      Object.assign(current, patch);
+      if (Object.keys(patch).length > 0) {
+        saveConfig(patch);
+        Object.assign(current, patch);
+      }
+
+      // Retire only credentials that now exist in the safeStorage-backed
+      // current store. This is intentionally after saveConfig so a failed
+      // migration never destroys the only usable copy.
+      if (legacyStore) {
+        const secured = getConfigSnapshot();
+        for (const key of SENSITIVE_KEYS) {
+          if (secured[key] && legacyStore.has(key)) legacyStore.delete(key);
+        }
+      }
     }
   } catch {
     // A malformed or inaccessible legacy store must never prevent the current

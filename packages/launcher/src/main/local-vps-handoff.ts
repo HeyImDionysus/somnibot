@@ -58,8 +58,11 @@ export async function waitForProcessIdsToExit(
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+      // EPERM and unknown probe failures cannot prove the process exited.
+      // Keep waiting and fail closed at the handoff deadline.
+      return true;
     }
   });
   const wait = options.wait ?? ((delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
@@ -89,7 +92,9 @@ export async function runLocalToVpsHandoff(options: {
     await options.stopLocal();
     await options.prepareVpsState?.();
   } catch (error) {
-    await options.restoreLocal();
+    // A failed stop may be partial. Starting another local stack here could
+    // duplicate an orphaned bot, so leave recovery blocked until the operator
+    // can prove the original process set is quiescent.
     throw error;
   }
 

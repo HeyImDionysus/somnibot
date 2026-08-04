@@ -10,6 +10,7 @@ import {
   WIZARD_STEPS,
   type WizardStep,
 } from './steps.js';
+import { encryptCloudCredential, encryptedCredentialSettingKey } from '../../services/cloud-credential-crypto.js';
 
 /* ------------------------------------------------------------------ */
 /*  Progress tracking via instance_settings                            */
@@ -17,6 +18,10 @@ import {
 
 const PROGRESS_KEY = 'setup_wizard_progress';
 const PROGRESS_SECTION = 'setup';
+const SECRET_SETTINGS_KEYS = new Set([
+  'paypal_client_secret', 'paypal_webhook_id', 'supabase_access_token',
+  'supabase_db_url', 'discord_bot_token', 'discord_client_secret',
+]);
 
 export interface WizardProgress {
   /** Step IDs that have been fully configured (credentials verified). */
@@ -107,7 +112,8 @@ export async function detectConfigured(supabase: SupabaseClient): Promise<Set<st
   // Gather all instance_settings keys we care about
   const allKeys: string[] = [];
   for (const step of WIZARD_STEPS) {
-    allKeys.push(...Object.values(step.fieldToSettingsKey));
+    allKeys.push(...Object.values(step.fieldToSettingsKey).map((key) =>
+      SECRET_SETTINGS_KEYS.has(key) ? encryptedCredentialSettingKey(key) : key));
   }
 
   const { data } = await supabase
@@ -129,6 +135,7 @@ export async function detectConfigured(supabase: SupabaseClient): Promise<Set<st
     const required = step.modalFields
       .filter((field) => field.required)
       .map((field) => step.fieldToSettingsKey[field.customId])
+      .map((key) => key && SECRET_SETTINGS_KEYS.has(key) ? encryptedCredentialSettingKey(key) : key)
       .filter((key): key is string => Boolean(key));
     if (required.length > 0 && required.every((k) => filledKeys.has(k))) {
       // Some keys are proof of work the wizard does on the operator's behalf
@@ -137,7 +144,9 @@ export async function detectConfigured(supabase: SupabaseClient): Promise<Set<st
       // a client id and secret but no webhook, and calling that "configured"
       // let the operator finish setup with payment events going nowhere.
       const provisioned = REQUIRED_PROVISIONED_KEYS[step.id];
-      if (provisioned && !provisioned.every((k) => filledKeys.has(k))) continue;
+      if (provisioned && !provisioned.every((k) => filledKeys.has(
+        SECRET_SETTINGS_KEYS.has(k) ? encryptedCredentialSettingKey(k) : k,
+      ))) continue;
       configured.add(step.id);
     }
   }
@@ -159,9 +168,25 @@ export async function storeCredentials(
 ): Promise<void> {
   const rows: { key: string; value: string; section: string; updated_at: string }[] = [];
 
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const secretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const projectOrigin = supabaseUrl ? new URL(supabaseUrl).origin : '';
+
   for (const [fieldId, settingsKey] of Object.entries(step.fieldToSettingsKey)) {
     const value = values[fieldId]?.trim();
     if (value) {
+      if (SECRET_SETTINGS_KEYS.has(settingsKey)) {
+        if (!secretKey || !projectOrigin) {
+          throw new Error('Supabase bootstrap credentials are required to encrypt setup credentials.');
+        }
+        rows.push({
+          key: encryptedCredentialSettingKey(settingsKey),
+          value: encryptCloudCredential(value, settingsKey, secretKey, projectOrigin),
+          section: step.id,
+          updated_at: new Date().toISOString(),
+        });
+        continue;
+      }
       rows.push({
         key: settingsKey,
         value,

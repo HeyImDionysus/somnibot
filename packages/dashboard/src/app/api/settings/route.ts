@@ -9,6 +9,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { apiServerError, dbError } from '@/lib/api/response';
 import { recordAdminChange, humanizeColumn } from '@/lib/admin-changes';
 import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
+import { encryptCloudCredential } from '@/lib/cloud-credential-crypto';
 
 const settingsUpdate = z.object({
   section: z.string().min(1).max(64),
@@ -35,7 +36,17 @@ const SECRET_FIELDS = new Set([
   'discord_bot_token',
   'discord_client_secret',
   'paypal_client_secret',
+  'paypal_webhook_id',
   'lavalink_password',
+  'valkey_url',
+  'supabase_access_token',
+  'supabase_db_url',
+]);
+
+const ENCRYPTED_SECRET_FIELDS = new Set([
+  'discord_bot_token', 'discord_client_secret', 'paypal_client_secret',
+  'paypal_webhook_id', 'lavalink_password', 'valkey_url',
+  'supabase_access_token', 'supabase_db_url',
 ]);
 
 /**
@@ -112,7 +123,13 @@ export async function GET() {
 
     if (settings) {
       for (const row of settings) {
-        if (row.value && !values[row.key]) {
+        const encryptedBaseKey = row.key.endsWith('_encrypted')
+          ? row.key.slice(0, -'_encrypted'.length)
+          : null;
+        if (encryptedBaseKey && SECRET_FIELDS.has(encryptedBaseKey) && !values[encryptedBaseKey]) {
+          values[encryptedBaseKey] = '••••••••';
+          sources[encryptedBaseKey] = 'db';
+        } else if (row.value && !values[row.key]) {
           // DB value, only if env var isn't already set
           values[row.key] = SECRET_FIELDS.has(row.key) ? maskValue(row.value) : row.value;
           sources[row.key] = 'db';
@@ -205,9 +222,25 @@ export async function PUT(request: NextRequest) {
     // V10 Audit §6: Batch all upserts into a single operation to avoid
     // sequential timing that leaks info about which keys were skipped.
     const now = new Date().toISOString();
-    const upsertRows = Object.entries(values)
-      .filter(([, value]) => !value.includes('••••') && value.trim() !== '')
-      .map(([key, value]) => ({ key, value, section, updated_at: now }));
+    const writableEntries = Object.entries(values)
+      .filter(([, value]) => !value.includes('••••') && value.trim() !== '');
+    if (writableEntries.some(([key]) => key === 'supabase_secret_key')) {
+      return NextResponse.json(
+        { error: 'The Supabase bootstrap secret must be changed through the encrypted launcher setup.' },
+        { status: 400 },
+      );
+    }
+    const bootstrapSecret = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    const projectOrigin = supabaseUrl ? new URL(supabaseUrl).origin : '';
+    const upsertRows = writableEntries.map(([key, value]) => {
+      if (!ENCRYPTED_SECRET_FIELDS.has(key)) return { key, value, section, updated_at: now };
+      if (!bootstrapSecret || !projectOrigin) {
+        throw new Error('Supabase bootstrap credentials are required to encrypt settings.');
+      }
+      const encrypted = encryptCloudCredential(value, key, bootstrapSecret, projectOrigin);
+      return { ...encrypted, section, updated_at: now };
+    });
 
     if (upsertRows.length === 0) {
       return NextResponse.json(

@@ -6,7 +6,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 vi.mock('@/lib/supabase/server', () => ({ createServerSupabase: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
@@ -106,6 +109,23 @@ describe('PUT /api/settings', () => {
     expect(upsertArg).toHaveLength(2);
     expect(upsertArg[0]).toMatchObject({ key: 'discord_guild_id', value: '111222333', section: 'discord' });
     expect(upsertArg[1]).toMatchObject({ key: 'discord_application_id', value: '444555666', section: 'discord' });
+  });
+
+  it('stores submitted secrets only as project-bound encrypted rows', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://project.supabase.co');
+    vi.stubEnv('SUPABASE_SECRET_KEY', 'service-role-test-key');
+    mock._query.upsert.mockResolvedValue({ error: null });
+
+    const res = await putSettings({
+      section: 'paypal',
+      values: { paypal_client_secret: 'replacement-secret' },
+    });
+
+    expect(res.status).toBe(200);
+    const rows = mock._query.upsert.mock.calls[0][0];
+    expect(rows[0].key).toBe('paypal_client_secret_encrypted');
+    expect(rows[0].value).toMatch(/^somnibot-cloud-v1:/);
+    expect(JSON.stringify(rows)).not.toContain('replacement-secret');
   });
 
   it('filters out masked values (••••) — does not overwrite secrets with mask', async () => {

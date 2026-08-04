@@ -8,6 +8,9 @@ import {
   type SyncableCredentials,
 } from '../main/supabase-sync.js';
 
+const SYNC_SECRET = 'service-role-test-key';
+const PROJECT_ORIGIN = 'https://project.supabase.co';
+
 function pushCredentials(overrides: Partial<SyncableCredentials> = {}): SyncableCredentials {
   return {
     discordToken: 'discord-token',
@@ -43,24 +46,16 @@ function pushCredentials(overrides: Partial<SyncableCredentials> = {}): Syncable
 
 describe('buildSyncRows', () => {
   it('writes the complete cross-surface credential set with canonical settings keys', () => {
-    const rows = buildSyncRows(pushCredentials(), '2026-08-02T00:00:00.000Z');
+    const rows = buildSyncRows(pushCredentials(), SYNC_SECRET, PROJECT_ORIGIN, '2026-08-02T00:00:00.000Z');
     const rowMap = Object.fromEntries(rows.map(row => [row.key, row.value]));
 
-    expect(rowMap).toEqual({
-      discord_bot_token: 'discord-token',
+    expect(rowMap).toMatchObject({
       discord_application_id: 'discord-app',
-      discord_client_secret: 'discord-secret',
       discord_guild_id: 'discord-guild',
       supabase_url: 'https://project.supabase.co',
-      supabase_secret_key: 'supabase-secret',
       supabase_publishable_key: 'supabase-publishable',
-      supabase_db_password: 'database-password',
-      supabase_access_token: 'supabase-access-token',
       supabase_discord_auth_provider_configured: 'true',
       paypal_client_id: 'paypal-client',
-      paypal_client_secret: 'paypal-secret',
-      paypal_webhook_id: 'paypal-webhook',
-      paypal_webhook_proof_key: 'paypal-webhook-proof',
       paypal_sandbox: 'true',
       lavalink_enabled: 'true',
       local_public_callback_base_url: 'https://somnibot-laptop.tailnet.ts.net',
@@ -68,13 +63,21 @@ describe('buildSyncRows', () => {
       vps_ssh_host: '203.0.113.10',
       vps_ssh_user: 'somnibot',
       vps_deploy_path: '/opt/somnibot',
-      tailscale_auth_key: 'tskey-auth-portable',
-      vps_csrf_secret: 'vps-csrf',
-      vps_nextauth_secret: 'vps-nextauth',
-      vps_webhook_replay_secret: 'vps-replay',
-      vps_valkey_password: 'vps-valkey',
-      vps_lavalink_password: 'vps-lavalink',
     });
+    const encryptedKeys = [
+      'discord_bot_token_encrypted', 'discord_client_secret_encrypted',
+      'supabase_secret_key_encrypted', 'supabase_db_password_encrypted',
+      'supabase_access_token_encrypted', 'paypal_client_secret_encrypted',
+      'paypal_webhook_id_encrypted', 'paypal_webhook_proof_key_encrypted',
+      'tailscale_auth_key_encrypted', 'vps_csrf_secret_encrypted',
+      'vps_nextauth_secret_encrypted', 'vps_webhook_replay_secret_encrypted',
+      'vps_valkey_password_encrypted', 'vps_lavalink_password_encrypted',
+    ];
+    for (const key of encryptedKeys) {
+      expect(rowMap[key]).toMatch(/^somnibot-cloud-v1:/);
+    }
+    expect(JSON.stringify(rows)).not.toContain('discord-token');
+    expect(JSON.stringify(rows)).not.toContain('paypal-secret');
     expect(rows.every(row => row.section === 'launcher')).toBe(true);
     expect(rows.every(row => row.updated_at === '2026-08-02T00:00:00.000Z')).toBe(true);
   });
@@ -84,28 +87,26 @@ describe('buildSyncRows', () => {
       discordClientSecret: '',
       supabaseDbPassword: '   ',
       publicCallbackBaseUrl: '\t',
-    }));
+    }), SYNC_SECRET, PROJECT_ORIGIN);
     const keys = rows.map(row => row.key);
 
-    expect(keys).not.toContain('discord_client_secret');
-    expect(keys).not.toContain('supabase_db_password');
+    expect(keys).not.toContain('discord_client_secret_encrypted');
+    expect(keys).not.toContain('supabase_db_password_encrypted');
     expect(keys).not.toContain('local_public_callback_base_url');
   });
 });
 
 describe('parseSyncRows', () => {
   it('restores Supabase and all PayPal connection fields even when Discord is absent', () => {
-    const restored = parseSyncRows([
-      { key: 'supabase_db_password', value: 'restored-db-password' },
-      { key: 'supabase_access_token', value: 'restored-management-token' },
-      { key: 'supabase_discord_auth_provider_configured', value: 'true' },
-      { key: 'paypal_client_id', value: 'restored-client' },
-      { key: 'paypal_client_secret', value: 'restored-secret' },
-      { key: 'paypal_webhook_id', value: 'restored-webhook' },
-      { key: 'paypal_sandbox', value: 'false' },
-      { key: 'lavalink_enabled', value: 'true' },
-      { key: 'tailscale_auth_key', value: 'restored-tailscale-auth-key' },
-    ]);
+    const source = pushCredentials({
+      discordToken: '', discordApplicationId: '', discordClientSecret: '', discordGuildId: '',
+      supabaseDbPassword: 'restored-db-password',
+      supabaseAccessToken: 'restored-management-token',
+      paypalClientId: 'restored-client', paypalClientSecret: 'restored-secret',
+      paypalWebhookId: 'restored-webhook', paypalSandbox: false,
+      tailscaleAuthKey: 'restored-tailscale-auth-key',
+    });
+    const restored = parseSyncRows(buildSyncRows(source, SYNC_SECRET, PROJECT_ORIGIN), SYNC_SECRET, PROJECT_ORIGIN);
 
     expect(restored).toEqual({
       supabaseDbPassword: 'restored-db-password',
@@ -114,9 +115,19 @@ describe('parseSyncRows', () => {
       paypalClientId: 'restored-client',
       paypalClientSecret: 'restored-secret',
       paypalWebhookId: 'restored-webhook',
+      paypalWebhookProofKey: 'paypal-webhook-proof',
       paypalSandbox: false,
       lavalinkEnabled: true,
       tailscaleAuthKey: 'restored-tailscale-auth-key',
+      supabaseUrl: 'https://project.supabase.co',
+      supabaseSecretKey: 'supabase-secret',
+      supabasePublishableKey: 'supabase-publishable',
+      publicCallbackBaseUrl: 'https://somnibot-laptop.tailnet.ts.net',
+      vpsDomain: 'somnibot.example.com', vpsSshHost: '203.0.113.10',
+      vpsSshUser: 'somnibot', vpsDeployPath: '/opt/somnibot',
+      vpsCsrfSecret: 'vps-csrf', vpsNextAuthSecret: 'vps-nextauth',
+      vpsWebhookReplaySecret: 'vps-replay', vpsValkeyPassword: 'vps-valkey',
+      vpsLavalinkPassword: 'vps-lavalink',
     });
   });
 
@@ -131,14 +142,11 @@ describe('parseSyncRows', () => {
       { key: 'paypal_client_id', value: 'wizard-paypal-client' },
       { key: 'paypal_client_secret', value: 'wizard-paypal-secret' },
       { key: 'paypal_webhook_url', value: 'https://somni.tailnet.ts.net/api/paypal/webhook' },
-    ]);
+    ], SYNC_SECRET, PROJECT_ORIGIN);
 
     expect(restored).toMatchObject({
-      discordToken: 'legacy-discord-token',
       discordApplicationId: 'legacy-app-id',
-      supabaseDbPassword: 'encoded database password',
       paypalClientId: 'wizard-paypal-client',
-      paypalClientSecret: 'wizard-paypal-secret',
       publicCallbackBaseUrl: 'https://somni.tailnet.ts.net',
     });
   });
@@ -149,19 +157,19 @@ describe('parseSyncRows', () => {
       { key: 'supabase_db_password', value: '' },
       { key: 'paypal_sandbox', value: 'not-a-boolean' },
       { key: 'lavalink_enabled', value: 'not-a-boolean' },
-    ])).toEqual({});
+    ], SYNC_SECRET, PROJECT_ORIGIN)).toEqual({});
   });
 
   it('round-trips the complete launcher connection set', () => {
     const original = pushCredentials();
-    const rows = buildSyncRows(original);
-    expect(parseSyncRows(rows)).toEqual(original);
+    const rows = buildSyncRows(original, SYNC_SECRET, PROJECT_ORIGIN);
+    expect(parseSyncRows(rows, SYNC_SECRET, PROJECT_ORIGIN)).toEqual(original);
   });
 
   it('does not replace an existing password from a connection URL without a password', () => {
     expect(parseSyncRows([
       { key: 'supabase_db_url', value: 'postgresql://postgres@db.example.test:5432/postgres' },
-    ])).toEqual({});
+    ], SYNC_SECRET, PROJECT_ORIGIN)).toEqual({});
   });
 });
 
@@ -213,16 +221,11 @@ describe('pullFromSupabase', () => {
   });
 
   it('queries known connection keys across bot-owned sections and returns a partial merge', async () => {
+    const cloudRows = buildSyncRows(pushCredentials(), SYNC_SECRET, PROJECT_ORIGIN)
+      .filter(row => ['paypal_client_id', 'paypal_client_secret_encrypted', 'supabase_db_password_encrypted'].includes(row.key));
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => [
-        { key: 'paypal_client_id', value: 'wizard-paypal-client' },
-        { key: 'paypal_client_secret', value: 'wizard-paypal-secret' },
-        {
-          key: 'supabase_db_url',
-          value: 'postgresql://postgres:restored-password@db.example.test:5432/postgres',
-        },
-      ],
+      json: async () => cloudRows,
     });
     vi.stubGlobal('fetch', fetchMock);
 
@@ -231,9 +234,9 @@ describe('pullFromSupabase', () => {
     expect(result).toEqual({
       ok: true,
       credentials: {
-        paypalClientId: 'wizard-paypal-client',
-        paypalClientSecret: 'wizard-paypal-secret',
-        supabaseDbPassword: 'restored-password',
+        paypalClientId: 'paypal-client',
+        paypalClientSecret: 'paypal-secret',
+        supabaseDbPassword: 'database-password',
       },
     });
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -241,7 +244,7 @@ describe('pullFromSupabase', () => {
     expect(requestUrl.searchParams.has('section')).toBe(false);
     expect(requestUrl.searchParams.get('select')).toBe('key,value');
     expect(requestUrl.searchParams.get('key')).toContain('paypal_client_id');
-    expect(requestUrl.searchParams.get('key')).toContain('supabase_db_url');
+    expect(requestUrl.searchParams.get('key')).not.toContain('supabase_db_url,');
   });
 });
 

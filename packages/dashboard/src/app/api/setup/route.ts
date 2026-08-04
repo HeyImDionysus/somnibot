@@ -12,6 +12,7 @@
  * - GET remains public so the setup page can detect state.
  */
 import { NextResponse, type NextRequest } from 'next/server';
+import { encryptCloudCredential } from '@/lib/cloud-credential-crypto';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/supabase/auto-config';
 import { requireGuildOwner } from '@/lib/api/require-owner';
@@ -90,6 +91,21 @@ async function persistSetupSetting(
   value: string,
   section: string,
 ): Promise<void> {
+  if (SECRET_SETUP_SETTING_KEYS.has(key)) {
+    const bootstrapSecret = key === 'supabase_secret_key'
+      ? value
+      : process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    if (bootstrapSecret && supabaseUrl) {
+      const encrypted = encryptCloudCredential(value, key, bootstrapSecret, new URL(supabaseUrl).origin);
+      await supabase
+        .from('instance_settings')
+        .upsert(
+          { ...encrypted, section, updated_at: new Date().toISOString() },
+          { onConflict: 'key' },
+        );
+    }
+  }
   await supabase
     .from('instance_settings')
     .upsert(
@@ -724,11 +740,9 @@ export async function GET(req: NextRequest) {
     status.paypalWebhookError = savedPayPalStatus.error;
     status.paypalCredentialsConfigured = Boolean(
       (process.env['PAYPAL_CLIENT_ID']?.trim() || savedSettings.get('paypal_client_id'))
-      && (process.env['PAYPAL_CLIENT_SECRET']?.trim() || hasConfiguredSetupSecret(savedSettings, 'paypal_client_secret')),
+      && process.env['PAYPAL_CLIENT_SECRET']?.trim(),
     );
-    status.paypalWebhookIdConfigured = Boolean(
-      process.env['PAYPAL_WEBHOOK_ID']?.trim() || hasConfiguredSetupSecret(savedSettings, 'paypal_webhook_id'),
-    );
+    status.paypalWebhookIdConfigured = Boolean(process.env['PAYPAL_WEBHOOK_ID']?.trim());
 
     // Check if Discord creds exist in instance_settings (for display purposes)
     if (!status.discordCredentialsPresent) {
@@ -851,6 +865,7 @@ export async function POST(request: NextRequest) {
         for (const [key, { value, section }] of Object.entries(creds)) {
           await persistSetupSetting(supabase, key, value, section);
         }
+        await persistSetupSetting(supabase, 'setup_started_at', new Date().toISOString(), 'system');
         credentialsSaved = true;
         console.log('[Setup] ✅ Discord credentials saved to instance_settings');
 
@@ -865,7 +880,7 @@ export async function POST(request: NextRequest) {
               : '[Setup] ✅ Discord auth provider auto-configured in Supabase',
           );
         } else {
-          console.warn('[Setup] ⚠️  Could not auto-configure Discord auth:', authResult.error);
+          console.warn('[Setup] Could not auto-configure Discord auth provider.');
         }
       }
 
@@ -1126,7 +1141,7 @@ export async function POST(request: NextRequest) {
     });
     if (!authResult.success) {
       const publicAuthError = redactAuthProviderError(authResult.error);
-      console.warn('[Setup] Could not finalize setup because Discord auth is not configured:', authResult.error);
+      console.warn('[Setup] Could not finalize setup because Discord auth is not configured.');
       return NextResponse.json(
         {
           ok: false,

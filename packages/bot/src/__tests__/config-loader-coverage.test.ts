@@ -96,7 +96,7 @@ describe('loadConfigFromDatabase', () => {
     expect(result).toBe(0);
   });
 
-  it('loads missing config values from database', async () => {
+  it('loads missing non-secret config values but ignores legacy raw secrets', async () => {
     mockFrom.mockReturnValue(
       chainBuilder({
         data: [
@@ -108,8 +108,8 @@ describe('loadConfigFromDatabase', () => {
     );
 
     const result = await loadConfigFromDatabase();
-    expect(result).toBe(2);
-    expect(process.env.DISCORD_TOKEN).toBe('loaded-token');
+    expect(result).toBe(1);
+    expect(process.env.DISCORD_TOKEN).toBeUndefined();
     expect(process.env.LAVALINK_HOST).toBe('localhost');
   });
 
