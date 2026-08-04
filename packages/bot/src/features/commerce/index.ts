@@ -9,4 +9,4 @@ export { EntitlementService } from './entitlement-service.js';
 export { sendReceiptDM, buildReceiptEmbed } from './receipt-builder.js';
 export { buildStoreCommand, handleStoreCommand } from './store-command.js';
 export { buildLicenseCommand, handleLicenseCommand } from './license-commands.js';
-export { handleBuyButton } from './payment-handler.js';
+export { handleBuyButton, handleFreeClaimButton } from './payment-handler.js';
