@@ -672,6 +672,8 @@ const setupAction = z.discriminatedUnion('action', [
   }),
   z.object({
     action: z.literal('configure-auth'),
+    clientId: snowflake.optional(),
+    clientSecret: z.string().optional(),
   }),
   z.object({
     action: z.literal('finalize'),

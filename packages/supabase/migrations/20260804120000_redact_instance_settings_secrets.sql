@@ -20,6 +20,7 @@ DECLARE
     'supabase_secret_key',
     'supabase_access_token',
     'supabase_db_url',
+    'supabase_db_url_template',
     'supabase_db_password',
     'tailscale_auth_key',
     'vps_csrf_secret',
