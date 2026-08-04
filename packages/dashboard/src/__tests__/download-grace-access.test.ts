@@ -72,10 +72,21 @@ function setupMocks(rows: Array<Record<string, unknown>>) {
   const entitlements = registerTable(mock, 'entitlements');
   entitlements.in.mockResolvedValue({ data: rows, error: null });
 
+  // Delivery selection now checks prior download evidence before choosing a
+  // live entitlement. An empty set models a first download and keeps the
+  // fixture explicit instead of relying on the helper's generic fallback.
+  const deliveries = registerTable(mock, 'commerce_download_deliveries');
+  deliveries.in.mockResolvedValue({ data: [], error: null });
+
   const files = registerTable(mock, 'product_files');
   const productFile = { data: { id: FILE_ID, file_path: 'p/f.zip' }, error: null };
   files.single.mockResolvedValue(productFile);
   files.maybeSingle.mockResolvedValue(productFile);
+
+  // The signed-link TTL is guild-configurable; no row means the bounded
+  // five-minute default (300 seconds) used by this fixture.
+  const guildConfig = registerTable(mock, 'guild_config');
+  guildConfig.maybeSingle.mockResolvedValue({ data: null, error: null });
 
   // The file-download route increments a counter via RPC and mints a storage
   // signed URL — the flat helper's mock has neither, so stub them here.
@@ -146,7 +157,7 @@ describe('POST /api/portal/download-link — grace deadline enforcement', () => 
     expect(body.url).toBe('https://signed.example/download');
     expect(generateSignedDownloadUrl).toHaveBeenCalledWith(expect.objectContaining({
       entitlementId: 'ent-1',
-    }));
+    }), 300);
   });
 
   it('mints a signed URL for a grace entitlement still inside its window', async () => {

@@ -77,8 +77,10 @@ describe('hasRouteAccess()', () => {
     expect(hasRouteAccess(['dashboard.full_access'], '/store')).toBe(true);
   });
 
-  it('grants access to unknown routes by default', () => {
-    expect(hasRouteAccess([], '/some-unknown-route')).toBe(true);
+  it('denies access to unknown routes by default (fail closed)', () => {
+    // New dashboard surfaces must be explicitly registered in
+    // ROUTE_PERMISSIONS before any role can reach them.
+    expect(hasRouteAccess([], '/some-unknown-route')).toBe(false);
   });
 
   it('blocks /settings/team without manage_team', () => {

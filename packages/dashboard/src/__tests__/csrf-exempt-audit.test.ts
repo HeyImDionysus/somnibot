@@ -44,6 +44,9 @@ function segmentToApiPath(segment: string): string {
  */
 const CSRF_EXEMPT_PREFIXES = [
   '/api/paypal/webhook',
+  // Cron/operator recovery authenticates with x-paypal-reconcile-secret,
+  // independently of the browser session/CSRF token.
+  '/api/paypal/recovery',
   '/api/license/',
   '/api/portal/',
   '/api/auth/',

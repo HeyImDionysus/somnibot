@@ -1141,13 +1141,29 @@ describe('/api/settings', () => {
     createAdminMock({ instance_settings: { data: null, error: null } });
     const { PUT } = await import('@/app/api/settings/route');
 
-    const res = await PUT(jsonRequest('http://x/api/settings', 'PUT', {
-      section: 'discord',
-      values: {
-        discord_guild_id: '111222333',
-        discord_bot_token: SECRET_MARKERS[1],
-      },
-    }));
+    // discord_bot_token is encrypted before persistence. Supply the same
+    // bootstrap inputs production uses so this wiring test exercises the
+    // successful write path rather than failing before the upsert.
+    const previousSecret = process.env.SUPABASE_SECRET_KEY;
+    const previousUrl = process.env.SUPABASE_URL;
+    process.env.SUPABASE_SECRET_KEY = 'test-bootstrap-secret';
+    process.env.SUPABASE_URL = 'https://test.supabase.co';
+
+    let res: Response;
+    try {
+      res = await PUT(jsonRequest('http://x/api/settings', 'PUT', {
+        section: 'discord',
+        values: {
+          discord_guild_id: '111222333',
+          discord_bot_token: SECRET_MARKERS[1],
+        },
+      }));
+    } finally {
+      if (previousSecret === undefined) delete process.env.SUPABASE_SECRET_KEY;
+      else process.env.SUPABASE_SECRET_KEY = previousSecret;
+      if (previousUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = previousUrl;
+    }
     expect(res.status).toBe(200);
 
     const arg = recorded();
@@ -1159,7 +1175,7 @@ describe('/api/settings', () => {
     // credential of this installation into a table the admin UI renders.
     expect(arg.after).toMatchObject({
       section: 'discord',
-      changed_keys: ['discord_guild_id', 'discord_bot_token'],
+      changed_keys: ['discord_guild_id', 'discord_bot_token_encrypted'],
     });
     expect(arg.before).toBeUndefined();
     expectNoSecrets(arg);

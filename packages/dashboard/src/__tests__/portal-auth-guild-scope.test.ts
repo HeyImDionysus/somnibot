@@ -28,6 +28,11 @@ let insertedSession: Record<string, unknown> | null = null;
 const originalHops = process.env[TRUSTED_PROXY_HOPS_ENV];
 
 function makeAdmin() {
+  const guildConfigChain: any = {
+    select: () => guildConfigChain,
+    eq: () => guildConfigChain,
+    maybeSingle: async () => ({ data: null, error: null }),
+  };
   return {
     from: (table: string) => {
       if (table === 'audit_logs') {
@@ -44,6 +49,7 @@ function makeAdmin() {
         };
         return chain;
       }
+      if (table === 'guild_config') return guildConfigChain;
       // portal_sessions
       const chain: any = {
         select: () => chain,
