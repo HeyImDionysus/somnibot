@@ -133,6 +133,8 @@ export interface GiveawayEndedData {
   title: string;
   winnerIds: string[];
   prizeProductId: string | null;
+  occurrenceId?: string;
+  correlationId?: string;
 }
 
 export interface MessageSentData {
