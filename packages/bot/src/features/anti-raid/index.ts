@@ -60,6 +60,9 @@ const DEFAULT_RAID_MODE_COOLDOWN = 5 * 60_000;
 // ── V5 Audit §14.6 — In-memory fallback when Valkey is unavailable ──
 // Prevents anti-raid from silently failing if Valkey goes down.
 const _memoryJoinWindows = new Map<string, number[]>();
+// Stable gateway join identities prevent redelivered member-add events from
+// inflating the fallback window while Valkey is unavailable.
+const _memoryJoinOccurrences = new Map<string, Map<string, number>>();
 const _memoryRaidMode = new Map<string, number>();
 
 
@@ -127,6 +130,12 @@ function pruneStaleMemoryEntries(): void {
     const newest = timestamps.length > 0 ? timestamps[timestamps.length - 1] : 0;
     if (newest < staleThreshold) _memoryJoinWindows.delete(guildId);
   }
+  for (const [guildId, occurrences] of _memoryJoinOccurrences) {
+    for (const [identity, timestamp] of occurrences) {
+      if (timestamp < staleThreshold) occurrences.delete(identity);
+    }
+    if (occurrences.size === 0) _memoryJoinOccurrences.delete(guildId);
+  }
   // Prune raid mode: remove guilds past cooldown
   for (const [guildId, activated] of _memoryRaidMode) {
     if (now - activated >= 60 * 60_000) _memoryRaidMode.delete(guildId);
@@ -163,6 +172,7 @@ export function stopAntiRaidPruner(): void {
 export function clearAntiRaidGuildState(guildId: string): void {
   _configCache.delete(guildId);
   _memoryJoinWindows.delete(guildId);
+  _memoryJoinOccurrences.delete(guildId);
   _memoryRaidMode.delete(guildId);
   _memoryRaidBanned.delete(guildId);
 }
@@ -287,7 +297,12 @@ async function raiseAntiRaidAlert(
  * Record a join in the Valkey sliding window and return the count.
  * V5 Audit §14.6 — Falls back to in-memory tracking if Valkey is unavailable.
  */
-async function recordJoinAndCount(guildId: string, windowMs: number): Promise<number> {
+async function recordJoinAndCount(
+  guildId: string,
+  windowMs: number,
+  /** Stable identity for one Discord guildMemberAdd delivery (joinedTimestamp). */
+  joinOccurrenceKey?: string,
+): Promise<number> {
   try {
     const valkey = getValkey();
     const key = joinWindowKey(guildId);
@@ -297,8 +312,16 @@ async function recordJoinAndCount(guildId: string, windowMs: number): Promise<nu
     // Atomic pipeline: remove expired entries, add current, count, set expiry
     const pipeline = valkey.pipeline();
     pipeline.zremrangebyscore(key, '-inf', String(windowStart));
-    // V8 Audit §8.P3a: Use crypto.randomUUID() for collision-proof member uniqueness
-    pipeline.zadd(key, String(now), `${now}:${randomUUID().slice(0, 8)}`);
+    // A gateway redelivery carries the same joinedTimestamp. Reusing that
+    // identity updates the existing sorted-set member instead of double
+    // counting the join. Legacy callers without it retain per-event members.
+    pipeline.zadd(
+      key,
+      String(now),
+      joinOccurrenceKey && joinOccurrenceKey.length > 0
+        ? `${guildId}:${joinOccurrenceKey}`
+        : `${now}:${randomUUID().slice(0, 8)}`,
+    );
     pipeline.zcard(key);
     pipeline.pexpire(key, windowMs + 10_000); // TTL slightly longer than window
     const results = await pipeline.exec();
@@ -316,7 +339,20 @@ async function recordJoinAndCount(guildId: string, windowMs: number): Promise<nu
     // TTL behavior. Without this, the per-guild array grows unbounded
     // during prolonged Valkey downtime.
     const filtered = joins.filter((t) => t > windowStart);
-    filtered.push(now);
+    if (joinOccurrenceKey && joinOccurrenceKey.length > 0) {
+      const occurrences = _memoryJoinOccurrences.get(guildId) ?? new Map<string, number>();
+      for (const [identity, timestamp] of occurrences) {
+        if (timestamp <= windowStart) occurrences.delete(identity);
+      }
+      if (!occurrences.has(joinOccurrenceKey)) {
+        occurrences.set(joinOccurrenceKey, now);
+        filtered.push(now);
+      }
+      _memoryJoinOccurrences.set(guildId, occurrences);
+      capMap(_memoryJoinOccurrences, MAX_MEMORY_GUILDS);
+    } else {
+      filtered.push(now);
+    }
     _memoryJoinWindows.set(guildId, filtered);
     capMap(_memoryJoinWindows, MAX_MEMORY_GUILDS); // V7 Audit §8.P3a
     return filtered.length;
@@ -388,6 +424,8 @@ export async function processAntiRaid(
   member: GuildMember,
   supabase: SupabaseClient,
   eventBus?: PlatformEventBus,
+  /** Stable Discord join identity, normally member.joinedTimestamp. */
+  joinOccurrenceKey?: string,
 ): Promise<boolean> {
   const config = await loadConfig(supabase, guild.id);
   if (!config.anti_raid_enabled) return false;
@@ -438,7 +476,7 @@ export async function processAntiRaid(
 
   // 2. Join flood detection (Valkey-backed sliding window)
   const windowMs = config.anti_raid_join_window_seconds * 1000;
-  const joinCount = await recordJoinAndCount(guild.id, windowMs);
+  const joinCount = await recordJoinAndCount(guild.id, windowMs, joinOccurrenceKey);
 
   // Check raid mode state
   const raidActive = await isRaidModeActive(guild.id, raidCooldownMs(config));

@@ -24,7 +24,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, DbTicket, TicketTypeConfig } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { applyBrand, resolveBrandKit, voice } from '../branding/index.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import {
   claimDiscordOccurrence,
@@ -606,10 +606,12 @@ export async function createTicket(
       .setColor(brandKit.accentColor)
       .setTitle(`🎫 Ticket #${ticketNumber} — ${ticketType.label}`)
       .setDescription(
-        `${introText}\n\n💡 **Tip:** Include your order number (e.g., INS-00042) for faster assistance.`,
+        `${voice(brandKit.voicePreset, 'success', { message: introText })}\n\n` +
+        `💡 **Tip:** Include your order number (e.g., INS-00042) for faster assistance.`,
       )
       .setTimestamp()
       .setFooter({ text: `Ticket created by ${member.user.tag}` });
+    applyBrand(introEmbed, brandKit, { intent: 'primary' });
 
     const actionRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder()
@@ -954,9 +956,12 @@ export async function closeTicket(
         .setColor(brandKit.primaryColor)
         .setTitle('🔒 Ticket Closed')
         .setDescription(
-          `Closed by <@${closedById}>${reason ? `\n**Reason:** ${reason}` : ''}\n\nThis ticket is now locked. A transcript has been saved.`,
+          `${voice(brandKit.voicePreset, 'success', {
+            message: `Closed by <@${closedById}>${reason ? `\n**Reason:** ${reason}` : ''}`,
+          })}\n\nThis ticket is now locked. A transcript has been saved.`,
         )
         .setTimestamp();
+      applyBrand(closeEmbed, brandKit, { intent: 'primary' });
 
       const reopenRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
         new ButtonBuilder()
@@ -991,9 +996,11 @@ export async function closeTicket(
               .setColor(brandKit.accentColor)
               .setTitle('📋 How was your support experience?')
               .setDescription(
-                `Your ticket #${ticketNumber} has been closed. Please rate your experience:`,
+                `${brandKit.brandName} would love your feedback on ticket #${ticketNumber}. ` +
+                'Please rate your support experience:',
               )
               .setTimestamp();
+            applyBrand(feedbackEmbed, brandKit, { intent: 'info' });
 
             const feedbackRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
               ...[1, 2, 3, 4, 5].map((n) =>
@@ -1096,8 +1103,11 @@ export async function reopenTicket(
       const reopenEmbed = new EmbedBuilder()
         .setColor(brandKit.accentColor)
         .setTitle('🔓 Ticket Reopened')
-        .setDescription(`Reopened by <@${reopenedById}>. You can continue the conversation.`)
+        .setDescription(voice(brandKit.voicePreset, 'success', {
+          message: `Reopened by <@${reopenedById}>. You can continue the conversation.`,
+        }))
         .setTimestamp();
+      applyBrand(reopenEmbed, brandKit, { intent: 'primary' });
 
       await channel.send({ embeds: [reopenEmbed] });
     } catch (err) {
@@ -1302,18 +1312,16 @@ export async function checkInactiveTickets(
     } else if (idleMs >= warnAfterMs && !ticket.inactivity_warned) {
       // Send warning
       try {
-        await channel.send({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(brandKit.primaryColor)
-              .setTitle('⏰ Inactivity Warning')
-              .setDescription(
-                `This ticket has been inactive for over ${Math.round(idleMs / 3600000)} hours. ` +
-                `It will be automatically closed if there is no further activity.`,
-              )
-              .setTimestamp(),
-          ],
-        });
+        const inactivityEmbed = new EmbedBuilder()
+          .setColor(brandKit.primaryColor)
+          .setTitle('⏰ Inactivity Warning')
+          .setDescription(
+            `${brandKit.brandName}: this ticket has been inactive for over ${Math.round(idleMs / 3600000)} hours. ` +
+            `It will be automatically closed if there is no further activity.`,
+          )
+          .setTimestamp();
+        applyBrand(inactivityEmbed, brandKit, { intent: 'warning' });
+        await channel.send({ embeds: [inactivityEmbed] });
         await supabase
           .from('tickets')
           .update({ inactivity_warned: true })
