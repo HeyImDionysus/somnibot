@@ -141,6 +141,14 @@ export class StatsChannelManager {
             // advance last_value — otherwise the deletion is silent and the
             // counter would skip this value once the channel is recreated.
             await this.raiseChannelDeletedAlert(config);
+            this.eventBus.emit('stats_channel.update_failed', this.guild.id, {
+              statChannelId: config.id,
+              channelId,
+              statType: config.stat_type,
+              error: `channel_missing:${channelId}`,
+              occurrenceId: `${config.id}:channel_missing:${channelId}`,
+              correlationId: `stats:${config.id}`,
+            });
             continue;
           }
           await channel.setName(newName);
@@ -290,6 +298,8 @@ export class StatsChannelManager {
           statType: config.stat_type,
           value,
           created,
+          occurrenceId: `${config.id}:${value}`,
+          correlationId: `stats:${config.id}`,
         });
       } catch (err) {
         log.error(`Failed to update ${config.stat_type}:`, err);
@@ -615,6 +625,8 @@ export class StatsChannelManager {
         channelId: config.channel_id,
         statType: config.stat_type,
         error: message,
+        occurrenceId: `${config.id}:failed:${message}`,
+        correlationId: `stats:${config.id}`,
       });
     }
     const result = await raiseOwnerAlert(this.supabase, this.guild.id, {

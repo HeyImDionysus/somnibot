@@ -661,6 +661,8 @@ export class TempChannelManager {
         hubId: hub.id,
         hubChannelId: hub.hub_channel_id,
         ownerId: member.id,
+        occurrenceId: occurrenceId ?? undefined,
+        correlationId: `temp:${vc.id}`,
       });
 
       // Move the member to the new channel
@@ -680,6 +682,8 @@ export class TempChannelManager {
         hubChannelId: hub.hub_channel_id,
         memberId: member.id,
         error: String(err),
+        occurrenceId: occurrenceId ?? undefined,
+        correlationId: `temp:hub:${hub.id}`,
       });
       await this.notifyCreationFailure(member, hub, err);
       if (occurrenceId) {
@@ -996,6 +1000,8 @@ export class TempChannelManager {
       this.eventBus.emit('temp_channel.orphan_reconciled', this.guild.id, {
         channelId,
         ownerId: active.owner_id,
+        occurrenceId: `orphan:${channelId}`,
+        correlationId: `temp:${channelId}`,
       });
       return;
     }
@@ -1085,6 +1091,9 @@ export class TempChannelManager {
       channelId,
       ownerId,
       reason: 'empty',
+      actorId: ownerId,
+      occurrenceId: `${channelId}:deleted:empty`,
+      correlationId: `temp:${channelId}`,
     });
     log.info(`Deleted temp channel ${channelId}`);
   }
@@ -1144,6 +1153,8 @@ export class TempChannelManager {
       channelId,
       previousOwnerId: oldOwnerId,
       newOwnerId,
+      occurrenceId: `${channelId}:claimed:${newOwnerId}`,
+      correlationId: `temp:${channelId}`,
     });
   }
 
@@ -1216,10 +1227,14 @@ export class TempChannelManager {
           targetType: 'channel',
           targetId: channelId,
           details: { ownerId: active.owner_id, reason: 'startup_reconciliation' },
+          occurrenceKey: `temp_channel.orphan_reconciled:${channelId}`,
+          correlationId: `temp:${channelId}`,
         });
         this.eventBus.emit('temp_channel.orphan_reconciled', this.guild.id, {
           channelId,
           ownerId: active.owner_id,
+          occurrenceId: `orphan:${channelId}`,
+          correlationId: `temp:${channelId}`,
         });
       }
     }

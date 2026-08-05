@@ -691,7 +691,7 @@ export class ScheduledMessageRunner {
     if (!sent.ok) {
       log.error(`Failed to send "${schedule.name}" after retries:`, sent.error);
       await failDiscordOccurrence(this.supabase, occurrenceId, sent.error).catch(() => {});
-      await this.markFailed(schedule, `send_failed:${sent.error}`);
+      await this.markFailed(schedule, `send_failed:${sent.error}`, occurrenceId);
       return;
     }
     await completeDiscordOccurrence(
@@ -706,6 +706,8 @@ export class ScheduledMessageRunner {
       name: schedule.name,
       channelId: schedule.channel_id,
       currentSends: claimedSendCount,
+      occurrenceId,
+      correlationId: `schedule:${schedule.id}`,
     });
 
     log.info(`Sent "${schedule.name}" to #${channel.name}`);
@@ -742,7 +744,7 @@ export class ScheduledMessageRunner {
    * The status transition is conditional (only from 'active') so concurrent
    * runner instances do not double-alert for the same failure.
    */
-  private async markFailed(schedule: ScheduledMessage, reason: string): Promise<void> {
+  private async markFailed(schedule: ScheduledMessage, reason: string, occurrenceId?: string): Promise<void> {
     const { data: transitioned, error } = await this.supabase
       .from('scheduled_messages')
       .update({ status: 'failed', last_error: reason, failed_at: new Date().toISOString() })
@@ -763,6 +765,8 @@ export class ScheduledMessageRunner {
       name: schedule.name,
       channelId: schedule.channel_id,
       reason,
+      occurrenceId: occurrenceId ?? `${schedule.id}:failed`,
+      correlationId: `schedule:${schedule.id}`,
     });
 
     const channel = this.guild.channels.cache.get(schedule.channel_id);

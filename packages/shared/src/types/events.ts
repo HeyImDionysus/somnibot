@@ -523,38 +523,38 @@ export interface PlatformEventMap {
   'music.denied': { userId: string; action: string };
   'music.capacity_rejected': { userId: string; reason: 'queue_full' | 'user_limit'; limit: number };
   'music.store_outage': { userId: string; operation: string; error: string };
-  'giveaway.started': { giveawayId: string; prize: string; winnerCount: number; channelId: string; creatorId: string; endsAt: string; requiredRoleId: string | null; requiredLevel: number | null };
-  'giveaway.entered': { giveawayId: string; userId: string; withdrawn: boolean; entryCount: number };
-  'giveaway.paused': { giveawayId: string; prize: string; actorId: string | null };
-  'giveaway.resumed': { giveawayId: string; prize: string; actorId: string | null; endsAt: string };
-  'giveaway.rerolled': { giveawayId: string; prize: string; winnerIds: string[]; actorId: string | null };
-  'giveaway.failed': { giveawayId: string | null; stage: 'create' | 'entry' | 'reroll'; actorId: string | null; error: string };
+  'giveaway.started': { giveawayId: string; prize: string; winnerCount: number; channelId: string; creatorId: string; endsAt: string; requiredRoleId: string | null; requiredLevel: number | null; occurrenceId?: string; correlationId?: string };
+  'giveaway.entered': { giveawayId: string; userId: string; withdrawn: boolean; entryCount: number; occurrenceId?: string; correlationId?: string };
+  'giveaway.paused': { giveawayId: string; prize: string; actorId: string | null; occurrenceId?: string; correlationId?: string };
+  'giveaway.resumed': { giveawayId: string; prize: string; actorId: string | null; endsAt: string; occurrenceId?: string; correlationId?: string };
+  'giveaway.rerolled': { giveawayId: string; prize: string; winnerIds: string[]; actorId: string | null; occurrenceId?: string; correlationId?: string };
+  'giveaway.failed': { giveawayId: string | null; stage: 'create' | 'entry' | 'reroll'; actorId: string | null; error: string; occurrenceId?: string; correlationId?: string };
   /**
    * Entry attempts are hot (button clicks) — audited via the batched event
    * rail only. Reasons are only the branches that actually emit: the gates
    * (role/level), a click on an ended/paused giveaway, and a missing member
    * record. Re-clicking while already entered is a WITHDRAWAL, not a denial.
    */
-  'giveaway.entry_denied': { giveawayId: string; userId: string; reason: 'role_gate' | 'level_gate' | 'not_active' | 'member_not_found'; requiredRoleId?: string | null; requiredLevel?: number | null; userLevel?: number };
+  'giveaway.entry_denied': { giveawayId: string; userId: string; reason: 'role_gate' | 'level_gate' | 'not_active' | 'member_not_found'; requiredRoleId?: string | null; requiredLevel?: number | null; userLevel?: number; occurrenceId?: string; correlationId?: string };
   'xp.admin_adjusted': { actorId: string; targetId: string; operation: 'add' | 'remove' | 'set' | 'reset'; amount: number; newXp: number; newLevel: number };
   'profile.updated': { userId: string; field: 'title' | 'bio'; value: string; truncated: boolean };
   'starboard.post_created': { sourceMessageId: string; sourceChannelId: string; starboardMessageId: string; authorId: string; starCount: number };
-  'stats_channel.updated': { statChannelId: string; channelId: string; statType: string; value: string; created: boolean };
-  'stats_channel.update_failed': { statChannelId: string; channelId: string | null; statType: string; error: string };
-  'temp_channel.created': { channelId: string; textChannelId: string | null; hubId: string; hubChannelId: string; ownerId: string };
-  'temp_channel.claimed': { channelId: string; previousOwnerId: string; newOwnerId: string };
-  'temp_channel.deleted': { channelId: string; ownerId: string; reason: string };
-  'temp_channel.creation_failed': { hubId: string; hubChannelId: string; memberId: string; error: string };
-  'temp_channel.orphan_reconciled': { channelId: string; ownerId: string };
+  'stats_channel.updated': { statChannelId: string; channelId: string; statType: string; value: string; created: boolean; occurrenceId?: string; correlationId?: string };
+  'stats_channel.update_failed': { statChannelId: string; channelId: string | null; statType: string; error: string; occurrenceId?: string; correlationId?: string };
+  'temp_channel.created': { channelId: string; textChannelId: string | null; hubId: string; hubChannelId: string; ownerId: string; occurrenceId?: string; correlationId?: string };
+  'temp_channel.claimed': { channelId: string; previousOwnerId: string; newOwnerId: string; occurrenceId?: string; correlationId?: string };
+  'temp_channel.deleted': { channelId: string; ownerId: string; reason: string; actorId?: string; occurrenceId?: string; correlationId?: string };
+  'temp_channel.creation_failed': { hubId: string; hubChannelId: string; memberId: string; error: string; occurrenceId?: string; correlationId?: string };
+  'temp_channel.orphan_reconciled': { channelId: string; ownerId: string; occurrenceId?: string; correlationId?: string };
   /** One event for the whole /voice owner-control surface (lock/unlock/limit/name/permit/deny/ban/claim). */
-  'temp_channel.settings_changed': { channelId: string; actorId: string; op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban' | 'claim'; targetUserId?: string; value?: string | number; before?: Record<string, unknown>; after?: Record<string, unknown> };
-  'scheduled_message.sent': { scheduleId: string; name: string; channelId: string; currentSends: number };
-  'scheduled_message.delivery_failed': { scheduleId: string; name: string; channelId: string; reason: string };
-  'poll.created': { pollId: string; title: string; optionCount: number; allowMultiple: boolean; creatorId: string; channelId: string };
-  'poll.closed': { pollId: string; title: string; actorId: string };
-  'prediction.created': { predictionId: string; title: string; optionCount: number; creatorId: string; channelId: string };
-  'prediction.bet_placed': { predictionId: string; userId: string; optionId: string; amount: number; newPool: number };
-  'prediction.resolved': { predictionId: string; title: string; winningOptionId: string; totalPool: number; payoutCount: number; refundedCount: number; actorId: string; redrive?: boolean };
+  'temp_channel.settings_changed': { channelId: string; actorId: string; op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban' | 'claim'; targetUserId?: string; value?: string | number; before?: Record<string, unknown>; after?: Record<string, unknown>; occurrenceId?: string; correlationId?: string };
+  'scheduled_message.sent': { scheduleId: string; name: string; channelId: string; currentSends: number; occurrenceId?: string; correlationId?: string };
+  'scheduled_message.delivery_failed': { scheduleId: string; name: string; channelId: string; reason: string; occurrenceId?: string; correlationId?: string };
+  'poll.created': { pollId: string; title: string; optionCount: number; allowMultiple: boolean; creatorId: string; channelId: string; occurrenceId?: string; correlationId?: string };
+  'poll.closed': { pollId: string; title: string; actorId: string; occurrenceId?: string; correlationId?: string };
+  'prediction.created': { predictionId: string; title: string; optionCount: number; creatorId: string; channelId: string; occurrenceId?: string; correlationId?: string };
+  'prediction.bet_placed': { predictionId: string; userId: string; optionId: string; amount: number; newPool: number; occurrenceId?: string; correlationId?: string };
+  'prediction.resolved': { predictionId: string; title: string; winningOptionId: string; totalPool: number; payoutCount: number; refundedCount: number; actorId: string; redrive?: boolean; occurrenceId?: string; correlationId?: string };
 }
 
 export type PlatformEventType = keyof PlatformEventMap;

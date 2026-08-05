@@ -175,6 +175,8 @@ export class GiveawayManager {
         stage: 'create',
         actorId: options.creatorId,
         error: error?.message ?? 'unknown',
+        occurrenceId: `create:${options.channelId}:${options.prize}`,
+        correlationId: `giveaway:create:${options.creatorId}`,
       });
       await this.raiseGiveawayAlert(
         'create',
@@ -211,6 +213,8 @@ export class GiveawayManager {
       endsAt: giveaway.ends_at,
       requiredRoleId: giveaway.required_role_id,
       requiredLevel: giveaway.required_level,
+      occurrenceId: giveaway.id,
+      correlationId: `giveaway:${giveaway.id}`,
     });
 
     return giveaway;
@@ -264,6 +268,8 @@ export class GiveawayManager {
         giveawayId,
         userId,
         reason: 'not_active',
+        occurrenceId: `${giveawayId}:${userId}:not_active`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({ content: '❌ This giveaway has ended.', ephemeral: true });
       return true;
@@ -278,6 +284,8 @@ export class GiveawayManager {
         giveawayId,
         userId,
         reason: 'member_not_found',
+        occurrenceId: `${giveawayId}:${userId}:member_not_found`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({ content: '❌ Could not find your member data.', ephemeral: true });
       return true;
@@ -291,6 +299,8 @@ export class GiveawayManager {
         userId,
         reason: 'role_gate',
         requiredRoleId: giveaway.required_role_id,
+        occurrenceId: `${giveawayId}:${userId}:role_gate`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({
         content: `❌ You need the <@&${giveaway.required_role_id}> role to enter this giveaway.`,
@@ -315,6 +325,8 @@ export class GiveawayManager {
           reason: 'level_gate',
           requiredLevel: giveaway.required_level,
           userLevel,
+          occurrenceId: `${giveawayId}:${userId}:level_gate`,
+          correlationId: `giveaway:${giveawayId}`,
         });
         await interaction.reply({
           content: `❌ You need to be level ${giveaway.required_level} or higher to enter. Your current level: ${userLevel}.`,
@@ -339,6 +351,8 @@ export class GiveawayManager {
           stage: 'entry',
           actorId: userId,
           error: 'giveaway_remove_entry RPC not found or no match',
+          occurrenceId: `${giveawayId}:${userId}:withdraw_failed`,
+          correlationId: `giveaway:${giveawayId}`,
         });
         await this.raiseGiveawayAlert(
           'entry',
@@ -356,6 +370,8 @@ export class GiveawayManager {
         userId,
         withdrawn: true,
         entryCount: newEntries.length,
+        occurrenceId: `${giveawayId}:${userId}:withdraw`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({ content: '🚪 You have withdrawn from the giveaway.', ephemeral: true });
       return true;
@@ -375,6 +391,8 @@ export class GiveawayManager {
         stage: 'entry',
         actorId: userId,
         error: 'giveaway_add_entry RPC not found or no match',
+        occurrenceId: `${giveawayId}:${userId}:entry_failed`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await this.raiseGiveawayAlert(
         'entry',
@@ -392,6 +410,8 @@ export class GiveawayManager {
       userId,
       withdrawn: false,
       entryCount: newEntries.length,
+      occurrenceId: `${giveawayId}:${userId}:enter`,
+      correlationId: `giveaway:${giveawayId}`,
     });
     await interaction.reply({ content: '🎉 You have entered the giveaway! Click again to withdraw.', ephemeral: true });
     return true;
@@ -451,6 +471,8 @@ export class GiveawayManager {
       giveawayId,
       prize: giveaway.prize,
       actorId: actorId ?? null,
+      occurrenceId: `${giveawayId}:pause`,
+      correlationId: `giveaway:${giveawayId}`,
     });
 
     log.info(`Paused "${giveaway.prize}"`);
@@ -497,6 +519,8 @@ export class GiveawayManager {
       prize: giveaway.prize,
       actorId: actorId ?? null,
       endsAt: resumedGiveaway.ends_at,
+      occurrenceId: `${giveawayId}:resume`,
+      correlationId: `giveaway:${giveawayId}`,
     });
 
     log.info(`Resumed "${giveaway.prize}"`);
@@ -564,6 +588,8 @@ export class GiveawayManager {
       prize: giveaway.prize,
       winnerIds: newWinners,
       actorId: actorId ?? null,
+      occurrenceId: `${giveawayId}:reroll:${newWinners.join(',')}`,
+      correlationId: `giveaway:${giveawayId}`,
     });
 
     return newWinners;
@@ -668,6 +694,8 @@ export class GiveawayManager {
       title: giveaway.prize,
       winnerIds: winners,
       prizeProductId: giveaway.prize_product_id,
+      occurrenceId: `${giveaway.id}:end`,
+      correlationId: `giveaway:${giveaway.id}`,
     });
 
     log.info(`Ended "${giveaway.prize}" — ${winners.length} winner(s)`);
