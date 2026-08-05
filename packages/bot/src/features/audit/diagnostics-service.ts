@@ -32,7 +32,7 @@ export class DiagnosticsService {
     supabase: SupabaseClient,
     guildIdOrAlertThresholds?: string | Partial<AlertThresholds>,
     alertThresholds?: Partial<AlertThresholds>,
-    private readonly snapshotIntervalMs = 60_000,
+    private snapshotIntervalMs = 60_000,
   ) {
     this.client = client;
     this.supabase = supabase;
@@ -43,6 +43,7 @@ export class DiagnosticsService {
       supabase,
       typeof guildIdOrAlertThresholds === 'string' ? alertThresholds : guildIdOrAlertThresholds,
       client.eventBus,
+      { client },
     );
     this.startedAt = Date.now();
   }
@@ -55,12 +56,31 @@ export class DiagnosticsService {
     void this.writeSnapshot();
 
     // Then on the owner-configured cadence (bounded by the DB/API contract).
-    const intervalMs = Math.max(10_000, Math.min(3_600_000, this.snapshotIntervalMs));
+    const intervalMs = this.clampInterval(this.snapshotIntervalMs);
+    this.schedule(intervalMs);
+
+    log.info(`Started — writing health snapshots every ${intervalMs}ms (with alerts)`);
+  }
+
+  /** Apply an owner change without requiring a bot restart. */
+  setSnapshotInterval(intervalMs: number): void {
+    if (!Number.isFinite(intervalMs)) return;
+    const next = this.clampInterval(intervalMs);
+    this.snapshotIntervalMs = next;
+    if (this.timer) this.schedule(next);
+    log.info(`Snapshot interval updated to ${next}ms`);
+  }
+
+  private clampInterval(intervalMs: number): number {
+    return Math.max(15_000, Math.min(600_000, Math.trunc(intervalMs)));
+  }
+
+  private schedule(intervalMs: number): void {
+    if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       void this.writeSnapshot();
     }, intervalMs);
-
-    log.info(`Started — writing health snapshots every ${intervalMs}ms (with alerts)`);
+    this.timer.unref?.();
   }
 
   /**

@@ -33,6 +33,7 @@ interface DiagnosticsData {
     wsPingMs: number;
     webhookErrorRate: number;
   };
+  snapshotIntervalMs?: number;
   bot: {
     online: boolean;
     uptimeSeconds: number;
@@ -129,6 +130,16 @@ function Guidance({ metric, on }: { metric: GuidedMetric; on: boolean }) {
       </p>
     </div>
   );
+}
+
+function alertGuidanceMetric(alertType: string): GuidedMetric | null {
+  switch (alertType) {
+    case 'memory_high': return 'memory';
+    case 'ws_ping_high': return 'wsPing';
+    case 'valkey_disconnected': return 'valkey';
+    case 'lavalink_down': return 'lavalink';
+    default: return null;
+  }
 }
 
 function StatusDot({ ok, muted = false }: { ok: boolean; muted?: boolean }) {
@@ -250,6 +261,9 @@ export default function DiagnosticsPage() {
           (body as { error?: string }).error
           ?? 'Could not save that value. Check it is inside the allowed range.',
         );
+        // Re-read after a rejected save so the field is remounted with the
+        // last persisted value rather than displaying a value the bot ignores.
+        await fetchDiagnostics();
         return;
       }
       await fetchDiagnostics();
@@ -444,6 +458,12 @@ export default function DiagnosticsPage() {
                     </h4>
                   </div>
                   <p className="text-sm text-discord-text-muted">{alert.message}</p>
+                  {alertGuidanceMetric(alert.alert_type) && (
+                    <Guidance
+                      metric={alertGuidanceMetric(alert.alert_type)!}
+                      on={diag?.guidedMode !== false}
+                    />
+                  )}
                   <p className="text-xs text-discord-text-muted mt-1">
                     Since {formatDate(alert.created_at)}
                   </p>
@@ -546,6 +566,7 @@ export default function DiagnosticsPage() {
               </span>
             </div>
           </div>
+          <Guidance metric="supabase" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Valkey */}
@@ -566,6 +587,7 @@ export default function DiagnosticsPage() {
               <span className="text-discord-text-secondary">{diag?.valkey.memoryMb ?? 0} MB</span>
             </div>
           </div>
+          <Guidance metric="valkey" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Lavalink */}
@@ -598,6 +620,7 @@ export default function DiagnosticsPage() {
               ))
             )}
           </div>
+          <Guidance metric="lavalink" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Sync */}
@@ -643,11 +666,12 @@ export default function DiagnosticsPage() {
           </div>
         </div>
 
-        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block text-sm">
             <span className="text-discord-text-muted">Memory warning above (MB)</span>
             <input
-              type="number" min={64} max={16384}
+              key={`memory-threshold-${diag?.thresholds?.memoryRssMb ?? 512}`}
+              type="number" min={128} max={8192}
               defaultValue={diag?.thresholds?.memoryRssMb ?? 512}
               onBlur={(e) => void saveThresholds({ memory_alert_threshold_mb: Number(e.target.value) })}
               disabled={savingThresholds}
@@ -655,8 +679,21 @@ export default function DiagnosticsPage() {
             />
           </label>
           <label className="block text-sm">
+            <span className="text-discord-text-muted">Health snapshot interval (ms)</span>
+            <input
+              key={`snapshot-interval-${diag?.snapshotIntervalMs ?? 60_000}`}
+              type="number" min={15_000} max={600_000} step={1_000}
+              defaultValue={diag?.snapshotIntervalMs ?? 60_000}
+              onBlur={(e) => void saveThresholds({ diagnostics_snapshot_interval_ms: Number(e.target.value) })}
+              disabled={savingThresholds}
+              className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+            />
+            <span className="mt-1 block text-xs text-discord-text-muted">15,000–600,000 ms</span>
+          </label>
+          <label className="block text-sm">
             <span className="text-discord-text-muted">Gateway ping warning above (ms)</span>
             <input
+              key={`ping-threshold-${diag?.thresholds?.wsPingMs ?? 500}`}
               type="number" min={50} max={10000}
               defaultValue={diag?.thresholds?.wsPingMs ?? 500}
               onBlur={(e) => void saveThresholds({ ws_ping_alert_threshold_ms: Number(e.target.value) })}
@@ -667,6 +704,7 @@ export default function DiagnosticsPage() {
           <label className="block text-sm">
             <span className="text-discord-text-muted">Webhook failure rate above (0–1)</span>
             <input
+              key={`webhook-threshold-${diag?.thresholds?.webhookErrorRate ?? 0.25}`}
               type="number" min={0} max={1} step={0.01}
               defaultValue={diag?.thresholds?.webhookErrorRate ?? 0.25}
               onBlur={(e) => void saveThresholds({ webhook_error_rate_threshold: Number(e.target.value) })}
@@ -742,6 +780,7 @@ export default function DiagnosticsPage() {
             {diag?.dlq?.pendingCount ?? 0}
           </p>
           <p className="text-sm text-discord-text-muted">DLQ Pending</p>
+          <Guidance metric="deadLetter" on={diag?.guidedMode !== false} />
         </div>
       </div>
 

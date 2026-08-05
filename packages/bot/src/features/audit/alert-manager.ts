@@ -17,6 +17,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import {
+  raiseOwnerAlert,
+  resolveOwnerAlert,
+  type OwnerAlertDelivery,
+} from '../../services/alert-service.js';
 
 const log = createLogger('AlertManager');
 
@@ -34,11 +39,28 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof n === 'number' && Number.isFinite(n) ? n : fallback;
 }
 
+function boundedNumberOr(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const n = numberOr(value, fallback);
+  return n >= min && n <= max ? n : fallback;
+}
+
 const DEFAULT_THRESHOLDS: AlertThresholds = {
   memoryRssMb: 512,
   wsPingMs: 500,
   webhookErrorRate: 0.25,
 };
+
+const DIAGNOSTIC_ALERT_TYPES = [
+  'memory_high',
+  'ws_ping_high',
+  'valkey_disconnected',
+  'lavalink_down',
+] as const;
 
 // ── Snapshot Shape ──────────────────────────────────────────
 
@@ -61,6 +83,27 @@ interface AlertEntry {
   metadata: Record<string, unknown>;
 }
 
+/** Keep owner-facing notifications useful without exposing implementation
+ * jargon. The dashboard renders the same guidance beside the raw alert. */
+function suggestedNextStep(alertType: string): string {
+  switch (alertType) {
+    case 'memory_high':
+      return 'Check whether memory keeps climbing before restarting the bot or raising the threshold.';
+    case 'ws_ping_high':
+      return 'Check Discord and the VPS network before changing bot settings.';
+    case 'valkey_disconnected':
+      return 'Start the cache service; the bot continues with in-memory state until it returns.';
+    case 'lavalink_down':
+      return 'Start the audio service, or leave music disabled if you do not use it.';
+    default:
+      return 'Open Diagnostics for the guided recovery checklist.';
+  }
+}
+
+function withSuggestion(alertType: string, message: string): string {
+  return `${message} Suggested next step: ${suggestedNextStep(alertType)}`;
+}
+
 // ── AlertManager ────────────────────────────────────────────
 
 export class AlertManager {
@@ -77,11 +120,15 @@ export class AlertManager {
     supabase: SupabaseClient,
     thresholds?: Partial<AlertThresholds>,
     eventBus?: PlatformEventBus,
+    ownerDelivery?: OwnerAlertDelivery,
   ) {
     this.supabase = supabase;
     this.thresholds = { ...DEFAULT_THRESHOLDS, ...thresholds };
     this.eventBus = eventBus;
+    this.ownerDelivery = ownerDelivery;
   }
+
+  private ownerDelivery?: OwnerAlertDelivery;
 
   /**
    * Per-guild threshold overrides, cached briefly.
@@ -91,6 +138,24 @@ export class AlertManager {
    */
   private thresholdCache = new Map<string, { value: AlertThresholds; time: number }>();
   private autoIncidentCache = new Map<string, { value: boolean; time: number }>();
+
+  /** Recover open diagnostic conditions after a bot restart. */
+  private async hydrateActiveAlerts(guildId: string): Promise<void> {
+    try {
+      const { data, error } = await this.supabase
+        .from('alerts')
+        .select('alert_type')
+        .eq('guild_id', guildId)
+        .eq('resolved', false)
+        .in('alert_type', [...DIAGNOSTIC_ALERT_TYPES]);
+      if (error) return;
+      for (const row of data ?? []) {
+        if (typeof row.alert_type === 'string') this.activeAlerts.add(row.alert_type);
+      }
+    } catch (err) {
+      log.warn('Could not hydrate open diagnostic alerts after restart', { guildId, error: String(err) });
+    }
+  }
 
   /**
    * Thresholds for one guild: the owner's configured values over the shipped
@@ -113,9 +178,9 @@ export class AlertManager {
       if (!error && data) {
         const row = data as Record<string, unknown>;
         resolved = {
-          memoryRssMb: numberOr(row.memory_alert_threshold_mb, this.thresholds.memoryRssMb),
-          wsPingMs: numberOr(row.ws_ping_alert_threshold_ms, this.thresholds.wsPingMs),
-          webhookErrorRate: numberOr(row.webhook_error_rate_threshold, this.thresholds.webhookErrorRate),
+          memoryRssMb: boundedNumberOr(row.memory_alert_threshold_mb, this.thresholds.memoryRssMb, 128, 8192),
+          wsPingMs: boundedNumberOr(row.ws_ping_alert_threshold_ms, this.thresholds.wsPingMs, 50, 10000),
+          webhookErrorRate: boundedNumberOr(row.webhook_error_rate_threshold, this.thresholds.webhookErrorRate, 0, 1),
         };
         this.autoIncidentCache.set(guildId, {
           value: row.incidents_auto_create_from_critical_alerts !== false,
@@ -145,6 +210,7 @@ export class AlertManager {
    * Evaluate a health snapshot and create/resolve alerts as needed.
    */
   async evaluate(snapshot: HealthSnapshot): Promise<void> {
+    await this.hydrateActiveAlerts(snapshot.guild_id);
     const alerts: AlertEntry[] = [];
     const thresholds = await this.thresholdsFor(snapshot.guild_id);
 
@@ -155,7 +221,7 @@ export class AlertManager {
         alert_type: 'memory_high',
         severity: snapshot.memory_rss_mb > thresholds.memoryRssMb * 1.5 ? 'critical' : 'warning',
         title: 'High Memory Usage',
-        message: `Bot RSS memory is ${snapshot.memory_rss_mb.toFixed(1)}MB (threshold: ${thresholds.memoryRssMb}MB)`,
+        message: withSuggestion('memory_high', `Bot memory is ${snapshot.memory_rss_mb.toFixed(1)}MB (threshold: ${thresholds.memoryRssMb}MB).`),
         metadata: { rss_mb: snapshot.memory_rss_mb, threshold_mb: thresholds.memoryRssMb },
       });
     }
@@ -167,7 +233,7 @@ export class AlertManager {
         alert_type: 'ws_ping_high',
         severity: snapshot.discord_ws_ping > thresholds.wsPingMs * 2 ? 'critical' : 'warning',
         title: 'High Discord Latency',
-        message: `WebSocket ping is ${snapshot.discord_ws_ping}ms (threshold: ${thresholds.wsPingMs}ms)`,
+        message: withSuggestion('ws_ping_high', `Discord response time is ${snapshot.discord_ws_ping}ms (threshold: ${thresholds.wsPingMs}ms).`),
         metadata: { ping_ms: snapshot.discord_ws_ping, threshold_ms: thresholds.wsPingMs },
       });
     }
@@ -179,7 +245,7 @@ export class AlertManager {
         alert_type: 'valkey_disconnected',
         severity: 'critical',
         title: 'Valkey Cache Disconnected',
-        message: 'The Valkey/Redis cache is unreachable. Caching, rate limiting, and session features may not work.',
+        message: withSuggestion('valkey_disconnected', 'The cache is unreachable. Cooldowns and short-lived state may reset when the bot restarts.'),
         metadata: {},
       });
     }
@@ -196,7 +262,7 @@ export class AlertManager {
         alert_type: 'lavalink_down',
         severity: 'warning',
         title: 'All Lavalink Nodes Down',
-        message: `All ${snapshot.lavalink_nodes.length} Lavalink node(s) are disconnected. Music playback will not work.`,
+        message: withSuggestion('lavalink_down', `All ${snapshot.lavalink_nodes.length} audio node(s) are disconnected. Music playback will not work.`),
         metadata: { nodeCount: snapshot.lavalink_nodes.length },
       });
     }
@@ -241,16 +307,33 @@ export class AlertManager {
           // here means another evaluation already opened this exact alert — the
           // intended single-row outcome, not a failure; fall through and treat
           // it as open. Any other error surfaces via the catch below.
-          const { error: insertErr } = await this.supabase
-            .from('alerts')
-            .insert(alert);
-          if (insertErr && (insertErr as { code?: string }).code !== '23505') {
+          let insertErr: { code?: string; message?: string } | null = null;
+          let inserted = false;
+          if (this.ownerDelivery) {
+            const result = await raiseOwnerAlert(this.supabase, alert.guild_id, {
+              alertType: alert.alert_type,
+              severity: alert.severity,
+              title: alert.title,
+              message: alert.message,
+              metadata: alert.metadata,
+              ...this.ownerDelivery,
+            });
+            inserted = result.inserted;
+            insertErr = result.insertErrorCode ? { code: result.insertErrorCode } : null;
+          } else {
+            const result = await this.supabase
+              .from('alerts')
+              .insert(alert);
+            insertErr = result.error;
+            inserted = !insertErr;
+          }
+          if (insertErr && insertErr.code !== '23505') {
             throw insertErr;
           }
           // Only THIS evaluation's fresh insert (no error) mirrors an
           // alert.raised audit event — a 23505 means a concurrent evaluation
           // already opened it and emitted, so we must not double-audit.
-          if (!insertErr) {
+          if (inserted) {
             this.eventBus?.emit('diagnostics.alert_raised', alert.guild_id, {
               alertType: alert.alert_type,
               severity: alert.severity,
@@ -288,23 +371,39 @@ export class AlertManager {
     const alertTypesToResolve = [...this.activeAlerts].filter((t) => !currentAlertTypes.has(t));
     for (const alertType of alertTypesToResolve) {
       try {
-        await this.supabase
-          .from('alerts')
-          .update({
-            resolved: true,
-            resolved_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('guild_id', snapshot.guild_id)
-          .eq('alert_type', alertType)
-          .eq('resolved', false);
+        let resolvedCount = 0;
+        if (this.ownerDelivery) {
+          resolvedCount = await resolveOwnerAlert(
+            this.supabase,
+            snapshot.guild_id,
+            alertType,
+            undefined,
+            {
+              ...this.ownerDelivery,
+              notice: `The ${alertType.replaceAll('_', ' ')} alert has cleared. All good again.`,
+            },
+          );
+        } else {
+          const { data } = await this.supabase
+            .from('alerts')
+            .update({
+              resolved: true,
+              resolved_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('guild_id', snapshot.guild_id)
+            .eq('alert_type', alertType)
+            .eq('resolved', false)
+            .select('id');
+          resolvedCount = data?.length ?? 0;
+        }
 
         this.activeAlerts.delete(alertType);
 
         // Mirror the auto-resolution to the append-only audit trail.
-        this.eventBus?.emit('diagnostics.alert_resolved', snapshot.guild_id, {
-          alertType,
-        });
+        if (resolvedCount > 0 || !this.ownerDelivery) {
+          this.eventBus?.emit('diagnostics.alert_resolved', snapshot.guild_id, { alertType });
+        }
       } catch (err) {
         log.error(`Failed to resolve alert ${alertType}:`, err);
       }

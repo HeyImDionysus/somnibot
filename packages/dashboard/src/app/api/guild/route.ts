@@ -79,7 +79,11 @@ export async function PATCH(request: NextRequest) {
 
   // Notify the bot so it hot-reloads the changed config immediately.
   // Fields in this schema span multiple feature areas — use 'all' to cover them.
-  await notifyBot(guildId, 'all', updates);
+  // Carry the captured pre-write values through the bot action queue. The
+  // bot's append-only audit rail uses this exact snapshot for the
+  // config.updated before/after record; reading after the upsert would make
+  // the diff appear unchanged.
+  await notifyBot(guildId, 'all', updates, auth.ctx.discordId, undefined, before);
 
   await recordGuildConfigChange({
     guildId,

@@ -14,9 +14,10 @@
  * Constraints mirrored here:
  *   team_max_pending_invitations  BETWEEN 1 AND 100         (20260723193000)
  *   team_invitation_expiry_ms     BETWEEN 3.6e6 AND 2.592e9 (20260723193000)
- *   memory_alert_threshold_mb     BETWEEN 64 AND 16384      (20260727000000)
+ *   memory_alert_threshold_mb     BETWEEN 128 AND 8192      (20260804145000)
  *   ws_ping_alert_threshold_ms    BETWEEN 50 AND 10000      (20260727000000)
  *   webhook_error_rate_threshold  BETWEEN 0 AND 1           (20260727000000)
+ *   diagnostics_snapshot_interval_ms BETWEEN 15000 AND 600000 (20260804145000)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -37,6 +38,8 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
 const GUILD = '111111111111111111';
+let configUpsert: ReturnType<typeof vi.fn>;
+let persistedConfig: Record<string, unknown>;
 
 function patch(body: unknown) {
   return new NextRequest('http://x/api/guild', {
@@ -48,6 +51,12 @@ function patch(body: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  persistedConfig = {
+    diagnostics_guided_mode: true,
+    memory_alert_threshold_mb: 512,
+    ws_ping_alert_threshold_ms: 500,
+    diagnostics_snapshot_interval_ms: 60000,
+  };
   vi.mocked(requireGuildOwner).mockResolvedValue({
     ok: true,
     ctx: { userId: 'u', discordId: '222222222222222222', guildId: GUILD },
@@ -56,7 +65,12 @@ beforeEach(() => {
     maybeSingle: vi.fn(async () => ({ data: {}, error: null })),
     then: (resolve: (v: unknown) => unknown) => resolve({ error: null }),
   };
-  for (const m of ['select', 'eq', 'upsert', 'update']) chain[m] = vi.fn(() => chain);
+  configUpsert = vi.fn((payload: Record<string, unknown>) => {
+    persistedConfig = { ...persistedConfig, ...payload };
+    return chain;
+  });
+  for (const m of ['select', 'eq', 'update']) chain[m] = vi.fn(() => chain);
+  chain.upsert = configUpsert;
   vi.mocked(createAdminSupabase).mockReturnValue({ from: vi.fn(() => chain) } as never);
 });
 
@@ -133,5 +147,24 @@ describe('diagnostics controls', () => {
   ])('rejects %s before it reaches the database', async (_label, body) => {
     const res = await PATCH(patch(body));
     expect(res.status).toBe(400);
+  });
+
+  it('keeps the prior persisted values after an invalid update', async () => {
+    const valid = await PATCH(patch({
+      memory_alert_threshold_mb: 1024,
+      diagnostics_snapshot_interval_ms: 30000,
+    }));
+    expect(valid.status).toBe(200);
+    const beforeInvalid = { ...persistedConfig };
+    configUpsert.mockClear();
+
+    const invalid = await PATCH(patch({
+      memory_alert_threshold_mb: 0,
+      diagnostics_snapshot_interval_ms: 1000,
+    }));
+
+    expect(invalid.status).toBe(400);
+    expect(configUpsert).not.toHaveBeenCalled();
+    expect(persistedConfig).toEqual(beforeInvalid);
   });
 });

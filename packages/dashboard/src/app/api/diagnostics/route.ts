@@ -119,7 +119,7 @@ export async function GET(request: NextRequest) {
   // failed read just renders the page without the extra context.
   const { data: guidedCfg } = await supabase
     .from('guild_config')
-    .select('diagnostics_guided_mode, memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold')
+    .select('diagnostics_guided_mode, memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold, diagnostics_snapshot_interval_ms')
     .eq('guild_id', guildId)
     .maybeSingle();
   const cfgRow = (guidedCfg ?? null) as Record<string, unknown> | null;
@@ -133,6 +133,7 @@ export async function GET(request: NextRequest) {
         wsPingMs: Number(cfgRow?.ws_ping_alert_threshold_ms ?? 500),
         webhookErrorRate: Number(cfgRow?.webhook_error_rate_threshold ?? 0.25),
       },
+      snapshotIntervalMs: Number(cfgRow?.diagnostics_snapshot_interval_ms ?? 60_000),
       bot: {
         online: isOnline,
         uptimeSeconds: botHealth?.uptime_seconds ?? 0,

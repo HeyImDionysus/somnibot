@@ -22,6 +22,7 @@
  * - 'stats-channels' → reload stats channel config
  * - 'embeds' → reload saved embed templates
  * - 'branding' → invalidate the white-label brand kit cache
+ * - diagnostics interval → reschedule health snapshots without a restart
  * - 'settings' → reload instance-wide settings (full reload)
  * - 'all' → full config reload
  */
@@ -82,6 +83,7 @@ export class ConfigWatcher {
     ) => void,
     private onAuditConfigChange?: () => void,
     private onAutomationConfigChange?: () => void,
+    private onDiagnosticsConfigChange?: (snapshotIntervalMs?: number) => void,
   ) {}
 
   /**
@@ -96,12 +98,16 @@ export class ConfigWatcher {
       const section = event.data.section;
       const changedInterval = event.data.changes?.sync_interval_minutes;
       const changedEnabled = event.data.changes?.sync_enabled;
+      const changedSnapshotInterval = event.data.changes?.diagnostics_snapshot_interval_ms;
       if (section === 'settings' || section === 'all') {
         // Audit cadence is a runtime timer, not merely cached config. Refresh
         // it on the same config event so the new value takes effect without a
         // restart and the old timer is replaced exactly once.
         this.onAuditConfigChange?.();
         this.onAutomationConfigChange?.();
+        if (typeof changedSnapshotInterval === 'number' && Number.isFinite(changedSnapshotInterval)) {
+          this.onDiagnosticsConfigChange?.(changedSnapshotInterval);
+        }
       }
       if (
         (section === 'settings' || section === 'all')
