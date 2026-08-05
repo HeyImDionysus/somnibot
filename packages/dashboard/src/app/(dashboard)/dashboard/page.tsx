@@ -10,6 +10,7 @@ import {
   BarChart3, DollarSign, Headphones, Activity, Clock, Wifi,
 } from 'lucide-react';
 import Link from 'next/link';
+import { PendingTeamInvitations } from '@/components/layout/pending-team-invitations';
 
 interface GuildData {
   guild: {
@@ -110,6 +111,8 @@ export default function DashboardPage() {
           {guild?.name ? `Overview of ${guild.name}` : 'Overview of your SomniBot instance'}
         </p>
       </div>
+
+      <PendingTeamInvitations />
 
       {/* Status Row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

@@ -66,6 +66,19 @@ async function installTeamApi(
   await page.route('**/api/rbac/invitations', (route) =>
     fulfillJson(route, { success: true, data: state.invitations }),
   );
+  // Playwright's single-star glob does not cross `/`; resend has both an id
+  // and an action segment, so give it its own route rather than leaking to
+  // the live handler during the browser proof.
+  await page.route('**/api/rbac/invitations/*/*', async (route) => {
+    expect(route.request().url()).toMatch(/\/resend$/);
+    expect(route.request().method()).toBe('POST');
+    if (state.invitations[0]) state.invitations[0].dm_status = 'queued';
+    await fulfillJson(route, {
+      success: true,
+      mode: 'dm',
+      message: 'The invitation is queued for one more DM attempt.',
+    });
+  });
   await page.route('**/api/rbac/invitations/*', async (route) => {
     expect(route.request().method()).toBe('DELETE');
     state.invitations = [];
@@ -102,7 +115,7 @@ test.describe('Team invitation browser flow', () => {
     };
     await installTeamApi(page, state);
     await page.goto('/settings/team');
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Team', exact: true })).toBeVisible();
 
     const direct = page.getByRole('checkbox', { name: /Add people without asking them first/ });
     await direct.check();
@@ -154,6 +167,9 @@ test.describe('Team invitation browser flow', () => {
     await expect(page.getByRole('heading', { name: 'Pending Invitations' })).toBeVisible();
     await expect(page.getByText('223456789012345695')).toBeVisible();
     await expect(page.getByText('⏳ DM queued')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Resend', exact: true }).click();
+    await expect(page.getByText('The invitation is queued for one more DM attempt.')).toBeVisible();
 
     await page.getByRole('button', { name: 'Revoke', exact: true }).click();
     await expect(page.getByText('Invitation revoked')).toBeVisible();

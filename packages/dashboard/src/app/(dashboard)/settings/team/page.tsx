@@ -192,6 +192,17 @@ export default function TeamSettingsPage() {
     loadInvitations();
   };
 
+  const resendInvitation = async (invitationId: string) => {
+    const res = await fetch(`/api/rbac/invitations/${invitationId}/resend`, { method: 'POST' });
+    const json = await res.json().catch(() => ({}));
+    if (res.ok) {
+      toast({ title: json.message || 'Invitation delivery re-queued', variant: 'success' });
+    } else {
+      toast({ title: json.error || 'Could not resend invitation', variant: 'error' });
+    }
+    loadInvitations();
+  };
+
   const createRole = async () => {
     if (!newRoleName.trim()) return;
     await fetch('/api/rbac/roles', {
@@ -442,13 +453,22 @@ export default function TeamSettingsPage() {
                         <span>Expires {formatDate(inv.expires_at)}</span>
                       </div>
                     </div>
-                    <button
-                      onClick={() => revokeInvitation(inv.id)}
-                      className="shrink-0 text-xs text-discord-text-muted hover:text-red-400 transition-colors"
-                      title="Revoke invitation"
-                    >
-                      Revoke
-                    </button>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <button
+                        onClick={() => void resendInvitation(inv.id)}
+                        className="text-xs text-discord-text-muted hover:text-[#FF1493] transition-colors"
+                        title="Retry delivery without creating another invitation"
+                      >
+                        Resend
+                      </button>
+                      <button
+                        onClick={() => void revokeInvitation(inv.id)}
+                        className="text-xs text-discord-text-muted hover:text-red-400 transition-colors"
+                        title="Revoke invitation"
+                      >
+                        Revoke
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

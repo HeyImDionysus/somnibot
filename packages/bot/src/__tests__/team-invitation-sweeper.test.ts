@@ -46,8 +46,10 @@ function makeSupabase(handler: (s: QState) => unknown) {
     const builder: any = {
       select: (cols?: string) => { state.columns = cols ?? null; return builder; },
       insert: (p: unknown) => { state.op = 'insert'; state.payload = p; return builder; },
+      upsert: (p: unknown) => { state.op = 'upsert'; state.payload = Array.isArray(p) ? p[0] : p; return builder; },
       update: (p: unknown) => { state.op = 'update'; state.payload = p; return builder; },
       eq: (k: string, v: unknown) => { state.filters[k] = v; return builder; },
+      gt: (k: string, v: unknown) => { state.filters['gt_' + k] = v; return builder; },
       lt: (k: string, v: unknown) => { state.filters['lt_' + k] = v; return builder; },
       order: () => builder,
       limit: () => builder,
@@ -94,7 +96,7 @@ function setup(opts: SetupOpts) {
       }
       return { data: { mod_log_channel_id: null }, error: null };
     }
-    if (table === 'audit_logs' && op === 'insert') {
+    if (table === 'audit_logs' && (op === 'insert' || op === 'upsert')) {
       audits.push(s.payload as Record<string, unknown>);
       return { error: null };
     }

@@ -65,6 +65,9 @@ export async function POST(
     // invitation's discord_id below, so a member can only accept their OWN invitation.
     const auth = await requireAuth();
     if (!auth.ok) return auth.response;
+    if (!auth.discordId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const session = { discordId: auth.discordId };
 
     const { id } = await params;
@@ -80,6 +83,17 @@ export async function POST(
     // Not found OR foreign → 404, no information leak (token guessing yields
     // nothing distinguishable from a nonexistent invitation).
     if (!inv || inv.discord_id !== session.discordId) {
+      if (inv) {
+        await writeTeamAudit(admin, {
+          guildId: inv.guild_id,
+          actorId: session.discordId,
+          action: 'team.invite_accept_denied',
+          targetId: inv.discord_id,
+          details: { invitation_id: inv.id, reason: 'foreign_invitation' },
+          correlationId: `team-invitation:${inv.id}`,
+          success: false,
+        });
+      }
       return NextResponse.json({ error: 'Invitation not found' }, { status: 404 });
     }
 
@@ -87,7 +101,11 @@ export async function POST(
     if (inv.status === 'accepted') {
       const ensured = await ensureAssignment(admin, inv);
       if (!ensured.ok) return dbError(ensured.error, 'rbac/invitations:accept');
-      return NextResponse.json({ success: true, alreadyAccepted: true });
+      return NextResponse.json({
+        success: true,
+        alreadyAccepted: true,
+        message: 'You already accepted this invitation — your dashboard access is unchanged.',
+      });
     }
 
     if (inv.status === 'revoked') {
@@ -110,6 +128,9 @@ export async function POST(
       .eq('id', inv.id)
       .eq('discord_id', session.discordId)
       .eq('status', 'pending')
+      // The expiry check is part of the compare-and-set. A request that was
+      // opened before the clock crossed expiry cannot win against the sweeper.
+      .gt('expires_at', now)
       .select('id')
       .maybeSingle();
 
@@ -126,7 +147,11 @@ export async function POST(
       if (status === 'accepted') {
         const ensured = await ensureAssignment(admin, inv);
         if (!ensured.ok) return dbError(ensured.error, 'rbac/invitations:accept');
-        return NextResponse.json({ success: true, alreadyAccepted: true });
+        return NextResponse.json({
+          success: true,
+          alreadyAccepted: true,
+          message: 'You already accepted this invitation — your dashboard access is unchanged.',
+        });
       }
       if (status === 'revoked') {
         return NextResponse.json({ error: 'This invitation was revoked' }, { status: 409 });
@@ -146,6 +171,8 @@ export async function POST(
       action: 'team.invite_accepted',
       targetId: session.discordId,
       details: { invitation_id: inv.id, role_id: inv.role_id, invited_by: inv.invited_by },
+      correlationId: `team-invitation:${inv.id}`,
+      occurrenceKey: `team.invite_accepted:${inv.id}`,
     });
 
     // The accepting user's own permissions changed — clear their CSRF cookies so

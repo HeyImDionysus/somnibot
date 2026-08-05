@@ -1401,6 +1401,26 @@ export interface DbAuditLog {
   correlation_id: string | null;
 }
 
+// Consent-based dashboard-team invitation lifecycle. The expiry timestamp is
+// immutable for an invitation; resend only re-queues delivery while status
+// remains pending.
+export interface DbTeamInvitations {
+  id: string;
+  guild_id: string;
+  discord_id: string;
+  role_id: string;
+  status: 'pending' | 'accepted' | 'declined' | 'expired' | 'revoked';
+  delivery_mode: 'dm' | 'dashboard' | null;
+  dm_status: 'queued' | 'sent' | 'failed' | 'skipped';
+  invited_by: string | null;
+  invited_by_name: string | null;
+  accept_notified: boolean;
+  expires_at: string;
+  accepted_at: string | null;
+  responded_at: string | null;
+  created_at: string;
+}
+
 export interface DbWebhookEvent {
   event_id: string;
   event_type: string;

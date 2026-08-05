@@ -121,6 +121,10 @@ export interface TeamAuditEntry {
   action: string;
   targetId?: string | null;
   details?: Record<string, unknown>;
+  /** Groups all lifecycle events for one invitation in the audit rail. */
+  correlationId?: string;
+  /** Stable event identity used to prevent duplicate rows on retries. */
+  occurrenceKey?: string;
   success?: boolean;
 }
 
@@ -134,16 +138,25 @@ export async function writeTeamAudit(
   entry: TeamAuditEntry,
 ): Promise<void> {
   try {
-    await admin.from('audit_logs').insert({
+    const details = entry.details ?? {};
+    const invitationId = typeof details.invitation_id === 'string' ? details.invitation_id : null;
+    const correlationId = entry.correlationId
+      ?? (invitationId ? `team-invitation:${invitationId}` : `team:${entry.action}:${entry.targetId ?? 'unknown'}`);
+    const row = {
       guild_id: entry.guildId,
       actor_type: 'dashboard',
       actor_id: entry.actorId,
       action: entry.action,
+      category: 'rbac',
       target_type: 'team_invitation',
       target_id: entry.targetId ?? null,
-      details: entry.details ?? {},
+      details,
+      correlation_id: correlationId,
       success: entry.success ?? true,
-    });
+      ...(entry.occurrenceKey ? { occurrence_key: entry.occurrenceKey } : {}),
+    };
+
+    await admin.from('audit_logs').insert(row);
   } catch {
     // Audit logging must never break the invitation flow.
   }

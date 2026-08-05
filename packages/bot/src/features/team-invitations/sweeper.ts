@@ -91,6 +91,13 @@ export class TeamInvitationSweeper {
   /** Run all three phases once. Each phase is isolated so one failure can't
    *  starve the others. */
   async runOnce(): Promise<void> {
+    // Close expired rows before external delivery so a request that crosses
+    // the expiry boundary never receives a late invitation DM.
+    try {
+      await this.expireOverdue();
+    } catch (err) {
+      log.error('Expiry-sweep phase failed', { error: String(err) });
+    }
     try {
       await this.deliverPendingDms();
     } catch (err) {
@@ -100,11 +107,6 @@ export class TeamInvitationSweeper {
       await this.mirrorAcceptances();
     } catch (err) {
       log.error('Acceptance-mirror phase failed', { error: String(err) });
-    }
-    try {
-      await this.expireOverdue();
-    } catch (err) {
-      log.error('Expiry-sweep phase failed', { error: String(err) });
     }
   }
 
@@ -116,6 +118,7 @@ export class TeamInvitationSweeper {
       .select(INVITE_SELECT)
       .eq('status', 'pending')
       .eq('dm_status', 'queued')
+      .gt('expires_at', new Date().toISOString())
       .limit(BATCH_LIMIT);
     if (error) {
       log.error('Failed to read queued invitations', { error: error.message });
@@ -162,6 +165,7 @@ export class TeamInvitationSweeper {
           targetType: 'team_invitation',
           targetId: row.discord_id,
           details: { invitation_id: row.id, role_id: row.role_id },
+          correlationId: `team-invitation:${row.id}`,
           success: false,
           errorMessage: String(err),
         });
@@ -188,6 +192,7 @@ export class TeamInvitationSweeper {
       .from('team_invitations')
       .update({ dm_status: dmStatus, delivery_mode: deliveryMode })
       .eq('id', id)
+      .eq('status', 'pending')
       .eq('dm_status', 'queued')
       .select('id')
       .maybeSingle();
@@ -260,6 +265,8 @@ export class TeamInvitationSweeper {
         targetType: 'team_invitation',
         targetId: row.discord_id,
         details: { invitation_id: row.id, role_id: row.role_id },
+        correlationId: `team-invitation:${row.id}`,
+        occurrenceKey: `team.invite_expired:${row.id}`,
       });
 
       const guild = this.client.guilds.cache.get(row.guild_id);

@@ -246,6 +246,8 @@ export async function POST(request: NextRequest) {
           dm_enabled: teamConfig.inviteDmEnabled,
           expires_at: expiresAt,
         },
+        correlationId: `team-invitation:${(invitation as { id?: string })?.id ?? body.discord_id}`,
+        occurrenceKey: `team.invite_sent:${(invitation as { id?: string })?.id ?? body.discord_id}`,
       });
 
       // [security] Only the invitation's own lifecycle fields are recorded.
@@ -302,6 +304,8 @@ export async function POST(request: NextRequest) {
       action: 'team.role_assigned',
       targetId: body.discord_id,
       details: { role_id: body.role_id, direct: true },
+      correlationId: `team-role:${ctx.guildId}:${body.discord_id}:${body.role_id}`,
+      occurrenceKey: `team.role_assigned:${ctx.guildId}:${body.discord_id}:${body.role_id}`,
     });
     // Owner alert: a live dashboard-role grant is a security-relevant privilege
     // change the owner should see (grant/revoke parity).
@@ -392,6 +396,8 @@ export async function DELETE(request: NextRequest) {
       action: 'team.role_revoked',
       targetId: revoked?.discord_id ?? null,
       details: { assignment_id: assignmentId, role_id: revoked?.role_id ?? null },
+      correlationId: `team-role:${ctx.guildId}:${assignmentId}`,
+      occurrenceKey: `team.role_revoked:${ctx.guildId}:${assignmentId}`,
     });
     if (revoked?.discord_id) {
       try {
