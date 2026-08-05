@@ -182,7 +182,7 @@ export async function handleCustomCommand(
   if (cmd.allowed_channels.length > 0 && !cmd.allowed_channels.includes(interaction.channelId)) {
     await auditDenied(supabase, cmd, interaction, guild.id, 'channel_not_allowed');
     await interaction.reply({
-      content: voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} in this channel` }),
+      content: `${voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} in this channel` })} This command can't be used in this channel.`,
       ephemeral: true,
     });
     return true;
@@ -191,7 +191,7 @@ export async function handleCustomCommand(
   if (cmd.denied_channels.length > 0 && cmd.denied_channels.includes(interaction.channelId)) {
     await auditDenied(supabase, cmd, interaction, guild.id, 'channel_denied');
     await interaction.reply({
-      content: voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} in this channel` }),
+      content: `${voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} in this channel` })} This command can't be used in this channel.`,
       ephemeral: true,
     });
     return true;
