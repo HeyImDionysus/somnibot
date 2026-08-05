@@ -17,6 +17,9 @@ import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
+import * as auditService from '../../services/audit.js';
+import type { EconomyAuditOptions } from '../../services/audit.js';
+import { randomUUID } from 'node:crypto';
 import {
   BRAND_KIT_COLUMNS,
   brandKitFromConfig,
@@ -29,6 +32,16 @@ import { voice } from '../branding/voice.js';
 import { claimOccurrence } from '../../utils/occurrence-fence.js';
 
 const log = createLogger('Fishing');
+
+async function writeEconomyAudit(supabase: SupabaseClient, options: EconomyAuditOptions): Promise<void> {
+  const correlationId = options.operationId ?? randomUUID();
+  await auditService.writeAuditLog(supabase, {
+    guildId: options.guildId, actorType: options.actorType ?? 'user', actorId: options.actorId,
+    action: options.action, category: 'economy', targetType: options.targetType ?? 'member',
+    targetId: options.targetId ?? options.actorId, details: options.details, correlationId,
+    occurrenceKey: `${options.action}:${correlationId}`, success: options.success, errorMessage: options.errorMessage,
+  });
+}
 
 // ── Local Types ───────────────────────────────────────────
 
@@ -365,8 +378,13 @@ export class FishingManager {
     userId: string,
     interactionId?: string,
   ): Promise<{ embed: EmbedBuilder; cooldownKey: string }> {
+    const correlationId = interactionId?.trim() || randomUUID();
     const config = await this.getConfig();
     if (!config.economy_fishing_enabled) {
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'fishing.cast_denied', details: { reason: 'feature_disabled' }, success: false,
+      });
       return {
         embed: brandedEmbed(config.brandKit, {
           intent: 'danger',
@@ -387,6 +405,10 @@ export class FishingManager {
         { onUnavailable: 'decline' },
       );
       if (claim === 'replay') {
+        await writeEconomyAudit(this.supabase, {
+          guildId: this.guild.id, actorId: userId, operationId: correlationId,
+          action: 'fishing.cast_denied', details: { reason: 'replay' }, success: false,
+        });
         return {
           embed: brandedEmbed(config.brandKit, {
             intent: 'warning',
@@ -411,6 +433,10 @@ export class FishingManager {
     );
     if (!claimed) {
       const ttl = await this.valkey.ttl(cdKey);
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'fishing.cast_denied', details: { reason: 'cooldown', ttl }, success: false,
+      });
       return {
         embed: brandedEmbed(config.brandKit, {
           intent: 'warning',
@@ -432,9 +458,20 @@ export class FishingManager {
       } catch (e: unknown) {
         log.warn('failed to release cast cooldown after rod read failure:', (e as Error)?.message ?? e);
       }
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'fishing.backend_unavailable_retried', details: { operation: 'rod_read' }, success: false, actorType: 'system',
+      });
+      eventBus.emit('fishing.backend_unavailable_retried', this.guild.id, {
+        userId, operation: 'rod_read', correlationId, occurrenceId: correlationId,
+      });
       return { embed: await this.unavailableEmbed(), cooldownKey: '' };
     }
     if (!hasRod) {
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'fishing.cast_denied', details: { reason: 'missing_rod' }, success: false,
+      });
       return {
         embed: brandedEmbed(config.brandKit, {
           intent: 'danger',
@@ -459,6 +496,27 @@ export class FishingManager {
       const junk = randomPick(JUNK_ITEMS);
       // V52-M2: check addCurrency return so failed credits are surfaced
       const paid = await this.addCurrency(userId, junk.currency);
+      const catchDetails = { catchType: 'junk', name: junk.name, amount: junk.currency, paid };
+      if (!paid) {
+        await writeEconomyAudit(this.supabase, {
+          guildId: this.guild.id, actorId: userId, operationId: `${correlationId}:payout`,
+          action: 'fishing.catch_payout_failed', details: catchDetails, success: false,
+          errorMessage: 'wallet credit failed', actorType: 'system',
+        });
+        eventBus.emit('fishing.catch_payout_failed', this.guild.id, {
+          userId, species: junk.name, amount: junk.currency,
+          correlationId: `${correlationId}:payout`, occurrenceId: `${correlationId}:payout`,
+        });
+      }
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'fishing.catch', details: catchDetails, success: paid,
+        errorMessage: paid ? undefined : 'wallet credit failed',
+      });
+      eventBus.emit('fishing.catch', this.guild.id, {
+        userId, species: junk.name, rarity: 'junk', price: junk.currency, paid,
+        correlationId, occurrenceId: correlationId,
+      });
       embed = new EmbedBuilder()
         .setTitle('🎣 You cast your line...')
         .setDescription(
@@ -472,6 +530,27 @@ export class FishingManager {
       const treasure = randomPick(TREASURE_ITEMS);
       // V52-M2: check addCurrency return so failed credits are surfaced
       const paid = await this.addCurrency(userId, treasure.currency);
+      const catchDetails = { catchType: 'treasure', name: treasure.name, amount: treasure.currency, paid };
+      if (!paid) {
+        await writeEconomyAudit(this.supabase, {
+          guildId: this.guild.id, actorId: userId, operationId: `${correlationId}:payout`,
+          action: 'fishing.catch_payout_failed', details: catchDetails, success: false,
+          errorMessage: 'wallet credit failed', actorType: 'system',
+        });
+        eventBus.emit('fishing.catch_payout_failed', this.guild.id, {
+          userId, species: treasure.name, amount: treasure.currency,
+          correlationId: `${correlationId}:payout`, occurrenceId: `${correlationId}:payout`,
+        });
+      }
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'fishing.catch', details: catchDetails, success: paid,
+        errorMessage: paid ? undefined : 'wallet credit failed',
+      });
+      eventBus.emit('fishing.catch', this.guild.id, {
+        userId, species: treasure.name, rarity: 'treasure', price: treasure.currency, paid,
+        correlationId, occurrenceId: correlationId,
+      });
       embed = new EmbedBuilder()
         .setTitle('🎣 You cast your line...')
         .setDescription(
@@ -483,7 +562,7 @@ export class FishingManager {
         .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` });
     } else {
       // Fish catch
-      const fishCatch = await this.rollFishCatch(userId, baitUsed);
+      const fishCatch = await this.rollFishCatch(userId, baitUsed, correlationId);
       // [game-economy-fishing DEPFAIL] A null roll means the species catalog
       // was unreadable (outage) — release the cast cooldown and degrade
       // honestly rather than crash or fabricate a catch.
@@ -493,6 +572,13 @@ export class FishingManager {
         } catch (e: unknown) {
           log.warn('failed to release cast cooldown after species read failure:', (e as Error)?.message ?? e);
         }
+        await writeEconomyAudit(this.supabase, {
+          guildId: this.guild.id, actorId: userId, operationId: correlationId,
+          action: 'fishing.backend_unavailable_retried', details: { operation: 'species_read' }, success: false, actorType: 'system',
+        });
+        eventBus.emit('fishing.backend_unavailable_retried', this.guild.id, {
+          userId, operation: 'species_read', correlationId, occurrenceId: correlationId,
+        });
         return { embed: await this.unavailableEmbed(), cooldownKey: '' };
       }
       // V52-M2: surface wallet credit failure in the embed
@@ -518,7 +604,7 @@ export class FishingManager {
 
       // [game-economy-fishing] One-time collection completion bonus: only a fish
       // catch can discover a new species, so the completion check lives here.
-      const completion = await this.maybePayCollectionReward(userId);
+      const completion = await this.maybePayCollectionReward(userId, correlationId);
       if (completion) {
         embed.addFields({
           name: '📖 Collection Complete!',
@@ -535,7 +621,8 @@ export class FishingManager {
     return { embed, cooldownKey: cdKey };
   }
 
-  private async rollFishCatch(userId: string, baitName: string | null): Promise<FishCatch | null> {
+  private async rollFishCatch(userId: string, baitName: string | null, operationId?: string): Promise<FishCatch | null> {
+    const correlationId = operationId?.trim() || randomUUID();
     const species = await this.getSpecies();
     // [game-economy-fishing DEPFAIL] Unreadable/empty species catalog: no roll
     // is possible — the caller degrades honestly (previously this crashed on
@@ -600,21 +687,36 @@ export class FishingManager {
         .catch((e: unknown) => { log.warn('payout-degraded alert failed:', (e as Error)?.message ?? e); });
       // [game-economy-fishing] Audit the failed auto-sell so the unpaid catch is
       // an append-only observable event, not just a warning log.
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'fishing.catch_payout_failed', details: { species: picked.name, amount: price }, success: false, actorType: 'system',
+      });
       eventBus.emit('fishing.payout_failed', this.guild.id, {
         userId,
         species: picked.name,
         amount: price,
+        correlationId,
+        occurrenceId: correlationId,
+      });
+      eventBus.emit('fishing.catch_payout_failed', this.guild.id, {
+        userId, species: picked.name, amount: price, correlationId, occurrenceId: correlationId,
       });
     }
 
     // [game-economy-fishing] Append-only audit row for the catch state change
     // (records the catch + whether the auto-sell credit landed).
+    await writeEconomyAudit(this.supabase, {
+      guildId: this.guild.id, actorId: userId, operationId: correlationId,
+      action: 'fishing.catch', details: { species: picked.name, rarity: picked.rarity, price, paid },
+    });
     eventBus.emit('fishing.catch', this.guild.id, {
       userId,
       species: picked.name,
       rarity: picked.rarity,
       price,
       paid,
+      correlationId,
+      occurrenceId: correlationId,
     });
 
     return { species: picked, weight, price, paid };
@@ -666,10 +768,20 @@ export class FishingManager {
       const ok = await this.addCurrency(row.user_id, row.price_earned);
       if (ok) {
         settled++;
+        const operationId = `retry:${row.id}`;
+        await writeEconomyAudit(this.supabase, {
+          guildId: this.guild.id, actorId: row.user_id, operationId,
+          action: 'fishing.catch_payout_retried', details: { catchId: row.id, amount: row.price_earned }, actorType: 'system',
+        });
       } else {
         // Credit failed after the claim — revert so a later sweep retries.
         await this.supabase.from('economy_fish_catches')
           .update({ paid: false }).eq('id', row.id);
+        const operationId = `retry:${row.id}`;
+        await writeEconomyAudit(this.supabase, {
+          guildId: this.guild.id, actorId: row.user_id, operationId,
+          action: 'fishing.catch_payout_failed', details: { catchId: row.id, amount: row.price_earned }, success: false, actorType: 'system',
+        });
       }
     }
     return settled;
@@ -708,7 +820,8 @@ export class FishingManager {
    * when the reward is disabled, the collection is incomplete, already claimed,
    * or the credit failed (in which case the fence is rolled back so it retries).
    */
-  private async maybePayCollectionReward(userId: string): Promise<{ coins: number } | null> {
+  private async maybePayCollectionReward(userId: string, operationId?: string): Promise<{ coins: number } | null> {
+    const correlationId = operationId?.trim() || randomUUID();
     const config = await this.getConfig();
     if (!config.economy_fishing_collection_reward_enabled) return null;
 
@@ -751,8 +864,19 @@ export class FishingManager {
       // Roll back the fence so the bonus is retried; never mark rewarded-but-unpaid.
       await this.supabase.from('economy_fish_collection_rewards')
         .delete().eq('guild_id', this.guild.id).eq('user_id', userId);
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: `${correlationId}:collection`,
+        action: 'fishing.collection_reward_retried', details: { amount: coins }, success: false, actorType: 'system',
+      });
+      eventBus.emit('fishing.collection_reward_retried', this.guild.id, {
+        userId, amount: coins, correlationId: `${correlationId}:collection`, occurrenceId: `${correlationId}:collection`,
+      });
       return null;
     }
+    await writeEconomyAudit(this.supabase, {
+      guildId: this.guild.id, actorId: userId, operationId: `${correlationId}:collection`,
+      action: 'fishing.collection_reward', details: { amount: coins },
+    });
     return { coins };
   }
 
