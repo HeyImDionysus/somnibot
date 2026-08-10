@@ -28,6 +28,7 @@ vi.mock('next/headers', () => ({
 
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createServerSupabase } from '@/lib/supabase/server';
+import { cookies, headers } from 'next/headers';
 
 // ── Permission helpers (pure logic, no mocking needed) ──────
 
@@ -176,6 +177,8 @@ describe('requireGuildOwner — 401/403 responses', () => {
     vi.resetAllMocks();
     mockCookieGet.mockReturnValue(undefined);
     mockHeaderGet.mockReturnValue(null);
+    vi.mocked(cookies).mockResolvedValue({ get: mockCookieGet } as never);
+    vi.mocked(headers).mockResolvedValue({ get: mockHeaderGet } as never);
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockAdminSupabase);
   });
 

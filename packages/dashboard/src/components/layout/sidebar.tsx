@@ -274,6 +274,14 @@ export function Sidebar() {
             name: meta?.full_name || meta?.name || meta?.custom_claims?.global_name || 'User',
             avatarUrl: meta?.avatar_url || null,
           });
+        } else {
+          const localResponse = await fetch('/api/guilds');
+          if (localResponse.ok) {
+            const localData = await localResponse.json() as { success?: boolean };
+            if (localData.success) {
+              setUser({ name: 'Local Operator', avatarUrl: null });
+            }
+          }
         }
       } catch {
         // Ignore — sidebar still renders

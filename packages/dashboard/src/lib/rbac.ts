@@ -11,6 +11,7 @@ import { NextResponse } from 'next/server';
 import { cookies, headers } from 'next/headers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createServerSupabase } from '@/lib/supabase/server';
+import { resolveLauncherLocalAuth } from '@/lib/api/launcher-local-auth';
 import type { DashboardPermission } from '@somnibot/shared';
 
 export interface AuthContext {
@@ -83,6 +84,20 @@ async function getRequestedGuildId(): Promise<string | null> {
  * Returns null if unauthenticated or no guild found.
  */
 export async function getAuthContext(): Promise<AuthContext | null> {
+  const localAuth = await resolveLauncherLocalAuth();
+  if (localAuth.kind === 'authorized') {
+    return {
+      userId: localAuth.ctx.userId,
+      discordId: localAuth.ctx.discordId,
+      guildId: localAuth.ctx.guildId,
+      isOwner: true,
+      permissions: ['dashboard.full_access'],
+    };
+  }
+  if (localAuth.kind === 'denied') {
+    throw new AuthError(localAuth.message, localAuth.status);
+  }
+
   const supabase = await createServerSupabase();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
