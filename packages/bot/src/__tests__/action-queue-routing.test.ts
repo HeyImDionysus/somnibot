@@ -1643,7 +1643,10 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-    expect(guild.roles.create).toHaveBeenCalled();
+    expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
+      colors: { primaryColor: 0xff0000 },
+    }));
+    expect(guild.roles.create.mock.calls[0][0]).not.toHaveProperty('color');
   });
 
   it('startActionQueueListener processes pending update_role action', async () => {

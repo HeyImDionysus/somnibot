@@ -261,7 +261,7 @@ async function handleCreateRole(
 
   const role = await guild.roles.create({
     name,
-    color,
+    colors: { primaryColor: color },
     hoist,
     mentionable,
     permissions: permissions

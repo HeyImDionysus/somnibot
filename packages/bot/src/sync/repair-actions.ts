@@ -1083,7 +1083,7 @@ async function recreateResource(
     const newRole = await guild.roles.create({
       name: (config.name as string) ?? driftItem.entityName,
       permissions: BigInt((config.permissions as string) ?? '0'),
-      color: (config.color as number) ?? 0,
+      colors: { primaryColor: (config.color as number) ?? 0 },
       hoist: (config.hoist as boolean) ?? false,
       mentionable: (config.mentionable as boolean) ?? false,
       reason: 'SomniBot repair — recreating deleted role',

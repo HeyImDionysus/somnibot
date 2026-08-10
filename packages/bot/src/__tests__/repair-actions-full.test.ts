@@ -251,7 +251,9 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
     expect(result.success).toBe(true);
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
+      colors: { primaryColor: 0xFF0000 },
     }));
+    expect(guild.roles.create.mock.calls[0][0]).not.toHaveProperty('color');
   });
 
   it('recreates a deleted role from a queued template key when the old Discord ID is absent', async () => {
@@ -283,7 +285,9 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
     expect(result.success).toBe(true);
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
+      colors: { primaryColor: 0xFF0000 },
     }));
+    expect(guild.roles.create.mock.calls[0][0]).not.toHaveProperty('color');
     expect(idMapChain.eq).toHaveBeenCalledWith('entity_type', 'role');
   });
 

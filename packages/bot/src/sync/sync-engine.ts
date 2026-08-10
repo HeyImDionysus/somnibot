@@ -354,7 +354,7 @@ async function repairDriftItem(
 
         const created = await guild.roles.create({
           name: roleDef.name,
-          color: roleDef.color ?? 0,
+          colors: { primaryColor: roleDef.color ?? 0 },
           permissions: BigInt(roleDef.permissions ?? '0'),
           hoist: roleDef.hoist ?? false,
           mentionable: roleDef.mentionable ?? false,
