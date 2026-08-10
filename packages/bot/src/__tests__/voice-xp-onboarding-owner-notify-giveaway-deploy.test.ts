@@ -3,6 +3,7 @@
  * GiveawayFulfillmentService, DeployListener
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -204,6 +205,31 @@ describe('VoiceXP', () => {
 // GuildOnboardingSync
 // ═══════════════════════════════════════════════
 describe('GuildOnboardingSync', () => {
+  it('syncs persisted onboarding once when startup runs and avoids duplicate listeners', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const supa = { from: vi.fn(() => chain({
+      onboarding_enabled: true,
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
+    })) } as unknown as SupabaseClient;
+    const g = guild();
+    g.editOnboarding = vi.fn(async () => ({}));
+    const eventBus = eb();
+    const sync = new GuildOnboardingSync(g, supa, eventBus);
+
+    // Given: persisted onboarding configuration is available at bot startup.
+    // When: startup is invoked twice for the same guild service.
+    sync.start();
+    sync.start();
+
+    // Then: exactly one initial Discord sync and one config listener exist.
+    await vi.waitFor(() => expect(g.editOnboarding).toHaveBeenCalledTimes(1));
+    expect(eventBus.on).toHaveBeenCalledTimes(1);
+
+    const configChangedHandler = eventBus.on.mock.calls[0][1];
+    configChangedHandler({ data: { section: 'onboarding' } });
+    await vi.waitFor(() => expect(g.editOnboarding).toHaveBeenCalledTimes(2));
+  });
+
   it('syncs native roles and channels, including a deduplicated interest-role mapping', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
     const supa = {

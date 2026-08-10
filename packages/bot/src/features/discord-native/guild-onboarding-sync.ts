@@ -38,6 +38,8 @@ export interface OnboardingPrompt {
 }
 
 export class GuildOnboardingSync {
+  private started = false;
+
   constructor(
     private guild: Guild,
     private supabase: SupabaseClient,
@@ -45,6 +47,9 @@ export class GuildOnboardingSync {
   ) {}
 
   start(): void {
+    if (this.started) return;
+    this.started = true;
+
     // Listen for onboarding config changes
     this.eventBus.on('config.changed', (event: PlatformEvent<'config.changed', ConfigChangedData>) => {
       if (event.data.section === 'onboarding' || event.data.section === 'welcome') {
@@ -53,6 +58,10 @@ export class GuildOnboardingSync {
         );
       }
     });
+
+    void this.syncOnboarding().catch((err) =>
+      log.error('Sync failed:', { error: String(err) }),
+    );
 
     log.info('Guild onboarding sync started');
   }
