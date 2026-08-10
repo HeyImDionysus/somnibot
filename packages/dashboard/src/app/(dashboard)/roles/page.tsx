@@ -7,6 +7,7 @@ import { Button } from '@/components/shared/button';
 import { Input, Select, Toggle } from '@/components/shared/input';
 import { Badge } from '@/components/shared/badge';
 import { rolesApi, type LiveRoleData } from '@/lib/api/client';
+import { roleUpdatePayload } from '@/lib/api/role-update-payload';
 import {
   Shield, Plus, Pencil, Trash2, Bot, Crown, Sparkles, Lock, Users,
   RefreshCw, AlertTriangle, X, Save, GripVertical, Star, ChevronDown, ChevronRight,
@@ -386,15 +387,7 @@ export default function RolesPage() {
     if (!editingRole) return;
     setActionPending(true);
     try {
-      await rolesApi.update({
-        roleId: editingRole.id,
-        name: editingRole.name,
-        color: editingRole.color,
-        hoist: editingRole.hoist,
-        mentionable: editingRole.mentionable,
-        permissions: editingRole.permissions,
-        templateKey: editingRole.templateKey ?? undefined,
-      });
+      await rolesApi.update(roleUpdatePayload(editingRole));
       setEditingRole(null);
       setTimeout(loadRoles, 2000);
     } catch (err) {
