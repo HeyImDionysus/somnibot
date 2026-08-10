@@ -22,6 +22,8 @@ describe('Games page controls', () => {
     expect(toggleSource).toContain('role="switch"');
     expect(toggleSource).toContain('aria-checked={checked}');
     expect(toggleSource).toContain('aria-label={label}');
+    expect(toggleSource).toContain('h-11 w-11');
+    expect(toggleSource).toContain('h-6 w-11');
   });
 
   it('commits a daily-loss change only after the API accepts it', () => {

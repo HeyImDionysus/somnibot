@@ -47,10 +47,12 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
         role="switch"
         aria-checked={checked}
         aria-label={label}
-        className={`relative w-11 h-6 cursor-pointer rounded-full transition-colors ${checked ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'}`}
+        className="relative flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
         onClick={() => onChange(!checked)}
       >
-        <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : ''}`} />
+        <span className={`absolute h-6 w-11 rounded-full transition-colors ${checked ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'}`}>
+          <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : ''}`} />
+        </span>
       </button>
       <span className="text-sm text-discord-text-primary">{label}</span>
     </div>
