@@ -214,6 +214,30 @@ describe('backfillMembers — left_at reconciliation (B1)', () => {
     expect(opArgs(departedUpdate!, 'in')).toEqual(['discord_id', ['departed']]);
   });
 
+  it('pages the REST fallback with the final first-page member as its after cursor', async () => {
+    const supabase = makeScriptedSupabase(standardHandler([]));
+    const firstPageMembers = Array.from({ length: 1000 }, (_, index) =>
+      makeDiscordMember(`member-${String(index).padStart(4, '0')}`),
+    );
+    const finalMember = makeDiscordMember('member-1000');
+    const firstPage = new Map(firstPageMembers.map((member) => [member.id, member]));
+    const secondPage = new Map([[finalMember.id, finalMember]]);
+    const guild = makeGuild([], 0, {
+      fetch: async () => { throw new Error('guild members chunk timed out'); },
+      listPages: [firstPage, secondPage],
+    });
+
+    const inserted = await backfillMembers(supabase as never, guild as never);
+
+    expect(guild.members.list).toHaveBeenNthCalledWith(1, { limit: 1000 });
+    expect(guild.members.list).toHaveBeenNthCalledWith(2, {
+      limit: 1000,
+      after: 'member-0999',
+    });
+    expect(guild.memberCount).toBe(1001);
+    expect(inserted).toBe(1001);
+  });
+
   it('marks departed active rows left from a complete fetch and refreshes the live count including bots', async () => {
     const supabase = makeScriptedSupabase(standardHandler([
       { discord_id: 'current', left_at: null, onboarding_completed: true },

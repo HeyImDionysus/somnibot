@@ -294,7 +294,7 @@ async function fetchCompleteRoster(guild: Guild): Promise<Map<string, GuildMembe
       return members;
     }
 
-    const lastMember = page.last();
+    const lastMember = [...page.values()].at(-1);
     if (!lastMember || lastMember.id === after) {
       log.warn('Member backfill skipped — REST roster fallback cursor did not advance');
       return null;
