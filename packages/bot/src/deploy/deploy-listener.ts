@@ -65,7 +65,7 @@ export function startDeployListener(client: SomniClient): void {
     .on(
       'postgres_changes',
       {
-        event: 'UPDATE',
+        event: '*',
         schema: 'public',
         table: 'guild_desired_state',
       },
@@ -78,7 +78,7 @@ export function startDeployListener(client: SomniClient): void {
           newState &&
           newState.applied_at === null &&
           Array.isArray(newState.roles) &&
-          newState.roles.length > 0
+          Array.isArray(newState.channels)
         ) {
           log.info('Detected deploy request via Realtime', { guildId });
           await executeDeploy(client, newState, guildId);
@@ -129,7 +129,7 @@ async function recoverPendingDeploys(client: SomniClient): Promise<void> {
 
   for (const row of data) {
     const stateRow = row as Record<string, unknown>;
-    if (Array.isArray(stateRow.roles) && stateRow.roles.length > 0) {
+    if (Array.isArray(stateRow.roles) && Array.isArray(stateRow.channels)) {
       await executeDeploy(client, stateRow);
     }
   }
@@ -145,21 +145,27 @@ async function recoverPendingDeploys(client: SomniClient): Promise<void> {
 function parseDesiredState(row: Record<string, unknown>): DesiredState {
   const roles = (row.roles as DesiredRole[]) ?? [];
   const channels = (row.channels as DesiredChannel[]) ?? [];
+  const storedCategories = Array.isArray(row.categories)
+    ? row.categories as DesiredCategory[]
+    : [];
 
-  // Extract unique categories from channels
-  const seenCats = new Set<string>();
-  const categories: DesiredCategory[] = [];
-  for (const ch of channels) {
-    if (ch.categoryKey && !seenCats.has(ch.categoryKey)) {
-      seenCats.add(ch.categoryKey);
-      categories.push({
-        key: ch.categoryKey,
-        name: ch.categoryKey
-          .replace(/^cat-/, '')
-          .replace(/-/g, ' ')
-          .replace(/\b\w/g, (c) => c.toUpperCase()),
-        position: categories.length,
-      });
+  const categories: DesiredCategory[] = storedCategories.length > 0
+    ? storedCategories
+    : [];
+  if (categories.length === 0) {
+    const seenCats = new Set<string>();
+    for (const ch of channels) {
+      if (ch.categoryKey && !seenCats.has(ch.categoryKey)) {
+        seenCats.add(ch.categoryKey);
+        categories.push({
+          key: ch.categoryKey,
+          name: ch.categoryKey
+            .replace(/^cat-/, '')
+            .replace(/-/g, ' ')
+            .replace(/\b\w/g, (c) => c.toUpperCase()),
+          position: categories.length,
+        });
+      }
     }
   }
 
@@ -187,7 +193,9 @@ async function executeDeploy(
 ): Promise<void> {
   const guildId = getGuildIdFromRow(stateRow, requestedGuildId ?? client.guildId);
   const desiredState = parseDesiredState(stateRow);
-  await executeDeployDirect(client, desiredState, guildId);
+  await executeDeployDirect(client, desiredState, guildId, {
+    cleanExisting: stateRow.deploy_mode === 'destructive',
+  });
 }
 
 /**
@@ -241,7 +249,7 @@ async function executeDeployDirect(
   });
 
   const options: DeployOptions = {
-    cleanExisting: true,
+    cleanExisting: false,
     dryRun: false,
     onProgress: (step, total, action) => {
       const activeStatus = deployStatuses.get(guildId);
@@ -264,31 +272,6 @@ async function executeDeployDirect(
       options,
     );
 
-    deployStatus.status = result.success ? 'success' : 'failed';
-    deployStatus.completedAt = new Date().toISOString();
-    deployStatus.result = result;
-
-    // Store ID mappings in discord_id_map
-    if (result.idMappings.length > 0) {
-      const { error: mapError } = await client.supabase
-        .from('discord_id_map')
-        .upsert(
-          result.idMappings.map((m) => ({
-            guild_id: guildId,
-            entity_type: m.entityType,
-            template_key: m.key,
-            discord_id: m.discordId,
-          })),
-          { onConflict: 'guild_id,entity_type,template_key' },
-        );
-
-      if (mapError) {
-        log.error('Failed to store ID mappings:', mapError.message);
-      } else {
-        log.info(`Stored ${result.idMappings.length} ID mappings`);
-      }
-    }
-
     // Mark desired state as applied
     if (result.success) {
       const { error: updateError } = await client.supabase
@@ -302,8 +285,19 @@ async function executeDeployDirect(
 
       if (updateError) {
         log.error('Failed to update desired state:', updateError.message);
+        result.success = false;
+        result.errors.push({
+          step: result.actions.length + 1,
+          entityType: 'system',
+          entityName: 'Deployment completion',
+          error: `Failed to mark the reviewed plan as applied: ${updateError.message}`,
+        });
       }
     }
+
+    deployStatus.status = result.success ? 'success' : 'failed';
+    deployStatus.completedAt = new Date().toISOString();
+    deployStatus.result = result;
 
     // Audit: batch log all individual actions
     await writeAuditBatch(

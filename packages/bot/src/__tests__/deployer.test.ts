@@ -60,14 +60,16 @@ function makeGuild() {
   const existingRole: any = {
     id: 'existing-role', name: 'Member', position: 2,
     managed: false, editable: true,
-    edit: vi.fn().mockResolvedValue({}),
+    edit: vi.fn(),
     setPosition: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue(undefined),
   };
+  existingRole.edit.mockImplementation(async () => existingRole);
 
   const textCh: any = {
     id: 'ch-1', type: 0, name: 'general',
     isTextBased: () => true,
+    isThread: () => false,
     send: vi.fn().mockResolvedValue({ id: 'msg-1' }),
     delete: vi.fn().mockResolvedValue(undefined),
     edit: vi.fn().mockResolvedValue({}),
@@ -102,6 +104,11 @@ function makeGuild() {
         id: `new-ch-${opts.name}`, name: opts.name,
         isTextBased: () => true, send: vi.fn(),
       })),
+      edit: vi.fn().mockImplementation(async (id: string, opts: Record<string, unknown>) => {
+        const channel = guild.channels.cache.get(id);
+        Object.assign(channel, opts);
+        return channel;
+      }),
       fetch: vi.fn().mockResolvedValue(new Map()),
     },
     client: { user: { id: 'bot-1' } },
@@ -241,6 +248,69 @@ describe('deployer', () => {
 
       // Deploy should still complete (individual errors don't crash the whole deploy)
       expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it('updates mapped categories and channels without replacing their Discord IDs', async () => {
+      const guild = makeGuild();
+      guild.channels.cache.find = (predicate: (channel: Record<string, unknown>) => boolean) =>
+        [...guild.channels.cache.values()].find(predicate);
+      const category = {
+        id: 'cat-1',
+        name: 'General',
+        type: 4,
+        edit: vi.fn(),
+        delete: vi.fn(),
+      };
+      category.edit.mockImplementation(async () => category);
+      guild.channels.cache.set(category.id, category);
+
+      const mappingChain = makeChain({
+        data: [
+          { entity_type: 'category', template_key: 'category:cat-general', discord_id: 'cat-1' },
+          { entity_type: 'channel', template_key: 'channel:general', discord_id: 'ch-1' },
+        ],
+        error: null,
+      });
+      const writeChain = makeChain({ data: null, error: null });
+      const supabase = {
+        from: vi.fn((table: string) => table === 'discord_id_map' ? mappingChain : writeChain),
+      };
+
+      const result = await deployServerState(
+        guild,
+        supabase as unknown as Parameters<typeof deployServerState>[1],
+        {
+          everyonePermissions: '0',
+          roles: [],
+          categories: [{ key: 'cat-general', name: 'Release QA', position: 0 }],
+          channels: [{
+            key: 'general',
+            name: 'release-validation',
+            type: 0,
+            categoryKey: 'cat-general',
+            position: 0,
+            topic: 'Proof',
+            slowmode: 5,
+            nsfw: false,
+            templateId: 'open',
+            overrides: [],
+          }],
+        },
+        { cleanExisting: false, dryRun: false },
+      );
+
+      expect(result.success).toBe(true);
+      expect(category.edit).toHaveBeenCalled();
+      expect(guild.channels.edit).toHaveBeenCalledWith(
+        'ch-1',
+        expect.objectContaining({ name: 'release-validation', parent: 'cat-1' }),
+      );
+      expect(guild.channels.create).not.toHaveBeenCalled();
+      expect(guild.channels.cache.get('ch-1').delete).not.toHaveBeenCalled();
+      expect(result.idMappings).toEqual(expect.arrayContaining([
+        { entityType: 'category', key: 'cat-general', discordId: 'cat-1' },
+        { entityType: 'channel', key: 'general', discordId: 'ch-1' },
+      ]));
     });
   });
 });

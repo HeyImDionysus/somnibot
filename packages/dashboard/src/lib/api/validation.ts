@@ -708,13 +708,17 @@ const setupAction = z.discriminatedUnion('action', [
 // ── Deploy / server-setup schemas ───────────────────
 
 const deployAction = z.object({
-  action: z.enum(['deploy', 'preview']).default('deploy'),
+  action: z.literal('deploy').default('deploy'),
   template_id: uuid.optional(),
   options: z.record(z.unknown()).optional(),
   roles: z.array(z.record(z.unknown())).optional(),
   channels: z.array(z.record(z.unknown())).optional(),
+  categories: z.array(z.object({
+    key: z.string().min(1).max(128),
+    name: z.string().min(1).max(100),
+    position: z.number().int().min(0).max(1000),
+  }).passthrough()).optional(),
   permissionMap: z.record(z.unknown()).optional(),
-  cleanExisting: z.boolean().optional(),
 });
 
 // ── Sync action schemas ─────────────────────────────

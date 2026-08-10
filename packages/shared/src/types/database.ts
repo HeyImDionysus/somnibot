@@ -518,7 +518,9 @@ export interface DbGuildDesiredState {
   guild_id: string;
   roles: Record<string, unknown>[];
   channels: Record<string, unknown>[];
+  categories: Record<string, unknown>[];
   permission_map: Record<string, unknown>;
+  deploy_mode: 'safe' | 'destructive';
   applied_at: string | null;
   last_sync_at: string | null;
   drift_detected: boolean;

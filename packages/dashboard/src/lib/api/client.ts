@@ -205,7 +205,6 @@ export const deployApi = {
     channels: unknown[];
     categories: unknown[];
     permissionMap?: Record<string, unknown>;
-    cleanExisting?: boolean;
   }) => request('/api/deploy', { method: 'POST', body: JSON.stringify(data) }),
 };
 

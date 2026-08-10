@@ -13,7 +13,6 @@ import {
   Loader2, Plus, Trash2, Crown, Sparkles, Users,
   X, Volume2, Megaphone, FolderOpen, Pencil, Save,
 } from 'lucide-react';
-import { deployApi } from '@/lib/api/client';
 import { useToast } from '@/components/shared/toast';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
@@ -242,6 +241,32 @@ function normalizeWizardChannelName(name: string, type: number): string {
   return type === 2 ? name.trim() : name.trim().toLowerCase().replace(/\s+/g, '-');
 }
 
+type DeploymentPlan = {
+  roles: readonly WizardRole[];
+  channels: readonly WizardChannel[];
+  categories: readonly WizardCategory[];
+};
+
+function hasAppliedCurrentPlan(
+  statusData: DeployData,
+  plan: DeploymentPlan,
+  previousAppliedAt: string | null,
+): boolean {
+  if (statusData.isDeploying || !statusData.desiredState) return false;
+
+  const desired = statusData.desiredState;
+  const appliedAt = desired.applied_at;
+  if (typeof appliedAt !== 'string' || appliedAt.length === 0) return false;
+  if (appliedAt === previousAppliedAt) return false;
+  if (!Array.isArray(desired.roles)
+    || !Array.isArray(desired.channels)
+    || !Array.isArray(desired.categories)) return false;
+
+  return JSON.stringify(desired.roles) === JSON.stringify(plan.roles)
+    && JSON.stringify(desired.channels) === JSON.stringify(plan.channels)
+    && JSON.stringify(desired.categories) === JSON.stringify(plan.categories);
+}
+
 function wizardChannelDefaults(type: number): Pick<WizardChannel, 'templateId' | 'overrides'> {
   return type === 2
     ? { templateId: 'voice', overrides: voiceOverrides() }
@@ -270,7 +295,6 @@ export default function SetupPage() {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
   const { toast } = useToast();
   const [completedSteps, setCompletedSteps] = useState<Set<WizardStep>>(new Set());
-  const [deploying, setDeploying] = useState(false);
   const [setupData, setSetupData] = useState<SetupData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -289,21 +313,26 @@ export default function SetupPage() {
 
           const savedRoles = data.desiredState?.roles;
           const savedChannels = data.desiredState?.channels;
+          const savedCategories = data.desiredState?.categories;
           if (Array.isArray(savedRoles) && savedRoles.length > 0) {
             setWizardRoles(savedRoles as WizardRole[]);
           }
           if (Array.isArray(savedChannels) && savedChannels.length > 0) {
             const channels = savedChannels as WizardChannel[];
             setWizardChannels(channels);
-            const categoryKeys = [...new Set(channels.map((channel) => channel.categoryKey).filter(Boolean))];
-            setWizardCategories(categoryKeys.map((key, position) => ({
-              key,
-              name: key
-                .replace(/^cat-/, '')
-                .replace(/-/g, ' ')
-                .replace(/\b\w/g, (letter) => letter.toUpperCase()),
-              position,
-            })));
+            if (Array.isArray(savedCategories) && savedCategories.length > 0) {
+              setWizardCategories(savedCategories as WizardCategory[]);
+            } else {
+              const categoryKeys = [...new Set(channels.map((channel) => channel.categoryKey).filter(Boolean))];
+              setWizardCategories(categoryKeys.map((key, position) => ({
+                key,
+                name: key
+                  .replace(/^cat-/, '')
+                  .replace(/-/g, ' ')
+                  .replace(/\b\w/g, (letter) => letter.toUpperCase()),
+                position,
+              })));
+            }
           }
 
           if (data.guild?.setupCompleted) {
@@ -312,6 +341,13 @@ export default function SetupPage() {
           } else if (data.isDeployed) {
             setCompletedSteps(new Set([1, 2, 3, 4, 5] as WizardStep[]));
             setCurrentStep(6);
+          }
+
+          const requestedStep = Number(new URLSearchParams(window.location.search).get('step'));
+          if (requestedStep === 3 || requestedStep === 4) {
+            const completed = requestedStep === 3 ? [1, 2] : [1, 2, 3];
+            setCompletedSteps(new Set(completed as WizardStep[]));
+            setCurrentStep(requestedStep);
           }
         }
       } catch (e) {
@@ -325,6 +361,37 @@ export default function SetupPage() {
   const markComplete = (step: WizardStep) => {
     setCompletedSteps((prev) => new Set([...prev, step]));
   };
+
+  const resetDeployCycle = useCallback(() => {
+    setCompletedSteps((previous) => {
+      const next = new Set(previous);
+      for (const step of [4, 5, 6, 7] as WizardStep[]) next.delete(step);
+      return next;
+    });
+  }, []);
+
+  const markRolesDirty = useCallback(() => {
+    resetDeployCycle();
+    setCompletedSteps((previous) => {
+      const next = new Set(previous);
+      next.delete(2);
+      return next;
+    });
+  }, [resetDeployCycle]);
+
+  const markChannelsDirty = useCallback(() => {
+    resetDeployCycle();
+    setCompletedSteps((previous) => {
+      const next = new Set(previous);
+      next.delete(3);
+      return next;
+    });
+  }, [resetDeployCycle]);
+
+  const navigateToStep = useCallback((step: WizardStep) => {
+    if (step === 4 && currentStep !== 4) resetDeployCycle();
+    setCurrentStep(step);
+  }, [currentStep, resetDeployCycle]);
 
   const canAdvance = completedSteps.has(currentStep);
 
@@ -356,7 +423,7 @@ export default function SetupPage() {
               return (
                 <button
                   key={step.number}
-                  onClick={() => setCurrentStep(step.number)}
+                  onClick={() => navigateToStep(step.number)}
                   className={cn(
                     'flex w-full items-center gap-2 rounded-input px-3 py-2 text-left transition-standard',
                     isCurrent && 'bg-discord-accent/15 ring-1 ring-discord-accent/40',
@@ -401,6 +468,7 @@ export default function SetupPage() {
               isComplete={completedSteps.has(2)}
               roles={wizardRoles}
               onRolesChange={setWizardRoles}
+              onDirty={markRolesDirty}
             />
           )}
           {currentStep === 3 && (
@@ -411,11 +479,7 @@ export default function SetupPage() {
               categories={wizardCategories}
               onChannelsChange={setWizardChannels}
               onCategoriesChange={setWizardCategories}
-              onDirty={() => setCompletedSteps((previous) => {
-                const next = new Set(previous);
-                next.delete(3);
-                return next;
-              })}
+              onDirty={markChannelsDirty}
             />
           )}
           {currentStep === 4 && (
@@ -425,14 +489,13 @@ export default function SetupPage() {
               roles={wizardRoles}
               channels={wizardChannels}
               categories={wizardCategories}
+              destructive={!setupData?.isDeployed && !setupData?.guild?.setupCompleted}
             />
           )}
           {currentStep === 5 && (
             <Step5Deploy
               onComplete={() => markComplete(5)}
               isComplete={completedSteps.has(5)}
-              deploying={deploying}
-              onDeploy={() => setDeploying(true)}
               roles={wizardRoles}
               channels={wizardChannels}
               categories={wizardCategories}
@@ -460,14 +523,14 @@ export default function SetupPage() {
               variant="ghost"
               size="sm"
               disabled={currentStep === 1}
-              onClick={() => setCurrentStep((s) => Math.max(1, s - 1) as WizardStep)}
+              onClick={() => navigateToStep(Math.max(1, currentStep - 1) as WizardStep)}
             >
               Back
             </Button>
             <Button
               size="sm"
               disabled={!canAdvance || currentStep === 7}
-              onClick={() => setCurrentStep((s) => Math.min(7, s + 1) as WizardStep)}
+              onClick={() => navigateToStep(Math.min(7, currentStep + 1) as WizardStep)}
             >
               Next
               <ChevronRight size={14} />
@@ -594,11 +657,13 @@ function Step2Roles({
   isComplete,
   roles,
   onRolesChange,
+  onDirty,
 }: {
   onComplete: () => void;
   isComplete: boolean;
   roles: WizardRole[];
   onRolesChange: (roles: WizardRole[]) => void;
+  onDirty: () => void;
 }) {
   const [addingTier, setAddingTier] = useState<TierKey | null>(null);
   const [newName, setNewName] = useState('');
@@ -627,6 +692,7 @@ function Step2Roles({
     };
 
     onRolesChange([...roles, role]);
+    onDirty();
     setNewName('');
     setNewColor('#99AAB5');
     setNewHoist(false);
@@ -635,6 +701,7 @@ function Step2Roles({
 
   const removeRole = (key: string) => {
     onRolesChange(roles.filter((r) => r.key !== key));
+    onDirty();
   };
 
   const hasRoles = roles.length > 0;
@@ -1252,12 +1319,14 @@ function Step4Review({
   roles,
   channels,
   categories,
+  destructive,
 }: {
   onComplete: () => void;
   isComplete: boolean;
   roles: WizardRole[];
   channels: WizardChannel[];
   categories: WizardCategory[];
+  destructive: boolean;
 }) {
   const rolesByTier = TIER_ORDER.map((tier) => ({
     tier,
@@ -1278,7 +1347,7 @@ function Step4Review({
       </CardHeader>
 
       <CardDescription>
-        Review what the bot will create in your Discord server.
+        Review what the bot will apply to your Discord server. Nothing changes until the next step.
       </CardDescription>
 
       <Card variant="warning">
@@ -1286,11 +1355,21 @@ function Step4Review({
           <AlertTriangle size={16} className="mt-0.5 text-discord-warning" />
           <div>
             <p className="text-sm font-medium text-discord-text-primary">
-              Destructive Action Warning
+              {destructive ? 'Destructive First Deployment' : 'Destructive Changes Warning'}
             </p>
             <p className="text-xs text-discord-text-muted">
-              The bot will <strong>delete all existing channels and non-managed roles</strong> in your Discord server,
-              then recreate everything from your configuration. This cannot be undone.
+              {destructive ? (
+                <>
+                  The first deployment will <strong>delete all existing channels and non-managed roles</strong>,
+                  then create this plan. Deleted messages and assignments cannot be restored.
+                </>
+              ) : (
+                <>
+                  Existing mapped roles, categories, and channels keep their Discord IDs and are edited in place.
+                  Removing an item or changing a channel type deletes that mapped Discord object, including its
+                  message history or member assignments.
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -1300,8 +1379,12 @@ function Step4Review({
         <p className="font-medium text-discord-text-primary">Deploy plan:</p>
         <ul className="space-y-1 text-discord-text-secondary">
           <li>1. Set @everyone permissions to zero (lockout model)</li>
-          <li>2. Delete existing non-managed roles and channels</li>
-          <li>3. Create {roles.length} roles:</li>
+          <li>
+            2. {destructive
+              ? 'Replace existing non-managed roles and channels'
+              : 'Reconcile SomniBot-managed objects and remove only items deleted from this plan'}
+          </li>
+          <li>3. Apply {roles.length} roles:</li>
         </ul>
 
         {/* Role hierarchy preview */}
@@ -1333,8 +1416,8 @@ function Step4Review({
         </div>
 
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>4. Create {categories.length} categories</li>
-          <li>5. Create {channels.length} channels with permission overrides</li>
+          <li>4. Apply {categories.length} categories</li>
+          <li>5. Apply {channels.length} channels with permission overrides</li>
           <li>6. Store ID mappings for drift detection</li>
         </ul>
       </div>
@@ -1353,39 +1436,45 @@ function Step4Review({
 function Step5Deploy({
   onComplete,
   isComplete,
-  deploying,
-  onDeploy,
   roles,
   channels,
   categories,
 }: {
   onComplete: () => void;
   isComplete: boolean;
-  deploying: boolean;
-  onDeploy: () => void;
   roles: WizardRole[];
   channels: WizardChannel[];
   categories: WizardCategory[];
 }) {
+  const [deploying, setDeploying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusText, setStatusText] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const handleDeploy = async () => {
-    onDeploy();
+    setDeploying(true);
     setError(null);
     setStatusText('Sending deploy request to bot...');
     setProgress(5);
 
     try {
+      const beforeResponse = await fetch('/api/deploy');
+      const beforeData: DeployData | null = beforeResponse.ok
+        ? await beforeResponse.json() as DeployData
+        : null;
+      const previousAppliedAt = typeof beforeData?.desiredState?.applied_at === 'string'
+        ? beforeData.desiredState.applied_at
+        : null;
+      const requestedAt = Date.now();
+
       const res = await fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'deploy',
           roles,
           channels,
           categories,
-          cleanExisting: true,
         }),
       });
 
@@ -1409,25 +1498,30 @@ function Step5Deploy({
           if (statusRes.ok) {
             const statusData: DeployData = await statusRes.json();
 
-            if (!statusData.isDeploying && statusData.desiredState) {
-              const appliedAt = (statusData.desiredState as Record<string, unknown>).applied_at;
-              if (appliedAt) {
-                setProgress(100);
-                setStatusText('Deployment complete!');
-                onComplete();
-                return;
-              }
+            if (hasAppliedCurrentPlan(
+              statusData,
+              { roles, channels, categories },
+              previousAppliedAt,
+            )) {
+              setProgress(100);
+              setStatusText('Deployment complete!');
+              setDeploying(false);
+              onComplete();
+              return;
             }
 
             if (statusData.recentActions?.length > 0) {
               const latest = statusData.recentActions[0];
-              if (latest.action === 'deploy.completed') {
-                setProgress(100);
-                setStatusText('Deployment complete!');
-                onComplete();
+              const latestAt = typeof latest.timestamp === 'string'
+                ? Date.parse(latest.timestamp)
+                : Number.NaN;
+              if (latest.action === 'deploy.failed'
+                && Number.isFinite(latestAt)
+                && latestAt >= requestedAt - 1_000) {
+                setError('Deployment failed — check the audit log');
+                setStatusText('Deployment failed.');
+                setDeploying(false);
                 return;
-              } else if (latest.action === 'deploy.failed') {
-                throw new Error('Deployment failed — check the audit log');
               }
             }
           }
@@ -1442,10 +1536,12 @@ function Step5Deploy({
       setError('Deployment was not confirmed within 2 minutes. Check the bot connection and try again.');
       setStatusText('Deployment confirmation timed out.');
       setProgress(90);
+      setDeploying(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       setError(msg);
       setStatusText(`Error: ${msg}`);
+      setDeploying(false);
     }
   };
 
@@ -1474,6 +1570,15 @@ function Step5Deploy({
         </>
       )}
 
+      {error && !deploying && (
+        <Card variant="danger">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-discord-danger" />
+            <p className="text-sm text-discord-text-primary">{error}</p>
+          </div>
+        </Card>
+      )}
+
       {(deploying || isComplete) && (
         <div className="space-y-3">
           <div className="h-3 overflow-hidden rounded-full bg-discord-bg-tertiary">
@@ -1486,15 +1591,6 @@ function Step5Deploy({
             />
           </div>
           <p className="text-sm text-discord-text-secondary">{statusText}</p>
-
-          {error && (
-            <Card variant="danger">
-              <div className="flex items-center gap-2">
-                <AlertTriangle size={16} className="text-discord-danger" />
-                <p className="text-sm text-discord-text-primary">{error}</p>
-              </div>
-            </Card>
-          )}
 
           {isComplete && !error && (
             <Card variant="success">
@@ -1660,7 +1756,7 @@ function Step7GoLive({
         <h4 className="text-sm font-medium text-discord-text-primary">What&apos;s Next</h4>
         <div className="mt-2 space-y-1 text-xs text-discord-text-secondary">
           <p>• <strong>Roles:</strong> Fine-tune permissions per role from the Roles page</p>
-          <p>• <strong>Channels:</strong> Add or reorganize channels from the Channels page</p>
+          <p>• <strong>Channels:</strong> Rerun the Channels step to review and deploy changes</p>
           <p>• <strong>Onboarding:</strong> Configure Discord native onboarding &amp; welcome messages</p>
           <p>• <strong>Moderation:</strong> Set up auto-mod rules &amp; escalation chains</p>
           <p>• <strong>Music:</strong> Configure the music player &amp; DJ permissions</p>

@@ -168,7 +168,7 @@ describe('startDeployListener', () => {
     expect(client._channelObj.on).toHaveBeenCalledWith(
       'postgres_changes',
       expect.objectContaining({
-        event: 'UPDATE',
+        event: '*',
         schema: 'public',
         table: 'guild_desired_state',
       }),
@@ -202,6 +202,29 @@ describe('startDeployListener', () => {
 
     expect(mockDeployServerState).toHaveBeenCalled();
     expect(mockWriteAuditLog).toHaveBeenCalled();
+  });
+
+  it('uses destructive mode only when the reviewed row explicitly requests it', async () => {
+    const client = makeClient();
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback();
+
+    await cb!({
+      new: {
+        applied_at: null,
+        deploy_mode: 'destructive',
+        roles: [],
+        channels: [],
+        categories: [],
+      },
+    });
+
+    expect(mockDeployServerState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ cleanExisting: true }),
+    );
   });
 
   it('handles realtime deploy trigger for a non-primary guild', async () => {
@@ -240,13 +263,18 @@ describe('startDeployListener', () => {
     expect(mockDeployServerState).not.toHaveBeenCalled();
   });
 
-  it('ignores realtime updates with empty roles', async () => {
+  it('deploys a reviewed empty plan', async () => {
     const client = makeClient();
     startDeployListener(client as any);
     const cb = client._realtimeCallback();
 
     await cb!({ new: { applied_at: null, roles: [], channels: [] } });
-    expect(mockDeployServerState).not.toHaveBeenCalled();
+    expect(mockDeployServerState).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ roles: [], channels: [] }),
+      expect.objectContaining({ cleanExisting: false }),
+    );
   });
 
   it('handles event bus deploy.requested', async () => {
@@ -287,7 +315,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     resetDeployMocks();
   });
 
-  it('stores ID mappings on success', async () => {
+  it('leaves ID mapping persistence to the deployer', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
     startDeployListener(client as any);
@@ -297,8 +325,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
     });
 
-    // Check upsert was called for id mappings
-    expect(client.supabase.from).toHaveBeenCalledWith('discord_id_map');
+    expect(client.supabase.from).not.toHaveBeenCalledWith('discord_id_map');
   });
 
   it('marks desired state as applied', async () => {
@@ -399,18 +426,26 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(mockWriteAuditLog).toHaveBeenCalled();
   });
 
-  it('handles upsert error for ID mappings', async () => {
+  it('reports failure when the applied timestamp cannot be persisted', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: { message: 'upsert fail' } }));
-    startDeployListener(client as any);
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
     const cb = client._realtimeCallback()!;
 
     await cb({
       new: { applied_at: null, roles: [{ name: 'x' }], channels: [] },
     });
 
-    // Should log error but not throw
-    expect(mockWriteAuditLog).toHaveBeenCalled();
+    expect(client.eventBus.emit).toHaveBeenCalledWith(
+      'deploy.failed',
+      'g1',
+      expect.objectContaining({ error: expect.stringContaining('Failed to mark the reviewed plan as applied') }),
+    );
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'server.deployed',
+      'g1',
+      expect.anything(),
+    );
   });
 
   it('parses categories from channel categoryKeys', async () => {
@@ -445,6 +480,26 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(desiredState.categories).toHaveLength(2);
     expect(desiredState.categories[0].key).toBe('cat-text-channels');
     expect(desiredState.categories[1].key).toBe('cat-dev');
+  });
+
+  it('preserves stored category names exactly', async () => {
+    const client = makeClient();
+    client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: {
+        applied_at: null,
+        roles: [],
+        channels: [{ name: 'release-validation', categoryKey: 'cat-release-qa' }],
+        categories: [{ key: 'cat-release-qa', name: 'Release QA', position: 0 }],
+      },
+    });
+
+    expect(mockDeployServerState.mock.calls[0][2].categories).toEqual([
+      { key: 'cat-release-qa', name: 'Release QA', position: 0 },
+    ]);
   });
 
   it('handles guild not found', async () => {
