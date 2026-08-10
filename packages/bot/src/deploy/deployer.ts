@@ -228,6 +228,7 @@ export async function deployServerState(
       canonicalTemplateKey('channel', 'moderator-only'),
     ) ?? guild.safetyAlertsChannelId;
     if (moderatorOnlyChannelId) communityChannelIds.add(moderatorOnlyChannelId);
+    const deletedMappedDiscordIds = new Set<string>();
 
     // === Step 1: Zero @everyone during an explicitly destructive deployment ===
     if (options.cleanExisting) {
@@ -681,7 +682,6 @@ export async function deployServerState(
         ...desiredState.categories.map((category) => canonicalTemplateKey('category', category.key)),
         ...desiredState.channels.map((channel) => canonicalTemplateKey('channel', channel.key)),
       ]);
-      const deletedDiscordIds = new Set<string>();
       const entityOrder = ['channel', 'category', 'role'] as const;
 
       for (const entityType of entityOrder) {
@@ -690,7 +690,7 @@ export async function deployServerState(
             || typeof row.template_key !== 'string'
             || typeof row.discord_id !== 'string') continue;
           if (desiredMappingKeys.has(canonicalTemplateKey(entityType, row.template_key))) continue;
-          if (deletedDiscordIds.has(row.discord_id)) continue;
+          if (deletedMappedDiscordIds.has(row.discord_id)) continue;
 
           const entity = entityType === 'role'
             ? guild.roles.cache.get(row.discord_id)
@@ -712,7 +712,7 @@ export async function deployServerState(
                 'SomniBot deployment — removed from reviewed plan',
               );
             }
-            deletedDiscordIds.add(entity.id);
+            deletedMappedDiscordIds.add(entity.id);
             actions.push({
               step, action: 'delete', entityType,
               entityName: entity.name, discordId: entity.id, success: true,
@@ -733,14 +733,22 @@ export async function deployServerState(
     step++;
     report('Storing ID mappings');
     try {
-      const canReplaceMappingSet = errors.length === 0 || options.cleanExisting;
-      if (canReplaceMappingSet) {
+      if (options.cleanExisting) {
         const { error: deleteMappingsError } = await supabase
           .from('discord_id_map')
           .delete()
           .eq('guild_id', guild.id);
         if (deleteMappingsError) {
           throw new Error(`Failed to clear Discord ID mappings: ${deleteMappingsError.message}`);
+        }
+      } else if (deletedMappedDiscordIds.size > 0) {
+        const { error: deleteMappingsError } = await supabase
+          .from('discord_id_map')
+          .delete()
+          .eq('guild_id', guild.id)
+          .in('discord_id', [...deletedMappedDiscordIds]);
+        if (deleteMappingsError) {
+          throw new Error(`Failed to remove deleted Discord ID mappings: ${deleteMappingsError.message}`);
         }
       }
 

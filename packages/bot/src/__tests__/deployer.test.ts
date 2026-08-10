@@ -477,5 +477,100 @@ describe('deployer', () => {
         }),
       );
     });
+
+    it('preserves a protected community channel mapping during a safe deploy', async () => {
+      const guild = makeGuild();
+      const moderatorOnly = {
+        id: 'moderator-only',
+        name: 'moderator-only',
+        parentId: 'existing-parent',
+        isTextBased: () => true,
+        isThread: () => false,
+        delete: vi.fn().mockResolvedValue(undefined),
+        permissionOverwrites: { cache: new Map() },
+      };
+      guild.channels.cache.set(moderatorOnly.id, moderatorOnly);
+
+      const mappingChain = makeChain({
+        data: [{
+          entity_type: 'channel',
+          template_key: 'channel:moderator-only',
+          discord_id: moderatorOnly.id,
+        }],
+        error: null,
+      });
+      const writeChain = makeChain({ data: null, error: null });
+      const supabase = {
+        from: vi.fn((table: string) => table === 'discord_id_map' ? mappingChain : writeChain),
+      };
+
+      const result = await deployServerState(
+        guild,
+        supabase as never,
+        {
+          everyonePermissions: '0',
+          roles: [],
+          categories: [],
+          channels: [],
+        },
+        { cleanExisting: false, dryRun: false },
+      );
+
+      expect(result.success, JSON.stringify(result.errors)).toBe(true);
+      expect(moderatorOnly.delete).not.toHaveBeenCalled();
+      expect(mappingChain.delete).not.toHaveBeenCalled();
+    });
+
+    it('removes only mappings for resources actually deleted by a safe deploy', async () => {
+      const guild = makeGuild();
+      const moderatorOnly = {
+        id: 'moderator-only',
+        name: 'moderator-only',
+        parentId: 'existing-parent',
+        isTextBased: () => true,
+        isThread: () => false,
+        delete: vi.fn().mockResolvedValue(undefined),
+        permissionOverwrites: { cache: new Map() },
+      };
+      guild.channels.cache.set(moderatorOnly.id, moderatorOnly);
+
+      const mappingChain = makeChain({
+        data: [
+          {
+            entity_type: 'channel',
+            template_key: 'channel:moderator-only',
+            discord_id: moderatorOnly.id,
+          },
+          {
+            entity_type: 'channel',
+            template_key: 'channel:general',
+            discord_id: 'ch-1',
+          },
+        ],
+        error: null,
+      });
+      const writeChain = makeChain({ data: null, error: null });
+      const supabase = {
+        from: vi.fn((table: string) => table === 'discord_id_map' ? mappingChain : writeChain),
+      };
+
+      const result = await deployServerState(
+        guild,
+        supabase as never,
+        {
+          everyonePermissions: '0',
+          roles: [],
+          categories: [],
+          channels: [],
+        },
+        { cleanExisting: false, dryRun: false },
+      );
+
+      expect(result.success, JSON.stringify(result.errors)).toBe(true);
+      expect(guild.channels.cache.get('ch-1').delete).toHaveBeenCalledOnce();
+      expect(moderatorOnly.delete).not.toHaveBeenCalled();
+      expect(mappingChain.delete).toHaveBeenCalledOnce();
+      expect(mappingChain.in).toHaveBeenCalledWith('discord_id', ['ch-1']);
+    });
   });
 });
