@@ -59,7 +59,7 @@ export interface SyntheticOptions {
   getNumber(name: string, required?: boolean): number | null;
   getBoolean(name: string, required?: boolean): boolean | null;
   getUser(name: string, required?: boolean): unknown;
-  getMember(name: string): unknown;
+  getMember(name: string, required?: boolean): unknown;
   getChannel(name: string, required?: boolean): unknown;
   getRole(name: string, required?: boolean): unknown;
   getMentionable(name: string, required?: boolean): unknown;
@@ -313,6 +313,16 @@ function optionNotFound(name: string): never {
   throw new Error(`CommandInteractionOptionNotFound: required option "${name}" not found`);
 }
 
+function optionTypeMismatch(name: string, expected: string, actual: string): never {
+  // Mirrors discord.js's CommandInteractionOptionTypeMismatch contract. The
+  // production interaction payload is schema-typed by Discord; synthetic
+  // callers should fail loudly when they supply a value that cannot satisfy the
+  // getter the real handler invokes rather than silently returning a bad cast.
+  throw new Error(
+    `CommandInteractionOptionTypeMismatch: option "${name}" is ${actual}, expected ${expected}`,
+  );
+}
+
 function makeOptions(map: Record<string, OptionValue>, extras: SlashExtras = {}): SyntheticOptions {
   const read = <T>(name: string, required?: boolean): T | null => {
     const value = map[name];
@@ -323,13 +333,30 @@ function makeOptions(map: Record<string, OptionValue>, extras: SlashExtras = {})
     return value as unknown as T;
   };
 
+  const readPrimitive = <T>(
+    name: string,
+    required: boolean | undefined,
+    expected: string,
+    matches: (value: OptionValue) => boolean,
+  ): T | null => {
+    const value = map[name];
+    if (value === undefined || value === null) {
+      if (required) optionNotFound(name);
+      return null;
+    }
+    if (!matches(value)) {
+      optionTypeMismatch(name, expected, typeof value);
+    }
+    return value as unknown as T;
+  };
+
   return {
-    getString: (name, required) => read<string>(name, required),
-    getInteger: (name, required) => read<number>(name, required),
-    getNumber: (name, required) => read<number>(name, required),
-    getBoolean: (name, required) => read<boolean>(name, required),
+    getString: (name, required) => readPrimitive<string>(name, required, 'string', (value) => typeof value === 'string'),
+    getInteger: (name, required) => readPrimitive<number>(name, required, 'integer', (value) => typeof value === 'number' && Number.isInteger(value)),
+    getNumber: (name, required) => readPrimitive<number>(name, required, 'number', (value) => typeof value === 'number' && Number.isFinite(value)),
+    getBoolean: (name, required) => readPrimitive<boolean>(name, required, 'boolean', (value) => typeof value === 'boolean'),
     getUser: (name, required) => read<unknown>(name, required),
-    getMember: (name) => read<unknown>(name, false),
+    getMember: (name, required) => read<unknown>(name, required),
     getChannel: (name, required) => read<unknown>(name, required),
     getRole: (name, required) => read<unknown>(name, required),
     getMentionable: (name, required) => read<unknown>(name, required),
@@ -393,6 +420,9 @@ export interface BuildSlashParams extends BaseInteractionParams, SlashExtras {
 }
 
 export function buildSlashInteraction(params: BuildSlashParams): SyntheticInteraction {
+  if (params.subcommandGroup !== undefined && params.subcommandGroup !== null && !params.subcommand) {
+    throw new Error('CommandInteractionOptionNoSubcommand: a subcommand group requires a subcommand');
+  }
   const base = makeBase(params, ['isCommand', 'isChatInputCommand']);
   base.commandName = params.commandName;
   base.options = makeOptions(params.options ?? {}, {

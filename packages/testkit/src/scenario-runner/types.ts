@@ -248,6 +248,9 @@ export interface RunSlashParams {
   readonly commandName: string;
   readonly userId: string;
   readonly userLabel?: string;
+  /** Values are already decoded the way Discord presents them to handlers:
+   * strings, numbers, booleans, or resolved user/channel/role-like objects.
+   * The runner forwards these without stringifying/coercing them. */
   readonly options?: Record<string, unknown>;
   readonly member?: unknown;
   /** Override the interaction id (used to prove replay: same id twice). */
