@@ -356,15 +356,6 @@ export async function startLavalink(): Promise<{
     const onData = (chunk: Buffer) => {
       const text = chunk.toString();
       broadcastLog(text);
-
-      // Detect ready string from Lavalink 4.x
-      if (!resolved && (text.includes('Lavalink is ready') || text.includes('Started Launcher'))) {
-        resolved = true;
-        setStatus('online');
-        markStable(proc);
-        broadcastLavalinkStatus();
-        resolve({ ok: true });
-      }
     };
 
     proc.stdout?.on('data', onData);
