@@ -40,6 +40,31 @@ interface CommandCategory {
   commands: { name: string; description: string }[];
 }
 
+const EMBED_FIELD_VALUE_LIMIT = 1024;
+const DETAIL_FIELDS_PER_EMBED = 5;
+const MAX_DETAIL_EMBEDS = 10;
+
+export function chunkHelpItems(items: readonly string[], separator: string): string[] {
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const item of items) {
+    const safeItem = item.length <= EMBED_FIELD_VALUE_LIMIT
+      ? item
+      : `${item.slice(0, EMBED_FIELD_VALUE_LIMIT - 1)}…`;
+    const candidate = current.length > 0 ? `${current}${separator}${safeItem}` : safeItem;
+    if (candidate.length <= EMBED_FIELD_VALUE_LIMIT) {
+      current = candidate;
+      continue;
+    }
+    if (current.length > 0) chunks.push(current);
+    current = safeItem;
+  }
+
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
 // ── Category classification ──────────────────────────────
 
 // Map command names to their category
@@ -196,11 +221,15 @@ export async function handleHelpCommand(
     );
 
   for (const cat of categories) {
-    const cmdList = cat.commands.map((c) => `\`${c.name}\``).join(', ');
-    overviewEmbed.addFields({
-      name: `${cat.emoji} ${cat.name} (${cat.commands.length})`,
-      value: cmdList,
-      inline: false,
+    const chunks = chunkHelpItems(cat.commands.map((command) => `\`${command.name}\``), ', ');
+    chunks.forEach((value, index) => {
+      overviewEmbed.addFields({
+        name: index === 0
+          ? `${cat.emoji} ${cat.name} (${cat.commands.length})`
+          : `${cat.emoji} ${cat.name} (continued)`,
+        value,
+        inline: false,
+      });
     });
   }
 
@@ -247,16 +276,31 @@ export async function handleHelpCategorySelect(
   }
 
   const kit = await helpBrandKit(client, interaction.guildId, interaction.guild?.name);
-  const embed = new EmbedBuilder()
-    .setTitle(`${category.emoji} ${category.name}`)
-    .setDescription(category.description);
+  const detailChunks = chunkHelpItems(
+    category.commands.map((command) => `**${command.name}** — ${command.description}`),
+    '\n',
+  );
+  const visibleChunks = detailChunks.slice(0, DETAIL_FIELDS_PER_EMBED * MAX_DETAIL_EMBEDS);
+  const pageCount = Math.max(1, Math.ceil(visibleChunks.length / DETAIL_FIELDS_PER_EMBED));
+  const embeds = Array.from({ length: pageCount }, (_, pageIndex) => {
+    const embed = new EmbedBuilder()
+      .setTitle(`${category.emoji} ${category.name}${pageCount > 1 ? ` (${pageIndex + 1}/${pageCount})` : ''}`)
+      .setDescription(category.description);
+    const pageChunks = visibleChunks.slice(
+      pageIndex * DETAIL_FIELDS_PER_EMBED,
+      (pageIndex + 1) * DETAIL_FIELDS_PER_EMBED,
+    );
+    pageChunks.forEach((value, fieldIndex) => {
+      embed.addFields({
+        name: pageIndex === 0 && fieldIndex === 0 ? 'Commands' : 'Commands (continued)',
+        value,
+        inline: false,
+      });
+    });
+    embed.setFooter({ text: 'Use /help to go back to the overview' });
+    applyBrand(embed, kit, { intent: 'info' });
+    return embed;
+  });
 
-  for (const cmd of category.commands) {
-    embed.addFields({ name: cmd.name, value: cmd.description, inline: true });
-  }
-
-  embed.setFooter({ text: 'Use /help to go back to the overview' });
-  applyBrand(embed, kit, { intent: 'info' });
-
-  await interaction.update({ embeds: [embed] });
+  await interaction.update({ embeds });
 }
