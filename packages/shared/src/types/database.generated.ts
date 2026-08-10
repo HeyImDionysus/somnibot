@@ -2231,6 +2231,16 @@ export interface DbEconomyPetBattles {
   created_at: string;
 }
 
+export interface DbEconomyPetOperations {
+  guild_id: string;
+  user_id: string;
+  pet_id: string;
+  operation: string;
+  request_id: string;
+  result: Json;
+  created_at: string;
+}
+
 export interface DbEconomyPets {
   id: string;
   guild_id: string;

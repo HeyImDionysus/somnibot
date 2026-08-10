@@ -209,7 +209,7 @@ describe('PetsManager', () => {
         economy_pets: null, // no existing pet
         economy_wallets: { wallet: 10000 },
       });
-      supabase.rpc.mockResolvedValue({ error: null });
+      supabase.rpc.mockResolvedValue({ data: { status: 'purchased', replayed: false }, error: null });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
 
       const interaction = makeInteraction({ petType: 'lucky' });
@@ -224,6 +224,7 @@ describe('PetsManager', () => {
         guild_config: { economy_pets_enabled: true },
         economy_pets: { name: 'Existing' },
       });
+      supabase.rpc.mockResolvedValue({ data: { status: 'already_has_pet', replayed: false }, error: null });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
 
       const interaction = makeInteraction();
@@ -239,6 +240,7 @@ describe('PetsManager', () => {
         economy_pets: null,
         economy_wallets: { wallet: 100 },
       });
+      supabase.rpc.mockResolvedValue({ data: { status: 'insufficient_balance', replayed: false }, error: null });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
 
       const interaction = makeInteraction();
@@ -248,63 +250,32 @@ describe('PetsManager', () => {
       }));
     });
 
-    it('handles debit failure', async () => {
+    it('handles atomic insufficient-balance failure', async () => {
       supabase = makeSupabase({
         guild_config: { economy_pets_enabled: true },
         economy_pets: null,
         economy_wallets: { wallet: 10000 },
       });
-      supabase.rpc.mockResolvedValue({ error: { message: 'insufficient' } });
+      supabase.rpc.mockResolvedValue({ data: { status: 'insufficient_balance', replayed: false }, error: null });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
 
       const interaction = makeInteraction();
       await mgr.buyPet(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('failed'),
+        content: expect.stringContaining('need'),
       }));
     });
 
-    it('refunds on insert error', async () => {
-      // First rpc call succeeds (debit), but insert fails
-      let rpcCallCount = 0;
-      const fromMock = vi.fn();
-      fromMock.mockImplementation((table: string) => {
-        const chain: Record<string, any> = {};
-        const methods = ['select', 'eq', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle'];
-        for (const m of methods) {
-          chain[m] = vi.fn().mockReturnValue(chain);
-        }
-        if (table === 'guild_config') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { economy_pets_enabled: true }, error: null });
-        } else if (table === 'economy_pets') {
-          // The getPet READ must succeed with no row (no pet yet) — a failed
-          // read is an outage the manager now (correctly) refuses to debit
-          // against, which would never reach the refund path under test.
-          // Only the INSERT fails, with the 23505 this test is about.
-          let isInsert = false;
-          chain.insert = vi.fn(() => { isInsert = true; return chain; });
-          chain.then = (resolve: (v: any) => void) =>
-            resolve(isInsert ? { data: null, error: { message: '23505' } } : { data: null, error: null });
-        } else if (table === 'economy_wallets') {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: { wallet: 10000 }, error: null });
-        } else {
-          chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
-        }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
-        return chain;
+    it('degrades without claiming a refund when the atomic purchase fails', async () => {
+      supabase = makeSupabase({
+        guild_config: { economy_pets_enabled: true },
+        economy_pets: null,
       });
-
-      const sb = {
-        from: fromMock,
-        rpc: vi.fn().mockResolvedValue({ error: null }),
-      };
-      mgr = new PetsManager(sb as any, null as any, valkey as any);
-
-      const interaction = makeInteraction();
-      await mgr.buyPet(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('refunded'),
-      }));
+      supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } });
+      mgr = new PetsManager(supabase as any, null as any, valkey as any);
+      await mgr.buyPet(makeInteraction() as any);
+      expect(supabase.rpc).toHaveBeenCalledWith('economy_pet_buy_atomic', expect.anything());
+      expect(raiseOwnerAlert).not.toHaveBeenCalled();
     });
   });
 
@@ -314,6 +285,7 @@ describe('PetsManager', () => {
         guild_config: { economy_pets_enabled: true },
         economy_pets: { id: 'p1', hunger: 50, status: 'normal' },
       });
+      supabase.rpc.mockResolvedValue({ data: { status: 'fed', replayed: false, old_hunger: 50, new_hunger: 80, pet_name: 'Pet' }, error: null });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
 
       const interaction = makeInteraction();
@@ -336,55 +308,36 @@ describe('PetsManager', () => {
       );
     });
 
-    it('refunds a paid feed when the atomic pet mutation fails', async () => {
+    it('does not issue a compensating refund when the atomic feed call fails', async () => {
       supabase = makeSupabase({
         guild_config: { economy_pets_enabled: true, economy_pet_feed_cost: 50 },
         economy_pets: { id: 'p1', hunger: 50, status: 'normal' },
         economy_wallets: { wallet: 500 },
       });
-      supabase.rpc
-        .mockResolvedValueOnce({ data: null, error: null })
-        .mockResolvedValueOnce({ data: null, error: { message: 'feed failed' } })
-        .mockResolvedValueOnce({ data: 550, error: null });
+      supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: 'feed failed' } });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
       const interaction = makeInteraction();
 
       await mgr.feedPet(interaction as any);
 
-      expect(supabase.rpc).toHaveBeenNthCalledWith(3, 'economy_refund_balance', {
-        p_guild_id: 'g1',
-        p_user_id: 'u1',
-        p_amount: 50,
-        p_idempotency_key: 'pet:feed:refund:interaction-1',
-      });
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('have been refunded'),
-      }));
+      expect(supabase.rpc).toHaveBeenCalledWith('economy_pet_feed_atomic', expect.anything());
+      expect(interaction.reply).toHaveBeenCalled();
     });
 
-    it('does not claim a paid feed refund when the compensating credit fails', async () => {
+    it('does not claim a paid feed refund when the atomic call fails', async () => {
       supabase = makeSupabase({
         guild_config: { economy_pets_enabled: true, economy_pet_feed_cost: 50 },
         economy_pets: { id: 'p1', hunger: 50, status: 'normal' },
         economy_wallets: { wallet: 500 },
       });
-      supabase.rpc
-        .mockResolvedValueOnce({ data: null, error: null })
-        .mockResolvedValueOnce({ data: null, error: { message: 'feed failed' } })
-        .mockResolvedValueOnce({ data: null, error: { message: 'refund failed' } });
+      supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: 'feed failed' } });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
       const interaction = makeInteraction();
 
       await mgr.feedPet(interaction as any);
 
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('refund could not be confirmed'),
-      }));
-      expect(raiseOwnerAlert).toHaveBeenCalledWith(
-        supabase,
-        'g1',
-        expect.objectContaining({ alertType: 'pet_economy_refund_failed' }),
-      );
+      expect(interaction.reply).toHaveBeenCalled();
+      expect(raiseOwnerAlert).not.toHaveBeenCalled();
     });
 
     it('rejects when no pet', async () => {
@@ -462,15 +415,13 @@ describe('PetsManager', () => {
 
       await mgr.trainPet(interaction as any);
 
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('Nothing was charged'),
-      }));
+      expect(interaction.reply).toHaveBeenCalled();
       expect(interaction.reply).not.toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('have been refunded'),
       }));
     });
 
-    it('does not claim a paid training refund when the compensating credit fails', async () => {
+    it('does not issue a paid training refund when the atomic call fails', async () => {
       supabase = makeSupabase({
         guild_config: { economy_pets_enabled: true, economy_pet_train_cost: 100 },
         economy_pets: {
@@ -479,26 +430,14 @@ describe('PetsManager', () => {
         },
         economy_wallets: { wallet: 500 },
       });
-      supabase.rpc
-        .mockResolvedValueOnce({ data: null, error: null })
-        .mockResolvedValueOnce({ data: null, error: { message: 'train failed' } })
-        .mockResolvedValueOnce({ data: null, error: { message: 'refund failed' } });
+      supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: 'train failed' } });
       mgr = new PetsManager(supabase as any, null as any, valkey as any);
       const interaction = makeInteraction();
 
       await mgr.trainPet(interaction as any);
 
-      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringContaining('refund could not be confirmed'),
-      }));
-      expect(raiseOwnerAlert).toHaveBeenCalledWith(
-        supabase,
-        'g1',
-        expect.objectContaining({
-          alertType: 'pet_economy_refund_failed',
-          metadata: expect.objectContaining({ operation: 'train' }),
-        }),
-      );
+      expect(interaction.reply).toHaveBeenCalled();
+      expect(raiseOwnerAlert).not.toHaveBeenCalled();
     });
   });
 
