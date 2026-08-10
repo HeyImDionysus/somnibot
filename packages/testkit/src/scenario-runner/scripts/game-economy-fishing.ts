@@ -35,13 +35,13 @@
  *
  * Behavior-bug discovery: where the REAL bot diverges from the catalog's contracted
  * intent, the script records a FAIL (promise / observation / impact) — it never forces
- * green and never weakens the catalog. Two divergences are surfaced this way:
+ * green and never weakens the catalog. One divergence is currently surfaced this way:
  *   - the collection completion bonus (catalog control fishing-collection-reward-*,
  *     default 5000, message collection-completed, state transition collection-finished)
- *     has NO backing guild_config column and NO FishingManager code path (SET-B); and
- *   - a failed auto-sell payout cannot be flagged/retried: economy_fish_catches has no
- *     persisted paid/payout-status column and there is no retry queue or idempotency key
- *     (RETRY).
+ *     has NO backing guild_config column and NO FishingManager code path (SET-B).
+ *
+ * Failed auto-sell payouts now have durable paid/correlation state and a retry sweep;
+ * the RETRY scenario keeps the mid-cast fault-injection/readback boundary explicit.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -79,6 +79,8 @@ interface CatchRow {
   species_id: string;
   weight: number;
   price_earned: number;
+  paid: boolean;
+  correlation_id: string | null;
 }
 
 /** A minimal PostgREST error surface (code + message) for insert/RPC/select results. */
@@ -200,7 +202,7 @@ async function catchCount(handle: LiveClientHandle, userId: string): Promise<num
 async function readFirstCatch(handle: LiveClientHandle, userId: string): Promise<CatchRow | null> {
   const { data } = await handle.supabase
     .from('economy_fish_catches')
-    .select('id, user_id, guild_id, species_id, weight, price_earned')
+    .select('id, user_id, guild_id, species_id, weight, price_earned, paid, correlation_id')
     .eq('guild_id', handle.guildId)
     .eq('user_id', userId)
     .order('caught_at', { ascending: true })
@@ -513,16 +515,16 @@ async function driveCastWhenAvailable(
 }
 
 /**
- * Replay dedup for /fish cast is enforced solely by the ephemeral Valkey SET NX cooldown,
- * and economy_fish_catches carries NO persisted
- * idempotency / interaction-id column to observe DB-side. GATED honestly (never faked).
+ * Keep replay-safety GATED for scenarios that do not arrange a same-interaction-id
+ * redelivery. The dedicated REPLAY scenario below exercises the durable correlation
+ * fence when Valkey is available.
  */
 function gateReplay(ctx: ScenarioContext): void {
   ctx.gate(
     'replay-safety',
     'db-observable',
     'Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).',
-    'the /fish cast path is dependency-gated on the Valkey SET NX cooldown (redis-dependency); economy_fish_catches carries no persisted idempotency/interaction key, so exactly-once cannot be observed DB-side here',
+    'this scenario does not arrange a same-interaction-id cast redelivery; the dedicated REPLAY scenario proves the durable correlation fence when Valkey is live',
   );
 }
 
@@ -601,7 +603,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     'audit',
     'audit-row',
     'Each fishing action also lands an audit row with a run-prefixed correlation id, and audit history is anonymized rather than deleted.',
-    'economy_fish_catches carries no correlation-id column and FishingManager writes no audit_logs row; the append-only catch row (actor+guild+value) is the DB-observable audit evidence, but the correlation-id + audit_logs-anonymization contract is not backed here',
+    'this primitive-level setup inserts the catch directly and therefore does not emit the production fishing audit event; the live cast path now persists correlation_id, while audit anonymization still requires its dedicated lifecycle drive',
   );
 
   // The collection surface is read-only and needs no Valkey cooldown. The
@@ -1141,7 +1143,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'replay-safety',
     'db-observable',
     'The failed credit and its retry apply under one idempotency key, so the ledger shows exactly one credit for the catch — never zero-paid-but-recorded and never a double credit.',
-    'requires the mid-cast fault-injection lane; there is likewise no persisted idempotency key on the catch/credit to observe DB-side',
+    'requires the mid-cast fault-injection lane to interrupt after catch insertion; the production path now persists catch correlation and payout idempotency, but this scenario does not sever that exact boundary',
   );
 
   await proveRlsIsolation(ctx, handle);
@@ -1154,20 +1156,77 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({
     label: 'a',
     economyStartingBalance: 0,
-    guildConfigOverrides: { economy_fishing_enabled: true },
+    guildConfigOverrides: {
+      economy_fishing_enabled: true,
+      economy_fishing_junk_chance_pct: 0,
+      economy_fishing_treasure_chance_pct: 0,
+    },
   });
   const userA = ctx.userId('a');
 
-  // Seed a catch so the RLS positive control holds (the replay behavior itself is
-  // cast-driven and its only dedup guard is the Valkey SET NX cooldown — gated below).
   await seedWallet(handle, userA, 0, 0);
-  const species = await seedSpecies(ctx, handle);
-  if (species[0]) await insertCatch(handle, userA, species[0].id, 2.5, 30);
+  await seedSpecies(ctx, handle);
+  await seedRod(ctx, handle, userA);
 
-  gateReplay(ctx);
-  gateCastLive(
-    ctx,
-    'The channel shows exactly one catch embed despite the replays, and /fish collection + the wallet totals are unchanged from the pre-replay snapshot.',
+  if (ctx.capabilities.redis) {
+    const interactionId = `${ctx.runPrefix}fish-replay`;
+    const first = await ctx.runSlash(handle, {
+      commandName: 'fish',
+      userId: userA,
+      subcommand: 'cast',
+      interactionId,
+    });
+    const catchesAfterFirst = await catchCount(handle, userA);
+    const walletAfterFirst = (await readWallet(handle, userA))?.wallet ?? -1;
+    const replay = await ctx.runSlash(handle, {
+      commandName: 'fish',
+      userId: userA,
+      subcommand: 'cast',
+      interactionId,
+    });
+    const catchesAfterReplay = await catchCount(handle, userA);
+    const walletAfterReplay = (await readWallet(handle, userA))?.wallet ?? -1;
+    const { count: ledgerCount } = await handle.supabase
+      .from('economy_transactions')
+      .select('*', { count: 'exact', head: true })
+      .eq('guild_id', handle.guildId)
+      .eq('user_id', userA)
+      .eq('idempotency_key', interactionId);
+    const { data: catches } = await handle.supabase
+      .from('economy_fish_catches')
+      .select('correlation_id, paid')
+      .eq('guild_id', handle.guildId)
+      .eq('user_id', userA);
+    const correlated = catches ?? [];
+
+    ctx.expect(
+      first.has('editReply') &&
+        replay.has('editReply') &&
+        catchesAfterFirst === 1 &&
+        catchesAfterReplay === 1 &&
+        walletAfterFirst > 0 &&
+        walletAfterReplay === walletAfterFirst &&
+        ledgerCount === 1 &&
+        correlated.length === 1 &&
+        correlated[0]?.correlation_id === interactionId &&
+        correlated[0]?.paid === true,
+      {
+        assertionClass: 'replay-safety',
+        channel: 'db-observable',
+        promise: 'Re-delivering the same /fish cast interaction records and pays exactly one durable catch.',
+        observation: `first catches=${catchesAfterFirst}, replay catches=${catchesAfterReplay}, first wallet=${walletAfterFirst}, replay wallet=${walletAfterReplay}, ledger rows=${ledgerCount ?? 0}, correlated catches=${correlated.length}.`,
+        impact: 'A redelivered cast changed the catch ledger or wallet more than once.',
+      },
+    );
+  } else {
+    gateReplay(ctx);
+  }
+
+  ctx.gate(
+    'Discord',
+    'discord-readback',
+    'The live guild shows one catch embed and one branded replay refusal for the redelivered interaction.',
+    'the production dispatcher and durable DB/Valkey effects are exercised here, but a real Discord gateway message readback is still required',
   );
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
