@@ -184,7 +184,7 @@ function Sparkline({
   const latest = data[data.length - 1];
 
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(4rem,6rem)] items-center gap-3">
+    <div className="grid min-w-0 grid-cols-1 items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(4rem,6rem)]">
       <svg
         width={width}
         height={height}
