@@ -40,6 +40,9 @@ export async function POST(
   try {
     const auth = await requireAuth();
     if (!auth.ok) return auth.response;
+    if (auth.localGuildIds?.length) {
+      return NextResponse.json({ error: 'Invitation not found' }, { status: 404 });
+    }
 
     const { id } = await params;
     const admin = createAdminSupabase();

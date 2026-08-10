@@ -68,6 +68,9 @@ export async function POST(
     if (!auth.discordId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    if (auth.localGuildIds?.length) {
+      return NextResponse.json({ error: 'Invitation not found' }, { status: 404 });
+    }
     const session = { discordId: auth.discordId };
 
     const { id } = await params;

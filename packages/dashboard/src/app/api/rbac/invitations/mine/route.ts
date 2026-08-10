@@ -18,6 +18,9 @@ export async function GET(request: Request) {
   if (!auth.discordId) {
     return NextResponse.json({ error: 'Discord identity unavailable' }, { status: 403 });
   }
+  if (auth.localGuildIds?.length) {
+    return NextResponse.json({ success: true, data: [] });
+  }
 
   const admin = createAdminSupabase();
   const { data, error } = await admin
