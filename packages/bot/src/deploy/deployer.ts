@@ -220,10 +220,14 @@ export async function deployServerState(
       };
     }
 
-    if (!options.cleanExisting) {
-      persistedMappings = await loadDiscordIdMappings(supabase, guild.id);
-    }
-    const mappingIndex = buildMappingIndex(persistedMappings);
+    persistedMappings = await loadDiscordIdMappings(supabase, guild.id);
+    const persistedMappingIndex = buildMappingIndex(persistedMappings);
+    const mappingIndex = options.cleanExisting ? new Map<string, string>() : persistedMappingIndex;
+    const communityChannelIds = communityChannelIdsForGuild(guild);
+    const moderatorOnlyChannelId = persistedMappingIndex.get(
+      canonicalTemplateKey('channel', 'moderator-only'),
+    ) ?? guild.safetyAlertsChannelId;
+    if (moderatorOnlyChannelId) communityChannelIds.add(moderatorOnlyChannelId);
 
     // === Step 1: Zero @everyone ===
     step++;
@@ -279,7 +283,7 @@ export async function deployServerState(
 
       // Then delete channels (skip Discord-required channels)
       const existingChannels = guild.channels.cache.filter(
-        (c) => c.id !== guild.rulesChannelId && c.id !== guild.publicUpdatesChannelId,
+        (c) => !communityChannelIds.has(c.id),
       );
 
       for (const [, channel] of existingChannels) {
@@ -528,11 +532,9 @@ export async function deployServerState(
     // === Step 6: Create channels with permission overrides ===
     // Handle Discord Community-required channels (rules, moderator-only).
     // These can't be deleted, so we reuse them instead of creating duplicates.
-    const communityChannelIds = communityChannelIdsForGuild(guild);
-    // Also detect the moderator-only channel Discord creates for Community servers
-    const modOnlyChannel = guild.channels.cache.find(
-      (c) => c.name === 'moderator-only' && !c.parentId,
-    );
+    const modOnlyChannel = moderatorOnlyChannelId
+      ? guild.channels.cache.get(moderatorOnlyChannelId)
+      : null;
 
     const sortedChannels = [...desiredState.channels].sort((a, b) => a.position - b.position);
 
@@ -615,14 +617,18 @@ export async function deployServerState(
       await sleep(300);
     }
 
-    // Move moderator-only channel to Staff category if it exists
-    if (modOnlyChannel && 'setParent' in modOnlyChannel) {
+    if (modOnlyChannel) {
       step++;
       report('Organizing community moderator-only channel');
       try {
         const staffCatId = categoryKeyToDiscordId.get('cat-staff');
-        if (staffCatId) {
-          await (modOnlyChannel as TextChannel).setParent(staffCatId, {
+        const staffChannel = desiredState.channels.find(
+          (channel) => channel.categoryKey === 'cat-staff' && channel.templateId === 'staff',
+        );
+        if (staffCatId && staffChannel) {
+          await guild.channels.edit(modOnlyChannel.id, {
+            parent: staffCatId,
+            permissionOverwrites: buildPermissionOverwrites(guild, staffChannel, roleKeyToDiscordId),
             reason: 'SomniBot deployment — organize community channel',
           });
           actions.push({
@@ -834,7 +840,8 @@ async function updateRole(role: Role, desired: DesiredRole): Promise<Role> {
 
 function communityChannelIdsForGuild(guild: Guild): Set<string> {
   return new Set(
-    [guild.rulesChannelId, guild.publicUpdatesChannelId].filter(Boolean) as string[],
+    [guild.rulesChannelId, guild.publicUpdatesChannelId, guild.safetyAlertsChannelId]
+      .filter(Boolean) as string[],
   );
 }
 

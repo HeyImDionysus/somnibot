@@ -312,5 +312,92 @@ describe('deployer', () => {
         { entityType: 'channel', key: 'general', discordId: 'ch-1' },
       ]));
     });
+
+    it('applies the staff permission map to an existing community moderator-only channel', async () => {
+      const guild = makeGuild();
+      const moderatorOnly = {
+        id: 'moderator-only',
+        name: 'moderator-only',
+        parentId: 'existing-parent',
+        isTextBased: () => true,
+        isThread: () => false,
+        delete: vi.fn().mockResolvedValue(undefined),
+      };
+      guild.channels.cache.set(moderatorOnly.id, moderatorOnly);
+      guild.safetyAlertsChannelId = 'discord-safety-alerts';
+      guild.channels.cache.find = (predicate: (channel: Record<string, unknown>) => boolean) =>
+        [...guild.channels.cache.values()].find(predicate);
+      guild.channels.cache.filter = (predicate: (channel: Record<string, unknown>) => boolean) =>
+        new Map([...guild.channels.cache].filter(([, channel]) => predicate(channel)));
+      guild.roles.cache.filter = (predicate: (role: Record<string, unknown>) => boolean) =>
+        new Map([...guild.roles.cache].filter(([, role]) => predicate(role)));
+      const mappingChain = makeChain({
+        data: [{
+          entity_type: 'channel',
+          template_key: 'channel:moderator-only',
+          discord_id: moderatorOnly.id,
+        }],
+        error: null,
+      });
+      const writeChain = makeChain({ data: null, error: null });
+      const supabase = {
+        from: vi.fn((table: string) => table === 'discord_id_map' ? mappingChain : writeChain),
+      };
+
+      await deployServerState(
+        guild,
+        supabase as never,
+        {
+          everyonePermissions: '0',
+          roles: [
+            { key: 'moderator', name: 'Moderator', tier: 'staff', permissions: '0', color: 0, hoist: false, mentionable: false, position: 1 },
+            { key: 'admin', name: 'Admin', tier: 'admin', permissions: '0', color: 0, hoist: false, mentionable: false, position: 2 },
+          ],
+          categories: [{ key: 'cat-staff', name: 'Staff', position: 0 }],
+          channels: [{
+            key: 'staff-chat',
+            name: 'staff-chat',
+            type: 0,
+            categoryKey: 'cat-staff',
+            position: 0,
+            topic: 'Staff only',
+            slowmode: 0,
+            nsfw: false,
+            templateId: 'staff',
+            overrides: [
+              { roleKey: 'everyone', allow: '0', deny: '1024' },
+              { roleKey: 'moderator', allow: '19327478848', deny: '0' },
+              { roleKey: 'admin', allow: '19327478848', deny: '0' },
+            ],
+          }],
+        },
+        { cleanExisting: true, dryRun: false },
+      );
+
+      expect(moderatorOnly.delete).not.toHaveBeenCalled();
+      expect(guild.channels.create).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'moderator-only' }),
+      );
+      expect(guild.channels.edit).toHaveBeenCalledWith(
+        moderatorOnly.id,
+        expect.objectContaining({
+          parent: expect.any(String),
+          permissionOverwrites: expect.arrayContaining([
+            expect.objectContaining({
+              id: guild.id,
+              deny: expect.objectContaining({ value: 1024n }),
+            }),
+            expect.objectContaining({
+              id: 'new-Moderator',
+              allow: expect.objectContaining({ value: 19327478848n }),
+            }),
+            expect.objectContaining({
+              id: 'new-Admin',
+              allow: expect.objectContaining({ value: 19327478848n }),
+            }),
+          ]),
+        }),
+      );
+    });
   });
 });
