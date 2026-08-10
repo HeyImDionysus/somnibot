@@ -268,7 +268,7 @@ function hasCompletedOnboarding(m: GuildMember): boolean {
 const READ_PAGE = 1000;
 const GATEWAY_ROSTER_FETCH_TIMEOUT_MS = 15_000;
 
-async function fetchCompleteRoster(guild: Guild): Promise<Map<string, GuildMember> | null> {
+export async function fetchCompleteRoster(guild: Guild): Promise<Map<string, GuildMember> | null> {
   try {
     const members = await guild.members.fetch({ time: GATEWAY_ROSTER_FETCH_TIMEOUT_MS });
     log.info('Roster backfill roster fetched', { source: 'gateway', count: members.size });

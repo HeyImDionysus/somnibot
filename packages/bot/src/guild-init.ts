@@ -15,6 +15,7 @@ import type { Guild, RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 import { BOOT_ID } from './services/boot-identity.js';
 import { seedStarterContent } from './services/content-seeder.js';
 import { backfillMembers } from './features/welcome/member-service.js';
+import { reconcilePendingOnboardingMembers } from './features/welcome/onboarding-handler.js';
 import { REST, Routes } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
@@ -301,9 +302,16 @@ export async function initGuildFeatures(
       guildLog.warn('Member roster backfill failed', { error: String(err) });
     })
     : Promise.resolve();
+  const onboardingReconcileWork = eagerInitEnabled && guildCfg
+    ? backfillWork.then(async () => {
+      await reconcilePendingOnboardingMembers(client, guild, guildCfg);
+    }, (err) => {
+      guildLog.warn('Pending onboarding reconciliation skipped', { error: String(err) });
+    })
+    : Promise.resolve();
   // Tracked immediately: if the economy block below is disabled, the warmup
   // never runs, and the backfill must still be awaitable by the E2E harness.
-  ctx.backgroundInit = backfillWork;
+  ctx.backgroundInit = onboardingReconcileWork;
   const aqHandle = await startActionQueueListener(guild, supabase);
   services.actionQueueStaleTimer = aqHandle.staleRecoveryTimer;
   services.actionQueueStop = aqHandle.stop;
@@ -607,7 +615,7 @@ export async function initGuildFeatures(
     })() : Promise.resolve();
     // Fold the warmup into the tracked background work (joins the backfill
     // registered above), so the E2E harness can wait for ALL init writes.
-    ctx.backgroundInit = Promise.allSettled([backfillWork, warmupWork]).then(() => undefined);
+    ctx.backgroundInit = Promise.allSettled([onboardingReconcileWork, warmupWork]).then(() => undefined);
   } catch (err) {
     guildLog.error('Economy system init error', { error: String(err) });
   }
@@ -726,6 +734,9 @@ export async function initGuildFeatures(
         if (snapshotIntervalMs !== undefined) {
           services.diagnosticsService?.setSnapshotInterval(snapshotIntervalMs);
         }
+      },
+      async () => {
+        await reconcilePendingOnboardingMembers(client, guild);
       },
     );
     services.configWatcher.start();

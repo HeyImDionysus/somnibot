@@ -17,6 +17,7 @@
 import {
   GuildMember,
   GuildMemberFlags,
+  type Guild,
   type PartialGuildMember,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -27,6 +28,7 @@ import {
   recordMemberJoin,
   recordMemberLeave,
   markOnboardingCompleted,
+  fetchCompleteRoster,
 } from './member-service.js';
 import { executeWelcomeFlow } from './welcome-service.js';
 import { executeGoodbyeFlow } from './goodbye-service.js';
@@ -46,11 +48,16 @@ function clearFallbackTimer(guildId: string, memberId: string): void {
 function scheduleFallback(client: SomniClient, member: GuildMember, config: DbGuildConfig): void {
   if (config.fallback_mode !== 'grant-after-timeout' || !config.member_role_id) return;
   const key = `${member.guild.id}:${member.id}`;
-  clearFallbackTimer(member.guild.id, member.id);
+  if (fallbackTimers.has(key)) return;
   const timer = setTimeout(async () => {
     fallbackTimers.delete(key);
     const current = await member.guild.members.fetch(member.id).catch(() => null);
-    if (!current || current.flags.has(GuildMemberFlags.CompletedOnboarding) || current.roles.cache.has(config.member_role_id!)) return;
+    if (
+      !current
+      || current.pending !== true
+      || current.flags.has(GuildMemberFlags.CompletedOnboarding)
+      || current.roles.cache.has(config.member_role_id!)
+    ) return;
     try {
       await current.roles.add(config.member_role_id!, 'Onboarding fallback timeout');
       const { data: grant, error: grantError } = await client.supabase.rpc('grant_onboarding_fallback_atomic', {
@@ -71,6 +78,69 @@ function scheduleFallback(client: SomniClient, member: GuildMember, config: DbGu
   }, Math.max(1, config.fallback_timeout_minutes ?? 10) * 60_000);
   timer.unref?.();
   fallbackTimers.set(key, timer);
+}
+
+export async function reconcilePendingOnboardingMembers(
+  client: SomniClient,
+  guild: Guild,
+  loadedConfig?: DbGuildConfig,
+): Promise<number> {
+  const timerPrefix = `${guild.id}:`;
+  for (const [key, timer] of fallbackTimers) {
+    if (!key.startsWith(timerPrefix)) continue;
+    clearTimeout(timer);
+    fallbackTimers.delete(key);
+  }
+
+  const config = loadedConfig ?? await getGuildConfig(client, guild.id);
+  if (
+    !config
+    || config.fallback_mode !== 'grant-after-timeout'
+    || !config.member_role_id
+  ) return 0;
+
+  const members = await fetchCompleteRoster(guild);
+  if (!members) return 0;
+
+  let scheduled = 0;
+  for (const member of members.values()) {
+    if (
+      member.user.bot
+      || member.roles.cache.has(config.member_role_id)
+    ) continue;
+
+    if (member.flags.has(GuildMemberFlags.CompletedOnboarding)) {
+      try {
+        await markOnboardingCompleted(client.supabase, guild.id, member.id);
+        await member.roles.add(
+          config.member_role_id,
+          'Recovering completed Discord onboarding',
+        );
+        log.info('Recovered completed onboarding member role', {
+          guildId: guild.id,
+          memberId: member.id,
+        });
+      } catch (err) {
+        log.error('Completed onboarding recovery failed:', { error: String(err) });
+      }
+      continue;
+    }
+
+    if (member.pending !== true) continue;
+
+    const key = `${guild.id}:${member.id}`;
+    if (fallbackTimers.has(key)) continue;
+    scheduleFallback(client, member, config);
+    scheduled++;
+  }
+
+  if (scheduled > 0) {
+    log.info('Reconciled pending onboarding fallback timers', {
+      guildId: guild.id,
+      scheduled,
+    });
+  }
+  return scheduled;
 }
 
 /**

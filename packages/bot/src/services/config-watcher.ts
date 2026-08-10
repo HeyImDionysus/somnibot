@@ -84,6 +84,7 @@ export class ConfigWatcher {
     private onAuditConfigChange?: () => void,
     private onAutomationConfigChange?: () => void,
     private onDiagnosticsConfigChange?: (snapshotIntervalMs?: number) => void,
+    private onOnboardingConfigChange?: () => void | Promise<void>,
   ) {}
 
   /**
@@ -323,6 +324,7 @@ export class ConfigWatcher {
     await this.valkey.del(`onboarding:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
     // Also invalidate the guild_config cache used by the onboarding handler
     await this.valkey.del(`guild_config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    await this.onOnboardingConfigChange?.();
     log.info('Onboarding config reloaded');
   }
 

@@ -125,6 +125,7 @@ describe('ConfigWatcher', () => {
   let watcher: ConfigWatcher;
   let eventBus: any;
   let configHandler: any;
+  let onboardingReload: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -134,7 +135,18 @@ describe('ConfigWatcher', () => {
       off: vi.fn(),
       emit: vi.fn(),
     };
-    watcher = new ConfigWatcher(makeGuild(), makeSupa() as any, eventBus, makeValkey());
+    onboardingReload = vi.fn().mockResolvedValue(undefined);
+    watcher = new ConfigWatcher(
+      makeGuild(),
+      makeSupa() as never,
+      eventBus,
+      makeValkey(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onboardingReload,
+    );
     watcher.start();
   });
 
@@ -146,6 +158,12 @@ describe('ConfigWatcher', () => {
   it('ignores events from other guilds', async () => {
     await configHandler({ guildId: 'other-guild', data: { section: 'economy', changedBy: 'user1' } });
     expect(mocks.invalidateEconomyCache).not.toHaveBeenCalled();
+  });
+
+  it('reconciles pending members after onboarding config reloads', async () => {
+    await configHandler({ guildId: 'guild-1', data: { section: 'onboarding', changedBy: 'owner' } });
+
+    expect(onboardingReload).toHaveBeenCalledOnce();
   });
 
   it('invalidates all economy caches on section=economy', async () => {
