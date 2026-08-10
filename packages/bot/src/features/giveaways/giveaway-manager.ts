@@ -608,7 +608,8 @@ export class GiveawayManager {
 
     for (const row of data) {
       try {
-        await this.selectWinnersAndEnd(row as GiveawayRow);
+        const giveaway = row as GiveawayRow;
+        await this.selectWinnersAndEnd(giveaway);
       } catch (err) {
         log.error(`Error ending giveaway ${row.id}:`, err);
       }
@@ -617,7 +618,24 @@ export class GiveawayManager {
 
   private async selectWinnersAndEnd(giveaway: GiveawayRow): Promise<string[] | null> {
     await this.loadConfig();
-    const winners = this.pickRandom(giveaway.entries, giveaway.winner_count);
+    // If a prior worker persisted winners before crashing, resume from that
+    // durable set. Sampling again would violate exactly-once winner selection.
+    if (giveaway.winners.length > 0) {
+      this.eventBus.emit('giveaway.draw_resumed', this.guild.id, {
+        giveawayId: giveaway.id,
+        winnerIds: [...giveaway.winners],
+        occurrenceId: `${giveaway.id}:draw-resumed`,
+        correlationId: `giveaway:${giveaway.id}`,
+      });
+      await this.raiseGiveawayAlert(
+        'draw_resumed',
+        `Giveaway "${giveaway.prize}" resumed from its durable draw record with ${giveaway.winners.length} winner(s).`,
+        { giveaway_id: giveaway.id, winner_count: giveaway.winners.length },
+      );
+    }
+    const winners = giveaway.winners.length > 0
+      ? [...giveaway.winners]
+      : this.pickRandom(giveaway.entries, giveaway.winner_count);
 
     // V50-M2: use giveaway_atomic_end RPC — gates the status flip on
     // status='active' so concurrent checkExpired + manual endGiveaway
@@ -708,18 +726,33 @@ export class GiveawayManager {
     const channel = this.guild.channels.cache.get(giveaway.channel_id) as TextChannel | undefined;
     if (!channel) return;
 
-    try {
-      const msg = await channel.messages.fetch(giveaway.message_id);
-      const embed = await this.buildGiveawayEmbed(giveaway);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const msg = await channel.messages.fetch(giveaway.message_id);
+        const embed = await this.buildGiveawayEmbed(giveaway);
 
-      if (giveaway.status === 'ended' || giveaway.status === 'cancelled') {
-        await msg.edit({ embeds: [embed], components: [] });
-      } else {
-        const row = this.buildEntryButton(giveaway);
-        await msg.edit({ embeds: [embed], components: [row] });
+        if (giveaway.status === 'ended' || giveaway.status === 'cancelled') {
+          await msg.edit({ embeds: [embed], components: [] });
+        } else {
+          const row = this.buildEntryButton(giveaway);
+          await msg.edit({ embeds: [embed], components: [row] });
+        }
+        return;
+      } catch {
+        // Message edits are best-effort, but a transient Discord failure gets
+        // a bounded retry under the same giveaway/message occurrence.  The
+        // state row remains authoritative throughout.
+        if (attempt === 3) return;
+        this.eventBus.emit('giveaway.embed_update_retried', this.guild.id, {
+          giveawayId: giveaway.id,
+          channelId: giveaway.channel_id,
+          messageId: giveaway.message_id,
+          attempt: attempt + 1,
+          occurrenceId: `${giveaway.id}:embed-update-retry`,
+          correlationId: `giveaway:${giveaway.id}`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
       }
-    } catch {
-      // Message may have been deleted
     }
   }
 

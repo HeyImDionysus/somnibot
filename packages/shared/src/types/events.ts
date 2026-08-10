@@ -546,6 +546,12 @@ export interface PlatformEventMap {
   'giveaway.resumed': { giveawayId: string; prize: string; actorId: string | null; endsAt: string; occurrenceId?: string; correlationId?: string };
   'giveaway.rerolled': { giveawayId: string; prize: string; winnerIds: string[]; actorId: string | null; occurrenceId?: string; correlationId?: string };
   'giveaway.failed': { giveawayId: string | null; stage: 'create' | 'entry' | 'reroll'; actorId: string | null; error: string; occurrenceId?: string; correlationId?: string };
+  /** Durable draw recovery after a worker restart finds a partially committed draw. */
+  'giveaway.draw_resumed': { giveawayId: string; winnerIds: string[]; occurrenceId?: string; correlationId?: string };
+  /** A giveaway message edit actually entered its bounded retry path. */
+  'giveaway.embed_update_retried': { giveawayId: string; channelId: string; messageId: string; attempt: number; occurrenceId?: string; correlationId?: string };
+  /** Winner DM delivery was definitively blocked; the channel announcement remains the fallback. */
+  'giveaway.winner_dm_fallback': { giveawayId: string; winnerId: string; occurrenceId?: string; correlationId?: string };
   /**
    * Entry attempts are hot (button clicks) — audited via the batched event
    * rail only. Reasons are only the branches that actually emit: the gates
@@ -565,8 +571,12 @@ export interface PlatformEventMap {
   'temp_channel.orphan_reconciled': { channelId: string; ownerId: string; occurrenceId?: string; correlationId?: string };
   /** One event for the whole /voice owner-control surface (lock/unlock/limit/name/permit/deny/ban/claim). */
   'temp_channel.settings_changed': { channelId: string; actorId: string; op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban' | 'claim'; targetUserId?: string; value?: string | number; before?: Record<string, unknown>; after?: Record<string, unknown>; occurrenceId?: string; correlationId?: string };
+  /** A /voice owner/control attempt was refused before any Discord mutation. */
+  'temp_channel.control_denied': { channelId: string; actorId: string; op: string; reason: string; occurrenceId?: string; correlationId?: string };
   'scheduled_message.sent': { scheduleId: string; name: string; channelId: string; currentSends: number; occurrenceId?: string; correlationId?: string };
   'scheduled_message.delivery_failed': { scheduleId: string; name: string; channelId: string; reason: string; occurrenceId?: string; correlationId?: string };
+  /** A recovery pass dropped one or more occurrences under skip-missed policy. */
+  'scheduled_message.missed': { scheduleId: string; name: string; channelId: string; missedCount: number; lastOccurrenceAt: string; occurrenceId?: string; correlationId?: string };
   'poll.created': { pollId: string; title: string; optionCount: number; allowMultiple: boolean; creatorId: string; channelId: string; occurrenceId?: string; correlationId?: string };
   'poll.closed': { pollId: string; title: string; actorId: string; occurrenceId?: string; correlationId?: string };
   'prediction.created': { predictionId: string; title: string; optionCount: number; creatorId: string; channelId: string; occurrenceId?: string; correlationId?: string };

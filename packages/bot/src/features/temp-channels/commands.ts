@@ -134,9 +134,25 @@ export async function handleTempChannelCommand(
       ...baseTemplateVars(interaction, ownerId, vcId),
       reason,
     });
+  const emitDenied = (reason: string): void => {
+    const interactionId = (interaction as ChatInputCommandInteraction & { id?: string }).id;
+    eventBus.emit('temp_channel.control_denied', interaction.guild!.id, {
+      channelId: vcId,
+      actorId: interaction.user.id,
+      op: sub,
+      reason,
+      // Discord interaction ids are unique per attempt. The deterministic
+      // fallback keeps tests and gateway-adjacent callers auditable without
+      // inventing a random key in the hot denial path.
+      occurrenceId: interactionId ?? `${vcId}:${interaction.user.id}:${sub}:${reason}`,
+      correlationId: `temp:${vcId}`,
+    });
+  };
 
   // Only owner or mods can control (except claim)
   if (sub !== 'claim' && !isOwner && !isMod) {
+    const reason = 'permission-denied';
+    emitDenied(reason);
     await interaction.reply({ content: denied('❌ Only the channel owner or moderators can use this command.'), ephemeral: true });
     return;
   }
@@ -259,16 +275,19 @@ export async function handleTempChannelCommand(
       case 'claim': {
         // Owner may have disabled claiming for this hub's rooms.
         if (hub && hub.allow_claim === false) {
+          emitDenied('claim-disabled');
           await interaction.reply({ content: denied('❌ Claiming is disabled for these voice channels.'), ephemeral: true });
           return;
         }
         if (!ownerId) {
+          emitDenied('owner-record-missing');
           await interaction.reply({ content: denied('❌ This channel has no owner record.'), ephemeral: true });
           return;
         }
         // Check if owner is still in the channel
         const ownerInChannel = vc.members.has(ownerId);
         if (ownerInChannel) {
+          emitDenied('owner-present');
           await interaction.reply({ content: denied('❌ The current owner is still in the channel.'), ephemeral: true });
           return;
         }

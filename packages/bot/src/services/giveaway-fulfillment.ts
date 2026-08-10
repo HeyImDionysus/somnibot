@@ -355,9 +355,31 @@ export class GiveawayFulfillmentService {
     // entitlement resolution above) and the winner is announced in-channel by
     // the manager, but no personal DM is sent. The messageId records the skip.
     const dmWinners = await this.dmWinnersEnabled();
-    const messageId = dmWinners
-      ? await this.sendWinnerNotification(winnerId, prizeSnapshot, deliveryKind, nonce)
-      : 'dm-disabled';
+    let messageId: string;
+    if (!dmWinners) {
+      messageId = 'dm-disabled';
+    } else {
+      try {
+        messageId = await this.sendWinnerNotification(winnerId, prizeSnapshot, deliveryKind, nonce);
+      } catch (error) {
+        // Discord code 50007 is the definitive "cannot send messages to this
+        // user" response.  The manager has already posted the durable channel
+        // announcement, so record the fallback as a successful terminal
+        // notification rather than retrying a permanently blocked DM. Other
+        // errors remain retryable and continue through the queue's backoff.
+        const code = typeof error === 'object' && error !== null && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+        if (code !== 50007 && code !== '50007') throw error;
+        this.eventBus.emit('giveaway.winner_dm_fallback', this.guild.id, {
+          giveawayId,
+          winnerId,
+          occurrenceId: `${giveawayId}:winner-dm-fallback:${winnerId}`,
+          correlationId: `giveaway:${giveawayId}`,
+        });
+        messageId = 'channel-fallback';
+      }
+    }
     return {
       giveawayId,
       winnerId,

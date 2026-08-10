@@ -194,6 +194,9 @@ describe('/voice controls emit temp_channel.settings_changed', () => {
     const mgr = { ...ownerManager(), getChannelOwner: () => 'someone-else' };
     await handleTempChannelCommand(makeInteraction('lock', vc), mgr);
     expect(settingsEmits()).toHaveLength(0);
+    expect(emitSpy).toHaveBeenCalledWith('temp_channel.control_denied', 'g1', expect.objectContaining({
+      channelId: 'vc1', actorId: 'u1', op: 'lock', reason: 'permission-denied',
+    }));
   });
 
   it('does NOT emit when the Discord mutation throws', async () => {
@@ -316,5 +319,37 @@ describe('AuditService maps temp_channel.settings_changed', () => {
       before_state: { ownerId: 'prev-owner' },
       after_state: { ownerId: 'claimer1' },
     });
+  });
+
+  it('maps a denied /voice control without copying sensitive reply text', async () => {
+    const { AuditService } = await import('../features/audit/audit-service.js');
+    const supabase = makeSupabase();
+    const bus = makeBus();
+    const service = new AuditService('g1', supabase as any, bus as any);
+    service.start();
+
+    bus._emit({
+      type: 'temp_channel.control_denied',
+      guildId: 'g1',
+      timestamp: Date.now(),
+      data: {
+        channelId: 'vc1', actorId: 'u1', op: 'lock', reason: 'permission-denied',
+        occurrenceId: 'interaction-1', correlationId: 'temp:vc1',
+      },
+    });
+    await (service as any).flush();
+    service.stop();
+
+    const batch = supabase._upsert.mock.calls[0][0];
+    expect(batch[0]).toMatchObject({
+      action: 'temp_channel.control_denied',
+      category: 'temp_channels',
+      actor_id: 'u1',
+      target_type: 'channel',
+      target_id: 'vc1',
+      success: false,
+      details: { op: 'lock', reason: 'permission-denied', channelId: 'vc1' },
+    });
+    expect(batch[0].details).not.toHaveProperty('content');
   });
 });

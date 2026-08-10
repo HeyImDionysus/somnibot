@@ -850,6 +850,18 @@ export class ScheduledMessageRunner {
     if (error || !won || won.length === 0) return;
 
     const missedCount = this.countOccurrences(schedule, baseline, now);
+    // Persisted cursor advancement is the occurrence transition.  Audit it
+    // before the owner alert so a notification outage cannot erase the fact
+    // that recovery dropped these occurrences.
+    this.eventBus.emit('scheduled_message.missed', this.guild.id, {
+      scheduleId: schedule.id,
+      name: schedule.name,
+      channelId: schedule.channel_id,
+      missedCount,
+      lastOccurrenceAt: lastOcc.toISOString(),
+      occurrenceId: `${schedule.id}:missed:${lastOcc.toISOString()}`,
+      correlationId: `schedule:${schedule.id}`,
+    });
     try {
       const noticeResult = await raiseOwnerAlert(this.supabase, this.guild.id, {
         alertType: 'scheduled_message_missed_occurrence',
