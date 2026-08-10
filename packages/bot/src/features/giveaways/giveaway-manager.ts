@@ -34,7 +34,7 @@ interface GiveawayRow {
   required_level: number | null;
   required_entitlement_product_id: string | null;
   entries: string[];
-  winners: string[];
+  winners: string[] | null;
   status: 'active' | 'ended' | 'cancelled' | 'paused';
   created_by: string;
   created_at: string;
@@ -543,8 +543,9 @@ export class GiveawayManager {
     if (giveaway.status !== 'ended') return [];
 
     const winnerCount = count ?? giveaway.winner_count;
+    const existingWinners = giveaway.winners ?? [];
     const eligibleEntries = giveaway.entries.filter(
-      (e: string) => !giveaway.winners.includes(e),
+      (e: string) => !existingWinners.includes(e),
     );
 
     const newWinners = this.pickRandom(eligibleEntries, winnerCount);
@@ -620,21 +621,22 @@ export class GiveawayManager {
     await this.loadConfig();
     // If a prior worker persisted winners before crashing, resume from that
     // durable set. Sampling again would violate exactly-once winner selection.
-    if (giveaway.winners.length > 0) {
+    const durableWinners = giveaway.winners ?? [];
+    if (durableWinners.length > 0) {
       this.eventBus.emit('giveaway.draw_resumed', this.guild.id, {
         giveawayId: giveaway.id,
-        winnerIds: [...giveaway.winners],
+        winnerIds: [...durableWinners],
         occurrenceId: `${giveaway.id}:draw-resumed`,
         correlationId: `giveaway:${giveaway.id}`,
       });
       await this.raiseGiveawayAlert(
         'draw_resumed',
-        `Giveaway "${giveaway.prize}" resumed from its durable draw record with ${giveaway.winners.length} winner(s).`,
-        { giveaway_id: giveaway.id, winner_count: giveaway.winners.length },
+        `Giveaway "${giveaway.prize}" resumed from its durable draw record with ${durableWinners.length} winner(s).`,
+        { giveaway_id: giveaway.id, winner_count: durableWinners.length },
       );
     }
-    const winners = giveaway.winners.length > 0
-      ? [...giveaway.winners]
+    const winners = durableWinners.length > 0
+      ? [...durableWinners]
       : this.pickRandom(giveaway.entries, giveaway.winner_count);
 
     // V50-M2: use giveaway_atomic_end RPC — gates the status flip on
@@ -656,7 +658,7 @@ export class GiveawayManager {
     if (!endedRows || (Array.isArray(endedRows) && endedRows.length === 0)) {
       // Another call already ended this giveaway — bail out
       log.info(`giveaway_atomic_end returned empty for "${giveaway.prize}" — already ended`);
-      return giveaway.winners;
+      return durableWinners;
     }
 
     // Update the giveaway message
@@ -764,6 +766,7 @@ export class GiveawayManager {
   private async buildGiveawayEmbed(giveaway: GiveawayRow): Promise<EmbedBuilder> {
     const isEnded = giveaway.status === 'ended';
     const isPaused = giveaway.status === 'paused';
+    const winners = giveaway.winners ?? [];
     const title = isEnded ? '🎉 Giveaway Ended' : isPaused ? '⏸️ Giveaway Paused' : '🎉 Giveaway';
     const kit = await this.brandKit();
     const embed = new EmbedBuilder()
@@ -790,7 +793,9 @@ export class GiveawayManager {
     fields.push({
       name: '🏆 Winners',
       value: isEnded
-        ? (giveaway.winners.length > 0 ? giveaway.winners.map((id) => `<@${id}>`).join('\n') : 'None')
+        ? (winners.length > 0
+          ? winners.map((id) => `<@${id}>`).join('\n')
+          : 'None')
         : String(giveaway.winner_count),
       inline: true,
     });
