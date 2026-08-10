@@ -212,7 +212,7 @@ export default function CustomersPage() {
   return (
     <div className="flex h-[calc(100vh-4rem)] gap-0">
       {/* ── Left: Customer List ─────────────────────────── */}
-      <div className="w-80 border-r border-discord-border-subtle bg-discord-secondary flex flex-col flex-shrink-0">
+      <div className="w-80 border-r border-discord-border-subtle bg-discord-bg-secondary flex flex-col flex-shrink-0">
         <div className="p-4 border-b border-discord-border-subtle">
           <h1 className="text-lg font-bold text-white mb-3">Customers</h1>
           <input
@@ -220,7 +220,7 @@ export default function CustomersPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by name, ID, email..."
-            className="w-full px-3 py-2 bg-discord-tertiary text-sm text-white rounded border border-discord-border-subtle focus:border-discord-blurple focus:outline-none"
+            className="w-full px-3 py-2 bg-discord-bg-tertiary text-sm text-white rounded border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
           />
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -233,8 +233,8 @@ export default function CustomersPage() {
               <button
                 key={c.id}
                 onClick={() => fetchTimeline(c.id)}
-                className={`w-full text-left px-4 py-3 border-b border-discord-border-subtle hover:bg-discord-tertiary transition-colors ${
-                  selectedId === c.id ? 'bg-discord-tertiary border-l-2 border-l-discord-blurple' : ''
+                className={`w-full text-left px-4 py-3 border-b border-discord-border-subtle hover:bg-discord-bg-tertiary transition-colors ${
+                  selectedId === c.id ? 'bg-discord-bg-tertiary border-l-2 border-l-discord-accent' : ''
                 }`}
               >
                 <div className="flex items-center justify-between">
@@ -275,9 +275,9 @@ export default function CustomersPage() {
         ) : timeline ? (
           <>
             {/* Header with summary cards */}
-            <div className="p-4 border-b border-discord-border-subtle bg-discord-secondary">
+            <div className="p-4 border-b border-discord-border-subtle bg-discord-bg-secondary">
               <div className="flex items-center gap-4 mb-4">
-                <div className="w-12 h-12 rounded-full bg-discord-blurple flex items-center justify-center text-white text-xl font-bold">
+                <div className="w-12 h-12 rounded-full bg-discord-accent flex items-center justify-center text-white text-xl font-bold">
                   {timeline.customer.discord_username.charAt(0).toUpperCase()}
                 </div>
                 <div>
@@ -299,7 +299,7 @@ export default function CustomersPage() {
                   { label: 'Infractions', value: String(timeline.summary.infractions), color: timeline.summary.infractions > 0 ? 'text-red-400' : 'text-discord-text-muted' },
                   { label: 'License Sessions', value: String(timeline.summary.activeLicenseSessions), color: 'text-cyan-400' },
                 ].map((card) => (
-                  <div key={card.label} className="bg-discord-tertiary rounded-lg p-2.5 text-center">
+                  <div key={card.label} className="bg-discord-bg-tertiary rounded-lg p-2.5 text-center">
                     <p className={`text-lg font-bold ${card.color}`}>{card.value}</p>
                     <p className="text-xs text-discord-text-muted">{card.label}</p>
                   </div>
@@ -308,7 +308,7 @@ export default function CustomersPage() {
             </div>
 
             {/* Tabs */}
-            <div className="flex items-center gap-1 px-4 pt-3 border-b border-discord-border-subtle bg-discord-primary">
+            <div className="flex items-center gap-1 px-4 pt-3 border-b border-discord-border-subtle bg-discord-bg-primary">
               {([
                 { key: 'timeline', label: 'Timeline', icon: '📋' },
                 { key: 'commerce', label: 'Commerce', icon: '💰' },
@@ -321,7 +321,7 @@ export default function CustomersPage() {
                   onClick={() => { setActiveTab(tab.key); setCategoryFilter(null); }}
                   className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
                     activeTab === tab.key
-                      ? 'bg-discord-secondary text-white border-b-2 border-discord-blurple'
+                      ? 'bg-discord-bg-secondary text-white border-b-2 border-discord-accent'
                       : 'text-discord-text-muted hover:text-white'
                   }`}
                 >
@@ -363,7 +363,7 @@ export default function CustomersPage() {
                   sessions.map((session) => (
                     <div
                       key={session.id}
-                      className="bg-discord-secondary rounded-lg p-4 border border-discord-border-subtle"
+                      className="bg-discord-bg-secondary rounded-lg p-4 border border-discord-border-subtle"
                     >
                       <div className="flex items-start justify-between">
                         <div className="space-y-1">
@@ -406,7 +406,7 @@ export default function CustomersPage() {
                   filteredTimeline.map((event) => (
                     <div
                       key={event.id}
-                      className={`bg-discord-secondary rounded-lg p-3 border-l-4 ${categoryColor(event.category)} hover:bg-discord-tertiary transition-colors`}
+                      className={`bg-discord-bg-secondary rounded-lg p-3 border-l-4 ${categoryColor(event.category)} hover:bg-discord-bg-tertiary transition-colors`}
                     >
                       <div className="flex items-start justify-between">
                         <div className="flex items-start gap-2">

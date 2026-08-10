@@ -108,7 +108,7 @@ function RecipeFormModal({
             <span className="text-xs text-discord-text-secondary">Name</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.name ?? ''}
               onChange={(e) => setForm((p) => ({ ...p, name: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -119,7 +119,7 @@ function RecipeFormModal({
             <span className="text-xs text-discord-text-secondary">Emoji</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple text-center"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent text-center"
               value={form.emoji ?? '🔨'}
               onChange={(e) => setForm((p) => ({ ...p, emoji: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -131,7 +131,7 @@ function RecipeFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Description</span>
           <textarea
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple resize-none"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent resize-none"
             value={form.description ?? ''}
             onChange={(e) => setForm((p) => ({ ...p, description: e.target.value.slice(0, 256) || null }))}
             maxLength={256}
@@ -144,7 +144,7 @@ function RecipeFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Category</span>
           <select
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
             value={form.category ?? 'General'}
             onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))}
           >
@@ -161,14 +161,14 @@ function RecipeFormModal({
             <div key={idx} className="flex gap-2 items-center">
               <input
                 type="text"
-                className="flex-1 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="flex-1 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 placeholder="Item name"
                 value={input.item_name}
                 onChange={(e) => updateInputs(idx, 'item_name', e.target.value)}
               />
               <input
                 type="number"
-                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 min={1}
                 max={999}
                 value={input.qty}
@@ -187,7 +187,7 @@ function RecipeFormModal({
           ))}
           <button
             type="button"
-            className="text-xs text-discord-blurple hover:underline"
+            className="text-xs text-discord-accent hover:underline"
             onClick={addInput}
           >
             + Add material
@@ -200,7 +200,7 @@ function RecipeFormModal({
             <span className="text-xs text-discord-text-secondary">Output Quantity</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={1}
               max={100}
               value={form.output_qty ?? 1}
@@ -211,7 +211,7 @@ function RecipeFormModal({
             <span className="text-xs text-discord-text-secondary">Cooldown (seconds)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={86400}
               value={form.cooldown_seconds ?? 60}
@@ -243,7 +243,7 @@ function RecipeFormModal({
           </button>
           <button
             type="button"
-            className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
             onClick={() => onSave(form)}
             disabled={saving || !form.name?.trim()}
           >
@@ -369,7 +369,7 @@ export default function CraftingPage() {
           </div>
         </div>
         <button
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
           onClick={() => setEditRecipe({ ...BLANK_RECIPE })}
         >
           <Plus size={16} />
@@ -396,7 +396,7 @@ export default function CraftingPage() {
               <span className="text-xs text-discord-text-secondary">Default Cooldown (s)</span>
               <input
                 type="number"
-                className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 min={0}
                 max={86400}
                 value={settings.economy_crafting_cooldown_seconds}
@@ -435,7 +435,7 @@ export default function CraftingPage() {
                     <span className="text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">disabled</span>
                   )}
                   {recipe.is_default && (
-                    <span className="text-xs bg-discord-blurple/20 text-discord-blurple px-1.5 py-0.5 rounded">default</span>
+                    <span className="text-xs bg-discord-accent/20 text-discord-accent px-1.5 py-0.5 rounded">default</span>
                   )}
                 </div>
                 <p className="text-xs text-discord-text-secondary mt-1">

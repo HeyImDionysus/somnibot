@@ -82,7 +82,7 @@ function Toggle({
     <label className="flex items-center gap-3 cursor-pointer">
       <div
         className={`relative w-11 h-6 rounded-full transition-colors ${
-          checked ? 'bg-brand-primary' : 'bg-discord-bg-tertiary'
+          checked ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
         }`}
         onClick={() => onChange(!checked)}
       >
@@ -419,7 +419,7 @@ export default function TriviaPage() {
             </button>
             <button
               onClick={() => setEditing({ ...BLANK_QUESTION })}
-              className="flex items-center gap-1 rounded-md bg-brand-primary px-3 py-1.5 text-xs text-white hover:bg-brand-primary-hover"
+              className="flex items-center gap-1 rounded-md bg-discord-accent px-3 py-1.5 text-xs text-white hover:bg-discord-accent-hover"
             >
               <Plus className="w-3 h-3" /> Add Question
             </button>
@@ -477,7 +477,7 @@ export default function TriviaPage() {
                     {q.category} • {q.difficulty} • Answer: {q.correct_answer}
                   </p>
                 </div>
-                <span className="ml-2 text-xs bg-discord-blurple/20 text-discord-blurple px-1.5 py-0.5 rounded">
+                <span className="ml-2 text-xs bg-discord-accent/20 text-discord-accent px-1.5 py-0.5 rounded">
                   Built-in
                 </span>
               </div>
@@ -552,7 +552,7 @@ export default function TriviaPage() {
               <button onClick={() => setEditing(null)} className="rounded-md bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-primary">
                 Cancel
               </button>
-              <button onClick={saveQuestion} disabled={saving} className="rounded-md bg-brand-primary px-4 py-2 text-sm text-white">
+              <button onClick={saveQuestion} disabled={saving} className="rounded-md bg-discord-accent px-4 py-2 text-sm text-white">
                 {saving ? 'Saving...' : 'Save'}
               </button>
             </div>

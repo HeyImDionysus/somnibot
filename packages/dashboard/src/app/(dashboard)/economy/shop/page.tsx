@@ -94,7 +94,7 @@ function ItemFormModal({
             <span className="text-xs text-discord-text-secondary">Name</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.name ?? ''}
               onChange={(e) => update('name', e.target.value.slice(0, 64))}
               maxLength={64}
@@ -105,7 +105,7 @@ function ItemFormModal({
             <span className="text-xs text-discord-text-secondary">Emoji</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple text-center"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent text-center"
               value={form.emoji ?? '📦'}
               onChange={(e) => update('emoji', e.target.value.slice(0, 64))}
               maxLength={64}
@@ -117,7 +117,7 @@ function ItemFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Description</span>
           <textarea
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple resize-none"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent resize-none"
             value={form.description ?? ''}
             onChange={(e) => update('description', e.target.value.slice(0, 256) || null)}
             maxLength={256}
@@ -130,7 +130,7 @@ function ItemFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Category</span>
           <select
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
             value={form.category ?? 'Consumables'}
             onChange={(e) => update('category', e.target.value)}
           >
@@ -144,7 +144,7 @@ function ItemFormModal({
             <span className="text-xs text-discord-text-secondary">Buy Price</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.price ?? 0}
               onChange={(e) => update('price', Math.max(0, parseInt(e.target.value) || 0))}
               min={0}
@@ -154,7 +154,7 @@ function ItemFormModal({
             <span className="text-xs text-discord-text-secondary">Sell Price (0 = not sellable)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.sell_price ?? 0}
               onChange={(e) => update('sell_price', Math.max(0, parseInt(e.target.value) || 0))}
               min={0}
@@ -168,7 +168,7 @@ function ItemFormModal({
             <span className="text-xs text-discord-text-secondary">Stock (empty = unlimited)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.stock ?? ''}
               onChange={(e) => update('stock', e.target.value ? Math.max(0, parseInt(e.target.value) || 0) : null)}
               min={0}
@@ -179,7 +179,7 @@ function ItemFormModal({
             <span className="text-xs text-discord-text-secondary">Max per User (empty = unlimited)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.max_per_user ?? ''}
               onChange={(e) => update('max_per_user', e.target.value ? Math.max(1, parseInt(e.target.value) || 1) : null)}
               min={1}
@@ -195,7 +195,7 @@ function ItemFormModal({
               type="checkbox"
               checked={form.tradeable ?? true}
               onChange={(e) => update('tradeable', e.target.checked)}
-              className="rounded border-discord-bg-tertiary bg-discord-bg-primary text-discord-blurple focus:ring-discord-blurple"
+              className="rounded border-discord-bg-tertiary bg-discord-bg-primary text-discord-accent focus:ring-discord-accent"
             />
             Tradeable
           </label>
@@ -204,7 +204,7 @@ function ItemFormModal({
               type="checkbox"
               checked={form.active ?? true}
               onChange={(e) => update('active', e.target.checked)}
-              className="rounded border-discord-bg-tertiary bg-discord-bg-primary text-discord-blurple focus:ring-discord-blurple"
+              className="rounded border-discord-bg-tertiary bg-discord-bg-primary text-discord-accent focus:ring-discord-accent"
             />
             Active
           </label>
@@ -221,7 +221,7 @@ function ItemFormModal({
           <button
             onClick={() => onSave(form)}
             disabled={saving || !form.name?.trim()}
-            className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? 'Saving...' : item.id ? 'Update' : 'Create'}
           </button>
@@ -324,7 +324,7 @@ export default function ShopPage() {
         </div>
         <button
           onClick={() => setEditingItem({ ...BLANK_ITEM })}
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
         >
           <Plus className="h-4 w-4" />
           Add Item

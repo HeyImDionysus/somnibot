@@ -91,7 +91,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Name</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.name ?? ''}
               onChange={(e) => setForm((p) => ({ ...p, name: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -102,7 +102,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Emoji</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple text-center"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent text-center"
               value={form.emoji ?? '🌱'}
               onChange={(e) => setForm((p) => ({ ...p, emoji: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -114,7 +114,7 @@ function CropFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Category</span>
           <select
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
             value={form.category ?? 'Vegetable'}
             onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))}
           >
@@ -130,7 +130,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Grow Time (seconds)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={60}
               max={604800}
               value={form.grow_seconds ?? 7200}
@@ -142,7 +142,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Wilt Time (seconds)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={3600}
               max={604800}
               value={form.wilt_seconds ?? 86400}
@@ -158,7 +158,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Sell Price</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={1000000}
               value={form.sell_price ?? 50}
@@ -169,7 +169,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Seeds Returned</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={10}
               value={form.seeds_returned ?? 1}
@@ -184,7 +184,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Sort Order</span>
             <input
               type="number"
-              className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={999}
               value={form.sort_order ?? 0}
@@ -214,7 +214,7 @@ function CropFormModal({
           </button>
           <button
             type="button"
-            className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
             onClick={() => onSave(form)}
             disabled={saving || !form.name?.trim()}
           >
@@ -342,7 +342,7 @@ export default function FarmingPage() {
           </div>
         </div>
         <button
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
           onClick={() => setEditCrop({ ...BLANK_CROP })}
         >
           <Plus size={16} />
@@ -381,7 +381,7 @@ export default function FarmingPage() {
               <span className="text-xs text-discord-text-secondary">Grid Size</span>
               <input
                 type="number"
-                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 min={1}
                 max={25}
                 value={settings.economy_farm_grid_size}
@@ -397,7 +397,7 @@ export default function FarmingPage() {
               <span className="text-xs text-discord-text-secondary">Fertilizer Reduction (%)</span>
               <input
                 type="number"
-                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 min={0}
                 max={90}
                 value={settings.economy_fertilizer_time_reduction_pct}
@@ -436,7 +436,7 @@ export default function FarmingPage() {
                     <span className="text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">disabled</span>
                   )}
                   {crop.is_default && (
-                    <span className="text-xs bg-discord-blurple/20 text-discord-blurple px-1.5 py-0.5 rounded">default</span>
+                    <span className="text-xs bg-discord-accent/20 text-discord-accent px-1.5 py-0.5 rounded">default</span>
                   )}
                 </div>
                 <p className="text-xs text-discord-text-secondary mt-1">

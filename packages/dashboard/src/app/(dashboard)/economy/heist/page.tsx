@@ -122,50 +122,50 @@ export default function HeistPage() {
       ) : (
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-discord-secondary rounded-lg p-4">
+            <div className="bg-discord-bg-secondary rounded-lg p-4">
               <label className="text-sm text-discord-text-secondary">Entry Fee (coins)</label>
               <input type="number" min={0} value={config.economy_heist_entry_fee}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_entry_fee: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
+            <div className="bg-discord-bg-secondary rounded-lg p-4">
               <label className="text-sm text-discord-text-secondary">Base Payout (coins)</label>
               <input type="number" min={100} value={config.economy_heist_base_payout}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_base_payout: parseInt(e.target.value) || 500 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
+            <div className="bg-discord-bg-secondary rounded-lg p-4">
               <label className="text-sm text-discord-text-secondary">Base Success %</label>
               <input type="number" min={5} max={95} value={config.economy_heist_success_base_pct}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_success_base_pct: parseInt(e.target.value) || 40 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
+            <div className="bg-discord-bg-secondary rounded-lg p-4">
               <label className="text-sm text-discord-text-secondary">Cooldown (seconds)</label>
               <input type="number" min={60} value={config.economy_heist_cooldown_seconds}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_cooldown_seconds: parseInt(e.target.value) || 300 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-discord-secondary rounded-lg p-4">
+            <div className="bg-discord-bg-secondary rounded-lg p-4">
               <label className="text-sm text-discord-text-secondary">Min Participants</label>
               <input type="number" min={2} max={10} value={config.economy_heist_min_participants}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_min_participants: parseInt(e.target.value) || 2 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
+            <div className="bg-discord-bg-secondary rounded-lg p-4">
               <label className="text-sm text-discord-text-secondary">Max Participants</label>
               <input type="number" min={2} max={20} value={config.economy_heist_max_participants}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_max_participants: parseInt(e.target.value) || 8 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
+            <div className="bg-discord-bg-secondary rounded-lg p-4">
               <label className="text-sm text-discord-text-secondary">Join Window (seconds)</label>
               <input type="number" min={15} max={300} value={config.economy_heist_join_window_secs}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_join_window_secs: parseInt(e.target.value) || 60 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
           </div>
 
@@ -176,7 +176,7 @@ export default function HeistPage() {
             ) : (
               <div className="space-y-2">
                 {heists.map((h) => (
-                  <div key={h.id} className="bg-discord-secondary rounded-lg p-3 flex items-center justify-between">
+                  <div key={h.id} className="bg-discord-bg-secondary rounded-lg p-3 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       {STATUS_ICONS[h.status] ?? null}
                       <div>

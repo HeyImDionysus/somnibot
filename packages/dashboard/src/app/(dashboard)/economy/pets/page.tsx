@@ -96,43 +96,43 @@ export default function PetsPage() {
         <EmptyState icon={PawPrint} title="Pets Disabled" description="Enable the pet system above to let users buy, care for, train, and battle virtual pets." />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-discord-secondary rounded-lg p-4 space-y-3">
+          <div className="bg-discord-bg-secondary rounded-lg p-4 space-y-3">
             <h3 className="font-semibold text-discord-text-primary">Care Settings</h3>
             <div>
               <label className="text-sm text-discord-text-secondary">Stat Decay Rate (%/day)</label>
               <input type="number" min={0} max={100} value={config.economy_pet_decay_rate}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_decay_rate: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
             <div>
               <label className="text-sm text-discord-text-secondary">Feed Cost (coins)</label>
               <input type="number" min={0} value={config.economy_pet_feed_cost}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_feed_cost: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
             <div>
               <label className="text-sm text-discord-text-secondary">Train Cost (coins)</label>
               <input type="number" min={0} value={config.economy_pet_train_cost}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_train_cost: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
             <div>
               <label className="text-sm text-discord-text-secondary">Decay Check Interval (hours)</label>
               <input type="number" min={1} max={168} value={config.economy_pet_decay_interval_hours}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_decay_interval_hours: parseInt(e.target.value) || 1 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               <p className="text-xs text-discord-text-secondary mt-1">How often the bot checks and applies stat decay.</p>
             </div>
             <div>
               <label className="text-sm text-discord-text-secondary">Low Stat Warning Threshold (%)</label>
               <input type="number" min={0} max={100} value={config.economy_pet_low_stat_threshold}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_low_stat_threshold: parseInt(e.target.value) || 20 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               <p className="text-xs text-discord-text-secondary mt-1">Pets below this threshold are marked as sad or sick.</p>
             </div>
           </div>
 
-          <div className="bg-discord-secondary rounded-lg p-4 space-y-3">
+          <div className="bg-discord-bg-secondary rounded-lg p-4 space-y-3">
             <h3 className="font-semibold text-discord-text-primary">Features</h3>
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={config.economy_pet_battle_enabled}
@@ -152,7 +152,7 @@ export default function PetsPage() {
                 className="rounded" />
               <span className="text-sm text-discord-text-primary">DM Owner When Pet Is Sad/Sick</span>
             </label>
-            <div className="mt-4 p-3 bg-discord-tertiary rounded text-sm text-discord-text-secondary">
+            <div className="mt-4 p-3 bg-discord-bg-tertiary rounded text-sm text-discord-text-secondary">
               <strong>Pet Types:</strong><br />
               🐺 Hunting — Boosts /hunt loot<br />
               🐕 Guard — Reduces rob success against owner<br />

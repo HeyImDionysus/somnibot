@@ -124,7 +124,7 @@ export default function MarketPage() {
               aria-checked={config.economy_market_enabled}
               onClick={() => saveConfig({ economy_market_enabled: !config.economy_market_enabled })}
               className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
-                config.economy_market_enabled ? 'bg-discord-blurple' : 'bg-discord-bg-tertiary'
+                config.economy_market_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
               }`}
             >
               <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
@@ -136,7 +136,7 @@ export default function MarketPage() {
             <span className="text-sm text-discord-text-secondary">Transaction Fee (%)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_market_fee_pct}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_market_fee_pct: parseInt(e.target.value) || 5 })
@@ -149,7 +149,7 @@ export default function MarketPage() {
             <span className="text-sm text-discord-text-secondary">Listing Duration (days)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_market_listing_days}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_market_listing_days: parseInt(e.target.value) || 7 })
@@ -162,7 +162,7 @@ export default function MarketPage() {
             <span className="text-sm text-discord-text-secondary">Max Listings per Player</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_market_max_listings}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_market_max_listings: parseInt(e.target.value) || 10 })
@@ -175,7 +175,7 @@ export default function MarketPage() {
             <span className="text-sm text-discord-text-secondary">Maximum Price per Unit (coins)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_market_max_price_per_unit}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_market_max_price_per_unit: parseInt(e.target.value, 10) || 1000000000 })

@@ -158,7 +158,7 @@ export default function AdventuresPage() {
         </div>
         <button
           onClick={() => setEditing({ ...BLANK_ADVENTURE })}
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-3 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-3 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
         >
           <Plus className="h-4 w-4" /> Add Adventure
         </button>
@@ -176,7 +176,7 @@ export default function AdventuresPage() {
               aria-checked={config.economy_adventures_enabled}
               onClick={() => saveConfig({ economy_adventures_enabled: !config.economy_adventures_enabled })}
               className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
-                config.economy_adventures_enabled ? 'bg-discord-blurple' : 'bg-discord-bg-tertiary'
+                config.economy_adventures_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
               }`}
             >
               <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
@@ -188,7 +188,7 @@ export default function AdventuresPage() {
             <span className="text-sm text-discord-text-secondary">Daily Limit</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_adventure_daily_limit}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_adventure_daily_limit: parseInt(e.target.value) || 3 })
@@ -201,7 +201,7 @@ export default function AdventuresPage() {
             <span className="text-sm text-discord-text-secondary">Ticket Cost (coins)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_adventure_ticket_cost}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_adventure_ticket_cost: parseInt(e.target.value) || 100 })
@@ -214,7 +214,7 @@ export default function AdventuresPage() {
             <span className="text-sm text-discord-text-secondary">Max Scenes per Adventure</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_adventure_max_scenes}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_adventure_max_scenes: parseInt(e.target.value) || 10 })
@@ -272,7 +272,7 @@ export default function AdventuresPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Name</span>
                 <input
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.name}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, name: e.target.value })}
                 />
@@ -280,7 +280,7 @@ export default function AdventuresPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Emoji</span>
                 <input
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.emoji}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, emoji: e.target.value })}
                 />
@@ -289,7 +289,7 @@ export default function AdventuresPage() {
             <label className="flex flex-col gap-1">
               <span className="text-sm text-discord-text-secondary">Description</span>
               <textarea
-                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple resize-none"
+                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent resize-none"
                 value={editing.description ?? ''}
                 rows={2}
                 onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditing({ ...editing, description: e.target.value })}
@@ -299,7 +299,7 @@ export default function AdventuresPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Type</span>
                 <select
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.adventure_type}
                   onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, adventure_type: e.target.value })}
                 >
@@ -311,7 +311,7 @@ export default function AdventuresPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Difficulty</span>
                 <select
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.difficulty}
                   onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, difficulty: e.target.value })}
                 >
@@ -326,7 +326,7 @@ export default function AdventuresPage() {
                 <span className="text-sm text-discord-text-secondary">Min Scenes</span>
                 <input
                   type="number"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.min_scenes}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, min_scenes: parseInt(e.target.value) || 5 })}
                   min={1}
@@ -337,7 +337,7 @@ export default function AdventuresPage() {
                 <span className="text-sm text-discord-text-secondary">Max Scenes</span>
                 <input
                   type="number"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.max_scenes}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, max_scenes: parseInt(e.target.value) || 10 })}
                   min={1}
@@ -355,7 +355,7 @@ export default function AdventuresPage() {
               <button
                 onClick={saveAdventure}
                 disabled={saving || !editing.name}
-                className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+                className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
               >
                 {saving ? 'Saving...' : 'Save'}
               </button>

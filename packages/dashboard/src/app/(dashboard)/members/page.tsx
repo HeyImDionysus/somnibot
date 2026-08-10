@@ -269,7 +269,7 @@ export default function MembersPage() {
               <tr
                 key={m.discord_id}
                 className={`border-b border-discord-border-subtle/50 transition-colors ${
-                  selected.has(m.discord_id) ? 'bg-discord-blurple/10' : 'hover:bg-discord-bg-tertiary/50'
+                  selected.has(m.discord_id) ? 'bg-discord-accent/10' : 'hover:bg-discord-bg-tertiary/50'
                 }`}
               >
                 <td className="px-3 py-2.5">

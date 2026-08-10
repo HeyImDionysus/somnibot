@@ -143,7 +143,7 @@ export default function ProductFiles({ productId, productName }: Props) {
   };
 
   return (
-    <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle">
+    <div className="bg-discord-bg-secondary rounded-lg border border-discord-border-subtle">
       <div className="p-4 border-b border-discord-border-subtle">
         <h3 className="text-sm font-semibold text-white">
           📁 Files for &quot;{productName}&quot;
@@ -165,7 +165,7 @@ export default function ProductFiles({ productId, productName }: Props) {
       <div
         className={`m-4 border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer ${
           dragOver
-            ? 'border-discord-blurple bg-discord-blurple/10'
+            ? 'border-discord-accent bg-discord-accent/10'
             : 'border-discord-border-subtle hover:border-discord-text-muted'
         }`}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -181,13 +181,13 @@ export default function ProductFiles({ productId, productName }: Props) {
         />
         {uploading ? (
           <div>
-            <p className="text-sm text-discord-blurple animate-pulse">{uploadProgress}</p>
+            <p className="text-sm text-discord-accent animate-pulse">{uploadProgress}</p>
           </div>
         ) : (
           <div>
             <p className="text-2xl mb-2">📤</p>
             <p className="text-sm text-discord-text-muted">
-              Drag & drop a file here, or <span className="text-discord-blurple">click to browse</span>
+              Drag & drop a file here, or <span className="text-discord-accent">click to browse</span>
             </p>
             <p className="text-xs text-discord-text-muted mt-1">Max 100MB per file</p>
           </div>
@@ -207,7 +207,7 @@ export default function ProductFiles({ productId, productName }: Props) {
             {files.map((f) => (
               <div
                 key={f.id}
-                className="flex items-center justify-between bg-discord-tertiary rounded-lg px-3 py-2.5 group"
+                className="flex items-center justify-between bg-discord-bg-tertiary rounded-lg px-3 py-2.5 group"
               >
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <span className="text-lg flex-shrink-0">{fileIcon(f.content_type)}</span>

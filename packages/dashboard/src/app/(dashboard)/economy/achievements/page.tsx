@@ -162,32 +162,32 @@ export default function AchievementsPage() {
 
       {/* Prestige settings */}
       {config.economy_prestige_enabled && (
-        <div className="bg-discord-secondary rounded-lg p-4">
+        <div className="bg-discord-bg-secondary rounded-lg p-4">
           <h3 className="font-semibold text-discord-text-primary mb-3">⭐ Prestige Settings</h3>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="text-sm text-discord-text-secondary">Multiplier Per Level (%)</label>
               <input type="number" min={1} max={100} value={config.economy_prestige_multiplier_pct}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_multiplier_pct: parseInt(e.target.value) || 10 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
             <div>
               <label className="text-sm text-discord-text-secondary">Min Level Required</label>
               <input type="number" min={1} value={config.economy_prestige_min_level}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_min_level: parseInt(e.target.value) || 50 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
             <div>
               <label className="text-sm text-discord-text-secondary">Min Net Worth</label>
               <input type="number" min={0} value={config.economy_prestige_min_net_worth}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_min_net_worth: parseInt(e.target.value) || 1000000 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
             <div>
               <label className="text-sm text-discord-text-secondary">Maximum Prestige Level</label>
               <input type="number" min={1} max={2147483647} value={config.economy_prestige_max_level}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_max_level: parseInt(e.target.value, 10) || 10 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
           </div>
         </div>
@@ -199,7 +199,7 @@ export default function AchievementsPage() {
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-discord-text-primary">Achievement Definitions</h2>
             <button onClick={() => setEditing({ ...BLANK_ACH })}
-              className="flex items-center gap-1 bg-discord-blurple text-white px-3 py-1.5 rounded text-sm hover:bg-discord-blurple/80">
+              className="flex items-center gap-1 bg-discord-accent text-white px-3 py-1.5 rounded text-sm hover:bg-discord-accent/80">
               <Plus className="w-4 h-4" /> Add Achievement
             </button>
           </div>
@@ -209,7 +209,7 @@ export default function AchievementsPage() {
           ) : (
             <div className="space-y-2">
               {achievements.map((a) => (
-                <div key={a.id} className="bg-discord-secondary rounded-lg p-3 flex items-center justify-between">
+                <div key={a.id} className="bg-discord-bg-secondary rounded-lg p-3 flex items-center justify-between">
                   <div>
                     <span className="text-xl mr-2">{a.badge_emoji}</span>
                     <span className="text-discord-text-primary font-medium">{a.name}</span>
@@ -220,7 +220,7 @@ export default function AchievementsPage() {
                     </span>
                   </div>
                   <div className="flex gap-1">
-                    <button onClick={() => setEditing({ ...a })} className="p-1 hover:text-discord-blurple text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
+                    <button onClick={() => setEditing({ ...a })} className="p-1 hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
                     <button onClick={() => setDeleteId(a.id)} className="p-1 hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
                   </div>
                 </div>
@@ -237,49 +237,49 @@ export default function AchievementsPage() {
       {/* Edit modal */}
       {editing && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEditing(null)}>
-          <div className="bg-discord-secondary rounded-lg p-6 w-full max-w-md space-y-4" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-discord-bg-secondary rounded-lg p-6 w-full max-w-md space-y-4" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-discord-text-primary">{editing.id ? 'Edit' : 'New'} Achievement</h3>
             <div className="grid grid-cols-4 gap-3">
               <div>
                 <label className="text-xs text-discord-text-secondary">Emoji</label>
                 <input value={editing.badge_emoji}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, badge_emoji: e.target.value })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2 text-center text-xl" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2 text-center text-xl" />
               </div>
               <div className="col-span-3">
                 <label className="text-xs text-discord-text-secondary">Name</label>
                 <input value={editing.name}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, name: e.target.value })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
             </div>
             <input placeholder="Description" value={editing.description}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, description: e.target.value })}
-              className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+              className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-xs text-discord-text-secondary">Condition Type</label>
                 <input value={editing.condition_type}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, condition_type: e.target.value })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Condition Value</label>
                 <input type="number" min={1} value={editing.condition_value}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, condition_value: parseInt(e.target.value) || 1 })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Reward (coins)</label>
                 <input type="number" min={0} value={editing.reward_currency}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, reward_currency: parseInt(e.target.value) || 0 })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Reward XP</label>
                 <input type="number" min={0} value={editing.reward_xp}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, reward_xp: parseInt(e.target.value) || 0 })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
             </div>
             <label className="flex items-center gap-2 cursor-pointer">
@@ -291,7 +291,7 @@ export default function AchievementsPage() {
             <div className="flex justify-end gap-2">
               <button onClick={() => setEditing(null)} className="px-4 py-2 rounded text-discord-text-secondary hover:text-discord-text-primary">Cancel</button>
               <button onClick={saveAchievement} disabled={saving}
-                className="px-4 py-2 bg-discord-blurple text-white rounded hover:bg-discord-blurple/80 disabled:opacity-50">
+                className="px-4 py-2 bg-discord-accent text-white rounded hover:bg-discord-accent/80 disabled:opacity-50">
                 {saving ? 'Saving...' : 'Save'}
               </button>
             </div>

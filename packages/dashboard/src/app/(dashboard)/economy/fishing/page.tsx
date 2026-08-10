@@ -169,7 +169,7 @@ export default function FishingPage() {
         </div>
         <button
           onClick={() => setEditing({ ...BLANK_SPECIES })}
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-3 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-3 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
         >
           <Plus className="h-4 w-4" /> Add Species
         </button>
@@ -187,7 +187,7 @@ export default function FishingPage() {
               aria-checked={config.economy_fishing_enabled}
               onClick={() => saveConfig({ economy_fishing_enabled: !config.economy_fishing_enabled })}
               className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
-                config.economy_fishing_enabled ? 'bg-discord-blurple' : 'bg-discord-bg-tertiary'
+                config.economy_fishing_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
               }`}
             >
               <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
@@ -199,7 +199,7 @@ export default function FishingPage() {
             <span className="text-sm text-discord-text-secondary">Cooldown (seconds)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_fishing_cooldown_seconds}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_fishing_cooldown_seconds: parseInt(e.target.value) || 30 })
@@ -212,7 +212,7 @@ export default function FishingPage() {
             <span className="text-sm text-discord-text-secondary">Junk Chance (%)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_fishing_junk_chance_pct}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_fishing_junk_chance_pct: parseInt(e.target.value) || 15 })
@@ -225,7 +225,7 @@ export default function FishingPage() {
             <span className="text-sm text-discord-text-secondary">Treasure Chance (%)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_fishing_treasure_chance_pct}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_fishing_treasure_chance_pct: parseInt(e.target.value) || 5 })
@@ -242,7 +242,7 @@ export default function FishingPage() {
               aria-checked={config.economy_fishing_collection_reward_enabled}
               onClick={() => saveConfig({ economy_fishing_collection_reward_enabled: !config.economy_fishing_collection_reward_enabled })}
               className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
-                config.economy_fishing_collection_reward_enabled ? 'bg-discord-blurple' : 'bg-discord-bg-tertiary'
+                config.economy_fishing_collection_reward_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
               }`}
             >
               <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
@@ -254,7 +254,7 @@ export default function FishingPage() {
             <span className="text-sm text-discord-text-secondary">Collection Reward (coins)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={config.economy_fishing_collection_reward_coins}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                 saveConfig({ economy_fishing_collection_reward_coins: parseInt(e.target.value, 10) || 5000 })
@@ -311,7 +311,7 @@ export default function FishingPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Name</span>
                 <input
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.name}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, name: e.target.value })}
                 />
@@ -319,7 +319,7 @@ export default function FishingPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Emoji</span>
                 <input
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.emoji}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, emoji: e.target.value })}
                 />
@@ -328,7 +328,7 @@ export default function FishingPage() {
             <label className="flex flex-col gap-1">
               <span className="text-sm text-discord-text-secondary">Rarity</span>
               <select
-                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 value={editing.rarity}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, rarity: e.target.value })}
               >
@@ -343,7 +343,7 @@ export default function FishingPage() {
                 <input
                   type="number"
                   step="0.1"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.min_weight}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, min_weight: parseFloat(e.target.value) || 0 })}
                 />
@@ -353,7 +353,7 @@ export default function FishingPage() {
                 <input
                   type="number"
                   step="0.1"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.max_weight}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, max_weight: parseFloat(e.target.value) || 0 })}
                 />
@@ -362,7 +362,7 @@ export default function FishingPage() {
                 <span className="text-sm text-discord-text-secondary">Base Price</span>
                 <input
                   type="number"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.base_price}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, base_price: parseInt(e.target.value) || 0 })}
                 />
@@ -378,7 +378,7 @@ export default function FishingPage() {
               <button
                 onClick={saveSpecies}
                 disabled={saving || !editing.name}
-                className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+                className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
               >
                 {saving ? 'Saving...' : 'Save'}
               </button>

@@ -94,7 +94,7 @@ function LootFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Source Type</span>
           <select
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
             value={form.source_type ?? 'hunt'}
             onChange={(e) => setForm((p) => ({ ...p, source_type: e.target.value as SourceType }))}
           >
@@ -110,7 +110,7 @@ function LootFormModal({
             <span className="text-xs text-discord-text-secondary">Item Name</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.item_name ?? ''}
               onChange={(e) => setForm((p) => ({ ...p, item_name: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -121,7 +121,7 @@ function LootFormModal({
             <span className="text-xs text-discord-text-secondary">Emoji</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple text-center"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent text-center"
               value={form.emoji ?? '📦'}
               onChange={(e) => setForm((p) => ({ ...p, emoji: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -133,7 +133,7 @@ function LootFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Rarity</span>
           <select
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
             value={form.rarity ?? 'common'}
             onChange={(e) => setForm((p) => ({ ...p, rarity: e.target.value as Rarity }))}
           >
@@ -149,7 +149,7 @@ function LootFormModal({
             <span className="text-xs text-discord-text-secondary">Min Qty</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={1}
               max={999}
               value={form.min_qty ?? 1}
@@ -160,7 +160,7 @@ function LootFormModal({
             <span className="text-xs text-discord-text-secondary">Max Qty</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={1}
               max={999}
               value={form.max_qty ?? 1}
@@ -171,7 +171,7 @@ function LootFormModal({
             <span className="text-xs text-discord-text-secondary">Weight</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={1}
               max={10000}
               value={form.weight ?? 100}
@@ -186,7 +186,7 @@ function LootFormModal({
             <span className="text-xs text-discord-text-secondary">Required Tool Tier</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={10}
               value={form.tool_tier ?? 0}
@@ -197,7 +197,7 @@ function LootFormModal({
             <span className="text-xs text-discord-text-secondary">Sell Value</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={1000000}
               value={form.sell_value ?? 10}
@@ -229,7 +229,7 @@ function LootFormModal({
           </button>
           <button
             type="button"
-            className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
             onClick={() => onSave(form)}
             disabled={saving || !form.item_name?.trim()}
           >
@@ -366,7 +366,7 @@ export default function GatheringPage() {
           </div>
         </div>
         <button
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
           onClick={() => setEditEntry({ ...BLANK_ENTRY })}
         >
           <Plus size={16} />
@@ -393,7 +393,7 @@ export default function GatheringPage() {
               <span className="text-xs text-discord-text-secondary">Cooldown (s)</span>
               <input
                 type="number"
-                className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 min={0}
                 max={86400}
                 value={settings.economy_gathering_cooldown_seconds}
@@ -414,7 +414,7 @@ export default function GatheringPage() {
         <button
           className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
             filterSource === 'all'
-              ? 'bg-discord-blurple text-white'
+              ? 'bg-discord-accent text-white'
               : 'bg-discord-bg-secondary text-discord-text-secondary hover:text-discord-text-primary'
           }`}
           onClick={() => setFilterSource('all')}
@@ -428,7 +428,7 @@ export default function GatheringPage() {
               key={s.value}
               className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                 filterSource === s.value
-                  ? 'bg-discord-blurple text-white'
+                  ? 'bg-discord-accent text-white'
                   : 'bg-discord-bg-secondary text-discord-text-secondary hover:text-discord-text-primary'
               }`}
               onClick={() => setFilterSource(s.value)}

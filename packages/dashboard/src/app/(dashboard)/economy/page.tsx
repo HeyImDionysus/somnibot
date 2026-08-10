@@ -150,7 +150,7 @@ function NumberField({
       <div className="flex items-center gap-2">
         <input
           type="number"
-          className="w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+          className="w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
           value={value}
           onChange={(e) => onChange(Math.max(min ?? 0, Math.min(max ?? 999999999, parseInt(e.target.value) || 0)))}
           min={min}
@@ -189,7 +189,7 @@ function Toggle({
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
-          checked ? 'bg-discord-blurple' : 'bg-discord-bg-tertiary'
+          checked ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
         } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
       >
         <span
@@ -279,7 +279,7 @@ export default function EconomyPage() {
         <button
           onClick={handleSave}
           disabled={!dirty || saving}
-          className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {saving ? 'Saving...' : 'Save Changes'}
         </button>
@@ -319,7 +319,7 @@ export default function EconomyPage() {
                 <span className="text-sm text-discord-text-secondary">Currency Name</span>
                 <input
                   type="text"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={config.currency_name}
                   onChange={(e) => updateField('currency_name', e.target.value.slice(0, 32))}
                   maxLength={32}
@@ -329,7 +329,7 @@ export default function EconomyPage() {
                 <span className="text-sm text-discord-text-secondary">Currency Emoji</span>
                 <input
                   type="text"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={config.currency_emoji}
                   onChange={(e) => updateField('currency_emoji', e.target.value.slice(0, 64))}
                   maxLength={64}
@@ -515,7 +515,7 @@ export default function EconomyPage() {
               <select
                 value={config.profile_visibility}
                 onChange={(e) => updateField('profile_visibility', e.target.value === 'members-after-onboarding' ? 'members-after-onboarding' : 'everyone')}
-                className="mt-1 w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-blurple focus:outline-none"
+                className="mt-1 w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
               >
                 <option value="everyone">Everyone</option>
                 <option value="members-after-onboarding">Members after onboarding</option>
@@ -526,7 +526,7 @@ export default function EconomyPage() {
               <select
                 value={config.content_filter_mode}
                 onChange={(e) => updateField('content_filter_mode', e.target.value === 'strict' ? 'strict' : 'lenient')}
-                className="mt-1 w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-blurple focus:outline-none"
+                className="mt-1 w-full rounded-md border border-discord-bg-tertiary bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
               >
                 <option value="lenient">Lenient (block only clear violations)</option>
                 <option value="strict">Strict (block broader categories)</option>
@@ -557,7 +557,7 @@ export default function EconomyPage() {
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+                className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
               >
                 {saving ? 'Saving...' : 'Save Changes'}
               </button>
