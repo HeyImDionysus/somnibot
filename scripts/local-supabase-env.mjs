@@ -42,9 +42,18 @@ function nonEmpty(value) {
  * Read the current local Supabase status.  Errors intentionally do not include
  * captured stdout/stderr, since either stream may contain credentials.
  */
-export function readLocalSupabaseStatus({ cwd = DEFAULT_CWD, exec = execFileSync } = {}) {
+export function readLocalSupabaseStatus({
+  cwd = DEFAULT_CWD,
+  exec = execFileSync,
+  cliPath = process.env.SUPABASE_CLI_PATH,
+} = {}) {
   try {
-    const output = exec(process.execPath, [SUPABASE_CLI_ENTRYPOINT, 'status', '--output', 'env'], {
+    const explicitCliPath = nonEmpty(cliPath);
+    const command = explicitCliPath || process.execPath;
+    const args = explicitCliPath
+      ? ['status', '--output', 'env']
+      : [SUPABASE_CLI_ENTRYPOINT, 'status', '--output', 'env'];
+    const output = exec(command, args, {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -84,6 +84,7 @@ function makeGuild(id = 'g1') {
     roles: { cache: roles, everyone: everyoneRole },
     rulesChannelId: 'ch-rules',
     publicUpdatesChannelId: 'ch-updates',
+    safetyAlertsChannelId: 'ch-moderator',
     iconURL: () => 'https://icon.png',
   } as any;
 }
@@ -158,18 +159,27 @@ describe('SyncEngine deep branches', () => {
     expect(bus.emit).toHaveBeenCalledWith('drift.detected', 'g1', expect.any(Object));
   });
 
-  it('runSyncCycle filters community and ticket channels', async () => {
+  it('runSyncCycle filters stable community and ticket channel IDs without matching names', async () => {
     const shared = await import('@somnibot/shared');
     (shared.classifyDrift as any).mockReturnValueOnce([
-      { type: 'missing', entityType: 'channel', entityName: 'rules', severity: 'warning', suggestedAction: 'accept' },
-      { type: 'missing', entityType: 'channel', entityName: 'updates', severity: 'warning', suggestedAction: 'accept' },
-      { type: 'missing', entityType: 'channel', entityName: 'moderator-only', severity: 'warning', suggestedAction: 'accept' },
-      { type: 'missing', entityType: 'channel', entityName: 'ticket-001-testuser', severity: 'warning', suggestedAction: 'accept' },
-      { type: 'missing', entityType: 'channel', entityName: 'real-channel', severity: 'warning', suggestedAction: 'accept' },
+      { type: 'missing', entityType: 'channel', entityName: 'renamed-rules', entityDiscordId: 'ch-rules', severity: 'warning', suggestedAction: 'accept' },
+      { type: 'missing', entityType: 'channel', entityName: 'renamed-updates', entityDiscordId: 'ch-updates', severity: 'warning', suggestedAction: 'accept' },
+      { type: 'missing', entityType: 'channel', entityName: 'renamed-moderator', entityDiscordId: 'ch-moderator', severity: 'warning', suggestedAction: 'accept' },
+      { type: 'missing', entityType: 'channel', entityName: 'renamed-ticket', entityDiscordId: 'ch-ticket', severity: 'warning', suggestedAction: 'accept' },
+      { type: 'missing', entityType: 'channel', entityName: 'ticket-001-testuser', entityDiscordId: 'ch-user-ticket-name', severity: 'warning', suggestedAction: 'accept' },
+      { type: 'missing', entityType: 'channel', entityName: 'real-channel', entityDiscordId: 'ch-real', severity: 'warning', suggestedAction: 'accept' },
     ]);
     
     const { runSyncCycle } = await import('../sync/sync-engine.js');
-    const fromMock = vi.fn(() => chain({ guild_id: 'g1', roles: [], channels: [] }));
+    const fromMock = vi.fn((table: string) => {
+      if (table !== 'tickets') return chain({ guild_id: 'g1', roles: [], channels: [] });
+      const ticketQuery = chain();
+      ticketQuery.then = (resolve: (value: unknown) => unknown) => resolve({
+        data: [{ channel_id: 'ch-ticket' }],
+        error: null,
+      });
+      return ticketQuery;
+    });
     const supa = { from: fromMock } as any;
     const g = makeGuild();
     
@@ -177,9 +187,10 @@ describe('SyncEngine deep branches', () => {
       enabled: true, intervalMinutes: 5, autoRepair: false, autoRepairEveryone: false,
     });
     
-    // Only 'real-channel' should pass through (community + ticket filtered)
-    expect(result.driftItems.length).toBe(1);
-    expect(result.driftItems[0].entityName).toBe('real-channel');
+    expect(result.driftItems.map((item) => item.entityName)).toEqual([
+      'ticket-001-testuser',
+      'real-channel',
+    ]);
   });
 
   it('runSyncCycle repairs @everyone when auto-repair AND the @everyone opt-in are both on', async () => {

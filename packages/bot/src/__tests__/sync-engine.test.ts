@@ -46,7 +46,7 @@ import { computeStateDiff, classifyDrift } from '@somnibot/shared';
 
 function makeChain(result: any = { data: null, error: null }) {
   const chain: any = {};
-  for (const m of ['from', 'select', 'insert', 'update', 'delete', 'upsert', 'eq', 'order', 'limit', 'single', 'maybeSingle', 'returns']) {
+  for (const m of ['from', 'select', 'insert', 'update', 'delete', 'upsert', 'eq', 'in', 'range', 'order', 'limit', 'single', 'maybeSingle', 'returns']) {
     chain[m] = vi.fn(() => chain);
   }
   chain.single = vi.fn(() => Promise.resolve(result));

@@ -14,6 +14,7 @@ test('parses status env output without requiring a specific key format', () => {
 test('maps current publishable/secret names when the CLI emits them', () => {
   let invocation;
   const result = readLocalSupabaseStatus({
+    cliPath: '',
     exec: (command, args) => {
       invocation = { command, args };
       return 'API_URL=http://127.0.0.1:65432\nPUBLISHABLE_KEY=sb_publishable_current\nSECRET_KEY=sb_secret_current';
@@ -29,6 +30,23 @@ test('maps current publishable/secret names when the CLI emits them', () => {
     serviceKey: 'sb_secret_current',
     source: 'supabase status',
   });
+});
+
+test('uses an explicitly configured Supabase CLI executable', () => {
+  let invocation;
+  const result = readLocalSupabaseStatus({
+    cliPath: '/usr/local/bin/supabase',
+    exec: (command, args) => {
+      invocation = { command, args };
+      return 'API_URL=http://127.0.0.1:54321\nANON_KEY=anon-current\nSERVICE_ROLE_KEY=service-current';
+    },
+  });
+  assert.deepEqual(invocation, {
+    command: '/usr/local/bin/supabase',
+    args: ['status', '--output', 'env'],
+  });
+  assert.equal(result.source, 'supabase status');
+  assert.equal(result.url, 'http://127.0.0.1:54321');
 });
 
 test('does not expose status output when the CLI is unavailable', () => {

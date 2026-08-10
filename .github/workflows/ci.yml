@@ -44,6 +44,7 @@ env:
   # 2.110+ executes CREATE INDEX CONCURRENTLY outside the per-migration
   # transaction, which the online fraud-observation index migration requires.
   SUPABASE_CLI_VERSION: "2.110.0"
+  SUPABASE_CLI_PATH: /usr/local/bin/supabase
 
 # =============================================================================
 # Reusable setup anchor — keeps checkout+pnpm+node+cache consistent
