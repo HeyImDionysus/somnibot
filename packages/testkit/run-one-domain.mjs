@@ -7,11 +7,11 @@
  *
  * Usage: node _run-domain.mjs <domainId>
  */
-// Arm the loopback guard env BEFORE importing the bot/testkit (mirrors live-setup.ts).
-const DEMO_SERVICE =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
-const DEMO_ANON =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
+// Arm the loopback guard env BEFORE importing the bot/testkit (mirrors
+// live-setup.ts). Credentials come from an isolated override or the local
+// Supabase CLI status; there are no embedded/demo-key fallbacks.
+const { resolveLocalSupabaseCredentials } = await import('./dist/local-supabase.js');
+const localSupabase = resolveLocalSupabaseCredentials();
 // ── Fault proxies ────────────────────────────────────────────────────────────
 // Route the WHOLE process through local TCP fault proxies so DEPFAIL/RETRY
 // scenarios can sever/restore a REAL network path (ctx.faults). Importing
@@ -21,11 +21,18 @@ const DEMO_ANON =
 // independently force the same explicit isolated endpoints before importing
 // production code. Ambient developer/production connection settings are never
 // a valid fleet target.
-const DIRECT_SUPABASE = process.env.SOMNIBOT_E2E_SUPABASE_URL || 'http://127.0.0.1:54321';
+const DIRECT_SUPABASE = localSupabase.url;
 const DIRECT_VALKEY = process.env.SOMNIBOT_E2E_VALKEY_URL || 'redis://127.0.0.1:6379';
 const { assertSupabaseUrlIsLocal, assertValkeyUrlIsLocal } = await import('./dist/guard.js');
 assertSupabaseUrlIsLocal(DIRECT_SUPABASE, 'SOMNIBOT_E2E_SUPABASE_URL');
 assertValkeyUrlIsLocal(DIRECT_VALKEY, 'SOMNIBOT_E2E_VALKEY_URL');
+
+// Never carry unrelated customer/production Supabase variables into the
+// isolated child. The resolver has already read the local source of truth.
+for (const key of Object.keys(process.env)) {
+  if (/^SUPABASE_/i.test(key)) delete process.env[key];
+}
+
 let faultControls = null;
 let supabaseUrl = DIRECT_SUPABASE;
 let valkeyUrl = DIRECT_VALKEY;
@@ -51,14 +58,11 @@ Object.assign(process.env, {
   SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: 'e2e-live-disposable-guild',
   DISCORD_TOKEN: 'e2e-live-no-login-dummy-token',
   DISCORD_APPLICATION_ID: '000000000000000000',
-  // Only explicit loopback-E2E overrides may replace the local CLI demo keys.
-  // Never inherit launcher/customer credentials into this local real-effect rig.
-  SUPABASE_SECRET_KEY:
-    process.env.SOMNIBOT_E2E_SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
-  SUPABASE_SERVICE_ROLE_KEY:
-    process.env.SOMNIBOT_E2E_SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
-  SUPABASE_ANON_KEY:
-    process.env.SOMNIBOT_E2E_SUPABASE_ANON_KEY || DEMO_ANON,
+  // The resolver supplied current keys from an isolated E2E shard or local
+  // CLI status. Never inherit launcher/customer credentials into this rig.
+  SUPABASE_SECRET_KEY: localSupabase.serviceRoleKey,
+  SUPABASE_SERVICE_ROLE_KEY: localSupabase.serviceRoleKey,
+  SUPABASE_ANON_KEY: localSupabase.anonKey,
   // Real, isolated Valkey so cooldown/streak/rate-limit legs drive.
   VALKEY_URL: valkeyUrl,
   // Disposable Valkey is deliberately unauthenticated. Clearing an ambient

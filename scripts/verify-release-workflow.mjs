@@ -20,6 +20,8 @@ const releaseWorkflow = read('.github/workflows/release.yml');
 const builderConfig = read('packages/launcher/electron-builder.yml');
 const buildScript = read('scripts/build-launcher.mjs');
 const fleetChild = read('packages/testkit/run-one-domain.mjs');
+const fleetSetup = read('packages/testkit/src/__tests__/live/live-setup.ts');
+const localSupabaseResolver = read('packages/testkit/src/local-supabase.ts');
 const rootPackage = JSON.parse(read('package.json'));
 const npmrc = read('.npmrc');
 
@@ -81,13 +83,43 @@ assert.match(
 );
 assert.match(
   fleetChild,
-  /SOMNIBOT_E2E_SUPABASE_SERVICE_ROLE_KEY/g,
-  'local fleet credentials may only use the explicit loopback-E2E override',
+  /resolveLocalSupabaseCredentials/g,
+  'local fleet child must resolve credentials from the isolated resolver',
+);
+assert.match(
+  fleetChild,
+  /Object\.keys\(process\.env\)[\s\S]*SUPABASE_/,
+  'local fleet child must clear unrelated ambient Supabase variables',
 );
 assert.doesNotMatch(
   fleetChild,
-  /SUPABASE_SECRET_KEY:\s*process\.env\.SUPABASE_SECRET_KEY|SUPABASE_SERVICE_ROLE_KEY:\s*process\.env\.SUPABASE_SERVICE_ROLE_KEY/,
-  'local fleet must never inherit ambient launcher or customer Supabase credentials',
+  /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9/,
+  'local fleet child must not embed stale Supabase demo credentials',
+);
+assert.match(
+  fleetSetup,
+  /resolveLocalSupabaseCredentials/g,
+  'live setup must use current local Supabase CLI credentials',
+);
+assert.match(
+  fleetSetup,
+  /Object\.keys\(process\.env\)[\s\S]*SUPABASE_/,
+  'live setup must clear unrelated ambient Supabase variables',
+);
+assert.doesNotMatch(
+  fleetSetup,
+  /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9/,
+  'live setup must not embed stale Supabase demo credentials',
+);
+assert.match(
+  localSupabaseResolver,
+  /process\.execPath[\s\S]*SUPABASE_CLI_ENTRY[\s\S]*'status', '-o', 'json'/,
+  'local credential resolver must invoke the pinned Supabase CLI status JSON entrypoint',
+);
+assert.match(
+  localSupabaseResolver,
+  /!\/\^SUPABASE_\/i\.test\(name\)/,
+  'local credential resolver must strip ambient Supabase variables from CLI env',
 );
 assert.match(
   builderConfig,
