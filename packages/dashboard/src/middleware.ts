@@ -2,6 +2,7 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { checkCsrf, shouldRotateCsrf, csrfRotationSeed, stripCsrfTimestamp, csrfCookieSessionId, deriveRotatedCsrf, deriveRebindCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
 import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
+import { getTrustedRedirectUrl } from '@/lib/public-redirect-origin';
 
 /* ------------------------------------------------------------------ */
 /*  CSP Nonce — generated per request for strict script-src            */
@@ -299,7 +300,7 @@ export async function middleware(request: NextRequest) {
     isSessionlessPublicRoute(request.nextUrl.pathname);
 
   if (!user && !isPublicRoute) {
-    const url = request.nextUrl.clone();
+    const url = getTrustedRedirectUrl(request);
     url.pathname = '/login';
     const redirect = NextResponse.redirect(url);
     applyCspHeaders(redirect, nonce);
@@ -308,7 +309,7 @@ export async function middleware(request: NextRequest) {
 
   // Redirect authenticated users away from login
   if (user && request.nextUrl.pathname === '/login') {
-    const url = request.nextUrl.clone();
+    const url = getTrustedRedirectUrl(request);
     url.pathname = '/dashboard';
     const redirect = NextResponse.redirect(url);
     applyCspHeaders(redirect, nonce);

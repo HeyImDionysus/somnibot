@@ -16,6 +16,7 @@ describe('middleware health access', () => {
     delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
     delete process.env.SOMNIBOT_CSP_INLINE_COMPAT;
     delete process.env.PAYPAL_RECONCILE_SECRET;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://example.supabase.co';
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'test-key';
 
@@ -221,6 +222,30 @@ describe('middleware health access', () => {
 
     expect(res.status).toBe(307);
     expect(res.headers.get('location')).toBe('http://localhost:3000/login');
+  });
+
+  it('keeps Funnel redirects on the configured public host', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.tailbd9d28.ts.net';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('https://localhost:3456/dashboard', {
+      headers: { host: 'somni.tailbd9d28.ts.net' },
+    }));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('https://somni.tailbd9d28.ts.net/login');
+  });
+
+  it('keeps direct local operator redirects on localhost when Funnel is configured', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.tailbd9d28.ts.net';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3456/dashboard', {
+      headers: { host: 'localhost:3456' },
+    }));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost:3456/login');
   });
 
   it('does not treat SESSION_TOKEN alone as launcher local mode', async () => {
