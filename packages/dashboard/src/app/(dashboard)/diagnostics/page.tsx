@@ -184,8 +184,13 @@ function Sparkline({
   const latest = data[data.length - 1];
 
   return (
-    <div className="flex items-center gap-3">
-      <svg width={width} height={height} className="shrink-0">
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(4rem,6rem)] items-center gap-3">
+      <svg
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-10 w-full min-w-0"
+      >
         <polyline
           points={points.join(' ')}
           fill="none"
@@ -195,7 +200,7 @@ function Sparkline({
           strokeLinejoin="round"
         />
       </svg>
-      <div className="text-xs text-discord-text-muted whitespace-nowrap">
+      <div className="min-w-0 max-w-24 break-words text-right text-xs leading-4 text-discord-text-muted">
         <span className="text-discord-text-secondary font-medium">{latest?.toFixed(1)}ms</span>
         {' '}(avg {avg}ms)
       </div>
