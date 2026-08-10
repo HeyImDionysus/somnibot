@@ -5,6 +5,8 @@
  * invalidateGuildConfigCache, restorePreviousRoles, restoreLevelRoles
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { GuildMember } from 'discord.js';
+import type { SomniClient } from '../client.js';
 
 vi.mock('discord.js', () => ({
   GuildMemberFlags: { CompletedOnboarding: 1 << 0 },
@@ -299,6 +301,30 @@ describe('handleMemberUpdate', () => {
     );
   });
 
+  it('terminates durable fallback state when native onboarding completes', async () => {
+    const client = makeClient();
+    const oldMember = makeMember({
+      flags: { has: vi.fn().mockReturnValue(false) },
+    });
+    const newMember = makeMember({
+      flags: { has: vi.fn().mockReturnValue(true) },
+    });
+    const typedClient: SomniClient = Object.assign(Object.create(null), client);
+    const typedOldMember: GuildMember = Object.assign(Object.create(null), oldMember);
+    const typedNewMember: GuildMember = Object.assign(Object.create(null), newMember);
+
+    await handleMemberUpdate(typedClient, typedOldMember, typedNewMember);
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('terminate_onboarding_fallback_intent', {
+      p_guild_id: 'g1',
+      p_discord_id: 'u1',
+      p_reason: 'native_onboarding_completed',
+    });
+    expect(client.supabase.rpc.mock.invocationCallOrder[0]).toBeLessThan(
+      mockMarkOnboardingCompleted.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
   it('skips when not an onboarding completion', async () => {
     const client = makeClient();
     const oldMember = makeMember({
@@ -398,6 +424,21 @@ describe('handleMemberLeave', () => {
     expect(client.eventBus.emit).toHaveBeenCalledWith(
       'member.left', 'g1', expect.objectContaining({ discordId: 'u1' }),
     );
+  });
+
+  it('terminates durable fallback state when the member leaves', async () => {
+    const client = makeClient();
+    const member = makeMember();
+    const typedClient: SomniClient = Object.assign(Object.create(null), client);
+    const typedMember: GuildMember = Object.assign(Object.create(null), member);
+
+    await handleMemberLeave(typedClient, typedMember);
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('terminate_onboarding_fallback_intent', {
+      p_guild_id: 'g1',
+      p_discord_id: 'u1',
+      p_reason: 'member_left',
+    });
   });
 
   it('handles partial member', async () => {

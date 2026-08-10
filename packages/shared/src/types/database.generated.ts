@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 267 migration files in packages/supabase/migrations/
+ * Source: 268 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2470,6 +2470,26 @@ export interface DbMemberFeatureUnlocks {
   user_id: string;
   feature_key: string;
   unlocked_at: string;
+}
+
+export interface DbOnboardingFallbackIntents {
+  id: string;
+  guild_id: string;
+  discord_id: string;
+  member_role_id: string;
+  timeout_minutes: number;
+  correlation_id: string;
+  role_add_authorized: boolean;
+  status: 'pending' | 'completed' | 'failed' | 'cancelled';
+  attempt_count: number;
+  attempt_token: string | null;
+  lease_expires_at: string | null;
+  next_attempt_at: string;
+  last_error: string | null;
+  completed_at: string | null;
+  completed_attempt_token: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DbPaymentRefunds {
