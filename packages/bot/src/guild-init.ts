@@ -168,12 +168,19 @@ export function initializeMarketFeature(
 }
 
 export function getCommunityChannelMappings(
-  guild: Pick<Guild, 'rulesChannelId' | 'publicUpdatesChannelId' | 'safetyAlertsChannelId'>,
+  guild: Pick<Guild, 'rulesChannelId' | 'publicUpdatesChannelId' | 'safetyAlertsChannelId'> & {
+    channels: { cache: { has(discordId: string): boolean } };
+  },
 ): Array<{ key: string; discordId: string }> {
   const communityIds: Array<{ key: string; discordId: string }> = [];
-  if (guild.rulesChannelId) communityIds.push({ key: 'channel:rules', discordId: guild.rulesChannelId });
-  if (guild.publicUpdatesChannelId) communityIds.push({ key: 'channel:public-updates', discordId: guild.publicUpdatesChannelId });
-  if (guild.safetyAlertsChannelId) communityIds.push({ key: 'channel:moderator-only', discordId: guild.safetyAlertsChannelId });
+  const register = (key: string, discordId: string | null): void => {
+    if (discordId && guild.channels.cache.has(discordId)) {
+      communityIds.push({ key, discordId });
+    }
+  };
+  register('channel:rules', guild.rulesChannelId);
+  register('channel:public-updates', guild.publicUpdatesChannelId);
+  register('channel:moderator-only', guild.safetyAlertsChannelId);
   return communityIds;
 }
 

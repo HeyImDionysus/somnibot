@@ -162,6 +162,11 @@ describe('guild-init', () => {
       rulesChannelId: null,
       publicUpdatesChannelId: null,
       safetyAlertsChannelId: 'system-moderator-only',
+      channels: {
+        cache: new Map([
+          ['system-moderator-only', { id: 'system-moderator-only' }],
+        ]),
+      },
     };
     const mappings = getCommunityChannelMappings(guild);
 
@@ -169,6 +174,17 @@ describe('guild-init', () => {
       key: 'channel:moderator-only',
       discordId: 'system-moderator-only',
     });
+  });
+
+  it('does not register stale Discord community channel IDs', () => {
+    const guild = {
+      rulesChannelId: 'missing-rules',
+      publicUpdatesChannelId: 'missing-updates',
+      safetyAlertsChannelId: 'missing-safety-alerts',
+      channels: { cache: new Map() },
+    };
+
+    expect(getCommunityChannelMappings(guild)).toEqual([]);
   });
 
   it('quiesces producers but retains the action queue for a privacy purge', async () => {
