@@ -41,15 +41,19 @@ const DEFAULT_CONFIG: GamesConfig = {
 
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex items-center gap-3 cursor-pointer">
-      <div
-        className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'}`}
+    <div className="flex items-center gap-3">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        className={`relative w-11 h-6 cursor-pointer rounded-full transition-colors ${checked ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'}`}
         onClick={() => onChange(!checked)}
       >
         <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : ''}`} />
-      </div>
+      </button>
       <span className="text-sm text-discord-text-primary">{label}</span>
-    </label>
+    </div>
   );
 }
 
@@ -105,7 +109,6 @@ export default function GamesPage() {
 
   const saveConfig = async (patch: Partial<GamesConfig>) => {
     const updated = { ...config, ...patch };
-    setConfig(updated);
     try {
       const res = await fetch('/api/guild', {
         method: 'PATCH',
@@ -113,6 +116,7 @@ export default function GamesPage() {
         body: JSON.stringify(updated),
       });
       if (!res.ok) throw new Error();
+      setConfig(updated);
       toast({ title: 'Settings saved', variant: 'success' });
     } catch {
       toast({ title: 'Failed to save', variant: 'error' });
