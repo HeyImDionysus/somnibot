@@ -226,7 +226,6 @@ export class PollsManager {
         correlationId: `poll:${pollId}`,
       });
       await buttonInteraction.reply({ content: 'This poll is closed.', ephemeral: true });
-      await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_denied', 'poll', pollId, { reason: 'closed_or_missing', optionId }, false, `poll.vote_denied:${buttonInteraction.id}`);
       return;
     }
 

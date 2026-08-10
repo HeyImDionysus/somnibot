@@ -1641,6 +1641,27 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     occurrenceId: (d) => d.occurrenceId as string | undefined,
     correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
   },
+  'welcome.dm_blocked_fallback': {
+    action: 'welcome.dm_blocked_fallback', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: () => ({ fallback: 'channel' }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.member_role_grant_failed': {
+    action: 'welcome.member_role_grant_failed', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: (d) => ({ roleId: d.roleId, attempt: d.attempt }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.channel_missing': {
+    action: 'welcome.channel_missing', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: (d) => ({ channelId: d.channelId }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
 };
 
 // ── AuditService ────────────────────────────────────────

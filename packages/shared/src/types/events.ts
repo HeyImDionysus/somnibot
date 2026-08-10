@@ -590,6 +590,9 @@ export interface PlatformEventMap {
   'prediction.late_interaction_rejected': { predictionId: string; actorId: string; action: 'bet' | 'vote'; reason: string; occurrenceId?: string; correlationId?: string };
   'prediction.settlement_payout_retried': { predictionId: string; betId: string; winnerId: string; settlementType: 'prediction_payout' | 'prediction_refund'; occurrenceId?: string; correlationId?: string };
   'welcome.delivery_failed': { memberId: string; surface: 'channel' | 'dm' | 'role'; reason: string; occurrenceId?: string; correlationId?: string };
+  'welcome.dm_blocked_fallback': { memberId: string; occurrenceId?: string; correlationId?: string };
+  'welcome.member_role_grant_failed': { memberId: string; roleId: string; attempt: number; occurrenceId?: string; correlationId?: string };
+  'welcome.channel_missing': { memberId: string; channelId: string; occurrenceId?: string; correlationId?: string };
 }
 
 export type PlatformEventType = keyof PlatformEventMap;

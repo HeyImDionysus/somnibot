@@ -85,7 +85,13 @@ async function sendWelcomeChannelMessage(
     const channel = member.guild.channels.cache.get(config.welcome_channel_id!) as TextChannel | undefined;
     if (!channel?.isTextBased()) {
       log.warn('Welcome channel not found or not text-based:', config.welcome_channel_id);
-      await recordWelcomeFailure(member, supabase, 'channel', 'channel_missing');
+      eventBus.emit('welcome.channel_missing', member.guild.id, {
+        memberId: member.id,
+        channelId: config.welcome_channel_id!,
+        occurrenceId: `${member.id}:welcome:channel-missing`,
+        correlationId: `welcome:${member.id}`,
+      });
+      await raiseWelcomeAlert(supabase, member, 'channel', 'channel_missing');
       return;
     }
 
@@ -127,7 +133,7 @@ async function sendWelcomeChannelMessage(
     log.info(`Channel message sent for ${member.user.tag}`);
   } catch (err) {
     log.error('Failed to send channel message:', { error: String(err) });
-    await recordWelcomeFailure(member, supabase, 'channel', 'send_failed');
+    await raiseWelcomeAlert(supabase, member, 'channel', 'send_failed');
   }
 }
 
@@ -154,13 +160,27 @@ async function sendWelcomeDM(
       : undefined;
     if (code === 50007) {
       log.warn(`Could not DM ${member.user.tag} because Discord rejected the DM`);
+      eventBus.emit('welcome.dm_blocked_fallback', member.guild.id, {
+        memberId: member.id,
+        occurrenceId: `${member.id}:welcome:dm-blocked`,
+        correlationId: `welcome:${member.id}`,
+      });
+      const channel = config.welcome_channel_id
+        ? member.guild.channels.cache.get(config.welcome_channel_id) as TextChannel | undefined
+        : undefined;
+      if (channel?.isTextBased()) {
+        await channel.send({
+          content: `${member}, welcome! I couldn't send you a DM, so here's the welcome note instead.`,
+          allowedMentions: { parse: ['users'] },
+        }).catch(() => undefined);
+      }
     } else {
       log.error(`Failed to send welcome DM to ${member.user.tag}:`, {
         code,
         error: String(err),
       });
     }
-    await recordWelcomeFailure(member, supabase, 'dm', code === 50007 ? 'dm_blocked' : 'send_failed');
+    if (code !== 50007) await raiseWelcomeAlert(supabase, member, 'dm', 'send_failed');
   }
 }
 
@@ -177,34 +197,49 @@ async function applyAutoRoles(
       const role = member.guild.roles.cache.get(roleId);
       if (!role) {
         log.warn(`Auto-role ${roleId} not found, skipping`);
-        await recordWelcomeFailure(member, supabase, 'role', `role_missing:${roleId}`);
+        eventBus.emit('welcome.member_role_grant_failed', member.guild.id, {
+          memberId: member.id, roleId, attempt: 0,
+          occurrenceId: `${member.id}:welcome:role:${roleId}`,
+          correlationId: `welcome:${member.id}`,
+        });
+        await raiseWelcomeAlert(supabase, member, 'role', `role_missing:${roleId}`);
         continue;
       }
       if (member.roles.cache.has(roleId)) continue; // Already has it
 
-      await member.roles.add(role, 'SomniBot welcome auto-role');
-      log.info(`Auto-role "${role.name}" granted to ${member.user.tag}`);
+      let granted = false;
+      for (let attempt = 1; attempt <= 2 && !granted; attempt++) {
+        try {
+          await member.roles.add(role, 'SomniBot welcome auto-role');
+          granted = true;
+          log.info(`Auto-role "${role.name}" granted to ${member.user.tag}`);
+        } catch (err) {
+          if (attempt === 2) {
+            log.error(`Failed to grant auto-role ${roleId}:`, err);
+            eventBus.emit('welcome.member_role_grant_failed', member.guild.id, {
+              memberId: member.id, roleId, attempt,
+              occurrenceId: `${member.id}:welcome:role:${roleId}`,
+              correlationId: `welcome:${member.id}`,
+            });
+            await raiseWelcomeAlert(supabase, member, 'role', `grant_failed:${roleId}`);
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          }
+        }
+      }
     } catch (err) {
       log.error(`Failed to grant auto-role ${roleId}:`, err);
-      await recordWelcomeFailure(member, supabase, 'role', `grant_failed:${roleId}`);
+      await raiseWelcomeAlert(supabase, member, 'role', `grant_failed:${roleId}`);
     }
   }
 }
 
-async function recordWelcomeFailure(
+async function raiseWelcomeAlert(
   member: GuildMember,
   supabase: SupabaseClient,
   surface: 'channel' | 'dm' | 'role',
   reason: string,
 ): Promise<void> {
-  const occurrenceId = `${member.id}:welcome:${surface}:${reason}`;
-  eventBus.emit('welcome.delivery_failed', member.guild.id, {
-    memberId: member.id,
-    surface,
-    reason,
-    occurrenceId,
-    correlationId: `welcome:${member.id}`,
-  });
   try {
     await raiseOwnerAlert(supabase, member.guild.id, {
       alertType: 'welcome_delivery_failed',

@@ -701,7 +701,7 @@ export class ScheduledMessageRunner {
         channelId: schedule.channel_id,
         attempt,
         backoffMs,
-        occurrenceId: `${occurrenceId}:send-retry`,
+        occurrenceId: `${occurrenceId}:send-retry:${attempt}`,
         correlationId: `schedule:${schedule.id}`,
       });
     });
