@@ -222,7 +222,10 @@ describe('GuildOnboardingSync', () => {
     sync.start();
 
     // Then: exactly one initial Discord sync and one config listener exist.
-    await vi.waitFor(() => expect(g.editOnboarding).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => {
+      expect(g.editOnboarding).toHaveBeenCalledTimes(1);
+      expect(g.editOnboarding).toHaveBeenCalledWith({ enabled: true, prompts: [] });
+    });
     expect(eventBus.on).toHaveBeenCalledTimes(1);
 
     const configChangedHandler = eventBus.on.mock.calls[0][1];

@@ -113,7 +113,9 @@ export class GuildOnboardingSync {
       await this.guild.editOnboarding({
         enabled: onboardingConfig.enabled,
         prompts,
-        defaultChannels: onboardingConfig.default_channel_ids,
+        ...(onboardingConfig.default_channel_ids.length > 0
+          ? { defaultChannels: onboardingConfig.default_channel_ids }
+          : {}),
       });
 
       log.info(`Synced ${prompts.length} onboarding prompts to Discord`);
