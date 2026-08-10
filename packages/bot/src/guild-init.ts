@@ -22,6 +22,7 @@ import type { PlatformEventBus } from './services/event-bus.js';
 import type { GuildContext } from './guild-context.js';
 import type { SomniClient } from './client.js';
 import { createLogger } from '@somnibot/shared';
+import { SOMNIBOT_VERSION } from './version.js';
 
 // ── Feature managers ──
 import { AutomationEngine } from './features/automations/index.js';
@@ -666,7 +667,7 @@ export async function initGuildFeatures(
       action: 'bot.started',
       actorType: 'system',
       actorId: 'system',
-      details: { version: '0.5.0' },
+      details: { version: SOMNIBOT_VERSION },
     });
 
     services.diagnosticsService = new DiagnosticsService(

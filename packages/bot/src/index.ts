@@ -51,6 +51,7 @@ import { shutdownBot, type BotLevelServices } from './services/bot-shutdown.js';
 import { acquireRuntimeLease, resolveRuntimeHolderId } from './services/runtime-lease.js';
 import { EmbedBuilder, Events } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
+import { SOMNIBOT_VERSION } from './version.js';
 
 const log = createLogger('Boot');
 
@@ -72,7 +73,7 @@ const log = createLogger('Boot');
  * New guilds joined after boot are initialized via the guildCreate event.
  */
 async function main(): Promise<void> {
-  log.info('━━━ SomniBot v0.5.0 — Starting ━━━');
+  log.info(`━━━ SomniBot v${SOMNIBOT_VERSION} — Starting ━━━`);
 
   // 0. Auto-migrate database on first boot
   const migrationResult = await runMigrations();
