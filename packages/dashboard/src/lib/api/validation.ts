@@ -72,7 +72,7 @@ const snowflake = z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake I
 const uuid = z.string().uuid();
 const safeName = z.string().min(1).max(100).trim();
 const safeDescription = z.string().max(2000).trim().optional().default('');
-const colorHex = z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().nullable();
+const embedColor = z.number().int().min(0).max(0xffffff).optional().nullable();
 const urlString = z.string().url().max(2048).optional().nullable();
 const snowflakeArray = z.array(snowflake).max(100).default([]);
 const uniqueSnowflakeArray = snowflakeArray.refine(
@@ -189,7 +189,7 @@ const embedCreate = z.object({
   name: safeName,
   title: z.string().max(256).optional().nullable(),
   description: z.string().max(4096).optional().nullable(),
-  color: colorHex,
+  color: embedColor,
   fields: z.array(z.object({
     name: z.string().max(256),
     value: z.string().max(1024),
@@ -212,7 +212,7 @@ const embedUpdate = z.object({
   name: safeName.optional(),
   title: z.string().max(256).optional().nullable(),
   description: z.string().max(4096).optional().nullable(),
-  color: colorHex,
+  color: embedColor,
   fields: z.array(z.object({
     name: z.string().max(256),
     value: z.string().max(1024),
