@@ -98,10 +98,11 @@ function makeDiscordMember(id: string, overrides: Record<string, unknown> = {}) 
   };
 }
 
-function makeGuild(members: ReturnType<typeof makeDiscordMember>[]) {
+function makeGuild(members: ReturnType<typeof makeDiscordMember>[], memberCount = members.length) {
   const collection = new Map(members.map((m) => [m.id, m]));
   return {
     id: 'guild-1',
+    memberCount,
     members: { fetch: vi.fn(async () => collection) },
   };
 }
@@ -178,6 +179,34 @@ describe('backfillMembers — paged reads (B5)', () => {
 // ── B1: stale left_at reconciliation ────────────────────────
 
 describe('backfillMembers — left_at reconciliation (B1)', () => {
+  it('marks departed active rows left from a complete fetch and refreshes the live count including bots', async () => {
+    const supabase = makeScriptedSupabase(standardHandler([
+      { discord_id: 'current', left_at: null, onboarding_completed: true },
+      { discord_id: 'departed', left_at: null, onboarding_completed: true },
+      { discord_id: 'erased-departed', left_at: null, onboarding_completed: true },
+    ], ['erased-departed']));
+    const guild = makeGuild([
+      makeDiscordMember('current'),
+      makeDiscordMember('bot', { user: { bot: true } }),
+    ], 3);
+
+    await backfillMembers(supabase as never, guild as never);
+
+    expect(guild.memberCount).toBe(2);
+    const departedUpdate = supabase.entries.find(
+      (entry) => entry.table === 'members' && opArgs(entry, 'in') !== undefined,
+    );
+    expect(departedUpdate).toBeDefined();
+    expect((opArgs(departedUpdate!, 'update') as [Record<string, unknown>])[0]).toEqual({
+      left_at: expect.any(String),
+    });
+    expect(departedUpdate!.ops.filter(([method]) => method === 'eq').map(([, args]) => args)).toEqual([
+      ['guild_id', 'guild-1'],
+    ]);
+    expect(opArgs(departedUpdate!, 'is')).toEqual(['left_at', null]);
+    expect(opArgs(departedUpdate!, 'in')).toEqual(['discord_id', ['departed']]);
+  });
+
   it('clears stale left_at per-row, refreshing identity but never history columns', async () => {
     const supabase = makeScriptedSupabase(standardHandler([
       { discord_id: 'rejoiner', left_at: '2026-01-15T00:00:00Z', onboarding_completed: true },
