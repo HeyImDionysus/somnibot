@@ -6,11 +6,11 @@
  * starts. This harness therefore creates the authoritative legacy table shape
  * in an isolated schema, seeds nullable historical timestamps, rewrites only
  * the migrations' explicit `public.` qualifier, and executes the real SQL
- * files in production order. The index migration is transaction-compatible
- * with the Supabase CLI. The harness seeds an invalid catalog row by
- * canceling a concurrent build only after PostgreSQL publishes its catalog
- * row, then exercises recovery and fail-closed behavior in disposable schema
- * state; production migration history is never touched.
+ * files in production order. The index fixture also reproduces a canceled
+ * `CREATE INDEX CONCURRENTLY`: one backend holds a pre-build write open while a
+ * second backend starts the real index statement, then the build is canceled
+ * after PostgreSQL publishes its invalid catalog entry. Production tables and
+ * migration history are never touched.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -76,11 +76,11 @@ function indexMigrationFragments(): {
   postflight: string;
 } {
   const source = isolatedMigration(INDEX_MIGRATION);
-  const createStart = source.search(/^CREATE INDEX IF NOT EXISTS/m);
+  const createStart = source.search(/^CREATE INDEX CONCURRENTLY/m);
   const createEnd = source.indexOf(';', createStart);
   if (createStart < 0 || createEnd < 0) {
     throw new Error(
-      `${INDEX_MIGRATION} must contain one transaction-compatible CREATE INDEX statement`,
+      `${INDEX_MIGRATION} must contain one CREATE INDEX CONCURRENTLY statement`,
     );
   }
 
@@ -97,15 +97,19 @@ function hasExecutableSql(source: string): boolean {
 
 async function applyIndexMigration(): Promise<void> {
   const fragments = indexMigrationFragments();
-  await sql.begin(async (transaction) => {
-    for (const statement of [
-      fragments.preflight,
-      fragments.create,
-      fragments.postflight,
-    ]) {
-      if (hasExecutableSql(statement)) await transaction.unsafe(statement);
+  for (const statement of [
+    fragments.preflight,
+    fragments.create,
+    fragments.postflight,
+  ]) {
+    if (hasExecutableSql(statement)) {
+      // Supabase CLI >=2.110 flushes the transaction batch around the
+      // pipeline-incompatible CREATE INDEX CONCURRENTLY statement. Executing
+      // these fragments separately reproduces that boundary without touching
+      // the real migration history table.
+      await sql.unsafe(statement);
     }
-  });
+  }
 }
 
 async function indexCatalog(
@@ -620,18 +624,13 @@ describe('phased fraud observation-clock legacy migration', () => {
     }
   });
 
-  it('rolls back the transaction when postflight validation cannot observe the index', async () => {
+  it('requires the concurrent index batch to remain outside a transaction', async () => {
     const fragments = indexMigrationFragments();
     await dropFixtureTargetIndex();
     try {
       await expect(sql.begin(async (transaction) => {
-        await transaction.unsafe(fragments.preflight);
         await transaction.unsafe(fragments.create);
-        await transaction.unsafe(
-          `DROP INDEX ${FIXTURE_SCHEMA}.idx_fraud_signals_critical_observation`,
-        );
-        await transaction.unsafe(fragments.postflight);
-      })).rejects.toMatchObject({ code: '55000' });
+      })).rejects.toMatchObject({ code: '25001' });
       expect(await indexCatalog(FIXTURE_SCHEMA)).toBeUndefined();
     } finally {
       await restoreFixtureTargetIndex();
@@ -836,7 +835,7 @@ describe('phased fraud observation-clock legacy migration', () => {
     const indexMigration = migrationSource(INDEX_MIGRATION);
     const executableSql = indexMigration.replace(/^\s*--.*$/gm, '');
     const createPosition = indexMigration.indexOf(
-      'CREATE INDEX IF NOT EXISTS',
+      'CREATE INDEX CONCURRENTLY IF NOT EXISTS',
     );
     const preflightSql = indexMigration.slice(0, createPosition);
     expect(createPosition).toBeGreaterThan(0);
@@ -856,7 +855,6 @@ describe('phased fraud observation-clock legacy migration', () => {
     expect(rejectWrongDefinition).toBeLessThan(preserveValidIndex);
     expect(indexMigration.slice(createPosition)).toContain('indisvalid');
     expect(indexMigration.slice(createPosition)).toContain('RAISE EXCEPTION');
-    expect(indexMigration).not.toContain('CREATE INDEX CONCURRENTLY');
     expect(executableSql.match(
       /LOCK TABLE public\.fraud_signals IN SHARE UPDATE EXCLUSIVE MODE/g,
     )).toHaveLength(2);

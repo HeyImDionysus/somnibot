@@ -273,12 +273,9 @@ function installDirectSimulator(
 
     if (
       options.failConcurrentIndex
-      && (
-        query.trimStart().startsWith('CREATE INDEX CONCURRENTLY')
-        || query.includes('CREATE INDEX IF NOT EXISTS')
-      )
+      && query.trimStart().startsWith('CREATE INDEX CONCURRENTLY')
     ) {
-      throw new Error('index build failed');
+      throw new Error('concurrent build failed');
     }
 
     if (query.includes('$migration_runner_history$')) {
@@ -423,7 +420,7 @@ describe('migration runner direct-Postgres execution', () => {
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
-  it('holds one reserved session advisory lock and reproves ownership around the ordinary migration transaction', async () => {
+  it('holds one reserved session advisory lock and reproves ownership before every DO/CIC/DO batch', async () => {
     const state: HistoryRow[] = [{
       filename: MIGRATION,
       checksum: canonical(source),
@@ -441,18 +438,20 @@ describe('migration runner direct-Postgres execution', () => {
     const execution = clients[4];
     expect(execution.queries).toEqual([]);
     expect(execution.reserve).toHaveBeenCalledOnce();
-    expect(execution.reserved.queries).toHaveLength(8);
+    expect(execution.reserved.queries).toHaveLength(12);
     expect(execution.reserved.queries[0]).toContain('pg_advisory_lock');
     expect(execution.reserved.queries[1]).toContain('$migration_runner_claim_proof$');
-    expect(execution.reserved.queries[2].trim()).toBe('BEGIN;');
-    expect(execution.reserved.queries[3]).toContain('DO $fraud_index_recovery$');
-    expect(execution.reserved.queries[3]).toContain('CREATE INDEX IF NOT EXISTS');
-    expect(execution.reserved.queries[3]).toContain('DO $fraud_index_postflight$');
-    expect(execution.reserved.queries[3]).not.toContain('$migration_runner_history$');
-    expect(execution.reserved.queries[4]).toContain('$migration_runner_claim_proof$');
-    expect(execution.reserved.queries[5]).toContain('$migration_runner_history$');
-    expect(execution.reserved.queries[6].trim()).toBe('COMMIT;');
-    expect(execution.reserved.queries[7]).toContain('pg_advisory_unlock');
+    expect(execution.reserved.queries[2]).toContain('DO $fraud_index_recovery$');
+    expect(execution.reserved.queries[3]).toContain('$migration_runner_claim_proof$');
+    expect(execution.reserved.queries[4].trimStart()).toMatch(/^CREATE INDEX CONCURRENTLY/);
+    expect(execution.reserved.queries[5]).toContain('$migration_runner_claim_proof$');
+    expect(execution.reserved.queries[6].trim()).toBe('BEGIN;');
+    expect(execution.reserved.queries[7]).toContain('DO $fraud_index_postflight$');
+    expect(execution.reserved.queries[7]).not.toContain('$migration_runner_history$');
+    expect(execution.reserved.queries[8]).toContain('$migration_runner_claim_proof$');
+    expect(execution.reserved.queries[9]).toContain('$migration_runner_history$');
+    expect(execution.reserved.queries[10].trim()).toBe('COMMIT;');
+    expect(execution.reserved.queries[11]).toContain('pg_advisory_unlock');
     expect(execution.reserved.release).toHaveBeenCalledOnce();
     expect(state[0]).toMatchObject({
       checksum: canonical(source),
@@ -463,7 +462,7 @@ describe('migration runner direct-Postgres execution', () => {
     ))).toBe(true);
   });
 
-  it('stops before completion and releases only its exact claim when index creation fails', async () => {
+  it('stops before postflight and releases only its exact claim on CIC failure', async () => {
     const state: HistoryRow[] = [{
       filename: MIGRATION,
       checksum: canonical(source),
@@ -476,11 +475,9 @@ describe('migration runner direct-Postgres execution', () => {
     const result = await runMigrations();
 
     expect(result.applied).toEqual([]);
-    expect(result.errors[0]).toMatch(/index build failed/i);
-    // The source batch contains the postflight text, but the injected index
-    // failure aborts before the runner can issue the completion CAS.
+    expect(result.errors[0]).toMatch(/concurrent build failed/i);
     expect(clients[4].reserved.queries.some((query) => (
-      query.includes('$migration_runner_history$')
+      query.includes('DO $fraud_index_postflight$')
     ))).toBe(false);
     expect(clients[4].reserved.queries.at(-1)).toContain('pg_advisory_unlock');
     expect(clients[4].reserved.release).toHaveBeenCalledOnce();
@@ -637,7 +634,7 @@ describe('migration runner direct-Postgres execution', () => {
     });
   });
 
-  it('stops before completion when ownership is lost during the ordinary migration transaction', async () => {
+  it('stops before CIC when ownership is lost after the approved preflight batch', async () => {
     const state: HistoryRow[] = [{
       filename: MIGRATION,
       checksum: canonical(source),
@@ -652,7 +649,7 @@ describe('migration runner direct-Postgres execution', () => {
     expect(result.applied).toEqual([]);
     expect(result.errors[0]).toMatch(/claim proof failed/i);
     expect(clients[4].reserved.queries.some((query) => (
-      query.includes('$migration_runner_history$')
+      query.trimStart().startsWith('CREATE INDEX CONCURRENTLY')
     ))).toBe(false);
     expect(clients[4].reserved.queries.at(-1)).toContain('pg_advisory_unlock');
     expect(state[0].checksum).toContain('00000000-0000-4000-8000-000000000099');

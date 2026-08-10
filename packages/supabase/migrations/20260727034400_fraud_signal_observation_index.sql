@@ -1,6 +1,6 @@
--- Supabase CLI runs migrations in a transaction during reset and deploy.
--- Keep this index build transaction-compatible so the migration is accepted
--- by the CLI pipeline as well as by the in-process migration runner.
+-- Supabase CLI >= 2.110 flushes its transaction batch before
+-- CREATE INDEX CONCURRENTLY, runs that statement alone, then resumes a
+-- transaction for the remaining statements and migration-history insert.
 --
 -- A canceled concurrent build leaves its catalog row behind with
 -- pg_index.indisvalid = false. CREATE INDEX ... IF NOT EXISTS alone would skip
@@ -107,8 +107,10 @@ BEGIN
           USING ERRCODE = '55000';
       END IF;
     ELSE
-      -- The ordinary drop of this invalid exact-definition index is legal
-      -- while the table lock proves no concurrent builder still owns it.
+      -- DROP INDEX CONCURRENTLY is also forbidden inside a transaction but is
+      -- not a Supabase CLI 2.110 pipeline-incompatible statement. A normal
+      -- drop of this invalid exact-definition index is legal while the table
+      -- lock proves no concurrent builder still owns it.
       EXECUTE
         'DROP INDEX public.idx_fraud_signals_critical_observation';
     END IF;
@@ -116,7 +118,7 @@ BEGIN
 END
 $fraud_index_recovery$;
 
-CREATE INDEX IF NOT EXISTS idx_fraud_signals_critical_observation
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_fraud_signals_critical_observation
   ON public.fraud_signals (guild_id, last_observed_at DESC)
   WHERE status = 'open' AND severity = 'critical';
 
@@ -127,9 +129,8 @@ DO $fraud_index_postflight$
 DECLARE
   target_index_ready BOOLEAN;
 BEGIN
-  -- Keep the postflight in the same transaction as the index build and
-  -- migration-history insert so a missing, invalid, or wrong-definition index
-  -- fails closed and leaves the migration retryable.
+  -- Supabase CLI 2.110 keeps this lock through its migration-history insert
+  -- because the postflight and history write share one transaction.
   PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
   LOCK TABLE public.fraud_signals IN SHARE UPDATE EXCLUSIVE MODE;
 
