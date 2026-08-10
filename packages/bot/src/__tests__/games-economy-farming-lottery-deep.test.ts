@@ -316,6 +316,7 @@ describe('EconomyManager deeper', () => {
     expect(supa.rpc).toHaveBeenCalledWith('economy_leaderboard', {
       p_guild_id: expect.any(String),
       p_limit: 10,
+      p_offset: 0,
     });
   });
 
