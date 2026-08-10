@@ -55,6 +55,7 @@ describe('runtime profile model', () => {
     expect(env.SOMNIBOT_RUNTIME_MODE).toBe('regular-local');
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED).toBe('true');
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('http://localhost:3456');
+    expect(env.HEALTH_PORT).toBe('3001');
   });
 
   it('emits the launcher public callback contract for regular-local setup finalization', () => {
@@ -84,6 +85,7 @@ describe('runtime profile model', () => {
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED).toBe('true');
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('https://somnibot.example.com');
     expect(env.PORT).toBe('3000');
+    expect(env.HEALTH_PORT).toBe('3001');
     expect(env.HOSTNAME).toBe('0.0.0.0');
     expect(env.VALKEY_URL).toBe('redis://valkey:6379');
     expect(env.LAVALINK_HOST).toBe('lavalink');

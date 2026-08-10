@@ -214,6 +214,7 @@ export function buildRuntimeEnvVars(config: RuntimeNetworkingConfig): Record<str
     NEXT_PUBLIC_APP_URL: profile.publicCallbackBaseUrl,
     PAYPAL_WEBHOOK_URL: profile.paypalWebhookUrl,
     PORT: profile.dashboardPort,
+    HEALTH_PORT: '3001',
     HOSTNAME: profile.dashboardHostname,
     LAVALINK_HOST: profile.lavalinkHost,
     LAVALINK_PORT: profile.lavalinkPort,
