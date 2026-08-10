@@ -235,8 +235,8 @@ async function applyAutoRoles(
 }
 
 async function raiseWelcomeAlert(
-  member: GuildMember,
   supabase: SupabaseClient,
+  member: GuildMember,
   surface: 'channel' | 'dm' | 'role',
   reason: string,
 ): Promise<void> {

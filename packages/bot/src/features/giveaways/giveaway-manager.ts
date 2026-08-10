@@ -748,7 +748,7 @@ export class GiveawayManager {
           channelId: giveaway.channel_id,
           messageId: giveaway.message_id,
           attempt: attempt + 1,
-          occurrenceId: `${giveaway.id}:embed-update-retry`,
+          occurrenceId: `${giveaway.id}:embed-update-retry:${attempt + 1}`,
           correlationId: `giveaway:${giveaway.id}`,
         });
         await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
