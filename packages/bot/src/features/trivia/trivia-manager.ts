@@ -239,7 +239,7 @@ export class TriviaManager {
     const allAnswers = cryptoShuffle([question.correct, ...question.wrong]);
     const correctIndex = allAnswers.indexOf(question.correct);
 
-    const labels = ['🅰️', '🅱️', '🅲', '🅳'];
+    const labels = ['A', 'B', 'C', 'D'];
     const embed = brandedEmbed(kit, {
       intent: 'info',
       title: hosted ? '🎉 Hosted Trivia!' : '🧠 Trivia Time!',
@@ -504,7 +504,7 @@ export class TriviaManager {
       totalPayout: totalPaid,
     });
 
-    const labels = ['🅰️', '🅱️', '🅲', '🅳'];
+    const labels = ['A', 'B', 'C', 'D'];
     let resultText =
       `**${round.question.question}**\n\n` +
       `✅ Correct Answer: ${labels[round.correctIndex]} **${round.question.correct}**\n\n`;
