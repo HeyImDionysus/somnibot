@@ -302,6 +302,11 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('applyPayPalWebhookResult(result)');
     expect(renderer).toContain('async function refreshProcessStatus()');
     expect(renderer).toContain('const status = await window.somnibot.getStatus();');
+    expect(renderer).toContain('function scheduleRuntimeHealthRetry(status)');
+    expect(renderer).toContain("latestProcessStatus?.dashboard === 'online'");
+    expect(renderer).toContain("runtimeHealth?.status === 'pending'");
+    expect(renderer).toContain('setupStatusRetryCount < 12');
+    expect(renderer).toContain('void refreshSetupStatus({ runtimeHealthRetry: true });');
     expect(renderer).toContain('await refreshProcessStatus();\n    updatePayPalWebhookButton();');
     expect(renderer).toContain('Local services were restarted to load the new Webhook ID.');
     expect(renderer).toContain('window.somnibot.ensurePayPalWebhook(collectConfig())');

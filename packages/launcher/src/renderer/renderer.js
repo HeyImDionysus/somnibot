@@ -128,6 +128,8 @@ let isPayPalWebhookRunning = false;
 let runtimeMode = 'regular-local';
 let setupStatus = null;
 let setupStatusSeq = 0;
+let setupStatusRetryTimer = null;
+let setupStatusRetryCount = 0;
 let latestProcessStatus = null;
 let tailscalePublicCallbackBaseUrl = '';
 let latestTailscaleReadiness = null;
@@ -407,6 +409,14 @@ function setRuntimeMode(mode, options = {}) {
 }
 
 async function refreshSetupStatus(options = {}) {
+  if (setupStatusRetryTimer) {
+    clearTimeout(setupStatusRetryTimer);
+    setupStatusRetryTimer = null;
+  }
+  if (!options.runtimeHealthRetry) {
+    setupStatusRetryCount = 0;
+  }
+
   const seq = ++setupStatusSeq;
   const input = {
     ...collectRuntimeConfig(),
@@ -464,6 +474,7 @@ async function refreshSetupStatus(options = {}) {
     clearStaleVpsActionResults(status);
     renderSetupStatus(status);
     updatePayPalWebhookButton();
+    scheduleRuntimeHealthRetry(status);
     return status;
   } catch (err) {
     console.error('Failed to refresh setup status:', err);
@@ -1462,6 +1473,25 @@ function markSavedSecret(input) {
     btn.setAttribute('aria-label', `${input.id} is saved securely`);
     btn.setAttribute('aria-pressed', 'false');
   }
+}
+
+function scheduleRuntimeHealthRetry(status) {
+  const runtimeHealth = status?.steps?.find((step) => step.id === 'start-local');
+  const shouldRetry = runtimeMode === 'regular-local'
+    && latestProcessStatus?.dashboard === 'online'
+    && runtimeHealth?.status === 'pending'
+    && setupStatusRetryCount < 12;
+
+  if (!shouldRetry) {
+    setupStatusRetryCount = 0;
+    return;
+  }
+
+  setupStatusRetryCount += 1;
+  setupStatusRetryTimer = setTimeout(() => {
+    setupStatusRetryTimer = null;
+    void refreshSetupStatus({ runtimeHealthRetry: true });
+  }, 5_000);
 }
 
 function clearSavedSecretState(input) {
