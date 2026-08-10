@@ -495,7 +495,7 @@ export class FishingManager {
       // Junk catch
       const junk = randomPick(JUNK_ITEMS);
       // V52-M2: check addCurrency return so failed credits are surfaced
-      const paid = await this.addCurrency(userId, junk.currency);
+      const paid = await this.addCurrency(userId, junk.currency, `${correlationId}:payout`);
       const catchDetails = { catchType: 'junk', name: junk.name, amount: junk.currency, paid };
       if (!paid) {
         await writeEconomyAudit(this.supabase, {
@@ -529,7 +529,7 @@ export class FishingManager {
       // Treasure catch
       const treasure = randomPick(TREASURE_ITEMS);
       // V52-M2: check addCurrency return so failed credits are surfaced
-      const paid = await this.addCurrency(userId, treasure.currency);
+      const paid = await this.addCurrency(userId, treasure.currency, `${correlationId}:payout`);
       const catchDetails = { catchType: 'treasure', name: treasure.name, amount: treasure.currency, paid };
       if (!paid) {
         await writeEconomyAudit(this.supabase, {
@@ -666,16 +666,59 @@ export class FishingManager {
     // payout leaves a durable unpaid row (paid=false) that an operator — or the
     // retryUnpaidPayouts sweep — can settle exactly once. A blind re-credit is
     // no longer possible because only still-unpaid rows are ever re-credited.
-    const { data: inserted } = await this.supabase.from('economy_fish_catches').insert({
+    const { data: inserted, error: insertError } = await this.supabase.from('economy_fish_catches').insert({
       guild_id: this.guild.id,
       user_id: userId,
       species_id: picked.id,
       weight: parseFloat(weight.toFixed(2)),
       price_earned: price,
       paid: false,
+      correlation_id: correlationId,
     }).select('id').single();
 
-    const paid = await this.addCurrency(userId, price);
+    // The partial unique index on (guild_id, correlation_id) turns a replay
+    // into a read of the original catch.  Do not roll a second species or
+    // issue another payout; if the original process died after the wallet
+    // credit but before flipping paid=true, reuse the same economy idempotency
+    // key so the retry is still a no-op at the ledger.
+    if (insertError) {
+      if (insertError.code !== '23505' || !correlationId) {
+        log.error('Fish catch insert failed:', insertError.message);
+        return null;
+      }
+      const { data: existing, error: readError } = await this.supabase
+        .from('economy_fish_catches')
+        .select('id, species_id, weight, price_earned, paid')
+        .eq('guild_id', this.guild.id)
+        .eq('correlation_id', correlationId)
+        .maybeSingle();
+      if (readError || !existing) {
+        log.error('Fish catch replay read failed:', readError?.message ?? 'row not found');
+        return null;
+      }
+      const existingSpecies = species.find((candidate) => candidate.id === existing.species_id);
+      if (!existingSpecies) {
+        log.error(`Fish catch replay species ${existing.species_id} is not in the active catalog`);
+        return null;
+      }
+      const existingCatch: FishCatch = {
+        species: existingSpecies,
+        weight: Number(existing.weight),
+        price: Number(existing.price_earned),
+        paid: existing.paid !== false,
+      };
+      if (existingCatch.paid) return existingCatch;
+
+      const replayPaid = await this.addCurrency(userId, existingCatch.price, correlationId);
+      if (replayPaid) {
+        await this.supabase.from('economy_fish_catches')
+          .update({ paid: true }).eq('id', existing.id).eq('paid', false);
+        existingCatch.paid = true;
+      }
+      return existingCatch;
+    }
+
+    const paid = await this.addCurrency(userId, price, correlationId);
     if (paid) {
       if (inserted?.id) {
         await this.supabase.from('economy_fish_catches').update({ paid: true }).eq('id', inserted.id);
@@ -749,13 +792,13 @@ export class FishingManager {
   async retryUnpaidPayouts(limit = 100): Promise<number> {
     const { data: unpaid } = await this.supabase
       .from('economy_fish_catches')
-      .select('id, user_id, price_earned')
+      .select('id, user_id, price_earned, correlation_id')
       .eq('guild_id', this.guild.id)
       .eq('paid', false)
       .limit(limit);
 
     let settled = 0;
-    for (const row of (unpaid ?? []) as Array<{ id: string; user_id: string; price_earned: number }>) {
+    for (const row of (unpaid ?? []) as Array<{ id: string; user_id: string; price_earned: number; correlation_id: string | null }>) {
       // Atomic claim: only the writer that flips false→true proceeds to credit.
       const { data: claimed } = await this.supabase
         .from('economy_fish_catches')
@@ -765,7 +808,7 @@ export class FishingManager {
         .select('id');
       if (!claimed || claimed.length === 0) continue; // another worker took it
 
-      const ok = await this.addCurrency(row.user_id, row.price_earned);
+      const ok = await this.addCurrency(row.user_id, row.price_earned, row.correlation_id ?? `retry:${row.id}`);
       if (ok) {
         settled++;
         const operationId = `retry:${row.id}`;
@@ -859,7 +902,7 @@ export class FishingManager {
     if (!claimedRows || claimedRows.length === 0) return null; // already rewarded
 
     const coins = config.economy_fishing_collection_reward_coins ?? 5000;
-    const paid = await this.addCurrency(userId, coins);
+    const paid = await this.addCurrency(userId, coins, `${correlationId}:collection`);
     if (!paid) {
       // Roll back the fence so the bonus is retried; never mark rewarded-but-unpaid.
       await this.supabase.from('economy_fish_collection_rewards')
@@ -951,11 +994,12 @@ export class FishingManager {
 
   // V52-M2: return boolean so callers can detect and surface wallet failures
   // instead of silently losing coins.
-  private async addCurrency(userId: string, amount: number): Promise<boolean> {
+  private async addCurrency(userId: string, amount: number, idempotencyKey?: string): Promise<boolean> {
     const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: amount,
+      ...(idempotencyKey ? { p_idempotency_key: idempotencyKey } : {}),
     });
     if (error) {
       log.error(`economy_add_balance failed for ${userId}:`, error.message);

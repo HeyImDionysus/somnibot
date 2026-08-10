@@ -1991,6 +1991,8 @@ export interface DbFishCatch {
   weight: number;
   price_earned: number;
   caught_at: string;
+  paid: boolean;
+  correlation_id: string | null;
 }
 
 // ── Adventures ────────────────────────────────────────────
