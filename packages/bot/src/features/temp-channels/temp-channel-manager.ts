@@ -722,10 +722,10 @@ export class TempChannelManager {
 
   /**
    * Recover the crash window between Discord channel creation and the
-   * active_temp_channels insert. The winning claim stores a deterministic room
-   * identity before any Discord side effect. A stale duplicate first refreshes
-   * the guild channel snapshot and adopts a matching survivor; only after
-   * proving that none exists may it renew the claim through a database CAS.
+   * active_temp_channels insert. The winning claim stores the created channel
+   * ids before any later persistence step. A stale duplicate can recover only
+   * those exact Discord resources; claims without durable ids require manual
+   * cleanup rather than risking adoption of a user-created channel.
    */
   private async recoverStaleCreationClaim(
     occurrence: DiscordOperationOccurrence,
@@ -740,15 +740,23 @@ export class TempChannelManager {
       || metadata.hubChannelId !== hub.hub_channel_id
       || metadata.categoryId !== hub.category_id
       || metadata.ownerId !== member.id
-      || typeof metadata.channelName !== 'string'
     ) {
       return 'blocked';
     }
-    const plannedChannelName = metadata.channelName;
 
     const claimedAt = Date.parse(occurrence.claimed_at);
     const staleBeforeMs = Date.now() - CREATION_CLAIM_LEASE_MS;
     if (!Number.isFinite(claimedAt) || claimedAt >= staleBeforeMs) return 'blocked';
+
+    const createdChannelIds = Array.isArray(metadata.createdChannelIds)
+      ? metadata.createdChannelIds.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (createdChannelIds.length === 0) {
+      log.warn('Stale temp-room claim has no durable channel ids; manual cleanup required', {
+        occurrenceId: occurrence.id,
+      });
+      return 'blocked';
+    }
 
     try {
       await this.guild.channels.fetch();
@@ -760,87 +768,43 @@ export class TempChannelManager {
       return 'blocked';
     }
 
-    // Durable ids beat name heuristics. When the crashed attempt persisted
-    // createdChannelIds, resolve survivors BY ID: a text channel surviving
-    // alone (voice deleted, cleanup writes all failed) is invisible to the
-    // voice name-search below — recovery would reclaim the occurrence and
-    // spawn a fresh room while the text channel stayed orphaned forever.
+    // Resolve survivors only by their durable ids: a text channel surviving
+    // alone (voice deleted, cleanup writes all failed) still needs cleanup.
     // Delete lone non-voice survivors first; while any survivor resists
     // deletion the claim stays blocked rather than reclaimed.
-    const createdChannelIds = Array.isArray(metadata.createdChannelIds)
-      ? metadata.createdChannelIds.filter((value): value is string => typeof value === 'string')
-      : [];
-    if (createdChannelIds.length > 0) {
-      const survivors = createdChannelIds
-        .map((channelId) => this.guild.channels.cache.get(channelId))
-        .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel));
-      const hasVoiceSurvivor = survivors.some(
-        (channel) => channel.type === ChannelType.GuildVoice,
-      );
-      if (!hasVoiceSurvivor && survivors.length > 0) {
-        for (const survivor of survivors) {
-          try {
-            await survivor.delete('Removing orphaned temp-channel remnant before reclaim');
-          } catch (deleteError) {
-            log.warn('Orphaned temp-channel remnant resisted deletion; blocking reclaim', {
-              occurrenceId: occurrence.id,
-              channelId: survivor.id,
-              error: String(deleteError),
-            });
-            return 'blocked';
-          }
+    const survivors = createdChannelIds
+      .map((channelId) => this.guild.channels.cache.get(channelId))
+      .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel));
+    const hasVoiceSurvivor = survivors.some(
+      (channel) => channel.type === ChannelType.GuildVoice,
+    );
+    if (!hasVoiceSurvivor && survivors.length > 0) {
+      for (const survivor of survivors) {
+        try {
+          await survivor.delete('Removing orphaned temp-channel remnant before reclaim');
+        } catch (deleteError) {
+          log.warn('Orphaned temp-channel remnant resisted deletion; blocking reclaim', {
+            occurrenceId: occurrence.id,
+            channelId: survivor.id,
+            error: String(deleteError),
+          });
+          return 'blocked';
         }
       }
     }
 
-    // The durable createdChannelIds are the AUTHORITATIVE room identity: a
-    // survivor renamed or moved during the stale window would slip past the
-    // name/category/timestamp heuristic, get reclaimed, and be recreated
-    // while the known room orphans. The heuristic remains only for claims
-    // that predate the id write.
-    const voiceById = createdChannelIds
+    const voice = createdChannelIds
       .map((channelId) => this.guild.channels.cache.get(channelId))
       .find((channel): channel is VoiceChannel =>
         channel?.type === ChannelType.GuildVoice,
       );
-    const voice = voiceById ?? [...this.guild.channels.cache.values()].find((candidate) => {
-      if (candidate.type !== ChannelType.GuildVoice) return false;
-      const channel = candidate as VoiceChannel;
-      return channel.name === plannedChannelName
-        && channel.parentId === hub.category_id
-        && channel.createdTimestamp >= claimedAt - 5_000
-        && channel.permissionOverwrites.cache
-          .get(member.id)?.allow.has(PermissionFlagsBits.ManageChannels) === true;
-    }) as VoiceChannel | undefined;
 
     if (voice) {
-      const pairedTextName =
-        typeof metadata.pairedTextName === 'string' ? metadata.pairedTextName : null;
-      // Same durable-id preference as the voice member of the pair: a text
-      // channel renamed or moved during the stale window must not be dropped
-      // to text_channel_id null and orphaned outside every cleanup path.
-      const pairedTextById = createdChannelIds
+      const pairedText = createdChannelIds
         .map((channelId) => this.guild.channels.cache.get(channelId))
         .find((channel): channel is TextChannel =>
           channel?.type === ChannelType.GuildText,
         );
-      const pairedText = pairedTextById ?? (pairedTextName
-        ? [...this.guild.channels.cache.values()].find((candidate) => {
-            if (candidate.type !== ChannelType.GuildText) return false;
-            const channel = candidate as TextChannel;
-            return channel.name === pairedTextName
-              && channel.parentId === hub.category_id
-              && channel.createdTimestamp >= claimedAt - 5_000
-              && channel.permissionOverwrites.cache
-                .get(member.id)?.allow.has(PermissionFlagsBits.ViewChannel) === true
-              && channel.permissionOverwrites.cache
-                .get(member.id)?.allow.has(PermissionFlagsBits.SendMessages) === true
-              && channel.permissionOverwrites.cache
-                .get(member.id)?.allow.has(PermissionFlagsBits.ManageMessages) === true
-              && channel.permissionOverwrites.cache
-                .get(this.guild.id)?.deny.has(PermissionFlagsBits.ViewChannel) === true;
-          }) as TextChannel | undefined
-        : undefined);
       const recovered: ActiveTempChannel = {
         channel_id: voice.id,
         text_channel_id: pairedText?.id ?? null,

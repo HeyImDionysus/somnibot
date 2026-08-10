@@ -968,6 +968,7 @@ describe('/api/deploy', () => {
     const { POST } = await import('@/app/api/deploy/route');
 
     const res = await POST(jsonRequest('http://x/api/deploy', 'POST', {
+      action: 'deploy',
       roles: [{ name: 'Moderator' }, { name: 'Member' }],
       channels: [{ name: 'general' }],
       cleanExisting: true,
@@ -999,6 +1000,7 @@ describe('/api/deploy', () => {
     const { POST } = await import('@/app/api/deploy/route');
 
     const res = await POST(jsonRequest('http://x/api/deploy', 'POST', {
+      action: 'deploy',
       roles: [{ name: 'Moderator' }],
       channels: [{ name: 'general' }],
     }));

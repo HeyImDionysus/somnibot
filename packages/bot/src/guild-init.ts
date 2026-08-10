@@ -167,6 +167,16 @@ export function initializeMarketFeature(
   }
 }
 
+export function getCommunityChannelMappings(
+  guild: Pick<Guild, 'rulesChannelId' | 'publicUpdatesChannelId' | 'safetyAlertsChannelId'>,
+): Array<{ key: string; discordId: string }> {
+  const communityIds: Array<{ key: string; discordId: string }> = [];
+  if (guild.rulesChannelId) communityIds.push({ key: 'channel:rules', discordId: guild.rulesChannelId });
+  if (guild.publicUpdatesChannelId) communityIds.push({ key: 'channel:public-updates', discordId: guild.publicUpdatesChannelId });
+  if (guild.safetyAlertsChannelId) communityIds.push({ key: 'channel:moderator-only', discordId: guild.safetyAlertsChannelId });
+  return communityIds;
+}
+
 /**
  * Initialize all feature managers and services for a single guild.
  * This is the GuildRouter initCallback: called once per guild on first access.
@@ -215,11 +225,7 @@ export async function initGuildFeatures(
 
   // ── Community channels ──
   try {
-    const communityIds: { key: string; discordId: string }[] = [];
-    if (guild.rulesChannelId) communityIds.push({ key: 'channel:rules', discordId: guild.rulesChannelId });
-    if (guild.publicUpdatesChannelId) communityIds.push({ key: 'channel:public-updates', discordId: guild.publicUpdatesChannelId });
-    const modOnly = guild.channels.cache.find((c) => c.name === 'moderator-only');
-    if (modOnly) communityIds.push({ key: 'channel:moderator-only', discordId: modOnly.id });
+    const communityIds = getCommunityChannelMappings(guild);
 
     if (communityIds.length > 0) {
       const rows = communityIds.map((c) => ({

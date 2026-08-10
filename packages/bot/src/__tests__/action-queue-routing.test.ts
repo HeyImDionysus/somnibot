@@ -642,7 +642,7 @@ function makeNonCommerceRelinkSupa(
 
 function makeGuild() {
   const mockRole = {
-    id: 'role-1', name: 'TestRole', managed: false, position: 1,
+    id: 'role-1', name: 'TestRole', managed: false, editable: true, position: 1,
     edit: vi.fn().mockResolvedValue({}),
     setPosition: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),

@@ -713,7 +713,9 @@ const setupAction = z.discriminatedUnion('action', [
 // ── Deploy / server-setup schemas ───────────────────
 
 const deployAction = z.object({
-  action: z.literal('deploy').default('deploy'),
+  action: z.literal('deploy'),
+  deployMode: z.enum(['safe', 'destructive']).default('safe'),
+  confirmDestructive: z.literal(true).optional(),
   template_id: uuid.optional(),
   options: z.record(z.unknown()).optional(),
   roles: z.array(z.record(z.unknown())).optional(),
@@ -724,6 +726,14 @@ const deployAction = z.object({
     position: z.number().int().min(0).max(1000),
   }).passthrough()).optional(),
   permissionMap: z.record(z.unknown()).optional(),
+}).superRefine((value, context) => {
+  if (value.deployMode === 'destructive' && value.confirmDestructive !== true) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['confirmDestructive'],
+      message: 'Destructive deployments require an explicit confirmation',
+    });
+  }
 });
 
 // ── Sync action schemas ─────────────────────────────

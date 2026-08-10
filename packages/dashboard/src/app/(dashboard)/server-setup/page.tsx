@@ -297,6 +297,7 @@ export default function SetupPage() {
   const [completedSteps, setCompletedSteps] = useState<Set<WizardStep>>(new Set());
   const [setupData, setSetupData] = useState<SetupData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [destructiveDeploymentConfirmed, setDestructiveDeploymentConfirmed] = useState(false);
 
   // Wizard state — roles & channels the user configures
   const [wizardRoles, setWizardRoles] = useState<WizardRole[]>([]);
@@ -363,6 +364,7 @@ export default function SetupPage() {
   };
 
   const resetDeployCycle = useCallback(() => {
+    setDestructiveDeploymentConfirmed(false);
     setCompletedSteps((previous) => {
       const next = new Set(previous);
       for (const step of [4, 5, 6, 7] as WizardStep[]) next.delete(step);
@@ -489,7 +491,9 @@ export default function SetupPage() {
               roles={wizardRoles}
               channels={wizardChannels}
               categories={wizardCategories}
-              destructive={!setupData?.isDeployed && !setupData?.guild?.setupCompleted}
+              destructiveConfirmed={destructiveDeploymentConfirmed}
+              onDestructiveConfirmation={() => setDestructiveDeploymentConfirmed(true)}
+              onDestructiveCancellation={() => setDestructiveDeploymentConfirmed(false)}
             />
           )}
           {currentStep === 5 && (
@@ -499,6 +503,7 @@ export default function SetupPage() {
               roles={wizardRoles}
               channels={wizardChannels}
               categories={wizardCategories}
+              destructiveConfirmed={destructiveDeploymentConfirmed}
             />
           )}
           {currentStep === 6 && (
@@ -1319,15 +1324,20 @@ function Step4Review({
   roles,
   channels,
   categories,
-  destructive,
+  destructiveConfirmed,
+  onDestructiveConfirmation,
+  onDestructiveCancellation,
 }: {
   onComplete: () => void;
   isComplete: boolean;
   roles: WizardRole[];
   channels: WizardChannel[];
   categories: WizardCategory[];
-  destructive: boolean;
+  destructiveConfirmed: boolean;
+  onDestructiveConfirmation: () => void;
+  onDestructiveCancellation: () => void;
 }) {
+  const [showDestructiveConfirmation, setShowDestructiveConfirmation] = useState(false);
   const rolesByTier = TIER_ORDER.map((tier) => ({
     tier,
     label: TIER_META[tier].label,
@@ -1350,24 +1360,29 @@ function Step4Review({
         Review what the bot will apply to your Discord server. Nothing changes until the next step.
       </CardDescription>
 
-      <Card variant="warning">
+      <Card variant={destructiveConfirmed ? 'danger' : 'warning'}>
         <div className="flex items-start gap-2">
-          <AlertTriangle size={16} className="mt-0.5 text-discord-warning" />
+          <AlertTriangle
+            size={16}
+            className={cn(
+              'mt-0.5',
+              destructiveConfirmed ? 'text-discord-danger' : 'text-discord-warning',
+            )}
+          />
           <div>
             <p className="text-sm font-medium text-discord-text-primary">
-              {destructive ? 'Destructive First Deployment' : 'Destructive Changes Warning'}
+              {destructiveConfirmed ? 'Destructive replacement confirmed' : 'Safe deployment selected'}
             </p>
             <p className="text-xs text-discord-text-muted">
-              {destructive ? (
+              {destructiveConfirmed ? (
                 <>
-                  The first deployment will <strong>delete all existing channels and non-managed roles</strong>,
-                  then create this plan. Deleted messages and assignments cannot be restored.
+                  This deployment will <strong>delete all existing channels and non-managed roles</strong>, then
+                  create this plan. Deleted messages and assignments cannot be restored.
                 </>
               ) : (
                 <>
-                  Existing mapped roles, categories, and channels keep their Discord IDs and are edited in place.
-                  Removing an item or changing a channel type deletes that mapped Discord object, including its
-                  message history or member assignments.
+                  The bot reconciles only SomniBot-managed objects. Existing user-created roles, categories,
+                  channels, messages, and assignments are preserved unless you explicitly request replacement below.
                 </>
               )}
             </p>
@@ -1378,11 +1393,15 @@ function Step4Review({
       <div className="space-y-3 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
         <p className="font-medium text-discord-text-primary">Deploy plan:</p>
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>1. Set @everyone permissions to zero (lockout model)</li>
           <li>
-            2. {destructive
+            1. {destructiveConfirmed
+              ? 'Set @everyone permissions to zero (lockout model)'
+              : 'Preserve existing user-created roles, channels, and permission overrides'}
+          </li>
+          <li>
+            2. {destructiveConfirmed
               ? 'Replace existing non-managed roles and channels'
-              : 'Reconcile SomniBot-managed objects and remove only items deleted from this plan'}
+              : 'Reconcile only SomniBot-managed roles, categories, and channels'}
           </li>
           <li>3. Apply {roles.length} roles:</li>
         </ul>
@@ -1411,20 +1430,45 @@ function Step4Review({
           ))}
           <div className="flex items-center gap-2 text-xs text-discord-text-muted">
             <span className="font-medium">@everyone</span>
-            <span className="text-[10px]">(zero permissions)</span>
+            <span className="text-[10px]">
+              {destructiveConfirmed ? '(zero permissions)' : '(existing permissions preserved)'}
+            </span>
           </div>
         </div>
 
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>4. Apply {categories.length} categories</li>
-          <li>5. Apply {channels.length} channels with permission overrides</li>
+          <li>4. {destructiveConfirmed ? 'Apply' : 'Reconcile'} {categories.length} categories</li>
+          <li>5. {destructiveConfirmed ? 'Apply' : 'Reconcile'} {channels.length} channels with permission overrides</li>
           <li>6. Store ID mappings for drift detection</li>
         </ul>
       </div>
 
+      {destructiveConfirmed ? (
+        <Button variant="secondary" size="sm" onClick={onDestructiveCancellation}>
+          Keep Existing Server Content
+        </Button>
+      ) : (
+        <Button variant="danger" size="sm" onClick={() => setShowDestructiveConfirmation(true)}>
+          Replace All Existing Roles and Channels
+        </Button>
+      )}
+
       <Button size="sm" onClick={onComplete}>
         I Understand — Ready to Deploy
       </Button>
+
+      <ConfirmDialog
+        open={showDestructiveConfirmation}
+        title="Replace all existing roles and channels?"
+        description="This permanently deletes existing channels, messages, non-managed roles, and member assignments before creating this plan. Choose Replace to explicitly authorize it."
+        confirmLabel="Replace Everything"
+        variant="danger"
+        onConfirm={() => {
+          onDestructiveConfirmation();
+          setShowDestructiveConfirmation(false);
+        }}
+        onCancel={() => setShowDestructiveConfirmation(false)}
+      />
     </div>
   );
 }
@@ -1439,12 +1483,14 @@ function Step5Deploy({
   roles,
   channels,
   categories,
+  destructiveConfirmed,
 }: {
   onComplete: () => void;
   isComplete: boolean;
   roles: WizardRole[];
   channels: WizardChannel[];
   categories: WizardCategory[];
+  destructiveConfirmed: boolean;
 }) {
   const [deploying, setDeploying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -1475,6 +1521,8 @@ function Step5Deploy({
           roles,
           channels,
           categories,
+          deployMode: destructiveConfirmed ? 'destructive' : 'safe',
+          confirmDestructive: destructiveConfirmed ? true : undefined,
         }),
       });
 

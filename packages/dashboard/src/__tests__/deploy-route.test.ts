@@ -67,9 +67,9 @@ beforeEach(() => {
 });
 
 describe('POST /api/deploy persistence', () => {
-  it('stores exact categories and computes safe mode from a completed deployment', async () => {
+  it('stores a safe deployment even before setup and ignores legacy cleanExisting', async () => {
     const supabase = makeSupabase({
-      guild_desired_state: { applied_at: '2026-08-10T12:00:00.000Z' },
+      guild_desired_state: { applied_at: null },
       guild: { setup_completed: false },
     });
     vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
@@ -92,7 +92,7 @@ describe('POST /api/deploy persistence', () => {
     expect(supabase.writes.some((write) => write.table === 'audit_logs')).toBe(true);
   });
 
-  it('uses destructive mode only when no deployment has ever completed', async () => {
+  it('rejects a destructive deployment without an explicit confirmation', async () => {
     const supabase = makeSupabase({ guild: { setup_completed: false } });
     vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
 
@@ -101,6 +101,24 @@ describe('POST /api/deploy persistence', () => {
       roles: [{ key: 'member' }],
       channels: [{ key: 'general', categoryKey: 'cat-general' }],
       categories,
+      deployMode: 'destructive',
+    }));
+
+    expect(response.status).toBe(400);
+    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+  });
+
+  it('persists destructive mode only when explicitly requested and confirmed', async () => {
+    const supabase = makeSupabase({ guild: { setup_completed: false } });
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await POST(request({
+      action: 'deploy',
+      roles: [{ key: 'member' }],
+      channels: [{ key: 'general', categoryKey: 'cat-general' }],
+      categories,
+      deployMode: 'destructive',
+      confirmDestructive: true,
     }));
 
     expect(response.status).toBe(200);
@@ -110,6 +128,35 @@ describe('POST /api/deploy persistence', () => {
       applied_at: null,
       deploy_mode: 'destructive',
     });
+  });
+
+  it('rejects a save-draft action without signaling the bot to deploy', async () => {
+    const supabase = makeSupabase();
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await POST(request({
+      action: 'save-draft',
+      roles: [{ key: 'member' }],
+      channels: [{ key: 'general', categoryKey: 'cat-general' }],
+      categories,
+    }));
+
+    expect(response.status).toBe(400);
+    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+  });
+
+  it('rejects a request that does not explicitly name the deploy action', async () => {
+    const supabase = makeSupabase();
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await POST(request({
+      roles: [{ key: 'member' }],
+      channels: [{ key: 'general', categoryKey: 'cat-general' }],
+      categories,
+    }));
+
+    expect(response.status).toBe(400);
+    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
   });
 
   it('fails closed when prior deployment state cannot be read', async () => {

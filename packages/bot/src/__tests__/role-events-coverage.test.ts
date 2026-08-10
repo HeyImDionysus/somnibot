@@ -125,10 +125,9 @@ describe('handleRoleUpdate', () => {
 
   it('handles @everyone permissions change with auto-repair', async () => {
     const client = makeClient();
-    // getSyncConfig: returns autoRepairEveryone = true
     client.supabase.from.mockImplementation((table: string) => {
       if (table === 'guild_config') {
-        return chainBuilder({ data: { sync_auto_repair: false, sync_auto_repair_everyone: true } });
+        return chainBuilder({ data: { sync_auto_repair: true, sync_auto_repair_everyone: true } });
       }
       return chainBuilder({ data: null });
     });
@@ -438,7 +437,7 @@ describe('handleRoleUpdate', () => {
     const client = makeClient();
     client.supabase.from.mockImplementation((table: string) => {
       if (table === 'guild_config') {
-        return chainBuilder({ data: { sync_auto_repair_everyone: true } });
+        return chainBuilder({ data: { sync_auto_repair: true, sync_auto_repair_everyone: true } });
       }
       return chainBuilder({ data: null });
     });
@@ -454,11 +453,11 @@ describe('handleRoleUpdate', () => {
     expect(mockQueueDriftItem).toHaveBeenCalled();
   });
 
-  it('handles @everyone without auto-repair', async () => {
+  it('does not reset @everyone when global auto-repair is off', async () => {
     const client = makeClient();
     client.supabase.from.mockImplementation((table: string) => {
       if (table === 'guild_config') {
-        return chainBuilder({ data: { sync_auto_repair_everyone: false } });
+        return chainBuilder({ data: { sync_auto_repair: false, sync_auto_repair_everyone: true } });
       }
       return chainBuilder({ data: null });
     });

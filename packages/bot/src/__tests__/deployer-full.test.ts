@@ -193,13 +193,31 @@ describe('deployServerState — dry run', () => {
 });
 
 describe('deployServerState — @everyone', () => {
-  it('sets @everyone permissions to 0', async () => {
+  it('preserves @everyone permissions during a safe deploy', async () => {
     const guild = makeGuild();
     const supabase = { from: vi.fn(() => supaChain()) } as any;
     const options: DeployOptions = { cleanExisting: false, dryRun: false };
 
     const desiredState = { ...defaultDesiredState };
     const result = await deployServerState(guild as any, supabase, desiredState as any, options);
+
+    expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
+    const evAction = result.actions.find(a => a.entityType === 'everyone');
+    expect(evAction).toBeUndefined();
+  });
+
+  it('sets @everyone permissions to 0 during a destructive deploy', async () => {
+    const guild = makeGuild();
+    const supabase = { from: vi.fn(() => supaChain()) };
+    const options: DeployOptions = { cleanExisting: true, dryRun: false };
+
+    const desiredState = { ...defaultDesiredState };
+    const result = await deployServerState(
+      guild as unknown as Parameters<typeof deployServerState>[0],
+      supabase as unknown as Parameters<typeof deployServerState>[1],
+      desiredState as unknown as Parameters<typeof deployServerState>[2],
+      options,
+    );
 
     expect(guild.roles.everyone.setPermissions).toHaveBeenCalledWith(0n, expect.any(String));
     const evAction = result.actions.find(a => a.entityType === 'everyone');
@@ -211,7 +229,7 @@ describe('deployServerState — @everyone', () => {
     guild.roles.everyone.setPermissions = vi.fn(async () => { throw new Error('Forbidden'); });
 
     const supabase = { from: vi.fn(() => supaChain()) } as any;
-    const options: DeployOptions = { cleanExisting: false, dryRun: false };
+    const options: DeployOptions = { cleanExisting: true, dryRun: false };
 
     const result = await deployServerState(guild as any, supabase, defaultDesiredState as any, options);
 

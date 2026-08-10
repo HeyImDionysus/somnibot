@@ -32,6 +32,17 @@ interface DriftCardProps {
   loading?: boolean;
 }
 
+export const EXTRA_RESOURCE_WARNING =
+  'This resource was created outside SomniBot and is not managed yet. Accept adopts it into the managed plan; Ignore dismisses this drift. To delete it, do so deliberately in Discord channel or role management.';
+
+export function canRepairDriftItem(item: Pick<DriftCardData, 'type'>): boolean {
+  return item.type !== 'EXTRA_RESOURCE';
+}
+
+export function shouldShowRepair(item: Pick<DriftCardData, 'type' | 'suggestedAction'>): boolean {
+  return item.suggestedAction === 'repair' && canRepairDriftItem(item);
+}
+
 // ============================================================
 // Icons & styles
 // ============================================================
@@ -74,6 +85,7 @@ const entityIcons: Record<string, React.ElementType> = {
 export function DriftCard({ item, onRepair, onAccept, onIgnore, loading }: DriftCardProps) {
   const config = severityConfig[item.severity];
   const EntityIcon = entityIcons[item.entityType] ?? Info;
+  const isExtraResource = item.type === 'EXTRA_RESOURCE';
 
   return (
     <div
@@ -98,6 +110,11 @@ export function DriftCard({ item, onRepair, onAccept, onIgnore, loading }: Drift
           <p className="mt-0.5 text-xs text-discord-text-secondary">
             {item.description}
           </p>
+          {isExtraResource && (
+            <p className="mt-2 rounded-input border border-discord-warning/30 bg-discord-warning/10 p-2 text-xs text-discord-warning">
+              {EXTRA_RESOURCE_WARNING}
+            </p>
+          )}
         </div>
       </div>
 
@@ -127,7 +144,7 @@ export function DriftCard({ item, onRepair, onAccept, onIgnore, loading }: Drift
 
       {/* Actions */}
       <div className="mt-2 flex items-center gap-2">
-        {item.suggestedAction === 'repair' && (
+        {shouldShowRepair(item) && (
           <Button size="sm" variant="primary" onClick={onRepair} disabled={loading}>
             <RotateCcw size={12} />
             Repair
@@ -135,7 +152,7 @@ export function DriftCard({ item, onRepair, onAccept, onIgnore, loading }: Drift
         )}
         <Button size="sm" variant="secondary" onClick={onAccept} disabled={loading}>
           <Check size={12} />
-          Accept
+          {isExtraResource ? 'Accept (adopt)' : 'Accept'}
         </Button>
         <Button size="sm" variant="ghost" onClick={onIgnore} disabled={loading}>
           <EyeOff size={12} />

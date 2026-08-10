@@ -213,10 +213,11 @@ describe('deployApi', () => {
   it('deploy() POSTs deployment payload to /api/deploy', async () => {
     mockFetch.mockReturnValueOnce(jsonOk({ success: true }));
 
-    const payload = { roles: [], channels: [], categories: [], cleanExisting: true };
+    const payload = { roles: [], channels: [], categories: [] };
     await deployApi.deploy(payload);
     expect(mockFetch).toHaveBeenCalledWith('/api/deploy', expect.objectContaining({
       method: 'POST',
+      body: JSON.stringify({ ...payload, action: 'deploy', deployMode: 'safe' }),
     }));
   });
 });

@@ -49,15 +49,7 @@ export async function POST(request: NextRequest) {
   const categories = body.categories
     ?? (Array.isArray(priorState?.categories) ? priorState.categories : []);
 
-  const { data: guild, error: guildError } = await admin
-    .from('guild')
-    .select('setup_completed')
-    .eq('id', guildId)
-    .single();
-  if (guildError) return dbError(guildError, 'deploy');
-  const setupCompleted = guild?.setup_completed === true;
-
-  const deployMode = priorState?.applied_at || setupCompleted ? 'safe' : 'destructive';
+  const deployMode = body.deployMode;
   const desiredState: Record<string, unknown> = {
     guild_id: guildId,
     roles: body.roles,

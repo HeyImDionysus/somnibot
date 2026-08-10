@@ -282,53 +282,7 @@ export async function repairDriftItem(
       }
 
       case 'EXTRA_RESOURCE': {
-        // Extra resource — "repair" means delete it
-        if (driftItem.entityDiscordId) {
-          // Capture what it was before it stops existing: this is the one
-          // repair that destroys something the owner may have made by hand,
-          // and afterwards there is nothing left to describe it with.
-          let deletedName: string | null = null;
-          if (driftItem.entityType === 'role') {
-            const role = guild.roles.cache.get(driftItem.entityDiscordId);
-            if (role && !role.managed) {
-              deletedName = role.name;
-              await role.delete('SomniBot repair — removing extra resource');
-            }
-          } else {
-            const channel = guild.channels.cache.get(driftItem.entityDiscordId);
-            if (channel) {
-              deletedName = channel.name;
-              await channel.delete('SomniBot repair — removing extra resource');
-            }
-          }
-
-          if (deletedName !== null) {
-            await recordAdminChange(supabase, {
-              guildId: guild.id,
-              actorId: 'sync-engine',
-              action: `drift_repair.${driftItem.entityType}_deleted`,
-              targetType: driftItem.entityType,
-              targetId: driftItem.entityDiscordId,
-              description:
-                `Drift repair deleted the ${driftItem.entityType} "${deletedName}" `
-                + 'because it was not part of the server template.',
-              before: { name: deletedName, discord_id: driftItem.entityDiscordId },
-              after: null,
-              blastRadius: 'critical',
-              // Deliberately no undo. Recreating it would produce a different
-              // Discord id, and for a channel every message in it is already
-              // gone — an "undo" button here would be a lie.
-              undoReason:
-                driftItem.entityType === 'role'
-                  ? 'recreating the role would assign a new ID and no member would regain it'
-                  : 'the channel and its message history no longer exist',
-            });
-          }
-
-          await removeDriftFromDb(supabase, guild.id, driftItem);
-          return { success: true };
-        }
-        return { success: false, error: 'No Discord ID for extra resource' };
+        return { success: false, error: 'Extra resources must be accepted or removed manually' };
       }
 
       default:
@@ -339,6 +293,182 @@ export async function repairDriftItem(
     log.error(`[Sync:Repair] Failed to repair "${driftItem.entityName}":`, message);
     return { success: false, error: message };
   }
+}
+
+function replaceDesiredConfig(
+  configs: Record<string, unknown>[],
+  entityType: DriftItem['entityType'],
+  config: Record<string, unknown>,
+): Record<string, unknown>[] {
+  const key = getConfigTemplateKey(config, entityType);
+  if (!key) return configs;
+  const index = configs.findIndex((existing) => configMatchesTemplateKey(existing, key, entityType));
+  if (index < 0) return [...configs, config];
+  return configs.map((existing, existingIndex) => existingIndex === index ? config : existing);
+}
+
+function acceptedResourceKey(discordId: string): string {
+  return `accepted-${discordId}`;
+}
+
+async function acceptExtraResource(
+  guild: Guild,
+  supabase: SupabaseClient,
+  driftItem: DriftItem,
+): Promise<{ success: boolean; error?: string }> {
+  if (!driftItem.entityDiscordId) {
+    return { success: false, error: 'Extra resource has no Discord ID' };
+  }
+
+  const entityType = driftItem.entityType;
+  if (entityType !== 'role' && entityType !== 'channel' && entityType !== 'category') {
+    return { success: false, error: `Cannot accept extra ${entityType} resources` };
+  }
+
+  const { data: state, error: stateError } = await supabase
+    .from('guild_desired_state')
+    .select('roles, channels, categories')
+    .eq('guild_id', guild.id)
+    .maybeSingle();
+  if (stateError || !state) {
+    return { success: false, error: 'No desired state found for accepting resource' };
+  }
+
+  const key = acceptedResourceKey(driftItem.entityDiscordId);
+  const templateKey = getCanonicalTemplateKey(key, entityType);
+  if (!templateKey) {
+    return { success: false, error: 'Could not create an ownership key for the resource' };
+  }
+
+  const roles = (state.roles as Record<string, unknown>[]) ?? [];
+  const channels = (state.channels as Record<string, unknown>[]) ?? [];
+  const categories = (state.categories as Record<string, unknown>[]) ?? [];
+  let nextRoles = roles;
+  let nextChannels = channels;
+  let nextCategories = categories;
+
+  if (entityType === 'role') {
+    const role = guild.roles.cache.get(driftItem.entityDiscordId);
+    if (!role) return { success: false, error: 'Extra role no longer exists' };
+    nextRoles = replaceDesiredConfig(roles, 'role', {
+      key,
+      name: role.name,
+      tier: 'custom',
+      permissions: role.permissions.bitfield.toString(),
+      color: role.color,
+      hoist: role.hoist,
+      mentionable: role.mentionable,
+      position: role.position,
+    });
+  } else {
+    const channel = guild.channels.cache.get(driftItem.entityDiscordId);
+    if (!channel) return { success: false, error: 'Extra channel no longer exists' };
+
+    if (entityType === 'category') {
+      if (channel.type !== ChannelType.GuildCategory) {
+        return { success: false, error: 'Extra category ID does not reference a category' };
+      }
+      nextCategories = replaceDesiredConfig(categories, 'category', {
+        key,
+        name: channel.name,
+        position: 'position' in channel && typeof channel.position === 'number'
+          ? channel.position
+          : 0,
+      });
+    } else {
+      const allowedChannelTypes = new Set([
+        ChannelType.GuildText,
+        ChannelType.GuildVoice,
+        ChannelType.GuildAnnouncement,
+        ChannelType.GuildStageVoice,
+        ChannelType.GuildForum,
+      ]);
+      if (!allowedChannelTypes.has(channel.type)) {
+        return { success: false, error: 'Extra channel type requires manual review' };
+      }
+      const parentId = 'parentId' in channel ? channel.parentId : null;
+      let categoryKey: string | null = null;
+      if (parentId) {
+        const { data: parentMapping, error: parentMappingError } = await supabase
+          .from('discord_id_map')
+          .select('template_key, entity_type')
+          .eq('guild_id', guild.id)
+          .eq('discord_id', parentId)
+          .maybeSingle();
+        if (parentMappingError) {
+          return { success: false, error: 'Could not verify the extra channel parent ownership' };
+        }
+        if (parentMapping?.entity_type !== 'category' || typeof parentMapping.template_key !== 'string') {
+          return { success: false, error: 'Extra channel parent is not tracked; accept the parent category first' };
+        }
+        categoryKey = unprefixedTemplateKey(parentMapping.template_key);
+      }
+      const { data: roleMappings, error: roleMappingsError } = await supabase
+        .from('discord_id_map')
+        .select('template_key, discord_id')
+        .eq('guild_id', guild.id)
+        .eq('entity_type', 'role');
+      if (roleMappingsError || !Array.isArray(roleMappings)) {
+        return { success: false, error: 'Could not verify managed permission overwrites for the extra channel' };
+      }
+      const roleKeyByDiscordId = new Map<string, string>();
+      for (const mapping of roleMappings) {
+        if (typeof mapping.discord_id !== 'string' || typeof mapping.template_key !== 'string') continue;
+        roleKeyByDiscordId.set(mapping.discord_id, unprefixedTemplateKey(mapping.template_key));
+      }
+      const overrides = 'permissionOverwrites' in channel
+        ? [...channel.permissionOverwrites.cache.values()].flatMap((overwrite) => {
+            const roleKey = overwrite.id === guild.id
+              ? 'everyone'
+              : roleKeyByDiscordId.get(overwrite.id);
+            if (!roleKey) return [];
+            return [{
+              roleKey,
+              allow: overwrite.allow.bitfield.toString(),
+              deny: overwrite.deny.bitfield.toString(),
+            }];
+          })
+        : [];
+      nextChannels = replaceDesiredConfig(channels, 'channel', {
+        key,
+        name: channel.name,
+        type: channel.type,
+        categoryKey,
+        position: 'position' in channel && typeof channel.position === 'number'
+          ? channel.position
+          : 0,
+        topic: 'topic' in channel ? channel.topic ?? null : null,
+        slowmode: 'rateLimitPerUser' in channel ? channel.rateLimitPerUser : 0,
+        nsfw: 'nsfw' in channel ? channel.nsfw : false,
+        templateId: 'accepted',
+        overrides,
+      });
+    }
+  }
+
+  const { error: desiredStateError } = await supabase
+    .from('guild_desired_state')
+    .update({ roles: nextRoles, channels: nextChannels, categories: nextCategories })
+    .eq('guild_id', guild.id);
+  if (desiredStateError) {
+    return { success: false, error: `Failed to save accepted resource in desired state: ${desiredStateError.message}` };
+  }
+
+  const { error: mappingError } = await supabase
+    .from('discord_id_map')
+    .upsert({
+      guild_id: guild.id,
+      entity_type: entityType,
+      template_key: templateKey,
+      discord_id: driftItem.entityDiscordId,
+    }, { onConflict: 'guild_id,entity_type,template_key' });
+  if (!mappingError) return { success: true };
+
+  await supabase
+    .from('guild_desired_state')
+    .update({ roles, channels, categories })
+    .eq('guild_id', guild.id);
+  return { success: false, error: `Failed to record accepted resource ownership: ${mappingError.message}` };
 }
 
 /**
@@ -371,15 +501,8 @@ export async function acceptDriftItem(
     }
 
     if (driftItem.type === 'EXTRA_RESOURCE' && driftItem.entityDiscordId) {
-      // Accept an extra resource — add it to the ID map so it's tracked going forward
-      const entityType = driftItem.entityType === 'category' ? 'category' : driftItem.entityType;
-      const templateKey = `accepted:${driftItem.entityDiscordId}`;
-      await supabase.from('discord_id_map').upsert({
-        guild_id: guild.id,
-        entity_type: entityType,
-        template_key: templateKey,
-        discord_id: driftItem.entityDiscordId,
-      }, { onConflict: 'guild_id,entity_type,template_key' });
+      const result = await acceptExtraResource(guild, supabase, driftItem);
+      if (!result.success) return result;
     }
 
     if ((driftItem.type === 'EXTERNAL_CHANGE' || driftItem.type === 'PERMISSION_DRIFT') && driftItem.entityDiscordId) {
@@ -783,10 +906,11 @@ async function removeDriftFromDb(
     .maybeSingle();
 
   const items: DriftItem[] = Array.isArray(data?.drift_details) ? data.drift_details : [];
-  const filtered = items.filter(
-    (i) =>
-      !(i.entityType === itemToRemove.entityType && i.entityName === itemToRemove.entityName),
-  );
+  const filtered = items.filter((item) => {
+    if (item.entityType !== itemToRemove.entityType) return true;
+    if (itemToRemove.entityDiscordId) return item.entityDiscordId !== itemToRemove.entityDiscordId;
+    return item.entityName !== itemToRemove.entityName;
+  });
 
   await supabase
     .from('guild_desired_state')
@@ -1051,6 +1175,14 @@ async function recreateResource(
 ): Promise<{ success: boolean; error?: string }> {
   const mapping = await findMissingResourceMapping(guild, supabase, driftItem);
   const entityType = mapping?.entity_type ?? driftItem.entityType;
+  const identityTemplateKey = mapping?.template_key ?? getDriftTemplateKey(driftItem);
+
+  if (!identityTemplateKey) {
+    return {
+      success: false,
+      error: 'Missing resource has no ownership mapping or template key — manual review required',
+    };
+  }
 
   // Look up desired config from the JSONB array
   const arrayKey = entityType === 'role' ? 'roles' : 'channels';
@@ -1062,17 +1194,16 @@ async function recreateResource(
 
   const stateRecord = state as Record<string, unknown> | null;
   const arr = (stateRecord?.[arrayKey] as Record<string, unknown>[]) ?? [];
-  const driftTemplateKey = getDriftTemplateKey(driftItem);
   const config = arr.find((item) =>
-    configMatchesTemplateKey(item, mapping?.template_key ?? driftTemplateKey, driftItem.entityType),
-  ) ?? arr.find((item) => item.name === driftItem.entityName);
+    configMatchesTemplateKey(item, identityTemplateKey, entityType),
+  );
 
   if (!config) {
     return { success: false, error: 'No desired config found for recreating resource' };
   }
 
   const templateKey = getCanonicalTemplateKey(
-    mapping?.template_key ?? getConfigTemplateKey(config, driftItem.entityType) ?? driftTemplateKey,
+    identityTemplateKey,
     entityType,
   );
   if (!templateKey) {

@@ -95,7 +95,7 @@ vi.mock('../services/alert-service.js', () => ({
   AlertService: class { send = vi.fn(); },
 }));
 
-import { destroyGuildServices, initializeMarketFeature } from '../guild-init.js';
+import { destroyGuildServices, getCommunityChannelMappings, initializeMarketFeature } from '../guild-init.js';
 import { unregisterEconomyManager } from '../features/economy/index.js';
 
 describe('guild-init', () => {
@@ -143,6 +143,32 @@ describe('guild-init', () => {
     };
     await destroyGuildServices(ctx as any);
     expect(ctx.getManager).toHaveBeenCalledWith('_services');
+  });
+
+  it('does not adopt a user-created moderator-only channel by name', () => {
+    const guild = {
+      rulesChannelId: null,
+      publicUpdatesChannelId: null,
+      safetyAlertsChannelId: null,
+      channels: { cache: new Map([['user-channel', { id: 'user-channel', name: 'moderator-only' }]]) },
+    };
+    const mappings = getCommunityChannelMappings(guild);
+
+    expect(mappings).not.toContainEqual(expect.objectContaining({ discordId: 'user-channel' }));
+  });
+
+  it('registers the canonical safety-alerts channel as moderator-only', () => {
+    const guild = {
+      rulesChannelId: null,
+      publicUpdatesChannelId: null,
+      safetyAlertsChannelId: 'system-moderator-only',
+    };
+    const mappings = getCommunityChannelMappings(guild);
+
+    expect(mappings).toContainEqual({
+      key: 'channel:moderator-only',
+      discordId: 'system-moderator-only',
+    });
   });
 
   it('quiesces producers but retains the action queue for a privacy purge', async () => {

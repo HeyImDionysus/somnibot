@@ -358,10 +358,16 @@ async function handleDeleteRole(
 ): Promise<ActionResult> {
   const roleId = payload.roleId as string;
   if (!roleId) return { success: false, error: 'Missing roleId' };
+  if (roleId === guild.id) {
+    return { success: false, error: 'Cannot delete the @everyone role', retryable: false };
+  }
 
   const role = guild.roles.cache.get(roleId);
   if (!role) return { success: false, error: `Role ${roleId} not found` };
   if (role.managed) return { success: false, error: 'Cannot delete managed roles' };
+  if (!role.editable) {
+    return { success: false, error: 'Cannot delete a role the bot cannot manage', retryable: false };
+  }
 
   const roleName = role.name;
   await role.delete('SomniBot dashboard — role deleted');
@@ -447,6 +453,60 @@ async function handleUpdateChannel(
   return { success: true, data: { channelId, name: channel.name } };
 }
 
+async function protectedCommunityChannelDeleteError(
+  guild: Guild,
+  supabase: SupabaseClient,
+  channelId: string,
+): Promise<ActionResult | null> {
+  const protectedChannelIds = new Set(
+    [guild.rulesChannelId, guild.publicUpdatesChannelId, guild.safetyAlertsChannelId]
+      .filter((id): id is string => typeof id === 'string' && id.length > 0),
+  );
+  if (protectedChannelIds.has(channelId)) {
+    return {
+      success: false,
+      error: 'Cannot delete a protected community channel',
+      retryable: false,
+    };
+  }
+
+  const { data, error } = await supabase
+    .from('discord_id_map')
+    .select('discord_id')
+    .eq('guild_id', guild.id)
+    .eq('entity_type', 'channel')
+    .in('template_key', ['channel:moderator-only', 'moderator-only']);
+
+  if (error || !Array.isArray(data)) {
+    return {
+      success: false,
+      error: 'Unable to verify protected community channels; delete refused',
+      retryable: true,
+    };
+  }
+
+  for (const mapping of data) {
+    if (!mapping || typeof mapping.discord_id !== 'string' || mapping.discord_id.length === 0) {
+      return {
+        success: false,
+        error: 'Unable to verify protected community channels; delete refused',
+        retryable: true,
+      };
+    }
+    protectedChannelIds.add(mapping.discord_id);
+  }
+
+  if (protectedChannelIds.has(channelId)) {
+    return {
+      success: false,
+      error: 'Cannot delete a protected community channel',
+      retryable: false,
+    };
+  }
+
+  return null;
+}
+
 async function handleDeleteChannel(
   guild: Guild,
   supabase: SupabaseClient,
@@ -457,6 +517,9 @@ async function handleDeleteChannel(
 
   const channel = guild.channels.cache.get(channelId);
   if (!channel) return { success: false, error: `Channel ${channelId} not found` };
+
+  const protectedChannelError = await protectedCommunityChannelDeleteError(guild, supabase, channelId);
+  if (protectedChannelError) return protectedChannelError;
 
   const channelName = channel.name;
   await channel.delete('SomniBot dashboard — channel deleted');
@@ -514,6 +577,9 @@ async function handleDeleteCategory(
   if (!channel) return { success: false, error: `Category ${categoryId} not found` };
   if (channel.type !== ChannelType.GuildCategory)
     return { success: false, error: 'Not a category' };
+
+  const protectedChannelError = await protectedCommunityChannelDeleteError(guild, supabase, categoryId);
+  if (protectedChannelError) return protectedChannelError;
 
   const categoryName = channel.name;
   await channel.delete('SomniBot dashboard — category deleted');

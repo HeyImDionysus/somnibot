@@ -116,7 +116,7 @@ function buildMappingIndex(rows: readonly DiscordIdMappingRow[]): Map<string, st
  * Deploy the desired server state to Discord.
  *
  * Execution order (important for Discord's hierarchy):
- * 1. Set @everyone to zero
+ * 1. Set @everyone to zero (destructive deployments only)
  * 2. Delete old channels (if cleanExisting)
  * 3. Delete old roles (if cleanExisting)
  * 4. Create roles (bottom-up for hierarchy)
@@ -229,23 +229,25 @@ export async function deployServerState(
     ) ?? guild.safetyAlertsChannelId;
     if (moderatorOnlyChannelId) communityChannelIds.add(moderatorOnlyChannelId);
 
-    // === Step 1: Zero @everyone ===
-    step++;
-    report('Setting @everyone to zero permissions');
-    try {
-      const everyoneRole = guild.roles.everyone;
-      await everyoneRole.setPermissions(0n, 'SomniBot deployment — @everyone = 0');
-      actions.push({
-        step, action: 'set', entityType: 'everyone',
-        entityName: '@everyone', discordId: everyoneRole.id, success: true,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      errors.push({ step, entityType: 'everyone', entityName: '@everyone', error: msg });
-      actions.push({
-        step, action: 'set', entityType: 'everyone',
-        entityName: '@everyone', success: false, error: msg,
-      });
+    // === Step 1: Zero @everyone during an explicitly destructive deployment ===
+    if (options.cleanExisting) {
+      step++;
+      report('Setting @everyone to zero permissions');
+      try {
+        const everyoneRole = guild.roles.everyone;
+        await everyoneRole.setPermissions(0n, 'SomniBot deployment — @everyone = 0');
+        actions.push({
+          step, action: 'set', entityType: 'everyone',
+          entityName: '@everyone', discordId: everyoneRole.id, success: true,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push({ step, entityType: 'everyone', entityName: '@everyone', error: msg });
+        actions.push({
+          step, action: 'set', entityType: 'everyone',
+          entityName: '@everyone', success: false, error: msg,
+        });
+      }
     }
 
     // === Step 2: Purge bot messages + delete old channels/roles (if cleanExisting) ===
@@ -537,6 +539,26 @@ export async function deployServerState(
       : null;
 
     const sortedChannels = [...desiredState.channels].sort((a, b) => a.position - b.position);
+    const managedRoleIds = new Set<string>();
+    for (const row of persistedMappings) {
+      if (row.entity_type === 'role' && typeof row.discord_id === 'string') {
+        managedRoleIds.add(row.discord_id);
+      }
+    }
+    for (const roleId of roleKeyToDiscordId.values()) managedRoleIds.add(roleId);
+
+    const permissionOverwritesForExistingChannel = (
+      channel: GuildBasedChannel,
+      desired: DesiredChannel,
+    ): OverwriteResolvable[] => {
+      const desiredOverwrites = buildPermissionOverwrites(guild, desired, roleKeyToDiscordId);
+      if (options.cleanExisting || channel.isThread()) return desiredOverwrites;
+
+      const managedTargetIds = new Set<string>([guild.id, ...managedRoleIds]);
+      const preservedOverwrites = [...channel.permissionOverwrites.cache.values()]
+        .filter((overwrite) => !managedTargetIds.has(overwrite.id));
+      return [...preservedOverwrites, ...desiredOverwrites];
+    };
 
     for (const desired of sortedChannels) {
       step++;
@@ -560,6 +582,10 @@ export async function deployServerState(
             nsfw: desired.nsfw,
             parent: parentId ?? null,
             position: desired.position,
+            permissionOverwrites: permissionOverwritesForExistingChannel(
+              existingCommunity,
+              desired,
+            ),
             reason: 'SomniBot deployment — reusing community channel',
           });
           idMappings.push({ entityType: 'channel', key: desired.key, discordId: existingCommunity.id });
@@ -595,7 +621,11 @@ export async function deployServerState(
           }
           const channelId = existingChannel
             ? await updateChannel(
-              guild, existingChannel, desired, roleKeyToDiscordId, categoryKeyToDiscordId,
+              guild,
+              existingChannel,
+              desired,
+              permissionOverwritesForExistingChannel(existingChannel, desired),
+              categoryKeyToDiscordId,
             )
             : await createChannel(
               guild, desired, roleKeyToDiscordId, categoryKeyToDiscordId,
@@ -628,7 +658,10 @@ export async function deployServerState(
         if (staffCatId && staffChannel) {
           await guild.channels.edit(modOnlyChannel.id, {
             parent: staffCatId,
-            permissionOverwrites: buildPermissionOverwrites(guild, staffChannel, roleKeyToDiscordId),
+            permissionOverwrites: permissionOverwritesForExistingChannel(
+              modOnlyChannel,
+              staffChannel,
+            ),
             reason: 'SomniBot deployment — organize community channel',
           });
           actions.push({
@@ -873,7 +906,7 @@ async function updateChannel(
   guild: Guild,
   channel: GuildBasedChannel,
   desired: DesiredChannel,
-  roleKeyToDiscordId: Map<string, string>,
+  permissionOverwrites: OverwriteResolvable[],
   categoryKeyToDiscordId: Map<string, string>,
 ): Promise<string> {
   const parentId = desired.categoryKey
@@ -883,7 +916,7 @@ async function updateChannel(
     name: desired.name,
     parent: parentId,
     position: desired.position,
-    permissionOverwrites: buildPermissionOverwrites(guild, desired, roleKeyToDiscordId),
+    permissionOverwrites,
     reason: 'SomniBot deployment — update channel',
   };
 
@@ -926,7 +959,7 @@ async function createChannel(
 }
 
 function estimateTotalSteps(state: DesiredState, options: DeployOptions): number {
-  let steps = 1; // @everyone
+  let steps = options.cleanExisting ? 1 : 0; // @everyone
   steps += state.roles.length; // Create roles
   steps += 1; // Set positions
   steps += state.categories.length; // Create categories

@@ -11,6 +11,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import {
+  canRepairDriftItem,
+  EXTRA_RESOURCE_WARNING,
+} from '@/components/sync/drift-card';
 
 interface SyncConfig {
   sync_enabled: boolean;
@@ -108,6 +112,10 @@ export default function SyncPage() {
     action: 'repair' | 'accept' | 'ignore',
     item: DriftItem,
   ) => {
+    if (action === 'repair' && !canRepairDriftItem(item)) {
+      setError(EXTRA_RESOURCE_WARNING);
+      return;
+    }
     setActionLoading(`${action}:${item.entityName}`);
     try {
       const res = await fetch('/api/sync/action', {
@@ -262,6 +270,11 @@ export default function SyncPage() {
                       <p className="mt-0.5 text-sm text-discord-text-muted">
                         {item.description}
                       </p>
+                      {item.type === 'EXTRA_RESOURCE' && (
+                        <p className="mt-2 rounded border border-discord-warning/30 bg-discord-warning/10 p-2 text-xs text-discord-warning">
+                          {EXTRA_RESOURCE_WARNING}
+                        </p>
+                      )}
 
                       {/* Detail changes */}
                       {item.details && Object.keys(item.details).length > 0 && (
@@ -284,14 +297,16 @@ export default function SyncPage() {
 
                     {/* Action buttons */}
                     <div className="flex shrink-0 gap-2">
-                      <button
-                        onClick={() => handleDriftAction('repair', item)}
-                        disabled={!!actionLoading}
-                        className="rounded bg-discord-accent/20 px-3 py-1.5 text-xs font-medium text-discord-accent hover:bg-discord-accent/30 disabled:opacity-50"
-                        title="Revert Discord to match desired state"
-                      >
-                        Repair
-                      </button>
+                      {canRepairDriftItem(item) && (
+                        <button
+                          onClick={() => handleDriftAction('repair', item)}
+                          disabled={!!actionLoading}
+                          className="rounded bg-discord-accent/20 px-3 py-1.5 text-xs font-medium text-discord-accent hover:bg-discord-accent/30 disabled:opacity-50"
+                          title="Revert Discord to match desired state"
+                        >
+                          Repair
+                        </button>
+                      )}
                       {item.type !== 'EVERYONE_DRIFT' && (
                         <button
                           onClick={() => handleDriftAction('accept', item)}
@@ -299,7 +314,7 @@ export default function SyncPage() {
                           className="rounded bg-green-500/20 px-3 py-1.5 text-xs font-medium text-green-400 hover:bg-green-500/30 disabled:opacity-50"
                           title="Update desired state to match Discord"
                         >
-                          Accept
+                          {item.type === 'EXTRA_RESOURCE' ? 'Accept (adopt)' : 'Accept'}
                         </button>
                       )}
                       <button
