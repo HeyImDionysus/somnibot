@@ -473,12 +473,14 @@ jobs:
           done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
       - name: Wait for Supabase REST API
         run: |
           echo "Waiting for Supabase REST API..."
           for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
-              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
               echo "✅ Supabase REST API ready (attempt $i)"
               exit 0
             fi
@@ -493,7 +495,6 @@ jobs:
         run: pnpm --filter @somnibot/bot test:integration --reporter=verbose
         env:
           SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       - name: Stop Supabase
         if: always()
         run: cd packages && supabase stop 2>/dev/null || true
@@ -580,12 +581,14 @@ jobs:
           done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
       - name: Wait for Supabase REST API
         run: |
           echo "Waiting for Supabase REST API..."
           for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
-              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
               echo "✅ Supabase REST API ready (attempt $i)"
               exit 0
             fi
@@ -622,7 +625,6 @@ jobs:
           SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
           PAYPAL_ENV: sandbox
-          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       # Dashboard route-driving lane: drives the REAL Next.js route handlers
       # in-process against the SAME local Supabase, with a REAL owner auth
       # session (zero production auth edits — only next/headers is mocked). See
@@ -633,11 +635,6 @@ jobs:
           --shard=${{ matrix.shard }}/4
         env:
           NODE_ENV: test
-          SUPABASE_URL: http://127.0.0.1:54321
-          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
-          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
-          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
           VALKEY_URL: redis://localhost:6379
           SOMNIBOT_FLEET_PROOF_DIR: ${{ github.workspace }}/artifacts/proofs
       - name: Stop Supabase
@@ -720,12 +717,14 @@ jobs:
           done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
       - name: Wait for Supabase REST API
         run: |
           echo "Waiting for Supabase REST API..."
           for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
-              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
               echo "✅ Supabase REST API ready (attempt $i)"
               exit 0
             fi
@@ -746,8 +745,6 @@ jobs:
           src/__tests__/live/all-domains-scenario.live.test.ts
         env:
           NODE_ENV: test
-          SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
           VALKEY_URL: redis://localhost:6379
           DISCORD_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
@@ -974,11 +971,13 @@ jobs:
           done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
       - name: Wait for database
         run: |
           for i in $(seq 1 20); do
-            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
-              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
               echo "✅ DB ready"
               exit 0
             fi
