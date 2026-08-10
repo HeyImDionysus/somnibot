@@ -10,6 +10,11 @@ import NowPlayingWidget from '@/components/music/now-playing-widget';
 import { useToast } from '@/components/shared/toast';
 import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import {
+  lavalinkHealthFromDiagnostics,
+  UNKNOWN_LAVALINK_HEALTH,
+  type LavalinkHealth,
+} from '@/lib/lavalink-health';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -50,6 +55,13 @@ const DEFAULT_CONFIG: MusicConfig = {
   priority_voting_enabled: true,
 };
 
+const LAVALINK_STATUS_TEXT: Record<LavalinkHealth['state'], string> = {
+  connected: 'At least one node is connected via WebSocket',
+  disconnected: 'All configured nodes are disconnected',
+  unavailable: 'No Lavalink node is configured',
+  unknown: 'Lavalink status is unavailable',
+};
+
 // ── Component ─────────────────────────────────────────────
 
 export default function MusicSettingsPage() {
@@ -61,6 +73,7 @@ export default function MusicSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [lavalinkHealth, setLavalinkHealth] = useState<LavalinkHealth>(UNKNOWN_LAVALINK_HEALTH);
   useUnsavedWarning(dirty);
 
   const fetchConfig = useCallback(async () => {
@@ -93,9 +106,23 @@ export default function MusicSettingsPage() {
     }
   }, [toast]);
 
+  const fetchLavalinkHealth = useCallback(async () => {
+    try {
+      const res = await fetch('/api/diagnostics');
+      if (!res.ok) {
+        setLavalinkHealth(UNKNOWN_LAVALINK_HEALTH);
+        return;
+      }
+      setLavalinkHealth(lavalinkHealthFromDiagnostics(await res.json()));
+    } catch {
+      setLavalinkHealth(UNKNOWN_LAVALINK_HEALTH);
+    }
+  }, []);
+
   useEffect(() => {
-    fetchConfig();
-  }, [fetchConfig]);
+    void fetchConfig();
+    void fetchLavalinkHealth();
+  }, [fetchConfig, fetchLavalinkHealth]);
 
   const updateField = <K extends keyof MusicConfig>(key: K, value: MusicConfig[K]) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
@@ -412,29 +439,10 @@ export default function MusicSettingsPage() {
           <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
             <h2 className="text-lg font-semibold text-discord-text-primary">Lavalink Node</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
-              Music audio is powered by a Lavalink v4 server with YouTube plugin.
+              Music audio is available when a Lavalink node is configured.
             </p>
-            <div className="mt-4 grid grid-cols-2 gap-4">
-              <div className="rounded-md bg-discord-bg-tertiary p-3">
-                <span className="text-xs font-medium text-discord-text-muted">Server</span>
-                <p className="mt-1 text-sm font-mono text-discord-text-primary">Lavalink v4.0.8</p>
-              </div>
-              <div className="rounded-md bg-discord-bg-tertiary p-3">
-                <span className="text-xs font-medium text-discord-text-muted">Client</span>
-                <p className="mt-1 text-sm font-mono text-discord-text-primary">Shoukaku v4.x</p>
-              </div>
-              <div className="rounded-md bg-discord-bg-tertiary p-3">
-                <span className="text-xs font-medium text-discord-text-muted">YouTube Plugin</span>
-                <p className="mt-1 text-sm font-mono text-discord-text-primary">v1.17.0</p>
-              </div>
-              <div className="rounded-md bg-discord-bg-tertiary p-3">
-                <span className="text-xs font-medium text-discord-text-muted">Enabled Filters</span>
-                <p className="mt-1 text-sm font-mono text-discord-text-primary">EQ, Timescale, Rotation</p>
-              </div>
-            </div>
             <div className="mt-4 flex items-center gap-2 text-sm">
-              <span className="h-2 w-2 rounded-full bg-discord-success animate-pulse" />
-              <span className="text-discord-text-secondary">Node connected via WebSocket</span>
+              <span className="text-discord-text-secondary">{LAVALINK_STATUS_TEXT[lavalinkHealth.state]}</span>
             </div>
           </div>
 
