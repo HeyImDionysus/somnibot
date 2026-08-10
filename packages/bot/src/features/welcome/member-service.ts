@@ -91,6 +91,8 @@ export async function recordMemberJoin(
   member: GuildMember,
   isReturning: boolean,
 ): Promise<DbMember | null> {
+  if (member.user.bot) return null;
+
   const guildId = member.guild.id;
   const discordId = member.id;
 
@@ -264,6 +266,42 @@ function hasCompletedOnboarding(m: GuildMember): boolean {
  * can exceed that must page with .range() and accumulate.
  */
 const READ_PAGE = 1000;
+const GATEWAY_ROSTER_FETCH_TIMEOUT_MS = 15_000;
+
+async function fetchCompleteRoster(guild: Guild): Promise<Map<string, GuildMember> | null> {
+  try {
+    const members = await guild.members.fetch({ time: GATEWAY_ROSTER_FETCH_TIMEOUT_MS });
+    log.info('Roster backfill roster fetched', { source: 'gateway', count: members.size });
+    return new Map(members);
+  } catch (gatewayError) {
+    log.warn('Roster backfill gateway fetch failed; using REST fallback', { error: String(gatewayError) });
+  }
+
+  const members = new Map<string, GuildMember>();
+  let after: string | undefined;
+  for (;;) {
+    let page;
+    try {
+      page = await guild.members.list({ limit: READ_PAGE, ...(after ? { after } : {}) });
+    } catch (restError) {
+      log.warn('Member backfill skipped — REST roster fallback failed', { error: String(restError) });
+      return null;
+    }
+
+    for (const member of page.values()) members.set(member.id, member);
+    if (page.size < READ_PAGE) {
+      log.info('Roster backfill roster fetched', { source: 'rest', count: members.size });
+      return members;
+    }
+
+    const lastMember = page.last();
+    if (!lastMember || lastMember.id === after) {
+      log.warn('Member backfill skipped — REST roster fallback cursor did not advance');
+      return null;
+    }
+    after = lastMember.id;
+  }
+}
 
 /**
  * Backfill and reconcile the roster with everyone ALREADY in the guild.
@@ -298,13 +336,8 @@ export async function backfillMembers(
   supabase: SupabaseClient,
   guild: Guild,
 ): Promise<number> {
-  let discordMembers;
-  try {
-    discordMembers = await guild.members.fetch();
-  } catch (err) {
-    log.warn('Member backfill skipped — could not fetch member list', { error: String(err) });
-    return 0;
-  }
+  const discordMembers = await fetchCompleteRoster(guild);
+  if (!discordMembers) return 0;
   guild.memberCount = discordMembers.size;
 
   // Read ALL existing rows, paged (a .limit() read is silently truncated at
