@@ -568,6 +568,7 @@ export interface PlatformEventMap {
   'temp_channel.claimed': { channelId: string; previousOwnerId: string; newOwnerId: string; occurrenceId?: string; correlationId?: string };
   'temp_channel.deleted': { channelId: string; ownerId: string; reason: string; actorId?: string; occurrenceId?: string; correlationId?: string };
   'temp_channel.creation_failed': { hubId: string; hubChannelId: string; memberId: string; error: string; occurrenceId?: string; correlationId?: string };
+  'temp_channel.creation_retried': { hubId: string; hubChannelId: string; memberId: string; attempt: number; backoffMs: number; occurrenceId?: string; correlationId?: string };
   'temp_channel.orphan_reconciled': { channelId: string; ownerId: string; occurrenceId?: string; correlationId?: string };
   /** One event for the whole /voice owner-control surface (lock/unlock/limit/name/permit/deny/ban/claim). */
   'temp_channel.settings_changed': { channelId: string; actorId: string; op: 'lock' | 'unlock' | 'limit' | 'name' | 'permit' | 'deny' | 'ban' | 'claim'; targetUserId?: string; value?: string | number; before?: Record<string, unknown>; after?: Record<string, unknown>; occurrenceId?: string; correlationId?: string };
@@ -575,13 +576,20 @@ export interface PlatformEventMap {
   'temp_channel.control_denied': { channelId: string; actorId: string; op: string; reason: string; occurrenceId?: string; correlationId?: string };
   'scheduled_message.sent': { scheduleId: string; name: string; channelId: string; currentSends: number; occurrenceId?: string; correlationId?: string };
   'scheduled_message.delivery_failed': { scheduleId: string; name: string; channelId: string; reason: string; occurrenceId?: string; correlationId?: string };
+  'scheduled_message.channel_missing': { scheduleId: string; name: string; channelId: string; occurrenceId?: string; correlationId?: string };
+  'scheduled_message.send_retried': { scheduleId: string; name: string; channelId: string; attempt: number; backoffMs: number; occurrenceId?: string; correlationId?: string };
   /** A recovery pass dropped one or more occurrences under skip-missed policy. */
   'scheduled_message.missed': { scheduleId: string; name: string; channelId: string; missedCount: number; lastOccurrenceAt: string; occurrenceId?: string; correlationId?: string };
   'poll.created': { pollId: string; title: string; optionCount: number; allowMultiple: boolean; creatorId: string; channelId: string; occurrenceId?: string; correlationId?: string };
   'poll.closed': { pollId: string; title: string; actorId: string; occurrenceId?: string; correlationId?: string };
+  'poll.late_interaction_rejected': { pollId: string; actorId: string; action: 'vote'; reason: string; occurrenceId?: string; correlationId?: string };
   'prediction.created': { predictionId: string; title: string; optionCount: number; creatorId: string; channelId: string; occurrenceId?: string; correlationId?: string };
   'prediction.bet_placed': { predictionId: string; userId: string; optionId: string; amount: number; newPool: number; occurrenceId?: string; correlationId?: string };
   'prediction.resolved': { predictionId: string; title: string; winningOptionId: string; totalPool: number; payoutCount: number; refundedCount: number; actorId: string; redrive?: boolean; occurrenceId?: string; correlationId?: string };
+  'prediction.resolve_rejected': { predictionId: string; actorId: string; reason: 'invalid_winner' | 'not_creator' | 'not_found'; occurrenceId?: string; correlationId?: string };
+  'prediction.late_interaction_rejected': { predictionId: string; actorId: string; action: 'bet' | 'vote'; reason: string; occurrenceId?: string; correlationId?: string };
+  'prediction.settlement_payout_retried': { predictionId: string; betId: string; winnerId: string; settlementType: 'prediction_payout' | 'prediction_refund'; occurrenceId?: string; correlationId?: string };
+  'welcome.delivery_failed': { memberId: string; surface: 'channel' | 'dm' | 'role'; reason: string; occurrenceId?: string; correlationId?: string };
 }
 
 export type PlatformEventType = keyof PlatformEventMap;

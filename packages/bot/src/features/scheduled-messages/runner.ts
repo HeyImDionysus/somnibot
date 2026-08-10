@@ -377,6 +377,13 @@ export class ScheduledMessageRunner {
       // owner once, and stop it re-firing every minute (loadSchedules filters on
       // status='active'). Previously this only log.warn()'d forever, silently.
       log.warn(`Channel ${schedule.channel_id} not found`);
+      this.eventBus.emit('scheduled_message.channel_missing', this.guild.id, {
+        scheduleId: schedule.id,
+        name: schedule.name,
+        channelId: schedule.channel_id,
+        occurrenceId: `${schedule.id}:channel-missing`,
+        correlationId: `schedule:${schedule.id}`,
+      });
       await this.markFailed(schedule, `channel_missing:${schedule.channel_id}`);
       return;
     }
@@ -687,6 +694,16 @@ export class ScheduledMessageRunner {
     const sent = await this.trySend(channel, {
       content: content || undefined,
       embeds: embed ? [embed] : undefined,
+    }, (attempt, backoffMs) => {
+      this.eventBus.emit('scheduled_message.send_retried', this.guild.id, {
+        scheduleId: schedule.id,
+        name: schedule.name,
+        channelId: schedule.channel_id,
+        attempt,
+        backoffMs,
+        occurrenceId: `${occurrenceId}:send-retry`,
+        correlationId: `schedule:${schedule.id}`,
+      });
     });
     if (!sent.ok) {
       log.error(`Failed to send "${schedule.name}" after retries:`, sent.error);
@@ -720,6 +737,7 @@ export class ScheduledMessageRunner {
   private async trySend(
     channel: TextChannel,
     payload: { content?: string; embeds?: EmbedBuilder[] },
+    onRetry?: (attempt: number, backoffMs: number) => void,
   ): Promise<{ ok: true; messageId: string } | { ok: false; error: string }> {
     const maxAttempts = 3;
     let lastErr: unknown;
@@ -732,6 +750,7 @@ export class ScheduledMessageRunner {
         if (attempt < maxAttempts) {
           const backoffMs = 500 * 2 ** (attempt - 1);
           log.warn(`Send attempt ${attempt} failed, retrying in ${backoffMs}ms:`, { error: String(err) });
+          onRetry?.(attempt + 1, backoffMs);
           await new Promise((resolve) => setTimeout(resolve, backoffMs));
         }
       }

@@ -22,6 +22,8 @@ import {
 } from './welcome-variables.js';
 import { getMemberNumber } from './member-service.js';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Welcome');
 
@@ -56,17 +58,17 @@ export async function executeWelcomeFlow(
 
   // 1. Welcome channel message (with optional card)
   if (config.welcome_enabled && config.welcome_channel_id) {
-    await sendWelcomeChannelMessage(member, config, variables);
+    await sendWelcomeChannelMessage(member, config, variables, supabase);
   }
 
   // 2. Welcome DM
   if (config.welcome_dm_enabled) {
-    await sendWelcomeDM(member, config, variables);
+    await sendWelcomeDM(member, config, variables, supabase);
   }
 
   // 3. Auto-roles
   if (config.welcome_auto_roles?.length > 0) {
-    await applyAutoRoles(member, config.welcome_auto_roles);
+    await applyAutoRoles(member, config.welcome_auto_roles, supabase);
   }
 }
 
@@ -77,11 +79,13 @@ async function sendWelcomeChannelMessage(
   member: GuildMember,
   config: DbGuildConfig,
   variables: WelcomeVariables,
+  supabase: SupabaseClient,
 ): Promise<void> {
   try {
     const channel = member.guild.channels.cache.get(config.welcome_channel_id!) as TextChannel | undefined;
     if (!channel?.isTextBased()) {
       log.warn('Welcome channel not found or not text-based:', config.welcome_channel_id);
+      await recordWelcomeFailure(member, supabase, 'channel', 'channel_missing');
       return;
     }
 
@@ -123,6 +127,7 @@ async function sendWelcomeChannelMessage(
     log.info(`Channel message sent for ${member.user.tag}`);
   } catch (err) {
     log.error('Failed to send channel message:', { error: String(err) });
+    await recordWelcomeFailure(member, supabase, 'channel', 'send_failed');
   }
 }
 
@@ -133,6 +138,7 @@ async function sendWelcomeDM(
   member: GuildMember,
   config: DbGuildConfig,
   variables: WelcomeVariables,
+  supabase: SupabaseClient,
 ): Promise<void> {
   try {
     const messageText = interpolateMessage(
@@ -154,6 +160,7 @@ async function sendWelcomeDM(
         error: String(err),
       });
     }
+    await recordWelcomeFailure(member, supabase, 'dm', code === 50007 ? 'dm_blocked' : 'send_failed');
   }
 }
 
@@ -163,12 +170,14 @@ async function sendWelcomeDM(
 async function applyAutoRoles(
   member: GuildMember,
   roleIds: string[],
+  supabase: SupabaseClient,
 ): Promise<void> {
   for (const roleId of roleIds) {
     try {
       const role = member.guild.roles.cache.get(roleId);
       if (!role) {
         log.warn(`Auto-role ${roleId} not found, skipping`);
+        await recordWelcomeFailure(member, supabase, 'role', `role_missing:${roleId}`);
         continue;
       }
       if (member.roles.cache.has(roleId)) continue; // Already has it
@@ -177,6 +186,35 @@ async function applyAutoRoles(
       log.info(`Auto-role "${role.name}" granted to ${member.user.tag}`);
     } catch (err) {
       log.error(`Failed to grant auto-role ${roleId}:`, err);
+      await recordWelcomeFailure(member, supabase, 'role', `grant_failed:${roleId}`);
     }
+  }
+}
+
+async function recordWelcomeFailure(
+  member: GuildMember,
+  supabase: SupabaseClient,
+  surface: 'channel' | 'dm' | 'role',
+  reason: string,
+): Promise<void> {
+  const occurrenceId = `${member.id}:welcome:${surface}:${reason}`;
+  eventBus.emit('welcome.delivery_failed', member.guild.id, {
+    memberId: member.id,
+    surface,
+    reason,
+    occurrenceId,
+    correlationId: `welcome:${member.id}`,
+  });
+  try {
+    await raiseOwnerAlert(supabase, member.guild.id, {
+      alertType: 'welcome_delivery_failed',
+      severity: 'warning',
+      title: 'Welcome delivery needs attention',
+      message: `Welcome ${surface} delivery for a member failed (${reason}).`,
+      metadata: { member_id: member.id, surface, reason },
+      guild: member.guild,
+    });
+  } catch (err) {
+    log.error('Failed to write welcome delivery alert:', { error: String(err) });
   }
 }

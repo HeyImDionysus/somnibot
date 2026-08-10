@@ -217,6 +217,14 @@ export class PollsManager {
       .single();
 
     if (!poll || poll.status !== 'active') {
+      this.eventBus.emit('poll.late_interaction_rejected', buttonInteraction.guildId!, {
+        pollId,
+        actorId: userId,
+        action: 'vote',
+        reason: poll ? `status:${poll.status}` : 'not_found',
+        occurrenceId: `${pollId}:late-vote:${buttonInteraction.id}`,
+        correlationId: `poll:${pollId}`,
+      });
       await buttonInteraction.reply({ content: 'This poll is closed.', ephemeral: true });
       await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_denied', 'poll', pollId, { reason: 'closed_or_missing', optionId }, false, `poll.vote_denied:${buttonInteraction.id}`);
       return;
@@ -513,6 +521,12 @@ export class PollsManager {
       return;
     }
     if (!prediction || prediction.status !== 'open') {
+      this.eventBus.emit('prediction.late_interaction_rejected', guildId, {
+        predictionId, actorId: userId, action: 'bet',
+        reason: prediction ? `status:${prediction.status}` : 'not_found',
+        occurrenceId: `${predictionId}:late-bet:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: '❌ Prediction is not open for bets.', ephemeral: true });
       return;
     }
@@ -841,11 +855,21 @@ export class PollsManager {
       .single();
 
     if (!prediction) {
+      this.eventBus.emit('prediction.resolve_rejected', guildId, {
+        predictionId, actorId: interaction.user.id, reason: 'not_found',
+        occurrenceId: `${predictionId}:resolve-rejected:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: voice(kit.voicePreset, 'not_found', { thing: 'Prediction' }), ephemeral: true });
       return;
     }
 
     if (prediction.creator_user_id !== interaction.user.id) {
+      this.eventBus.emit('prediction.resolve_rejected', guildId, {
+        predictionId, actorId: interaction.user.id, reason: 'not_creator',
+        occurrenceId: `${predictionId}:resolve-rejected:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: '❌ Only the creator can resolve this prediction.', ephemeral: true });
       return;
     }
@@ -858,6 +882,11 @@ export class PollsManager {
       .limit(1000);
 
     if (!options || winningIndex >= options.length) {
+      this.eventBus.emit('prediction.resolve_rejected', guildId, {
+        predictionId, actorId: interaction.user.id, reason: 'invalid_winner',
+        occurrenceId: `${predictionId}:resolve-rejected:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: '❌ Invalid winning option.', ephemeral: true });
       return;
     }
@@ -981,6 +1010,14 @@ export class PollsManager {
       if (err) {
         // Marker stays NULL — the next resolve re-drive retries this bet.
         log.error(`Failed to settle bet ${bet.id} (${type}) for ${bet.user_id}:`, err.message);
+        this.eventBus.emit('prediction.settlement_payout_retried', guildId, {
+          predictionId,
+          betId: bet.id,
+          winnerId: bet.user_id,
+          settlementType: type,
+          occurrenceId: `${predictionId}:settlement-retry:${bet.id}`,
+          correlationId: `prediction:${predictionId}`,
+        });
         return false;
       }
       const settled = res as { status?: string; replayed?: boolean } | null;

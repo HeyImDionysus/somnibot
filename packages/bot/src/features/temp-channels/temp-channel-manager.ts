@@ -375,6 +375,17 @@ export class TempChannelManager {
             ],
           }),
         'temp channel create',
+        (attempt, backoffMs) => {
+          this.eventBus.emit('temp_channel.creation_retried', this.guild.id, {
+            hubId: hub.id,
+            hubChannelId,
+            memberId: member.id,
+            attempt,
+            backoffMs,
+            occurrenceId: occurrenceId ?? `${member.id}:${hub.id}:creation-retry`,
+            correlationId: `temp:hub:${hub.id}`,
+          });
+        },
       );
       externalRoomExists = true;
 
@@ -892,7 +903,11 @@ export class TempChannelManager {
    * drop the whole action. Returns the first successful result or rethrows the
    * last error after all attempts are exhausted.
    */
-  private async withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  private async withRetry<T>(
+    fn: () => Promise<T>,
+    label: string,
+    onRetry?: (attempt: number, backoffMs: number) => void,
+  ): Promise<T> {
     const maxAttempts = 2;
     let lastErr: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -901,8 +916,10 @@ export class TempChannelManager {
       } catch (err) {
         lastErr = err;
         if (attempt < maxAttempts) {
+          const backoffMs = 250 * attempt;
           log.warn(`${label} attempt ${attempt} failed, retrying`, { error: String(err) });
-          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          onRetry?.(attempt + 1, backoffMs);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
         }
       }
     }
