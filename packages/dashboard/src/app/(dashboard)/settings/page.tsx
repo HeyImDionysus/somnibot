@@ -206,7 +206,7 @@ function StatusDot({ status }: { status: 'connected' | 'disconnected' | 'checkin
           : 'text-discord-text-muted',
       )}>
         {status === 'checking' ? 'Checking...'
-          : status === 'connected' ? 'Connected'
+          : status === 'connected' ? 'Configured'
           : status === 'bot-side' ? 'Bot-side only'
           : 'Not configured'}
       </span>
@@ -397,7 +397,7 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-xl font-bold text-discord-text-primary">Settings</h1>
         <p className="mt-1 text-sm text-discord-text-muted">
-          Configure external connections. Features become available as you connect each service.
+          Configure external services. This page shows saved configuration, not live service availability.
           Values set via environment variables are shown as locked.
         </p>
       </div>
@@ -409,13 +409,13 @@ export default function SettingsPage() {
           <div className="flex-1">
             <p className="text-sm font-medium text-discord-text-primary">
               {connectedCount === totalSections
-                ? 'All services connected'
-                : `${connectedCount} of ${totalSections} services connected`}
+                ? 'All configuration sections present'
+                : `${connectedCount} of ${totalSections} configuration sections present`}
             </p>
             <p className="text-xs text-discord-text-muted">
               {connectedCount === totalSections
-                ? 'Your dashboard is fully configured. Secrets are locked for security.'
-                : 'Configure remaining services to unlock all features.'}
+                ? 'Configuration is present. Check Diagnostics for live service status; secrets remain locked for security.'
+                : 'Add the remaining configuration, then check Diagnostics for live service status.'}
             </p>
           </div>
           {/* Progress bar */}

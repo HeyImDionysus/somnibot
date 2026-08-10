@@ -52,34 +52,63 @@ interface DashboardStats {
   }>;
 }
 
+interface DiagnosticsResponse {
+  readonly success: boolean;
+  readonly data: {
+    readonly bot: {
+      readonly online: boolean;
+      readonly onlineSourceAt: string | null;
+      readonly onlineSourceAgeSecs: number | null;
+      readonly metricsAvailable: boolean;
+      readonly metricsStale: boolean;
+      readonly metricsSnapshotAt: string | null;
+      readonly metricsAgeSecs: number | null;
+    };
+  };
+}
+
 /**
  * Dashboard Home — at-a-glance overview of bot status and server health.
  */
 export default function DashboardPage() {
   const [data, setData] = useState<GuildData | null>(null);
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [guildRes, statsRes] = await Promise.all([
+        const [guildRes, statsRes, diagnosticsRes] = await Promise.all([
           fetch('/api/guild'),
           fetch('/api/dashboard/stats'),
+          fetch('/api/diagnostics'),
         ]);
         if (guildRes.ok) {
           const json = await guildRes.json();
           setData(json);
         } else {
-          setError(true);
+          setError('Server details could not be loaded. Retry or open setup to connect a server.');
         }
         if (statsRes.ok) {
           const statsJson = await statsRes.json();
           setStats(statsJson);
+        } else {
+          setError('Dashboard metrics could not be loaded. Open Diagnostics to inspect the current bot status.');
+        }
+        if (diagnosticsRes.ok) {
+          const diagnosticsJson: DiagnosticsResponse = await diagnosticsRes.json();
+          if (diagnosticsJson.success) {
+            setDiagnostics(diagnosticsJson);
+          } else {
+            setError('Bot status could not be confirmed. Open Diagnostics and retry.');
+          }
+        } else {
+          setError('Bot status could not be confirmed. Open Diagnostics and retry.');
         }
       } catch {
-        setError(true);
+        setError('Dashboard data could not be loaded. Retry or open Diagnostics.');
       } finally {
         setLoading(false);
       }
@@ -102,6 +131,16 @@ export default function DashboardPage() {
   }
 
   const guild = data?.guild;
+  const bot = diagnostics?.data.bot;
+  const botStatusKnown = Boolean(bot);
+  const botOnline = bot?.online ?? false;
+  const metricsStale = !bot?.metricsAvailable || bot.metricsStale;
+  const metricsLastChecked = bot?.metricsAgeSecs == null
+    ? 'no health snapshot is available'
+    : `${bot.metricsAgeSecs}s ago`;
+  const botLastChecked = bot?.onlineSourceAgeSecs == null
+    ? 'no status observation is available'
+    : `${bot.onlineSourceAgeSecs}s ago`;
 
   return (
     <div className="space-y-6">
@@ -113,6 +152,16 @@ export default function DashboardPage() {
       </div>
 
       <PendingTeamInvitations />
+
+      {error && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-discord-danger/40 bg-discord-danger/10 px-4 py-3 text-sm text-discord-text-primary">
+          <span>{error}</span>
+          <div className="flex items-center gap-3">
+            <Link href="/diagnostics" className="font-medium text-discord-accent hover:underline">Open Diagnostics</Link>
+            <button type="button" onClick={() => window.location.reload()} className="font-medium text-discord-accent hover:underline">Retry</button>
+          </div>
+        </div>
+      )}
 
       {/* Status Row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -130,6 +179,7 @@ export default function DashboardPage() {
             <CardDescription>
               {guild ? guild.name : 'No guild connected'}
             </CardDescription>
+            {!guild && <Link href="/setup" className="text-xs font-medium text-discord-accent hover:underline">Open setup</Link>}
           </CardHeader>
         </Card>
 
@@ -138,7 +188,7 @@ export default function DashboardPage() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm font-medium">Bot</CardTitle>
-              {stats?.botOnline ? (
+              {botStatusKnown && botOnline ? (
                 <CheckCircle2 size={18} className="text-green-500" />
               ) : guild?.bot_joined_at ? (
                 <XCircle size={18} className="text-discord-danger" />
@@ -149,7 +199,9 @@ export default function DashboardPage() {
             <CardDescription>
               {!guild?.bot_joined_at
                 ? 'Bot not connected'
-                : !stats?.botOnline
+                : !botStatusKnown
+                  ? 'Status unavailable — open Diagnostics'
+                : !botOnline
                   ? 'Offline — bot is not responding'
                   : (() => {
                       const pos = guild.bot_role_position;
@@ -166,6 +218,9 @@ export default function DashboardPage() {
                       return statusText;
                     })()}
             </CardDescription>
+            {guild?.bot_joined_at && (!botStatusKnown || !botOnline) && (
+              <Link href="/diagnostics" className="text-xs font-medium text-discord-accent hover:underline">Open diagnostics</Link>
+            )}
           </CardHeader>
         </Card>
 
@@ -185,6 +240,7 @@ export default function DashboardPage() {
                 ? 'Server setup complete'
                 : 'Run the setup wizard to deploy roles & channels'}
             </CardDescription>
+            {!guild?.setup_completed && <Link href="/setup" className="text-xs font-medium text-discord-accent hover:underline">Continue setup</Link>}
           </CardHeader>
         </Card>
       </div>
@@ -192,8 +248,13 @@ export default function DashboardPage() {
       {/* Live Metrics */}
       <div>
         <h2 className="mb-3 text-sm font-semibold text-discord-text-muted uppercase tracking-wide">
-          Live Metrics
+          Bot Metrics
         </h2>
+        <p className="mb-3 text-xs text-discord-text-muted">
+          {metricsStale
+            ? `Health metrics are stale or unavailable (${metricsLastChecked}). Bot status was last checked ${botLastChecked}.`
+            : `Health metrics and bot status were last checked ${botLastChecked}.`}
+        </p>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-4">
           <MetricCard
             icon={Users}
@@ -223,8 +284,8 @@ export default function DashboardPage() {
           <MetricCard
             icon={Headphones}
             label="Voice Connections"
-            value={stats?.botOnline ? (stats?.activeVoice ?? '—') : '—'}
-            subValue={!stats?.botOnline ? 'Bot offline' : undefined}
+            value={botOnline && !metricsStale ? (stats?.activeVoice ?? '—') : '—'}
+            subValue={!botOnline ? 'Bot offline' : metricsStale ? 'Metrics stale' : undefined}
             color="text-purple-400"
           />
           <MetricCard
@@ -236,15 +297,15 @@ export default function DashboardPage() {
           <MetricCard
             icon={Clock}
             label="Uptime"
-            value={stats?.botOnline ? (stats?.uptime ?? '—') : '—'}
-            subValue={!stats?.botOnline ? 'Bot offline' : undefined}
+            value={botOnline && !metricsStale ? (stats?.uptime ?? '—') : '—'}
+            subValue={!botOnline ? 'Bot offline' : metricsStale ? 'Metrics stale' : undefined}
             color="text-cyan-400"
           />
           <MetricCard
             icon={Wifi}
             label="Tracked Members"
             value={stats?.trackedMembers ?? '—'}
-            subValue={stats?.botOnline && stats?.valkeyConnected ? 'Cache ✓' : stats?.botOnline ? 'No cache' : 'Bot offline'}
+            subValue={botOnline && !metricsStale && stats?.valkeyConnected ? 'Cache ✓' : botOnline && !metricsStale ? 'No cache' : metricsStale ? 'Metrics stale' : 'Bot offline'}
             color="text-blue-400"
           />
         </div>
