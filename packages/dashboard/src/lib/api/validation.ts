@@ -482,15 +482,15 @@ const giveawaySettings = z.object({
 const welcomeConfig = z.object({
   welcome_enabled: z.boolean().optional(),
   welcome_channel_id: snowflake.optional().nullable(),
-  welcome_message: z.string().max(2000).optional(),
+  welcome_message: z.string().max(2000).nullable().optional(),
   welcome_card_enabled: z.boolean().optional(),
   welcome_card_background: optionalHttpUrlSchema,
   welcome_dm_enabled: z.boolean().optional(),
-  welcome_dm_message: z.string().max(2000).optional(),
+  welcome_dm_message: z.string().max(2000).nullable().optional(),
   welcome_auto_roles: z.array(snowflake).max(25).optional(),
   goodbye_enabled: z.boolean().optional(),
   goodbye_channel_id: snowflake.optional().nullable(),
-  goodbye_message: z.string().max(2000).optional(),
+  goodbye_message: z.string().max(2000).nullable().optional(),
 });
 
 const nativeOnboardingOption = z.object({
