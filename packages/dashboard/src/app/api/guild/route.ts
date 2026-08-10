@@ -17,6 +17,11 @@ import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 import { guildConfigPatchSchema } from '@/lib/guild-config-schema';
 
+function normalizeGuildConfig(config: unknown): unknown | null {
+  if (Array.isArray(config)) return config[0] ?? null;
+  return typeof config === 'object' && config !== null ? config : null;
+}
+
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -50,7 +55,7 @@ export async function GET() {
   return NextResponse.json({
     success: true,
     guild,
-    config: guild.guild_config?.[0] ?? null,
+    config: normalizeGuildConfig(guild.guild_config),
     desiredState,
     memberCount: liveState?.member_count ?? 0,
     totalRoles: guild.total_roles ?? null,

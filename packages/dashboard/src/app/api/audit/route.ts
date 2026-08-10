@@ -118,6 +118,15 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  if (isExport && format === 'json') {
+    return new NextResponse(JSON.stringify(data ?? []), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Disposition': `attachment; filename="audit-log-${new Date().toISOString().slice(0, 10)}.json"`,
+      },
+    });
+  }
+
   return NextResponse.json({
     success: true,
     data: data ?? [],
