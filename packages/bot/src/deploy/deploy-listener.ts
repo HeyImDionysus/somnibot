@@ -87,6 +87,9 @@ export function startDeployListener(client: SomniClient): void {
     )
     .subscribe((status) => {
       log.info(`Realtime subscription: ${status}`);
+      if (status === 'SUBSCRIBED') {
+        void recoverPendingDeploys(client);
+      }
     });
 
   // Also listen via event bus for direct deploy requests (API / tests)
@@ -109,6 +112,27 @@ export function startDeployListener(client: SomniClient): void {
   });
 
   log.info('Deploy listener active');
+}
+
+async function recoverPendingDeploys(client: SomniClient): Promise<void> {
+  const { data, error } = await client.supabase
+    .from('guild_desired_state')
+    .select('*')
+    .is('applied_at', null);
+
+  if (error) {
+    log.error('Failed to recover pending deploy requests:', error.message);
+    return;
+  }
+
+  if (!Array.isArray(data)) return;
+
+  for (const row of data) {
+    const stateRow = row as Record<string, unknown>;
+    if (Array.isArray(stateRow.roles) && stateRow.roles.length > 0) {
+      await executeDeploy(client, stateRow);
+    }
+  }
 }
 
 // ============================================================

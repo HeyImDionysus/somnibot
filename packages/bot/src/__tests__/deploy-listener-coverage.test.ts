@@ -66,7 +66,7 @@ function resetDeployMocks(): void {
 
 function chainBuilder(resolveValue: Record<string, unknown> = { data: null, error: null }) {
   const chain: Record<string, unknown> = {};
-  for (const m of ['select', 'eq', 'update', 'upsert', 'insert', 'delete', 'order', 'limit']) {
+  for (const m of ['select', 'eq', 'is', 'update', 'upsert', 'insert', 'delete', 'order', 'limit']) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
   chain.single = vi.fn().mockResolvedValue(resolveValue);
@@ -143,6 +143,22 @@ describe('startDeployListener', () => {
     startDeployListener(client as any);
     expect(client.supabase.channel).toHaveBeenCalledWith('deploy-listener');
     expect(client._channelObj.subscribe).toHaveBeenCalled();
+  });
+
+  it('recovers a pending deploy after the realtime subscription starts', async () => {
+    const client = makeClient();
+    client.supabase.from.mockReturnValueOnce(chainBuilder({
+      data: [{
+        guild_id: 'g1',
+        applied_at: null,
+        roles: [{ name: 'Admin', permissions: '8' }],
+        channels: [{ name: 'general', type: 'text', categoryKey: 'cat-text' }],
+      }],
+      error: null,
+    }));
+
+    startDeployListener(client as any);
+    await vi.waitFor(() => expect(mockDeployServerState).toHaveBeenCalled());
   });
 
   it('subscribes to all guild desired-state updates', () => {
