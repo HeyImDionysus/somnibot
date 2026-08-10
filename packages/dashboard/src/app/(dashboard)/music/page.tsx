@@ -439,7 +439,7 @@ export default function MusicSettingsPage() {
           <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
             <h2 className="text-lg font-semibold text-discord-text-primary">Lavalink Node</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
-              Music audio is available when a Lavalink node is configured.
+              Live Lavalink diagnostics are reported below.
             </p>
             <div className="mt-4 flex items-center gap-2 text-sm">
               <span className="text-discord-text-secondary">{LAVALINK_STATUS_TEXT[lavalinkHealth.state]}</span>
