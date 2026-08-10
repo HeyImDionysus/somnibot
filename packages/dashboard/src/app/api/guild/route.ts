@@ -41,11 +41,18 @@ export async function GET() {
     .eq('guild_id', guildId)
     .single();
 
+  const { data: liveState } = await admin
+    .from('guild_live_state')
+    .select('member_count')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
   return NextResponse.json({
     success: true,
     guild,
     config: guild.guild_config?.[0] ?? null,
     desiredState,
+    memberCount: liveState?.member_count ?? 0,
     totalRoles: guild.total_roles ?? null,
   });
 }

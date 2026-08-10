@@ -452,10 +452,22 @@ function Step1BotStatus({
       const res = await fetch('/api/guild');
       if (res.ok) {
         const data = await res.json();
+        const guild = data.guild;
+        const rolePosition = guild?.bot_role_position;
+        if (!guild?.id || typeof guild.name !== 'string' || typeof rolePosition !== 'number' || rolePosition < 1) {
+          setStatus({
+            connected: false,
+            rolePosition: -1,
+            guildName: '',
+            memberCount: 0,
+            error: 'Bot is connected, but its role is not high enough to deploy server roles',
+          });
+          return;
+        }
         setStatus({
           connected: true,
-          rolePosition: data.botRolePosition ?? -1,
-          guildName: data.name ?? 'Unknown',
+          rolePosition,
+          guildName: guild.name,
           memberCount: data.memberCount ?? 0,
         });
         onComplete();
