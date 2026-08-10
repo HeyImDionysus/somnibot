@@ -81,11 +81,41 @@ describe('economy_pet_feed_atomic', () => {
     expect([a.data?.replayed, b.data?.replayed].sort()).toEqual([false, true]);
     expect(await walletOf()).toBe(450);
 
+    await supa
+      .from('economy_pets')
+      .update({ hunger: 50 })
+      .eq('guild_id', GUILD_ID)
+      .eq('user_id', USER);
     await supa.from('economy_wallets').upsert({ guild_id: GUILD_ID, user_id: USER, wallet: 10 });
     const poor = await rpc('economy_pet_feed_atomic', { p_guild_id: GUILD_ID, p_user_id: USER, p_amount: 30, p_cost: 50, p_request_id: 'feed-poor' });
     expect(poor.error).toBeNull();
     expect(poor.data).toMatchObject({ status: 'insufficient_balance', replayed: false });
     expect(await walletOf()).toBe(10);
+
+    // A terminal failure is fenced too: topping up after the first response
+    // must not turn the same interaction into a successful debit.
+    await supa.from('economy_wallets').upsert({ guild_id: GUILD_ID, user_id: USER, wallet: 100 });
+    const poorReplay = await rpc('economy_pet_feed_atomic', { p_guild_id: GUILD_ID, p_user_id: USER, p_amount: 30, p_cost: 50, p_request_id: 'feed-poor' });
+    expect(poorReplay.data).toMatchObject({ status: 'insufficient_balance', replayed: true });
+    expect(await walletOf()).toBe(100);
+
+    await supa.from('economy_pets').update({ hunger: 100 }).eq('guild_id', GUILD_ID).eq('user_id', USER);
+    const full = await rpc('economy_pet_feed_atomic', { p_guild_id: GUILD_ID, p_user_id: USER, p_amount: 30, p_cost: 50, p_request_id: 'feed-full' });
+    expect(full.data).toMatchObject({ status: 'already_full', replayed: false });
+    await supa.from('economy_pets').update({ hunger: 50 }).eq('guild_id', GUILD_ID).eq('user_id', USER);
+    const fullReplay = await rpc('economy_pet_feed_atomic', { p_guild_id: GUILD_ID, p_user_id: USER, p_amount: 30, p_cost: 50, p_request_id: 'feed-full' });
+    expect(fullReplay.data).toMatchObject({ status: 'already_full', replayed: true });
+    const { data: fullPet } = await supa.from('economy_pets').select('hunger').eq('guild_id', GUILD_ID).eq('user_id', USER).single();
+    expect(fullPet?.hunger).toBe(50);
+
+    const noPetUser = `${USER}-none`;
+    const noPet = await rpc('economy_pet_feed_atomic', { p_guild_id: GUILD_ID, p_user_id: noPetUser, p_amount: 30, p_cost: 50, p_request_id: 'feed-no-pet' });
+    expect(noPet.data).toMatchObject({ status: 'no_pet', replayed: false });
+    await supa.from('economy_wallets').upsert({ guild_id: GUILD_ID, user_id: noPetUser, wallet: 100 });
+    await seedPet(noPetUser);
+    const noPetReplay = await rpc('economy_pet_feed_atomic', { p_guild_id: GUILD_ID, p_user_id: noPetUser, p_amount: 30, p_cost: 50, p_request_id: 'feed-no-pet' });
+    expect(noPetReplay.data).toMatchObject({ status: 'no_pet', replayed: true });
+    expect(await walletOf(noPetUser)).toBe(100);
   });
 });
 

@@ -82,8 +82,9 @@ BEGIN
     RETURN v_result || pg_catalog.jsonb_build_object('replayed', true);
   END IF;
   SELECT metadata -> 'result' INTO v_result
-    FROM public.economy_transactions
+   FROM public.economy_transactions
    WHERE guild_id = p_guild_id
+     AND user_id = p_user_id
      AND idempotency_key = 'pet:feed:' || p_request_id
    LIMIT 1;
   IF FOUND THEN
@@ -96,16 +97,26 @@ BEGIN
    FOR UPDATE;
 
   IF NOT FOUND THEN
-    RETURN pg_catalog.jsonb_build_object(
+    v_result := pg_catalog.jsonb_build_object(
       'status', 'no_pet', 'applied', false, 'replayed', false
     );
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_feed_result', 0, 0, 'Pet feed not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:feed:' || p_request_id);
+    RETURN v_result;
   END IF;
 
   IF v_pet.hunger >= 100 THEN
-    RETURN pg_catalog.jsonb_build_object(
+    v_result := pg_catalog.jsonb_build_object(
       'status', 'already_full', 'applied', false, 'replayed', false,
       'old_hunger', v_pet.hunger, 'new_hunger', v_pet.hunger
     );
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_feed_result', 0, 0, 'Pet feed not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:feed:' || p_request_id);
+    RETURN v_result;
   END IF;
 
   SELECT wallet INTO v_wallet
@@ -114,10 +125,15 @@ BEGIN
    FOR UPDATE;
   v_wallet := COALESCE(v_wallet, 0);
   IF v_wallet < p_cost THEN
-    RETURN pg_catalog.jsonb_build_object(
+    v_result := pg_catalog.jsonb_build_object(
       'status', 'insufficient_balance', 'applied', false, 'replayed', false,
       'wallet_balance', v_wallet, 'cost', p_cost
     );
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_feed_result', 0, v_wallet, 'Pet feed not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:feed:' || p_request_id);
+    RETURN v_result;
   END IF;
 
   -- Debit and hunger update are in this transaction.  economy_subtract_balance
@@ -129,7 +145,7 @@ BEGIN
      WHERE guild_id = p_guild_id AND user_id = p_user_id;
   END IF;
 
-  v_new_hunger := pg_catalog.least(100, v_pet.hunger + p_amount);
+  v_new_hunger := LEAST(100, v_pet.hunger + p_amount);
   v_new_status := CASE
     WHEN v_new_hunger > 30 AND v_pet.happiness > 30 THEN 'happy'
     ELSE 'sad'
@@ -185,6 +201,12 @@ DECLARE
   v_wallet BIGINT;
   v_result JSONB;
 BEGIN
+  IF p_guild_id IS NULL OR pg_catalog.btrim(p_guild_id) = '' THEN
+    RAISE EXCEPTION 'economy_pet_buy_atomic: p_guild_id is required';
+  END IF;
+  IF p_user_id IS NULL OR pg_catalog.btrim(p_user_id) = '' THEN
+    RAISE EXCEPTION 'economy_pet_buy_atomic: p_user_id is required';
+  END IF;
   IF p_request_id IS NULL OR pg_catalog.btrim(p_request_id) = '' THEN
     RAISE EXCEPTION 'economy_pet_buy_atomic: p_request_id is required';
   END IF;
@@ -200,23 +222,34 @@ BEGIN
      AND operation = 'buy' AND request_id = p_request_id FOR UPDATE;
   IF FOUND THEN RETURN v_result || pg_catalog.jsonb_build_object('replayed', true); END IF;
   SELECT metadata -> 'result' INTO v_result FROM public.economy_transactions
-   WHERE guild_id = p_guild_id AND idempotency_key = 'pet:buy:' || p_request_id LIMIT 1;
+   WHERE guild_id = p_guild_id AND user_id = p_user_id
+     AND idempotency_key = 'pet:buy:' || p_request_id LIMIT 1;
   IF FOUND THEN RETURN v_result || pg_catalog.jsonb_build_object('replayed', true); END IF;
 
   SELECT * INTO v_pet FROM public.economy_pets
    WHERE guild_id = p_guild_id AND user_id = p_user_id FOR UPDATE;
   IF FOUND THEN
-    RETURN pg_catalog.jsonb_build_object('status', 'already_has_pet', 'applied', false, 'replayed', false);
+    v_result := pg_catalog.jsonb_build_object('status', 'already_has_pet', 'applied', false, 'replayed', false);
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_buy_result', 0, 0, 'Pet purchase not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:buy:' || p_request_id);
+    RETURN v_result;
   END IF;
 
   SELECT wallet INTO v_wallet FROM public.economy_wallets
    WHERE guild_id = p_guild_id AND user_id = p_user_id FOR UPDATE;
   v_wallet := COALESCE(v_wallet, 0);
   IF v_wallet < p_price THEN
-    RETURN pg_catalog.jsonb_build_object(
+    v_result := pg_catalog.jsonb_build_object(
       'status', 'insufficient_balance', 'applied', false, 'replayed', false,
       'wallet_balance', v_wallet, 'cost', p_price
     );
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_buy_result', 0, v_wallet, 'Pet purchase not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:buy:' || p_request_id);
+    RETURN v_result;
   END IF;
 
   IF p_price > 0 THEN
@@ -274,6 +307,12 @@ DECLARE
   v_stat_bonus  TEXT;
   v_result      JSONB;
 BEGIN
+  IF p_guild_id IS NULL OR pg_catalog.btrim(p_guild_id) = '' THEN
+    RAISE EXCEPTION 'economy_pet_train_atomic: p_guild_id is required';
+  END IF;
+  IF p_user_id IS NULL OR pg_catalog.btrim(p_user_id) = '' THEN
+    RAISE EXCEPTION 'economy_pet_train_atomic: p_user_id is required';
+  END IF;
   IF p_request_id IS NULL OR pg_catalog.btrim(p_request_id) = '' THEN
     RAISE EXCEPTION 'economy_pet_train_atomic: p_request_id is required';
   END IF;
@@ -289,29 +328,50 @@ BEGIN
      AND operation = 'train' AND request_id = p_request_id FOR UPDATE;
   IF FOUND THEN RETURN v_result || pg_catalog.jsonb_build_object('replayed', true); END IF;
   SELECT metadata -> 'result' INTO v_result FROM public.economy_transactions
-   WHERE guild_id = p_guild_id AND idempotency_key = 'pet:train:' || p_request_id LIMIT 1;
+   WHERE guild_id = p_guild_id AND user_id = p_user_id
+     AND idempotency_key = 'pet:train:' || p_request_id LIMIT 1;
   IF FOUND THEN RETURN v_result || pg_catalog.jsonb_build_object('replayed', true); END IF;
 
   SELECT * INTO v_pet FROM public.economy_pets
    WHERE guild_id = p_guild_id AND user_id = p_user_id FOR UPDATE;
   IF NOT FOUND THEN
-    RETURN pg_catalog.jsonb_build_object('status', 'no_pet', 'applied', false, 'replayed', false);
+    v_result := pg_catalog.jsonb_build_object('status', 'no_pet', 'applied', false, 'replayed', false);
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_train_result', 0, 0, 'Pet training not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:train:' || p_request_id);
+    RETURN v_result;
   END IF;
   IF v_pet.energy < p_energy_cost THEN
-    RETURN pg_catalog.jsonb_build_object('status', 'low_energy', 'applied', false, 'replayed', false);
+    v_result := pg_catalog.jsonb_build_object('status', 'low_energy', 'applied', false, 'replayed', false);
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_train_result', 0, 0, 'Pet training not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:train:' || p_request_id);
+    RETURN v_result;
   END IF;
   IF v_pet.level >= 50 THEN
-    RETURN pg_catalog.jsonb_build_object('status', 'max_level', 'applied', false, 'replayed', false);
+    v_result := pg_catalog.jsonb_build_object('status', 'max_level', 'applied', false, 'replayed', false);
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_train_result', 0, 0, 'Pet training not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:train:' || p_request_id);
+    RETURN v_result;
   END IF;
 
   SELECT wallet INTO v_wallet FROM public.economy_wallets
    WHERE guild_id = p_guild_id AND user_id = p_user_id FOR UPDATE;
   v_wallet := COALESCE(v_wallet, 0);
   IF v_wallet < p_cost THEN
-    RETURN pg_catalog.jsonb_build_object(
+    v_result := pg_catalog.jsonb_build_object(
       'status', 'insufficient_balance', 'applied', false, 'replayed', false,
       'wallet_balance', v_wallet, 'cost', p_cost
     );
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_train_result', 0, v_wallet, 'Pet training not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:train:' || p_request_id);
+    RETURN v_result;
   END IF;
   IF p_cost > 0 THEN
     UPDATE public.economy_wallets SET wallet = wallet - p_cost, updated_at = pg_catalog.now()
@@ -319,8 +379,8 @@ BEGIN
   END IF;
 
   v_new_xp := v_pet.xp + p_xp_gain;
-  v_new_level := pg_catalog.least(50, pg_catalog.floor(v_new_xp / 100.0)::INT + 1);
-  v_new_energy := pg_catalog.greatest(0, v_pet.energy - p_energy_cost);
+  v_new_level := LEAST(50, pg_catalog.floor(v_new_xp / 100.0)::INT + 1);
+  v_new_energy := GREATEST(0, v_pet.energy - p_energy_cost);
   v_leveled_up := v_new_level > v_pet.level;
   v_stat_bonus := NULL;
   IF v_leveled_up AND v_new_level % 5 = 0 THEN
@@ -382,6 +442,12 @@ DECLARE
   v_new_status TEXT;
   v_result JSONB;
 BEGIN
+  IF p_guild_id IS NULL OR pg_catalog.btrim(p_guild_id) = '' THEN
+    RAISE EXCEPTION 'economy_pet_play_atomic: p_guild_id is required';
+  END IF;
+  IF p_user_id IS NULL OR pg_catalog.btrim(p_user_id) = '' THEN
+    RAISE EXCEPTION 'economy_pet_play_atomic: p_user_id is required';
+  END IF;
   IF p_request_id IS NULL OR pg_catalog.btrim(p_request_id) = '' THEN
     RAISE EXCEPTION 'economy_pet_play_atomic: p_request_id is required';
   END IF;
@@ -395,13 +461,24 @@ BEGIN
    WHERE guild_id = p_guild_id AND user_id = p_user_id
      AND operation = 'play' AND request_id = p_request_id FOR UPDATE;
   IF FOUND THEN RETURN v_result || pg_catalog.jsonb_build_object('replayed', true); END IF;
+  SELECT metadata -> 'result' INTO v_result FROM public.economy_transactions
+   WHERE guild_id = p_guild_id AND user_id = p_user_id
+     AND idempotency_key = 'pet:play:' || p_request_id LIMIT 1;
+  IF FOUND THEN RETURN v_result || pg_catalog.jsonb_build_object('replayed', true); END IF;
 
   SELECT * INTO v_pet FROM public.economy_pets
    WHERE guild_id = p_guild_id AND user_id = p_user_id FOR UPDATE;
-  IF NOT FOUND THEN RETURN pg_catalog.jsonb_build_object('status', 'no_pet', 'applied', false, 'replayed', false); END IF;
+  IF NOT FOUND THEN
+    v_result := pg_catalog.jsonb_build_object('status', 'no_pet', 'applied', false, 'replayed', false);
+    INSERT INTO public.economy_transactions
+      (guild_id, user_id, type, amount, balance_after, description, metadata, idempotency_key)
+    VALUES (p_guild_id, p_user_id, 'pet_play_result', 0, 0, 'Pet play not applied',
+      pg_catalog.jsonb_build_object('result', v_result), 'pet:play:' || p_request_id);
+    RETURN v_result;
+  END IF;
 
-  v_new_happiness := pg_catalog.least(100, v_pet.happiness + p_happiness_gain);
-  v_new_energy := pg_catalog.greatest(0, v_pet.energy - p_energy_cost);
+  v_new_happiness := LEAST(100, v_pet.happiness + p_happiness_gain);
+  v_new_energy := GREATEST(0, v_pet.energy - p_energy_cost);
   v_new_status := CASE WHEN v_pet.hunger > 30 AND v_new_happiness > 30 THEN 'happy' ELSE 'sad' END;
   UPDATE public.economy_pets SET happiness = v_new_happiness, energy = v_new_energy,
     status = v_new_status, updated_at = pg_catalog.now() WHERE id = v_pet.id;
