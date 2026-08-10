@@ -19,6 +19,7 @@ const read = (relativePath) => readFileSync(path.join(root, relativePath), 'utf8
 const releaseWorkflow = read('.github/workflows/release.yml');
 const builderConfig = read('packages/launcher/electron-builder.yml');
 const buildScript = read('scripts/build-launcher.mjs');
+const fleetChild = read('packages/testkit/run-one-domain.mjs');
 const rootPackage = JSON.parse(read('package.json'));
 const npmrc = read('.npmrc');
 
@@ -72,6 +73,21 @@ assert.match(
   buildScript,
   /Packaged @somnibot\/shared runtime dependency/,
   'packaged runtime smoke must require the bot workspace dependency',
+);
+assert.match(
+  buildScript,
+  /'SUPABASE_SECRET_KEY',[\s\S]*'SUPABASE_SERVICE_ROLE_KEY'/,
+  'packaged runtime smoke must clear canonical and legacy Supabase secret-key names',
+);
+assert.match(
+  fleetChild,
+  /SOMNIBOT_E2E_SUPABASE_SERVICE_ROLE_KEY/g,
+  'local fleet credentials may only use the explicit loopback-E2E override',
+);
+assert.doesNotMatch(
+  fleetChild,
+  /SUPABASE_SECRET_KEY:\s*process\.env\.SUPABASE_SECRET_KEY|SUPABASE_SERVICE_ROLE_KEY:\s*process\.env\.SUPABASE_SERVICE_ROLE_KEY/,
+  'local fleet must never inherit ambient launcher or customer Supabase credentials',
 );
 assert.match(
   builderConfig,

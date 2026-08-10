@@ -519,6 +519,7 @@ function verifyPackagedBotRuntime() {
       'DISCORD_APPLICATION_ID',
       'SUPABASE_URL',
       'SUPABASE_SECRET_KEY',
+      'SUPABASE_SERVICE_ROLE_KEY',
       'NEXT_PUBLIC_SUPABASE_URL',
     ]) {
       delete smokeEnv[key];

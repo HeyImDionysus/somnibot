@@ -8,7 +8,15 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+
+/** Resolve the canonical launcher key while preserving the legacy CI alias. */
+export function resolveTestSupabaseKey(
+  env: Partial<Pick<NodeJS.ProcessEnv, 'SUPABASE_SECRET_KEY' | 'SUPABASE_SERVICE_ROLE_KEY'>> = process.env,
+): string {
+  return env.SUPABASE_SECRET_KEY ?? env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+}
+
+const SUPABASE_KEY = resolveTestSupabaseKey();
 
 /**
  * Well-known local-dev demo JWTs (signed with the Supabase CLI default
@@ -118,6 +126,13 @@ export async function isSupabaseAvailable(): Promise<boolean> {
  * available, the suite should fail loudly, not silently pass.
  */
 export async function requireSupabase(): Promise<SupabaseClient> {
+  if (!SUPABASE_KEY) {
+    throw new Error(
+      'SUPABASE_SECRET_KEY is required for integration tests ' +
+      '(legacy SUPABASE_SERVICE_ROLE_KEY is also accepted).'
+    );
+  }
+
   const available = await isSupabaseAvailable();
   if (!available) {
     throw new Error(

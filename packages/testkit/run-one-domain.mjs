@@ -51,9 +51,14 @@ Object.assign(process.env, {
   SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: 'e2e-live-disposable-guild',
   DISCORD_TOKEN: 'e2e-live-no-login-dummy-token',
   DISCORD_APPLICATION_ID: '000000000000000000',
-  SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY || DEMO_SERVICE,
-  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
-  SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || DEMO_ANON,
+  // Only explicit loopback-E2E overrides may replace the local CLI demo keys.
+  // Never inherit launcher/customer credentials into this local real-effect rig.
+  SUPABASE_SECRET_KEY:
+    process.env.SOMNIBOT_E2E_SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
+  SUPABASE_SERVICE_ROLE_KEY:
+    process.env.SOMNIBOT_E2E_SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
+  SUPABASE_ANON_KEY:
+    process.env.SOMNIBOT_E2E_SUPABASE_ANON_KEY || DEMO_ANON,
   // Real, isolated Valkey so cooldown/streak/rate-limit legs drive.
   VALKEY_URL: valkeyUrl,
   // Disposable Valkey is deliberately unauthenticated. Clearing an ambient
