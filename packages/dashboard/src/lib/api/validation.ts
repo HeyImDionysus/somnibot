@@ -605,10 +605,15 @@ const levelRewardCreate = z.object({
 const namePlaceholder = (s: string) => s.includes('{value}') || s.includes('{count}');
 const namePlaceholderMsg = 'name_format must contain the {value} placeholder';
 
+const statsChannelConfig = z.object({
+  category_id: snowflake,
+  value: z.string().max(128).optional(),
+}).passthrough();
+
 const statsChannelCreate = z.object({
   stat_type: z.string().min(1).max(64),
   name_format: z.string().max(128).refine(namePlaceholder, { message: namePlaceholderMsg }),
-  stat_config: z.record(z.unknown()).optional(),
+  stat_config: statsChannelConfig,
 });
 
 // ── Temp channel schemas ────────────────────────────

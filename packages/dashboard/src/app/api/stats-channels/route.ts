@@ -27,7 +27,10 @@ const statsChannelUpdate = z.object({
       message: 'name_format must contain the {value} placeholder',
     })
     .optional(),
-  stat_config: z.record(z.unknown()).optional(),
+  stat_config: z.object({
+    category_id: z.string().regex(/^\d{17,20}$/),
+    value: z.string().max(128).optional(),
+  }).passthrough().optional(),
   active: z.boolean().optional(),
 });
 export async function GET() {

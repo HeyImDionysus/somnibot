@@ -168,6 +168,10 @@ export default function StatsChannelsPage() {
       setError('Stat type and name format are required');
       return;
     }
+    if (!form.category_id) {
+      setError('Select a category where the bot should create this stats channel');
+      return;
+    }
 
     const stat_config: Record<string, unknown> = {};
     if (form.category_id) stat_config.category_id = form.category_id;
@@ -322,12 +326,11 @@ export default function StatsChannelsPage() {
               </div>
               <div>
                 <ChannelPicker
-                  label="Category (optional)"
+                  label="Stats Category *"
                   value={form.category_id || null}
                   onChange={(v) => setForm({ ...form, category_id: (v as string) ?? '' })}
-                  placeholder="Place channel in this category"
+                  placeholder="Select where the bot should create it"
                   channelTypes={['category']}
-                  allowNone
                 />
               </div>
               {form.stat_type === 'custom_counter' && (
