@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import '@/styles/globals.css';
 import { CsrfBoundary } from '@/components/csrf-boundary';
+import { ReactDevelopmentTools } from '@/components/react-development-tools';
 import {
   PUBLIC_SUPABASE_PUBLISHABLE_KEY_META_NAME,
   PUBLIC_SUPABASE_URL_META_NAME,
@@ -51,6 +52,7 @@ export default function RootLayout({
           : null}
       </head>
       <body className="min-h-screen bg-discord-bg-tertiary text-discord-text-primary antialiased">
+        <ReactDevelopmentTools />
         <CsrfBoundary />
         {children}
       </body>

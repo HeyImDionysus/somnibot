@@ -1,0 +1,8 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 0c8d6cb1b06d1e9d034c8e59691638088fbee2b6..91a9ec1d014b9897092c58f9384968f9287f354a 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -18729 +18729,2 @@
+-import { version as REACT_GRAB_VERSION } from "react-grab/package.json";
++import reactGrabPackage from "react-grab/package.json";
++var REACT_GRAB_VERSION = reactGrabPackage.version;
