@@ -20,6 +20,10 @@ const healthRecoveryInstaller = path.join(repoRoot, 'scripts', 'install-producti
 const productionCompose = path.join(repoRoot, 'scripts', 'lib', 'production-compose.sh');
 const deploymentGuide = path.join(repoRoot, 'DEPLOYMENT.md');
 const runbook = path.join(repoRoot, 'RUNBOOK.md');
+const productionDockerfiles = [
+  path.join(repoRoot, 'packages', 'bot', 'Dockerfile'),
+  path.join(repoRoot, 'packages', 'dashboard', 'Dockerfile'),
+];
 const productionComposeConsumers = [
   path.join(repoRoot, 'scripts', 'backup-production-valkey.sh'),
   path.join(repoRoot, 'scripts', 'enter-runtime-maintenance.sh'),
@@ -77,6 +81,25 @@ describe('protected VPS environment scripts', () => {
       expect(source, script).toContain('. "$compose_helper"');
       expect(source, script).not.toContain('docker compose -f "$compose_file"');
     }
+  });
+
+  it('copies workspace dependency patches before frozen installs in production images', () => {
+    for (const dockerfile of productionDockerfiles) {
+      const source = readFileSync(dockerfile, 'utf8');
+      const patchCopy = source.indexOf('COPY patches ./patches');
+      const frozenInstall = source.indexOf('RUN pnpm install --frozen-lockfile');
+
+      expect(patchCopy, dockerfile).toBeGreaterThan(-1);
+      expect(frozenInstall, dockerfile).toBeGreaterThan(patchCopy);
+    }
+
+    const botDockerfile = readFileSync(productionDockerfiles[0], 'utf8');
+    const migrationCopy = botDockerfile.indexOf(
+      'COPY packages/supabase/migrations ./packages/supabase/migrations',
+    );
+    const botBuild = botDockerfile.indexOf('RUN pnpm --filter @somnibot/bot build');
+    expect(migrationCopy).toBeGreaterThan(-1);
+    expect(botBuild).toBeGreaterThan(migrationCopy);
   });
 
   it('executes production Compose in the isolated project with only the active public-access files', () => {

@@ -15,6 +15,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # Copy workspace root files
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.base.json ./
+COPY patches ./patches
 
 # Copy package manifests for all workspace packages
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
@@ -23,6 +24,7 @@ COPY packages/bot/package.json packages/bot/tsconfig.json ./packages/bot/
 # Copy source code
 COPY packages/shared/src ./packages/shared/src
 COPY packages/bot/src ./packages/bot/src
+COPY packages/supabase/migrations ./packages/supabase/migrations
 COPY scripts/clean.mjs scripts/smoke-built-bot-migration-runner.mjs ./scripts/
 
 # Install dependencies with pnpm (deterministic via lockfile)

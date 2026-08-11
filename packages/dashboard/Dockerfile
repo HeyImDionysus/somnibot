@@ -15,6 +15,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # Copy workspace root files
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.base.json ./
+COPY patches ./patches
 
 # Copy package manifests
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
