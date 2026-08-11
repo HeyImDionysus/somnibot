@@ -447,5 +447,5 @@ GRANT EXECUTE ON FUNCTION public.cancel_onboarding_fallback_intent(UUID, UUID) T
 GRANT EXECUTE ON FUNCTION public.terminate_onboarding_fallback_intent(TEXT, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_onboarding_fallback_intent(UUID, UUID) TO service_role;
 
-REVOKE ALL ON FUNCTION public.grant_onboarding_fallback_atomic(TEXT, TEXT, INTEGER, TEXT) FROM PUBLIC, anon, authenticated, service_role;
-DROP FUNCTION public.grant_onboarding_fallback_atomic(TEXT, TEXT, INTEGER, TEXT);
+REVOKE ALL ON FUNCTION public.grant_onboarding_fallback_atomic(TEXT, TEXT, INTEGER, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.grant_onboarding_fallback_atomic(TEXT, TEXT, INTEGER, TEXT) TO service_role;
