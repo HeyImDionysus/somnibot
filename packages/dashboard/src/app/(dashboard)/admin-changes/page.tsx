@@ -5,6 +5,8 @@
 'use client';
 
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { requireApiSuccess } from '@/lib/client-api-result';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
@@ -54,6 +56,8 @@ export default function AdminChangesPage() {
   const [undoableOnly, setUndoableOnly] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);
+  const [confirmUndo, setConfirmUndo] = useState<AdminChange | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -61,8 +65,16 @@ export default function AdminChangesPage() {
       const params = new URLSearchParams();
       if (undoableOnly) params.set('undoable', 'true');
       const res = await fetch(`/api/admin-changes?${params}`);
-      const json = await res.json();
-      if (json.success) setChanges(json.data);
+      const json = await requireApiSuccess(res, 'Could not load admin changes. Retry from this page.');
+      if (Array.isArray(json.data)) {
+        setChanges(json.data as AdminChange[]);
+        return true;
+      }
+      setError('The admin-change service returned an invalid readback. Retry from this page.');
+      return false;
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load admin changes. Retry from this page.');
+      return false;
     } finally {
       setLoading(false);
     }
@@ -70,21 +82,27 @@ export default function AdminChangesPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const undoChange = async (id: string) => {
-    setUndoing(id);
+  const undoChange = async () => {
+    if (!confirmUndo) return;
+    setUndoing(confirmUndo.id);
+    setError(null);
     try {
       const res = await fetch('/api/admin-changes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'undo', id }),
+        body: JSON.stringify({ action: 'undo', id: confirmUndo.id }),
       });
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        toast({ title: 'Undo failed', description: json.error || 'Unknown error', variant: 'error' });
+      await requireApiSuccess(res, 'Could not undo this change. The recorded state is unchanged.');
+      if (!await load()) {
+        setError('The undo was accepted, but the updated change record could not be confirmed. Keep this dialog open and reload before retrying.');
         return;
       }
       toast({ title: 'Change undone', variant: 'success' });
-      load();
+      setConfirmUndo(null);
+    } catch (undoError) {
+      const message = undoError instanceof Error ? undoError.message : 'Could not undo this change. The recorded state is unchanged.';
+      setError(message);
+      toast({ title: 'Undo failed', description: message, variant: 'error' });
     } finally {
       setUndoing(null);
     }
@@ -109,6 +127,12 @@ export default function AdminChangesPage() {
         </label>
       </div>
 
+      {error && (
+        <div role="alert" className="rounded-card border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
       {loading ? (
         <TableSkeleton rows={6} />
       ) : changes.length === 0 ? (
@@ -120,11 +144,15 @@ export default function AdminChangesPage() {
         <div className="space-y-2">
           {changes.map((change) => (
             <div key={change.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
-              <button
-                onClick={() => setExpandedId(expandedId === change.id ? null : change.id)}
-                className="w-full text-left px-4 py-3 hover:bg-discord-bg-tertiary/30 transition-colors rounded-lg"
-              >
-                <div className="flex items-center justify-between">
+              <div className="flex items-start rounded-lg px-4 py-3 hover:bg-discord-bg-tertiary/30 transition-colors">
+                <button
+                  type="button"
+                  onClick={() => setExpandedId(expandedId === change.id ? null : change.id)}
+                  aria-expanded={expandedId === change.id}
+                  aria-label={`${expandedId === change.id ? 'Collapse' : 'Expand'} change: ${change.description}`}
+                  className="min-w-0 flex-1 text-left"
+                >
+                <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
                     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${BLAST_STYLES[change.blast_radius] || ''}`}>
                       {change.blast_radius}
@@ -136,18 +164,7 @@ export default function AdminChangesPage() {
                     )}
                     <span className="text-sm text-discord-text-primary truncate">{change.description}</span>
                   </div>
-                  <div className="flex items-center gap-3 shrink-0 ml-2">
-                    {change.is_undoable && !change.is_undone && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); undoChange(change.id); }}
-                        disabled={undoing === change.id}
-                        className="rounded-md bg-orange-500/20 px-3 py-1 text-xs font-medium text-orange-400 hover:bg-orange-500/30 transition-colors disabled:opacity-50"
-                      >
-                        {undoing === change.id ? 'Undoing…' : 'Undo'}
-                      </button>
-                    )}
-                    <span className="text-xs text-discord-text-muted whitespace-nowrap">{formatDate(change.created_at)}</span>
-                  </div>
+                  <span className="shrink-0 whitespace-nowrap text-xs text-discord-text-muted">{formatDate(change.created_at)}</span>
                 </div>
                 <div className="mt-1 text-xs text-discord-text-muted">
                   <span className="font-mono">{change.action}</span>
@@ -157,7 +174,18 @@ export default function AdminChangesPage() {
                   {' • '}
                   by <span className="font-mono">{change.actor_id.slice(0, 12)}</span>
                 </div>
-              </button>
+                </button>
+                {change.is_undoable && !change.is_undone && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmUndo(change)}
+                    disabled={undoing === change.id}
+                    className="ml-3 shrink-0 rounded-md bg-orange-500/20 px-3 py-1 text-xs font-medium text-orange-400 hover:bg-orange-500/30 transition-colors disabled:opacity-50"
+                  >
+                    {undoing === change.id ? 'Undoing…' : `Undo ${change.description}`}
+                  </button>
+                )}
+              </div>
 
               {expandedId === change.id && (
                 <div className="border-t border-discord-border-subtle px-4 py-3 grid gap-3 md:grid-cols-2">
@@ -189,6 +217,19 @@ export default function AdminChangesPage() {
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmUndo !== null}
+        title="Undo administrative change"
+        description={confirmUndo ? `Undo “${confirmUndo.description}” for ${confirmUndo.target_type}${confirmUndo.target_id ? ` ${confirmUndo.target_id}` : ''}. This applies the recorded before-state and may affect the current configuration.` : undefined}
+        confirmLabel="Undo change"
+        variant="warning"
+        loading={undoing !== null}
+        onConfirm={undoChange}
+        onCancel={() => {
+          if (!undoing) setConfirmUndo(null);
+        }}
+      />
     </div>
   );
 }

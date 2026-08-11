@@ -7,6 +7,8 @@
 'use client';
 
 import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { requireApiSuccess } from '@/lib/client-api-result';
 
 import { useEffect, useState, useCallback } from 'react';
 import { DIAGNOSTICS_GUIDANCE, type GuidedMetric } from '@/lib/diagnostics-guidance';
@@ -213,6 +215,7 @@ function Sparkline({
 export default function DiagnosticsPage() {
   const [diag, setDiag] = useState<DiagnosticsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Webhook log state
   const [webhooks, setWebhooks] = useState<WebhookEvent[]>([]);
@@ -231,16 +234,29 @@ export default function DiagnosticsPage() {
   // Alert state
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(true);
+  const [alertActionError, setAlertActionError] = useState<string | null>(null);
+  const [pendingAlertAction, setPendingAlertAction] = useState<{
+    readonly alert: Alert;
+    readonly action: 'acknowledge' | 'resolve';
+  } | null>(null);
+  const [pendingWebhookAction, setPendingWebhookAction] = useState<{
+    readonly eventId: string;
+    readonly action: 'replay' | 'recover';
+  } | null>(null);
 
   const fetchAlerts = useCallback(async () => {
     try {
       const res = await fetch('/api/alerts?status=active');
-      const json = await res.json();
-      if (json.success) {
-        setAlerts(json.data.alerts ?? []);
+      const json = await requireApiSuccess(res, 'Could not load active alerts. Retry from this page.');
+      const data = json.data;
+      if (!data || typeof data !== 'object' || !('alerts' in data) || !Array.isArray(data.alerts)) {
+        throw new Error('The active-alert readback was invalid. Retry from this page.');
       }
+      setAlerts(data.alerts as Alert[]);
+      return true;
     } catch (err) {
-      console.error('Failed to fetch alerts:', err);
+      setAlertActionError(err instanceof Error ? err.message : 'Could not load active alerts. Retry from this page.');
+      return false;
     } finally {
       setAlertsLoading(false);
     }
@@ -260,60 +276,53 @@ export default function DiagnosticsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setThresholdError(
-          (body as { error?: string }).error
-          ?? 'Could not save that value. Check it is inside the allowed range.',
-        );
-        // Re-read after a rejected save so the field is remounted with the
-        // last persisted value rather than displaying a value the bot ignores.
-        await fetchDiagnostics();
-        return;
+      await requireApiSuccess(
+        res,
+        'Could not save that value. Your entry is still shown; check the allowed range or retry.',
+      );
+      if (!await fetchDiagnostics()) {
+        setThresholdError('The setting was accepted, but the saved threshold could not be confirmed. Reload before retrying.');
       }
-      await fetchDiagnostics();
-    } catch {
-      setThresholdError('Could not reach the server to save that setting.');
+    } catch (saveError) {
+      setThresholdError(saveError instanceof Error ? saveError.message : 'Could not reach the server to save that setting.');
     } finally {
       setSavingThresholds(false);
     }
   };
 
-  const handleAcknowledgeAlert = async (alertId: string) => {
+  const handleAlertAction = async () => {
+    if (!pendingAlertAction) return;
+    setAlertActionError(null);
     try {
-      await fetch('/api/alerts', {
+      const response = await fetch('/api/alerts', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: alertId, action: 'acknowledge' }),
+        body: JSON.stringify({ id: pendingAlertAction.alert.id, action: pendingAlertAction.action }),
       });
-      await fetchAlerts();
-    } catch (err) {
-      console.error('Failed to acknowledge alert:', err);
-    }
-  };
-
-  const handleResolveAlert = async (alertId: string) => {
-    try {
-      await fetch('/api/alerts', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: alertId, action: 'resolve' }),
-      });
-      await fetchAlerts();
-    } catch (err) {
-      console.error('Failed to resolve alert:', err);
+      await requireApiSuccess(response, `Could not ${pendingAlertAction.action} this alert. It remains active.`);
+      if (!await fetchAlerts()) {
+        setAlertActionError('The alert action was accepted, but the active alert list could not be confirmed. Reload before retrying.');
+        return;
+      }
+      setPendingAlertAction(null);
+    } catch (alertError) {
+      setAlertActionError(alertError instanceof Error ? alertError.message : 'Could not update this alert. It remains active.');
     }
   };
 
   const fetchDiagnostics = useCallback(async () => {
     try {
       const res = await fetch('/api/diagnostics');
-      const json = await res.json();
-      if (json.success) {
-        setDiag(json.data);
+      const json = await requireApiSuccess(res, 'Could not load diagnostics. Retry from this page.');
+      if (!json.data || typeof json.data !== 'object') {
+        throw new Error('The diagnostics readback was invalid. Retry from this page.');
       }
+      setDiag(json.data as unknown as DiagnosticsData);
+      setLoadError(null);
+      return true;
     } catch (err) {
-      console.error('Failed to fetch diagnostics:', err);
+      setLoadError(err instanceof Error ? err.message : 'Could not load diagnostics. Retry from this page.');
+      return false;
     } finally {
       setLoading(false);
     }
@@ -325,13 +334,16 @@ export default function DiagnosticsPage() {
       const params = new URLSearchParams({ page: String(page), pageSize: '25' });
       if (whFilter) params.set('result', whFilter);
       const res = await fetch(`/api/webhooks?${params}`);
-      const json = await res.json();
-      if (json.success) {
-        setWebhooks(json.data);
-        setWhPagination(json.pagination);
+      const json = await requireApiSuccess(res, 'Could not load webhook events. Retry from this page.');
+      if (!Array.isArray(json.data) || !json.pagination || typeof json.pagination !== 'object') {
+        throw new Error('The webhook-event readback was invalid. Retry from this page.');
       }
+      setWebhooks(json.data as WebhookEvent[]);
+      setWhPagination(json.pagination as unknown as WebhookPagination);
+      return true;
     } catch (err) {
-      console.error('Failed to fetch webhooks:', err);
+      setWebhookActionError(err instanceof Error ? err.message : 'Could not load webhook events. Retry from this page.');
+      return false;
     } finally {
       setWhLoading(false);
     }
@@ -352,50 +364,33 @@ export default function DiagnosticsPage() {
     fetchWebhooks(1);
   }, [fetchWebhooks]);
 
-  const handleReplay = async (eventId: string) => {
-    setReplayingId(eventId);
+  const handleWebhookAction = async () => {
+    if (!pendingWebhookAction) return;
+    setReplayingId(pendingWebhookAction.eventId);
     setWebhookActionError(null);
     try {
-      const res = await fetch(`/api/webhooks/${eventId}/replay`, { method: 'POST' });
-      const json = await res.json();
-      if (json.success) {
-        // Refresh webhook list
-        await fetchWebhooks(whPagination.page);
-      } else {
-        setWebhookActionError(json.error ?? 'Replay failed.');
-      }
-    } catch (err) {
-      console.error('Replay failed:', err);
-      setWebhookActionError('Could not reach the server to replay that webhook.');
-    } finally {
-      setReplayingId(null);
-    }
-  };
-
-  const handleRecoverStaleReplay = async (eventId: string) => {
-    const confirmed = window.confirm(
-      'Only recover this claim after confirming the original replay worker has stopped. '
-      + 'Recovering it allows a new payment replay. Continue?',
-    );
-    if (!confirmed) return;
-
-    setReplayingId(eventId);
-    setWebhookActionError(null);
-    try {
-      const res = await fetch(`/api/webhooks/${eventId}/replay`, {
+      const res = await fetch(`/api/webhooks/${pendingWebhookAction.eventId}/replay`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'abandon_stale_claim' }),
+        ...(pendingWebhookAction.action === 'recover'
+          ? {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'abandon_stale_claim' }),
+            }
+          : {}),
       });
-      const json = await res.json();
-      if (json.success) {
-        await fetchWebhooks(whPagination.page);
-      } else {
-        setWebhookActionError(json.error ?? 'Could not recover that stale replay claim.');
+      await requireApiSuccess(
+        res,
+        pendingWebhookAction.action === 'recover'
+          ? 'Could not recover that stale replay claim. Confirm the original worker is stopped, then retry.'
+          : 'Could not replay that webhook. It has not been marked replayed.',
+      );
+      if (!await fetchWebhooks(whPagination.page)) {
+        setWebhookActionError('The replay action was accepted, but the webhook log readback failed. Keep this dialog open and reload before retrying.');
+        return;
       }
-    } catch (err) {
-      console.error('Stale replay recovery failed:', err);
-      setWebhookActionError('Could not reach the server to recover that replay claim.');
+      setPendingWebhookAction(null);
+    } catch (replayError) {
+      setWebhookActionError(replayError instanceof Error ? replayError.message : 'Could not update this webhook. Retry from this page.');
     } finally {
       setReplayingId(null);
     }
@@ -428,6 +423,18 @@ export default function DiagnosticsPage() {
           System health, infrastructure status, and webhook monitoring
         </p>
       </div>
+
+      {alertActionError && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {alertActionError}
+        </div>
+      )}
+
+      {loadError && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {loadError}
+        </div>
+      )}
 
       {/* Active Alerts Banner */}
       {!alertsLoading && alerts.length > 0 && (
@@ -476,14 +483,14 @@ export default function DiagnosticsPage() {
                 <div className="flex gap-2 shrink-0">
                   {!alert.acknowledged && (
                     <button
-                      onClick={() => handleAcknowledgeAlert(alert.id)}
+                      onClick={() => setPendingAlertAction({ alert, action: 'acknowledge' })}
                       className="rounded-md bg-discord-bg-secondary px-2 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary transition-colors"
                     >
                       Acknowledge
                     </button>
                   )}
                   <button
-                    onClick={() => handleResolveAlert(alert.id)}
+                    onClick={() => setPendingAlertAction({ alert, action: 'resolve' })}
                     className="rounded-md bg-discord-bg-secondary px-2 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary transition-colors"
                   >
                     Resolve
@@ -796,6 +803,7 @@ export default function DiagnosticsPage() {
           <select
             value={whFilter}
             onChange={(e) => setWhFilter(e.target.value)}
+            aria-label="Filter webhook results"
             className="rounded-md bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary outline-none focus:ring-2 focus:ring-discord-accent"
           >
             <option value="">All Results</option>
@@ -807,7 +815,7 @@ export default function DiagnosticsPage() {
 
         <div className="rounded-lg bg-discord-bg-secondary overflow-hidden">
           {webhookActionError && (
-            <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
+            <div role="alert" className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
               {webhookActionError}
             </div>
           )}
@@ -853,8 +861,9 @@ export default function DiagnosticsPage() {
                     <td className="px-4 py-2 text-right">
                       {wh.result === 'error' && (
                         <button
-                          onClick={() => handleReplay(wh.event_id)}
+                          onClick={() => setPendingWebhookAction({ eventId: wh.event_id, action: 'replay' })}
                           disabled={replayingId === wh.event_id}
+                          aria-label={`Replay ${wh.event_type} webhook ${wh.event_id}`}
                           className="rounded-md bg-discord-accent/20 px-2 py-1 text-xs font-medium text-discord-accent hover:bg-discord-accent/30 disabled:opacity-50 transition-colors"
                         >
                           {replayingId === wh.event_id ? 'Replaying…' : 'Replay'}
@@ -862,8 +871,9 @@ export default function DiagnosticsPage() {
                       )}
                       {isRecoverableStaleReplay(wh) && (
                         <button
-                          onClick={() => handleRecoverStaleReplay(wh.event_id)}
+                          onClick={() => setPendingWebhookAction({ eventId: wh.event_id, action: 'recover' })}
                           disabled={replayingId === wh.event_id}
+                          aria-label={`Recover stale replay claim for ${wh.event_type} webhook ${wh.event_id}`}
                           className="rounded-md bg-amber-500/20 px-2 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/30 disabled:opacity-50 transition-colors"
                           title="Use only after confirming the original replay worker stopped"
                         >
@@ -903,6 +913,31 @@ export default function DiagnosticsPage() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingAlertAction !== null}
+        title={pendingAlertAction?.action === 'resolve' ? 'Resolve active alert' : 'Acknowledge active alert'}
+        description={pendingAlertAction ? `${pendingAlertAction.action === 'resolve' ? 'Resolve' : 'Acknowledge'} “${pendingAlertAction.alert.title}” (alert ${pendingAlertAction.alert.id}). ${pendingAlertAction.action === 'resolve' ? 'This removes it from the active alert list as resolved.' : 'This records that an operator has seen it; the underlying condition is not repaired.'}` : undefined}
+        confirmLabel={pendingAlertAction?.action === 'resolve' ? 'Resolve alert' : 'Acknowledge alert'}
+        variant="warning"
+        onConfirm={handleAlertAction}
+        onCancel={() => setPendingAlertAction(null)}
+      />
+
+      <ConfirmDialog
+        open={pendingWebhookAction !== null}
+        title={pendingWebhookAction?.action === 'recover' ? 'Recover stale replay claim' : 'Replay webhook event'}
+        description={pendingWebhookAction ? pendingWebhookAction.action === 'recover'
+          ? `Recover claim for webhook ${pendingWebhookAction.eventId} only after confirming the original replay worker has stopped. Recovery allows a new payment replay and can repeat external side effects if the worker is still running.`
+          : `Replay webhook ${pendingWebhookAction.eventId}. This runs its handler again and can repeat external side effects; existing idempotency protections still apply.` : undefined}
+        confirmLabel={pendingWebhookAction?.action === 'recover' ? 'Recover replay claim' : 'Replay webhook'}
+        variant="warning"
+        loading={replayingId !== null}
+        onConfirm={handleWebhookAction}
+        onCancel={() => {
+          if (!replayingId) setPendingWebhookAction(null);
+        }}
+      />
     </div>
   );
 }

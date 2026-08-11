@@ -11,6 +11,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { requireApiSuccess } from '@/lib/client-api-result';
 import {
   canRepairDriftItem,
   EXTRA_RESOURCE_WARNING,
@@ -43,6 +45,10 @@ interface SyncStatus {
   driftItems: DriftItem[];
 }
 
+type PendingSyncAction =
+  | { readonly action: 'repair' | 'accept' | 'ignore'; readonly item: DriftItem }
+  | { readonly action: 'clear_all' };
+
 const SEVERITY_STYLES: Record<string, { bg: string; border: string; icon: string; label: string }> = {
   critical: { bg: 'bg-red-500/10', border: 'border-red-500/30', icon: '🚨', label: 'Critical' },
   warning: { bg: 'bg-yellow-500/10', border: 'border-yellow-500/30', icon: '⚠️', label: 'Warning' },
@@ -66,16 +72,21 @@ export default function SyncPage() {
   const [saving, setSaving] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingSyncAction | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/sync/status');
-      const json = await res.json();
-      if (json.success) {
-        setStatus(json.data);
+      const json = await requireApiSuccess(res, 'Could not load sync status. Retry from this page.');
+      if (json.data && typeof json.data === 'object') {
+        setStatus(json.data as SyncStatus);
+        return true;
       }
-    } catch {
-      setError('Failed to load sync status');
+      setError('The sync service returned an invalid readback. Retry from this page.');
+      return false;
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load sync status. Retry from this page.');
+      return false;
     } finally {
       setLoading(false);
     }
@@ -98,8 +109,11 @@ export default function SyncPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(status.config),
       });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
+      await requireApiSuccess(res, 'Could not save sync settings. Your edits are still here; correct the value or retry.');
+      if (!await loadStatus()) {
+        setError('Settings were accepted, but the saved sync configuration could not be confirmed. Keep this page open and reload before retrying.');
+        return;
+      }
       toast({ title: 'Settings saved', variant: 'success' });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
@@ -108,7 +122,7 @@ export default function SyncPage() {
     }
   };
 
-  const handleDriftAction = async (
+  const requestDriftAction = (
     action: 'repair' | 'accept' | 'ignore',
     item: DriftItem,
   ) => {
@@ -116,39 +130,35 @@ export default function SyncPage() {
       setError(EXTRA_RESOURCE_WARNING);
       return;
     }
-    setActionLoading(`${action}:${item.entityName}`);
-    try {
-      const res = await fetch('/api/sync/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action,
-          driftItem: item,
-        }),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
-      // Reload status
-      await loadStatus();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Action failed');
-    } finally {
-      setActionLoading(null);
-    }
+    setPendingAction({ action, item });
   };
 
-  const handleClearAll = async () => {
+  const executePendingAction = async () => {
+    if (!pendingAction) return;
+    const target = pendingAction.action === 'clear_all' ? 'all drift notices' : pendingAction.item.entityName;
+    setActionLoading(`${pendingAction.action}:${target}`);
+    setError(null);
     try {
       const res = await fetch('/api/sync/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'clear_all' }),
+        body: JSON.stringify(
+          pendingAction.action === 'clear_all'
+            ? { action: 'clear_all' }
+            : { action: pendingAction.action, driftItem: pendingAction.item },
+        ),
       });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
-      await loadStatus();
+      await requireApiSuccess(res, `Could not ${pendingAction.action === 'clear_all' ? 'clear the drift notices' : pendingAction.action + ' this drift item'}. No confirmed change was applied.`);
+      if (!await loadStatus()) {
+        setError('The sync action was accepted, but the updated drift state could not be confirmed. Keep this dialog open and reload before retrying.');
+        return;
+      }
+      toast({ title: pendingAction.action === 'clear_all' ? 'Drift notices cleared' : `Drift item ${pendingAction.action}ed`, variant: 'success' });
+      setPendingAction(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to clear');
+      setError(err instanceof Error ? err.message : 'The sync action failed. No confirmed change was applied.');
+    } finally {
+      setActionLoading(null);
     }
   };
 
@@ -233,7 +243,7 @@ export default function SyncPage() {
               Drift Items
             </h2>
             <button
-              onClick={handleClearAll}
+              onClick={() => setPendingAction({ action: 'clear_all' })}
               className="text-xs text-discord-text-muted hover:text-discord-text-primary"
             >
               Clear All
@@ -246,8 +256,6 @@ export default function SyncPage() {
             .flat()
             .map((item, idx) => {
               const style = SEVERITY_STYLES[item.severity] ?? SEVERITY_STYLES.info;
-              const isLoading = actionLoading?.startsWith(`${item.entityName}`);
-
               return (
                 <div
                   key={`${item.entityType}-${item.entityName}-${idx}`}
@@ -299,7 +307,7 @@ export default function SyncPage() {
                     <div className="flex shrink-0 gap-2">
                       {canRepairDriftItem(item) && (
                         <button
-                          onClick={() => handleDriftAction('repair', item)}
+                          onClick={() => requestDriftAction('repair', item)}
                           disabled={!!actionLoading}
                           className="rounded bg-discord-accent/20 px-3 py-1.5 text-xs font-medium text-discord-accent hover:bg-discord-accent/30 disabled:opacity-50"
                           title="Revert Discord to match desired state"
@@ -309,7 +317,7 @@ export default function SyncPage() {
                       )}
                       {item.type !== 'EVERYONE_DRIFT' && (
                         <button
-                          onClick={() => handleDriftAction('accept', item)}
+                          onClick={() => requestDriftAction('accept', item)}
                           disabled={!!actionLoading}
                           className="rounded bg-green-500/20 px-3 py-1.5 text-xs font-medium text-green-400 hover:bg-green-500/30 disabled:opacity-50"
                           title="Update desired state to match Discord"
@@ -318,7 +326,7 @@ export default function SyncPage() {
                         </button>
                       )}
                       <button
-                        onClick={() => handleDriftAction('ignore', item)}
+                        onClick={() => requestDriftAction('ignore', item)}
                         disabled={!!actionLoading}
                         className="rounded bg-discord-bg-tertiary px-3 py-1.5 text-xs font-medium text-discord-text-muted hover:text-discord-text-primary disabled:opacity-50"
                         title="Dismiss this item"
@@ -490,7 +498,7 @@ export default function SyncPage() {
           >
             {saving ? 'Saving...' : 'Save Settings'}
           </button>
-          {error && <span className="text-sm text-red-400">{error}</span>}
+          {error && <span role="alert" className="text-sm text-red-400">{error}</span>}
         </div>
       </section>
 
@@ -536,6 +544,27 @@ export default function SyncPage() {
           </div>
         </div>
       </section>
+
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.action === 'clear_all' ? 'Clear all drift notices' : pendingAction?.action === 'repair' ? 'Repair Discord resource' : pendingAction?.action === 'accept' ? 'Accept Discord state' : 'Ignore drift item'}
+        description={pendingAction ? pendingAction.action === 'clear_all'
+          ? `Clear all ${status.driftItems.length} drift notices from this view without repairing Discord or updating desired state.`
+          : pendingAction.action === 'repair'
+            ? `Repair “${pendingAction.item.entityName}” (${pendingAction.item.entityType}) by changing Discord to match the dashboard’s desired state.`
+            : pendingAction.action === 'accept'
+              ? pendingAction.item.type === 'EXTRA_RESOURCE'
+                ? `Adopt “${pendingAction.item.entityName}” (${pendingAction.item.entityType}) into the dashboard’s desired state. This preserves the existing Discord resource; it does not delete or recreate it.`
+                : `Accept Discord’s current state for “${pendingAction.item.entityName}” (${pendingAction.item.entityType}) and replace the dashboard’s desired state.`
+              : `Ignore drift for “${pendingAction.item.entityName}” (${pendingAction.item.entityType}). The difference remains in Discord but leaves this active list.` : undefined}
+        confirmLabel={pendingAction?.action === 'clear_all' ? 'Clear notices' : pendingAction?.action === 'repair' ? 'Repair resource' : pendingAction?.action === 'accept' ? pendingAction.item.type === 'EXTRA_RESOURCE' ? 'Adopt resource' : 'Accept state' : 'Ignore drift'}
+        variant={pendingAction?.action === 'repair' ? 'warning' : 'default'}
+        loading={actionLoading !== null}
+        onConfirm={executePendingAction}
+        onCancel={() => {
+          if (!actionLoading) setPendingAction(null);
+        }}
+      />
     </div>
   );
 }
