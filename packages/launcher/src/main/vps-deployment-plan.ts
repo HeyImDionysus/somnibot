@@ -1,6 +1,7 @@
 import {
   normalizeVpsDomain,
   normalizeRuntimeMode,
+  normalizeVpsPublicAccessMode,
   resolveRuntimeProfile,
   validateRuntimeNetworkingConfig,
   type RuntimeNetworkingConfig,
@@ -64,6 +65,7 @@ export interface VpsDeploymentPlan {
   blockedReasons: string[];
   warnings: string[];
   target: {
+    publicAccessMode: 'domain' | 'tailscale-funnel';
     domain: string;
     publicBaseUrl: string;
     repositoryUrl: string;
@@ -75,6 +77,8 @@ export interface VpsDeploymentPlan {
     envFilePath: string;
     envFilePermissions: '0600';
     composeFilePath: string;
+    composeProjectName: string;
+    composeOverrideFilePath: string | null;
   } | null;
   environment: {
     filePath: string;
@@ -114,6 +118,8 @@ const SSH_BASE_ARGS = [
 ] as const;
 const COMPOSE_FILE = 'docker-compose.prod.yml';
 const CADDY_FILE = 'services/caddy/Caddyfile';
+const FUNNEL_COMPOSE_OVERRIDE_FILE = '.somnibot/launcher-tailscale-funnel.compose.yml';
+const COMPOSE_PROJECT_NAME = 'somnibot-prod';
 
 function trim(value: string | undefined): string {
   return value?.trim() ?? '';
@@ -138,6 +144,20 @@ function hostnameFromUrl(value: string): string {
   }
 }
 
+export function buildVpsFunnelComposeOverride(): string {
+  return [
+    'services:',
+    '  dashboard:',
+    '    ports:',
+    '      - "127.0.0.1:3456:3000"',
+    '    environment:',
+    '      SOMNIBOT_TRUSTED_PROXY_HOPS: "0"',
+    '  caddy:',
+    '    profiles: ["somnibot-domain-edge"]',
+    '',
+  ].join('\n');
+}
+
 function envVar(
   name: string,
   value: string,
@@ -157,10 +177,13 @@ function hasAuthProviderSetupPath(input: Pick<VpsDeploymentPlanInput, 'supabaseA
 function buildEnvironmentVariables(
   publicBaseUrl: string,
   domain: string,
+  projectName: string,
+  publicAccessMode: 'domain' | 'tailscale-funnel',
   authProvider: Pick<VpsDeploymentPlanInput, 'supabaseAccessTokenReady' | 'supabaseDiscordAuthProviderConfigured'>,
 ): VpsDeploymentEnvVar[] {
   return [
-    envVar('DOMAIN', domain, { secret: false, required: true, source: 'derived' }),
+    envVar('DOMAIN', publicAccessMode === 'domain' ? domain : '', { secret: false, required: publicAccessMode === 'domain', source: 'derived' }),
+    envVar('COMPOSE_PROJECT_NAME', projectName, { secret: false, required: true, source: 'derived' }),
     envVar('NODE_ENV', 'production', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_RUNTIME_MODE', 'vps', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_RUNTIME_HOLDER_ID', '<SOMNIBOT_RUNTIME_HOLDER_ID>', { secret: false, required: true, source: 'derived' }),
@@ -248,9 +271,19 @@ function buildRemoteCommand(
   return buildCommand('ssh', [...SSH_BASE_ARGS, '--', sshTarget, remoteExecutable, ...remoteArgs], options);
 }
 
-function buildCommands(sshTarget: string, sshUser: string, deployPath: string, publicBaseUrl: string): VpsDeploymentCommand[] {
+function buildCommands(
+  sshTarget: string,
+  sshUser: string,
+  deployPath: string,
+  publicBaseUrl: string,
+  publicAccessMode: 'domain' | 'tailscale-funnel',
+): VpsDeploymentCommand[] {
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
+  const composeOverrideFilePath = joinPath(deployPath, FUNNEL_COMPOSE_OVERRIDE_FILE);
   const envFilePath = joinPath(deployPath, '.env');
+  const composeFileArgs = publicAccessMode === 'tailscale-funnel'
+    ? ['-f', composeFilePath, '-f', composeOverrideFilePath]
+    : ['-f', composeFilePath];
   const lavalinkProbeScript = [
     'docker',
     'compose',
@@ -308,6 +341,18 @@ function buildCommands(sshTarget: string, sshUser: string, deployPath: string, p
       approvalRequired: true,
       commandCategory: 'env',
     }),
+    ...(publicAccessMode === 'tailscale-funnel' ? [buildRemoteCommand(sshTarget, 'sh', [
+      '-c',
+      'umask 077; mkdir -p -- "$(dirname -- "$1")"; cat > "$1"',
+      'sh',
+      composeOverrideFilePath,
+    ], {
+      id: 'write-funnel-compose-override',
+      label: 'Write the loopback-only Tailscale Funnel Compose override',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    })] : []),
     buildRemoteCommand(sshTarget, 'sh', [
       joinPath(deployPath, 'scripts/stage-handoff-valkey.sh'),
       deployPath,
@@ -331,7 +376,7 @@ function buildCommands(sshTarget: string, sshUser: string, deployPath: string, p
       approvalRequired: true,
       commandCategory: 'service',
     }),
-    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', 'valkey'], {
+    buildRemoteCommand(sshTarget, 'docker', ['compose', ...composeFileArgs, 'up', '-d', 'valkey'], {
       id: 'start-vps-valkey',
       label: 'Start private VPS Valkey for state validation',
       changesRemote: true,
@@ -350,7 +395,21 @@ function buildCommands(sshTarget: string, sshUser: string, deployPath: string, p
       approvalRequired: true,
       commandCategory: 'service',
     }),
-    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
+    ...(publicAccessMode === 'tailscale-funnel' ? [buildRemoteCommand(sshTarget, 'docker', ['compose', ...composeFileArgs, 'stop', 'caddy'], {
+      id: 'stop-bundled-caddy',
+      label: 'Keep SomniBot bundled Caddy stopped for Tailscale Funnel mode',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    })] : []),
+    buildRemoteCommand(sshTarget, 'docker', [
+      'compose',
+      ...composeFileArgs,
+      'up',
+      '-d',
+      '--build',
+      ...(publicAccessMode === 'tailscale-funnel' ? ['bot', 'dashboard', 'valkey', 'lavalink'] : []),
+    ], {
       id: 'start-stack',
       label: 'Build and start production stack',
       changesRemote: true,
@@ -370,7 +429,7 @@ function buildCommands(sshTarget: string, sshUser: string, deployPath: string, p
       approvalRequired: true,
       commandCategory: 'service',
     }),
-    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'ps'], {
+    buildRemoteCommand(sshTarget, 'docker', ['compose', ...composeFileArgs, 'ps'], {
       id: 'check-stack',
       label: 'Check container status',
       changesRemote: false,
@@ -420,7 +479,11 @@ function buildRollback(
   composeFilePath: string,
   publicBaseUrl: string,
   lastGoodCommit: string,
+  composeOverrideFilePath: string | null,
 ): VpsDeploymentPlan['rollback'] {
+  const composeFileArgs = composeOverrideFilePath
+    ? ['-f', composeFilePath, '-f', composeOverrideFilePath]
+    : ['-f', composeFilePath];
   return {
     summary: 'Return the VPS checkout to a last known-good commit, rebuild containers, and verify dashboard health before calling rollback complete.',
     commands: [
@@ -448,7 +511,14 @@ function buildRollback(
         approvalRequired: true,
         commandCategory: 'service',
       }),
-      buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
+      buildRemoteCommand(sshTarget, 'docker', [
+        'compose',
+        ...composeFileArgs,
+        'up',
+        '-d',
+        '--build',
+        ...(composeOverrideFilePath ? ['bot', 'dashboard', 'valkey', 'lavalink'] : []),
+      ], {
         id: 'rollback-rebuild',
         label: 'Rebuild containers from known-good commit',
         changesRemote: true,
@@ -475,6 +545,7 @@ function buildRollback(
 
 export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsDeploymentPlan {
   const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
+  const publicAccessMode = normalizeVpsPublicAccessMode(input.vpsPublicAccessMode);
   const blockedReasons: string[] = [];
   const warnings: string[] = [];
 
@@ -484,10 +555,13 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
 
   blockedReasons.push(...validateRuntimeNetworkingConfig({
     runtimeMode,
+    vpsPublicAccessMode: publicAccessMode,
     vpsDomain: input.vpsDomain,
+    vpsTailscaleFunnelUrl: input.vpsTailscaleFunnelUrl,
+    vpsTailscaleFunnelVerifiedUrl: input.vpsTailscaleFunnelVerifiedUrl,
   }));
   const normalizedDomain = normalizeVpsDomain(input.vpsDomain);
-  if (runtimeMode === 'vps' && normalizedDomain) {
+  if (runtimeMode === 'vps' && publicAccessMode === 'domain' && normalizedDomain) {
     const parsedDomain = new URL(normalizedDomain);
     if (parsedDomain.port) {
       blockedReasons.push('VPS deployment plan requires the public domain without an explicit port because Caddy owns ports 80 and 443.');
@@ -540,15 +614,23 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
 
   const profile = resolveRuntimeProfile({
     runtimeMode: 'vps',
+    vpsPublicAccessMode: publicAccessMode,
     vpsDomain: input.vpsDomain,
+    vpsTailscaleFunnelUrl: input.vpsTailscaleFunnelUrl,
+    vpsTailscaleFunnelVerifiedUrl: input.vpsTailscaleFunnelVerifiedUrl,
   });
   const domain = hostnameFromUrl(profile.publicCallbackBaseUrl);
   const sshHost = trim(input.vpsSshHost);
   const sshUser = trim(input.vpsSshUser);
   const deployPath = trim(input.vpsDeployPath);
+  const sshTarget = `${sshUser}@${sshHost}`;
+  const projectName = COMPOSE_PROJECT_NAME;
   const envFilePath = joinPath(deployPath, '.env');
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
-  const variables = buildEnvironmentVariables(profile.publicCallbackBaseUrl, domain, input);
+  const composeOverrideFilePath = publicAccessMode === 'tailscale-funnel'
+    ? joinPath(deployPath, FUNNEL_COMPOSE_OVERRIDE_FILE)
+    : null;
+  const variables = buildEnvironmentVariables(profile.publicCallbackBaseUrl, domain, projectName, publicAccessMode, input);
 
   return {
     status: 'ready',
@@ -556,17 +638,20 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
     blockedReasons: [],
     warnings,
     target: {
+      publicAccessMode,
       domain,
       publicBaseUrl: profile.publicCallbackBaseUrl,
       repositoryUrl: SOMNIBOT_REPOSITORY_URL,
       repositoryRef: SOMNIBOT_REPOSITORY_REF,
       sshHost,
       sshUser,
-      sshTarget: `${sshUser}@${sshHost}`,
+      sshTarget,
       deployPath,
       envFilePath,
       envFilePermissions: ENV_FILE_PERMISSIONS,
       composeFilePath,
+      composeProjectName: projectName,
+      composeOverrideFilePath,
     },
     environment: {
       filePath: envFilePath,
@@ -578,8 +663,8 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
       {
         name: 'dashboard',
         role: 'Next.js operator dashboard and provider callback receiver',
-        exposure: 'public',
-        endpoint: 'dashboard:3000 behind Caddy',
+        exposure: publicAccessMode === 'domain' ? 'public' : 'private',
+        endpoint: publicAccessMode === 'domain' ? 'dashboard:3000 behind Caddy' : '127.0.0.1:3456 -> dashboard:3000',
       },
       {
         name: 'bot',
@@ -587,12 +672,12 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         exposure: 'private',
         endpoint: 'internal Docker network',
       },
-      {
+      ...(publicAccessMode === 'domain' ? [{
         name: 'caddy',
         role: 'Public HTTPS reverse proxy',
-        exposure: 'public',
+        exposure: 'public' as const,
         endpoint: `${domain}:80/443 -> dashboard:3000`,
-      },
+      }] : []),
       {
         name: 'lavalink',
         role: 'Private music service',
@@ -606,7 +691,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         endpoint: 'redis://:<VALKEY_PASSWORD>@valkey:6379',
       },
     ],
-    reverseProxy: {
+    reverseProxy: publicAccessMode === 'domain' ? {
       filePath: CADDY_FILE,
       publicPorts: ['80/tcp', '443/tcp'],
       upstream: 'dashboard:3000',
@@ -615,8 +700,8 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         'Caddy terminates public HTTPS and proxies requests to dashboard:3000.',
         'Valkey and Lavalink stay on the private Docker network and are never exposed publicly.',
       ],
-    },
-    commands: buildCommands(`${sshUser}@${sshHost}`, sshUser, deployPath, profile.publicCallbackBaseUrl),
+    } : null,
+    commands: buildCommands(sshTarget, sshUser, deployPath, profile.publicCallbackBaseUrl, publicAccessMode),
     approvalGates: [
       {
         id: 'ssh-host-key',
@@ -624,12 +709,17 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         detail: 'Verify and pin the VPS SSH host key before any preflight or credential transfer; live commands refuse unknown or changed hosts.',
         requiredBefore: 'Any SSH connection to the VPS.',
       },
-      {
+      ...(publicAccessMode === 'domain' ? [{
         id: 'dns-domain',
         label: 'DNS and domain approval',
         detail: 'Confirm the public domain points at the VPS before relying on Caddy HTTPS.',
         requiredBefore: 'Public health or callback verification.',
-      },
+      }] : [{
+        id: 'tailscale-funnel',
+        label: 'Verified Tailscale Funnel edge',
+        detail: 'Confirm remote Funnel status maps the exact *.ts.net HTTPS origin to 127.0.0.1:3456; no Tailscale auth key is stored or passed by the launcher.',
+        requiredBefore: 'Deployment approval and public HTTPS health verification.',
+      }]),
       {
         id: 'env-file',
         label: 'Environment file approval',
@@ -656,7 +746,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
       },
     ],
     rollback: input.lastGoodCommit
-      ? buildRollback(`${sshUser}@${sshHost}`, deployPath, composeFilePath, profile.publicCallbackBaseUrl, input.lastGoodCommit)
+      ? buildRollback(sshTarget, deployPath, composeFilePath, profile.publicCallbackBaseUrl, input.lastGoodCommit, composeOverrideFilePath)
       : {
         summary: 'Rollback requires an operator-supplied exact 40-character last-good commit before any rollback commands can be approved.',
         commands: [],

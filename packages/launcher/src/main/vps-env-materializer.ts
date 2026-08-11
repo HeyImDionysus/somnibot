@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { LauncherConfig } from './config-store.js';
 import { buildDbUrlEnv } from './supabase-db-url.js';
-import type { VpsDeploymentPlan } from './vps-deployment-plan.js';
+import { buildVpsFunnelComposeOverride, type VpsDeploymentPlan } from './vps-deployment-plan.js';
 import { getRuntimeHolderId } from './runtime-profile.js';
 import { VPS_BOOTSTRAP_SCRIPT, VPS_RUNTIME_BOOTSTRAP_SCRIPT } from './vps-bootstrap.js';
 
@@ -157,6 +157,9 @@ export function materializeVpsDeploymentPlan(
       }
       if (command.id === 'write-env-file') {
         return { ...command, sensitiveStdin: envFile };
+      }
+      if (command.id === 'write-funnel-compose-override') {
+        return { ...command, sensitiveStdin: buildVpsFunnelComposeOverride() };
       }
       return command;
     }),

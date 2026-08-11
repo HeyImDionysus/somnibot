@@ -24,6 +24,8 @@ import {
   REGULAR_LOCAL_OPERATOR_DASHBOARD_URL,
   getLauncherLocalStartBlocker,
   normalizeBaseUrl,
+  normalizeVpsPublicAccessMode,
+  normalizeVpsTailscaleFunnelUrl,
   resolveRuntimeProfile,
 } from './runtime-profile.js';
 import {
@@ -102,6 +104,10 @@ import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
 import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
 import { VPS_PREFLIGHT_SCRIPT } from './vps-bootstrap.js';
+import {
+  buildVpsTailscaleStatusCommand,
+  parseVpsTailscaleFunnelReadiness,
+} from './vps-tailscale-funnel.js';
 import {
   runLocalToVpsHandoff,
   shouldTransferLocalValkeyState,
@@ -295,7 +301,7 @@ const RENDERER_WRITABLE_CONFIG_KEYS: ReadonlySet<keyof LauncherConfig> = new Set
   'supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey', 'supabaseDbPassword',
   'supabaseDbUrlTemplate', 'supabaseAccessToken', 'supabaseDiscordAuthProviderConfigured',
   'paypalClientId', 'paypalClientSecret', 'paypalWebhookId', 'paypalSandbox',
-  'runtimeMode', 'publicCallbackBaseUrl', 'vpsDomain', 'vpsSshHost', 'vpsSshUser',
+  'runtimeMode', 'publicCallbackBaseUrl', 'vpsPublicAccessMode', 'vpsDomain', 'vpsTailscaleFunnelUrl', 'vpsSshHost', 'vpsSshUser',
   'vpsDeployPath', 'tailscaleAuthKey', 'firstRunComplete', 'lavalinkEnabled', 'windowBounds',
   'autoInstallOnQuit', 'keychainRequired', 'ownerBrandName', 'updatePromptBeforeDownload', 'sdkCacheTtlMs',
 ]);
@@ -382,6 +388,13 @@ function sanitizeRendererConfigPatch(config: LauncherConfigPatch): LauncherConfi
   ) as LauncherConfigPatch;
   const sanitized = sanitizePayPalConfigPatch(allowed);
   const savedConfig = getConfig();
+  const publicAccessModeChanged = sanitized.vpsPublicAccessMode !== undefined
+    && normalizeVpsPublicAccessMode(sanitized.vpsPublicAccessMode) !== normalizeVpsPublicAccessMode(savedConfig.vpsPublicAccessMode);
+  const funnelUrlChanged = sanitized.vpsTailscaleFunnelUrl !== undefined
+    && normalizeVpsTailscaleFunnelUrl(sanitized.vpsTailscaleFunnelUrl) !== normalizeVpsTailscaleFunnelUrl(savedConfig.vpsTailscaleFunnelUrl);
+  if (publicAccessModeChanged || funnelUrlChanged) {
+    sanitized.vpsTailscaleFunnelVerifiedUrl = '';
+  }
   const pairingError = validateSupabaseCredentialPairing(savedConfig.supabaseUrl, sanitized);
   if (pairingError) throw new Error(pairingError);
   if (
@@ -1746,7 +1759,9 @@ function registerIpcHandlers(): void {
       paypalSandbox: config.paypalSandbox,
       runtimeMode: config.runtimeMode,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+      vpsPublicAccessMode: config.vpsPublicAccessMode,
       vpsDomain: config.vpsDomain,
+      vpsTailscaleFunnelUrl: config.vpsTailscaleFunnelUrl,
       vpsSshHost: config.vpsSshHost,
       vpsSshUser: config.vpsSshUser,
       vpsDeployPath: config.vpsDeployPath,
@@ -1811,7 +1826,10 @@ function registerIpcHandlers(): void {
       runtimeMode: input.runtimeMode ?? config.runtimeMode,
       publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl,
       discordGuildId: input.discordGuildId ?? config.discordGuildId,
+      vpsPublicAccessMode: input.vpsPublicAccessMode ?? config.vpsPublicAccessMode,
       vpsDomain: input.vpsDomain ?? config.vpsDomain,
+      vpsTailscaleFunnelUrl: input.vpsTailscaleFunnelUrl ?? config.vpsTailscaleFunnelUrl,
+      vpsTailscaleFunnelVerifiedUrl: config.vpsTailscaleFunnelVerifiedUrl,
       vpsSshHost: input.vpsSshHost ?? config.vpsSshHost,
       vpsSshUser: input.vpsSshUser ?? config.vpsSshUser,
       vpsDeployPath: input.vpsDeployPath ?? config.vpsDeployPath,
@@ -2313,17 +2331,30 @@ function registerIpcHandlers(): void {
       sensitiveStdin: VPS_PREFLIGHT_SCRIPT,
     };
     const result = await runner(command, { index: 0, total: 1 });
-    const state = result.ok ? 'success' : result.retriable ? 'retry' : 'failure';
+    const tailscaleFunnel = cfg.vpsPublicAccessMode === 'tailscale-funnel'
+      ? await runner(buildVpsTailscaleStatusCommand(`${cfg.vpsSshUser}@${cfg.vpsSshHost}`), { index: 1, total: 2 })
+        .then(statusResult => parseVpsTailscaleFunnelReadiness(statusResult.output ?? statusResult.error ?? '', cfg.vpsTailscaleFunnelUrl))
+      : undefined;
+    if (tailscaleFunnel) {
+      saveConfig({
+        vpsTailscaleFunnelVerifiedUrl: tailscaleFunnel.state === 'verified'
+          ? normalizeVpsTailscaleFunnelUrl(tailscaleFunnel.publicUrl)
+          : '',
+      });
+    }
+    const publicAccessReady = !tailscaleFunnel || tailscaleFunnel.state === 'verified';
+    const state = result.ok && publicAccessReady ? 'success' : result.retriable ? 'retry' : 'failure';
     const redactedError = result.error ? redactVpsDeploymentText(result.error) : undefined;
 
     return {
       state,
-      canRetry: !result.ok,
+      canRetry: !result.ok || !publicAccessReady,
       command: {
         redactedDisplay: plan.command.redactedDisplay,
       },
       blockedReasons: [],
       warnings: plan.warnings,
+      ...(tailscaleFunnel ? { tailscaleFunnel } : {}),
       logs: [
         ...plan.logEvents,
         {
@@ -2334,6 +2365,12 @@ function registerIpcHandlers(): void {
             ? 'The target is writable (or can be created) and git/Docker Compose are available.'
             : `${redactedError ?? 'The VPS prerequisite preflight failed.'} The approved deployment plan includes a supported runtime-bootstrap step when Docker is missing.`,
         },
+        ...(tailscaleFunnel ? [{
+          level: tailscaleFunnel.state === 'verified' ? 'info' as const : 'warn' as const,
+          code: `vps-tailscale-${tailscaleFunnel.state}`,
+          message: tailscaleFunnel.message,
+          detail: tailscaleFunnel.nextAction,
+        }] : []),
       ],
     };
   });

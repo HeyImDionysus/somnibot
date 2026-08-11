@@ -19,7 +19,7 @@ import { randomBytes } from 'crypto';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { getLavalinkPassword } from './lavalink-manager.js';
-import { buildRuntimeEnvVars, getRuntimeHolderId, type RuntimeMode } from './runtime-profile.js';
+import { buildRuntimeEnvVars, getRuntimeHolderId, type RuntimeMode, type VpsPublicAccessMode } from './runtime-profile.js';
 import { buildDbUrlEnv } from './supabase-db-url.js';
 import {
   LEGACY_CONFIG_RELATIVE_PATHS,
@@ -84,7 +84,10 @@ export interface LauncherConfig {
   /** Last runtime that completed its full readiness proof; UI selection alone never changes this. */
   lastSuccessfulRuntimeMode?: RuntimeMode;
   publicCallbackBaseUrl: string;
+  vpsPublicAccessMode?: VpsPublicAccessMode;
   vpsDomain: string;
+  vpsTailscaleFunnelUrl?: string;
+  vpsTailscaleFunnelVerifiedUrl?: string;
   vpsSshHost: string;
   vpsSshUser: string;
   vpsDeployPath: string;
@@ -134,7 +137,10 @@ const DEFAULTS: LauncherConfig = {
   vpsLavalinkPassword: '',
   runtimeMode: 'regular-local',
   publicCallbackBaseUrl: '',
+  vpsPublicAccessMode: 'domain',
   vpsDomain: '',
+  vpsTailscaleFunnelUrl: '',
+  vpsTailscaleFunnelVerifiedUrl: '',
   vpsSshHost: '',
   vpsSshUser: '',
   vpsDeployPath: '',
@@ -407,7 +413,10 @@ function getConfigSnapshot(): Partial<LauncherConfig> {
     runtimeMode: storedOrUndefined('runtimeMode', 'regular-local'),
     lastSuccessfulRuntimeMode: store.get('lastSuccessfulRuntimeMode'),
     publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),
+    vpsPublicAccessMode: storedOrUndefined('vpsPublicAccessMode', 'domain'),
     vpsDomain: store.get('vpsDomain', ''),
+    vpsTailscaleFunnelUrl: store.get('vpsTailscaleFunnelUrl', ''),
+    vpsTailscaleFunnelVerifiedUrl: store.get('vpsTailscaleFunnelVerifiedUrl', ''),
     vpsSshHost: store.get('vpsSshHost', ''),
     vpsSshUser: store.get('vpsSshUser', ''),
     vpsDeployPath: store.get('vpsDeployPath', ''),
@@ -453,7 +462,10 @@ export function getConfig(): LauncherConfig {
     runtimeMode: store.get('runtimeMode', 'regular-local'),
     lastSuccessfulRuntimeMode: store.get('lastSuccessfulRuntimeMode'),
     publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),
+    vpsPublicAccessMode: store.get('vpsPublicAccessMode', 'domain'),
     vpsDomain: store.get('vpsDomain', ''),
+    vpsTailscaleFunnelUrl: store.get('vpsTailscaleFunnelUrl', ''),
+    vpsTailscaleFunnelVerifiedUrl: store.get('vpsTailscaleFunnelVerifiedUrl', ''),
     vpsSshHost: store.get('vpsSshHost', ''),
     vpsSshUser: store.get('vpsSshUser', ''),
     vpsDeployPath: store.get('vpsDeployPath', ''),

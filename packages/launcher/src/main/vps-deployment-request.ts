@@ -54,7 +54,10 @@ function rendererApproval(request: VpsDeploymentRunRequest | undefined): VpsDepl
 export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDeploymentPlan {
   return buildVpsDeploymentPlan({
     runtimeMode: config.runtimeMode,
+    vpsPublicAccessMode: config.vpsPublicAccessMode,
     vpsDomain: config.vpsDomain,
+    vpsTailscaleFunnelUrl: config.vpsTailscaleFunnelUrl,
+    vpsTailscaleFunnelVerifiedUrl: config.vpsTailscaleFunnelVerifiedUrl,
     vpsSshHost: config.vpsSshHost,
     vpsSshUser: config.vpsSshUser,
     vpsDeployPath: config.vpsDeployPath,

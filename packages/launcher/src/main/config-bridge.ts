@@ -39,6 +39,7 @@ export function sanitizeConfigPatchForStorage<T extends Partial<LauncherConfig>>
   // that startup cleanup will later consider launcher-owned.
   delete sanitized.lastPids;
   delete sanitized.lastPidStartedAt;
+  delete sanitized.vpsTailscaleFunnelVerifiedUrl;
   for (const key of SENSITIVE_CONFIG_KEYS) {
     if (sanitized[key] === MASKED_SECRET) {
       delete sanitized[key];

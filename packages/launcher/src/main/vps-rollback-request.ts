@@ -31,7 +31,10 @@ export function buildVpsRollbackPlanFromConfig(
 ): VpsDeploymentPlan {
   return buildVpsRollbackPlan({
     runtimeMode: config.runtimeMode,
+    vpsPublicAccessMode: config.vpsPublicAccessMode,
     vpsDomain: config.vpsDomain,
+    vpsTailscaleFunnelUrl: config.vpsTailscaleFunnelUrl,
+    vpsTailscaleFunnelVerifiedUrl: config.vpsTailscaleFunnelVerifiedUrl,
     vpsSshHost: config.vpsSshHost,
     vpsSshUser: config.vpsSshUser,
     vpsDeployPath: config.vpsDeployPath,
