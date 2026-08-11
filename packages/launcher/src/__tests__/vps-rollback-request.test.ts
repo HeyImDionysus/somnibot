@@ -7,20 +7,20 @@ import {
 } from '../main/vps-rollback-request';
 
 const config: LauncherConfig = {
-  discordToken: '',
-  discordApplicationId: '',
-  discordClientSecret: '',
+  discordToken: 'discord-token',
+  discordApplicationId: 'discord-application-id',
+  discordClientSecret: 'discord-client-secret',
   discordGuildId: '',
   guilds: [],
-  supabaseUrl: '',
-  supabaseSecretKey: '',
-  supabasePublishableKey: '',
-  supabaseDbPassword: '',
-  supabaseAccessToken: '',
+  supabaseUrl: 'https://somnibot.supabase.co',
+  supabaseSecretKey: 'supabase-secret-key',
+  supabasePublishableKey: 'supabase-publishable-key',
+  supabaseDbPassword: 'supabase-db-password',
+  supabaseAccessToken: 'supabase-access-token',
   supabaseDiscordAuthProviderConfigured: false,
-  paypalClientId: '',
-  paypalClientSecret: '',
-  paypalWebhookId: '',
+  paypalClientId: 'paypal-client-id',
+  paypalClientSecret: 'paypal-client-secret',
+  paypalWebhookId: 'paypal-webhook-id',
   paypalWebhookProofKey: '',
   paypalSandbox: true,
   runtimeMode: 'vps',
@@ -46,6 +46,27 @@ const successfulRunner: VpsDeploymentCommandRunner = async (command) => (
 );
 
 describe('VPS rollback request coordinator', () => {
+  it('blocks incomplete credentials and missing Supabase auth setup with deployment readiness warnings', () => {
+    const incompleteConfig: LauncherConfig = {
+      ...config,
+      discordToken: '',
+      paypalClientSecret: '',
+      supabaseAccessToken: '',
+      supabaseDiscordAuthProviderConfigured: false,
+    };
+
+    const plan = buildVpsRollbackPlanFromConfig(incompleteConfig, 'b'.repeat(40));
+
+    expect(plan.status).toBe('blocked');
+    expect(plan.blockedReasons).toContain(
+      'Supabase Discord auth provider setup requires a Management API token or manual provider confirmation before VPS deployment.',
+    );
+    expect(plan.warnings).toEqual(expect.arrayContaining([
+      'Credential fields are not complete yet; the deployment plan will keep secret values as placeholders.',
+      'PayPal app/webhook fields are not complete yet; store payments will stay disabled until PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, and PAYPAL_WEBHOOK_ID are set.',
+    ]));
+  });
+
   it('requires an exact SHA and executes restore before checkout, rebuild, and health verification after approval', async () => {
     const lastGoodCommit = 'c'.repeat(40);
     const executed: string[] = [];

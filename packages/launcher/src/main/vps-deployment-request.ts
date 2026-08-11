@@ -6,7 +6,11 @@ import {
   type VpsDeploymentCommandRunner,
   type VpsDeploymentExecutionResult,
 } from './vps-deployment-executor.js';
-import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
+import {
+  buildVpsDeploymentPlan,
+  type VpsDeploymentPlan,
+  type VpsDeploymentPlanInput,
+} from './vps-deployment-plan.js';
 import { ensurePersistedVpsSecrets, materializeVpsDeploymentPlan, type PersistedVpsSecrets } from './vps-env-materializer.js';
 
 export interface VpsDeploymentRunRequest {
@@ -51,8 +55,8 @@ function rendererApproval(request: VpsDeploymentRunRequest | undefined): VpsDepl
   };
 }
 
-export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDeploymentPlan {
-  return buildVpsDeploymentPlan({
+export function vpsDeploymentPlanInputFromConfig(config: LauncherConfig): VpsDeploymentPlanInput {
+  return {
     runtimeMode: config.runtimeMode,
     vpsPublicAccessMode: config.vpsPublicAccessMode,
     vpsDomain: config.vpsDomain,
@@ -77,7 +81,11 @@ export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDep
     ),
     supabaseAccessTokenReady: Boolean(config.supabaseAccessToken),
     supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
-  });
+  };
+}
+
+export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDeploymentPlan {
+  return buildVpsDeploymentPlan(vpsDeploymentPlanInputFromConfig(config));
 }
 
 export async function handleVpsDeploymentRunRequest(

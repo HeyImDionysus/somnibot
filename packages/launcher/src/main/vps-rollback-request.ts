@@ -11,7 +11,7 @@ import {
   buildVpsRollbackPlan,
   type VpsDeploymentPlan,
 } from './vps-deployment-plan.js';
-import { approvalCoversPlan } from './vps-deployment-request.js';
+import { approvalCoversPlan, vpsDeploymentPlanInputFromConfig } from './vps-deployment-request.js';
 
 export interface VpsRollbackRunRequest {
   lastGoodCommit: string;
@@ -30,18 +30,7 @@ export function buildVpsRollbackPlanFromConfig(
   lastGoodCommit: string,
 ): VpsDeploymentPlan {
   return buildVpsRollbackPlan({
-    runtimeMode: config.runtimeMode,
-    vpsPublicAccessMode: config.vpsPublicAccessMode,
-    vpsDomain: config.vpsDomain,
-    vpsTailscaleFunnelUrl: config.vpsTailscaleFunnelUrl,
-    vpsTailscaleFunnelVerifiedUrl: config.vpsTailscaleFunnelVerifiedUrl,
-    vpsSshHost: config.vpsSshHost,
-    vpsSshUser: config.vpsSshUser,
-    vpsDeployPath: config.vpsDeployPath,
-    credentialReady: true,
-    paypalReady: true,
-    supabaseAccessTokenReady: true,
-    supabaseDiscordAuthProviderConfigured: true,
+    ...vpsDeploymentPlanInputFromConfig(config),
     lastGoodCommit,
   });
 }
