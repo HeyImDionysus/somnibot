@@ -39,7 +39,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 }
 
-async function installCommunityApi(page: Page, state: CommunityState): Promise<void> {
+async function installCommunityApi(page: Page, state: CommunityState, persistNewMapping = true): Promise<void> {
   await page.route('**/api/reaction-roles', async (route) => {
     if (route.request().method() === 'GET') {
       await fulfillJson(route, { success: true, data: state.mappings });
@@ -62,7 +62,7 @@ async function installCommunityApi(page: Page, state: CommunityState): Promise<v
       active: true,
       created_at: '2030-01-01T00:00:00.000Z',
     };
-    state.mappings = [...state.mappings, mapping];
+    if (persistNewMapping) state.mappings = [...state.mappings, mapping];
     await fulfillJson(route, { success: true, data: mapping });
   });
 
@@ -202,5 +202,34 @@ test.describe('Community self-service browser flow', () => {
     await expect(page.getByRole('heading', { name: 'Channel management' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Open channel setup' })).toHaveAttribute('href', '/server-setup?step=3');
     await expect(page.getByRole('heading', { name: 'Deploy and verify deliberately' })).toBeVisible();
+  });
+
+  test('Given a POST-only mapping response, when the collection readback is stale, then it does not claim a saved mapping was read back', async ({ page }) => {
+    const state: CommunityState = {
+      defaults: {
+        reaction_roles_enabled: true,
+        default_style: 'buttons',
+        default_max_per_group: 0,
+        default_require_level: 0,
+        default_remove_on_unreact: true,
+        ticket_transcript_enabled: false,
+        ticket_dm_transcript: false,
+      },
+      mappings: [],
+    };
+    await installCommunityApi(page, state, false);
+
+    await page.goto('/reaction-roles');
+    await page.getByRole('button', { name: /Add Mapping/ }).click();
+    await page.getByRole('button', { name: 'Channel *' }).click();
+    await page.getByRole('button', { name: /role-picks/ }).click();
+    await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
+    await page.getByLabel('Emoji *').fill('📣');
+    await page.getByText('Select role to assign…', { exact: true }).click();
+    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('button', { name: 'Save mapping' }).click();
+
+    await expect(page.getByText('Reaction role saved; server readback is unavailable')).toBeVisible();
+    await expect(page.getByText('Saved mapping read back')).not.toBeVisible();
   });
 });
