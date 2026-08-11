@@ -18,7 +18,7 @@ function installLiveSnapshot(liveState: Record<string, unknown> | null): void {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.mocked(requireGuildOwner).mockResolvedValue({
     ok: true,
     ctx: { guildId: GUILD_ID, discordId: '222222222222222222', userId: 'owner' },
