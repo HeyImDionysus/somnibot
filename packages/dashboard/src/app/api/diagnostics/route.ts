@@ -12,6 +12,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const BOT_HEARTBEAT_STALE_MS = 120_000;
+const MAX_FUTURE_CLOCK_SKEW_MS = 30_000;
 
 interface Observation {
   readonly at: string | null;
@@ -30,11 +31,16 @@ function observationAt(timestamp: string | null | undefined, nowMs: number): Obs
     return { at: null, ageSecs: null, isFresh: false, timestampMs: null };
   }
 
-  const ageSecs = Math.max(0, Math.round((nowMs - timestampMs) / 1000));
+  const ageMs = nowMs - timestampMs;
+  if (ageMs < -MAX_FUTURE_CLOCK_SKEW_MS) {
+    return { at: null, ageSecs: null, isFresh: false, timestampMs: null };
+  }
+
+  const ageSecs = Math.max(0, Math.round(ageMs / 1000));
   return {
     at: timestamp,
     ageSecs,
-    isFresh: nowMs - timestampMs < BOT_HEARTBEAT_STALE_MS,
+    isFresh: ageMs < BOT_HEARTBEAT_STALE_MS,
     timestampMs,
   };
 }

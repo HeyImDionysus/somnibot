@@ -67,6 +67,38 @@ interface DiagnosticsResponse {
   };
 }
 
+function BotStatusDescription({
+  guildJoined,
+  botStatusKnown,
+  botOnline,
+  botRolePosition,
+  totalRoles,
+  wsPing,
+  metricsStale,
+}: {
+  readonly guildJoined: boolean;
+  readonly botStatusKnown: boolean;
+  readonly botOnline: boolean;
+  readonly botRolePosition: number | null;
+  readonly totalRoles: number | null | undefined;
+  readonly wsPing: number | null;
+  readonly metricsStale: boolean;
+}) {
+  if (!guildJoined) return 'Bot not connected';
+  if (!botStatusKnown) return 'Status unavailable — open Diagnostics';
+  if (!botOnline) return 'Offline — bot is not responding';
+
+  let statusText = 'Online';
+  if (botRolePosition != null && totalRoles && totalRoles > 0) {
+    const fromTop = totalRoles - botRolePosition;
+    statusText = fromTop <= 1
+      ? 'Online · Highest role ✓'
+      : `Online · ${fromTop - 1} role${fromTop - 1 === 1 ? '' : 's'} above bot`;
+  }
+  if (wsPing != null && !metricsStale) statusText += ` · ${wsPing}ms`;
+  return statusText;
+}
+
 /**
  * Dashboard Home — at-a-glance overview of bot status and server health.
  */
@@ -197,26 +229,15 @@ export default function DashboardPage() {
               )}
             </div>
             <CardDescription>
-              {!guild?.bot_joined_at
-                ? 'Bot not connected'
-                : !botStatusKnown
-                  ? 'Status unavailable — open Diagnostics'
-                : !botOnline
-                  ? 'Offline — bot is not responding'
-                  : (() => {
-                      const pos = guild.bot_role_position;
-                      const total = data?.totalRoles;
-                      const ping = stats?.wsPing;
-                      let statusText = 'Online';
-                      if (pos != null && total && total > 0) {
-                        const fromTop = total - pos;
-                        statusText = fromTop <= 1
-                          ? 'Online · Highest role ✓'
-                          : `Online · ${fromTop - 1} role${fromTop - 1 === 1 ? '' : 's'} above bot`;
-                      }
-                      if (ping != null) statusText += ` · ${ping}ms`;
-                      return statusText;
-                    })()}
+              <BotStatusDescription
+                guildJoined={Boolean(guild?.bot_joined_at)}
+                botStatusKnown={botStatusKnown}
+                botOnline={botOnline}
+                botRolePosition={guild?.bot_role_position ?? null}
+                totalRoles={data?.totalRoles}
+                wsPing={stats?.wsPing ?? null}
+                metricsStale={metricsStale}
+              />
             </CardDescription>
             {guild?.bot_joined_at && (!botStatusKnown || !botOnline) && (
               <Link href="/diagnostics" className="text-xs font-medium text-discord-accent hover:underline">Open diagnostics</Link>
