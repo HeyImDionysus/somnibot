@@ -5,7 +5,7 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
@@ -14,47 +14,26 @@ import { useToast } from '@/components/shared/toast';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { parseReactionRoleMessageReference } from '@/lib/community/reaction-role-message-reference';
+import {
+  DEFAULT_REACTION_ROLE_DEFAULTS,
+  defaultsMatchPatch,
+  mappingMatchesRequest,
+  parseGuildDefaultsResponse,
+  parseReactionRoleListResponse,
+  parseReactionRoleMutationResponse,
+  parseSuccessResponse,
+  type GuildDefaultsReadback,
+  type ReactionRole,
+  type ReactionRoleDefaults,
+} from '@/lib/community/reaction-role-api-contract';
 
 // ── Types ─────────────────────────────────────────────────
-
-interface ReactionRole {
-  id: string;
-  guild_id: string;
-  channel_id: string;
-  message_id: string;
-  emoji: string;
-  role_id: string;
-  exclusive_group: string | null;
-  require_role: string | null;
-  require_level: number | null;
-  max_per_group: number | null;
-  remove_on_unreact: boolean;
-  log_actions: boolean;
-  active: boolean;
-  created_at: string;
-}
-
-interface ReactionRoleDefaults {
-  reaction_roles_enabled: boolean;
-  default_style: 'buttons' | 'reaction' | 'select-menu';
-  default_max_per_group: number;
-  default_require_level: number;
-  default_remove_on_unreact: boolean;
-}
 
 interface MessageTarget {
   readonly key: string;
   readonly channelId: string;
   readonly messageId: string;
 }
-
-const initialDefaults: ReactionRoleDefaults = {
-  reaction_roles_enabled: true,
-  default_style: 'buttons',
-  default_max_per_group: 0,
-  default_require_level: 0,
-  default_remove_on_unreact: true,
-};
 
 const emptyForm = {
   channel_id: '',
@@ -68,6 +47,14 @@ const emptyForm = {
   remove_on_unreact: true,
   log_actions: false,
 };
+
+const reactionRoleDefaultKeys = [
+  'reaction_roles_enabled',
+  'default_style',
+  'default_max_per_group',
+  'default_require_level',
+  'default_remove_on_unreact',
+] as const satisfies readonly (keyof ReactionRoleDefaults)[];
 
 // ── Name display helpers ──────────────────────────────────
 
@@ -101,37 +88,30 @@ export default function ReactionRolesPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; emoji: string } | null>(null);
   const [form, setForm] = useState(emptyForm);
-  const [defaults, setDefaults] = useState<ReactionRoleDefaults>(initialDefaults);
-  const [savedDefaults, setSavedDefaults] = useState<ReactionRoleDefaults>(initialDefaults);
+  const [defaults, setDefaults] = useState<ReactionRoleDefaults>(DEFAULT_REACTION_ROLE_DEFAULTS);
+  const [savedDefaults, setSavedDefaults] = useState<ReactionRoleDefaults>(DEFAULT_REACTION_ROLE_DEFAULTS);
   const [messageLink, setMessageLink] = useState('');
   const [selectedTargetKey, setSelectedTargetKey] = useState('');
   const [mappingReadback, setMappingReadback] = useState<MessageTarget | null>(null);
+  const [mappingSaving, setMappingSaving] = useState(false);
+  const [defaultsSaving, setDefaultsSaving] = useState(false);
+  const [pendingRoleId, setPendingRoleId] = useState<string | null>(null);
+  const mappingSaveInFlight = useRef(false);
+  const defaultsSaveInFlight = useRef(false);
+  const roleMutationInFlight = useRef<string | null>(null);
 
 
   const fetchRoles = useCallback(async (): Promise<ReactionRole[] | null> => {
     try {
-      const [res, guildRes] = await Promise.all([fetch('/api/reaction-roles'), fetch('/api/guild')]);
-      const json = await res.json();
-      if (json.success) setRoles(json.data);
-      else {
-        setError(json.error);
+      const response = await fetch('/api/reaction-roles');
+      const raw: unknown = await response.json();
+      const parsed = parseReactionRoleListResponse(raw);
+      if (parsed.kind === 'error') {
+        setError(parsed.message);
         return null;
       }
-      const guildJson = await guildRes.json();
-      if (guildJson.success) {
-        const nextDefaults: ReactionRoleDefaults = {
-          reaction_roles_enabled: guildJson.config?.reaction_roles_enabled ?? initialDefaults.reaction_roles_enabled,
-          default_style: guildJson.config?.default_style ?? initialDefaults.default_style,
-          default_max_per_group: guildJson.config?.default_max_per_group ?? initialDefaults.default_max_per_group,
-          default_require_level: guildJson.config?.default_require_level ?? initialDefaults.default_require_level,
-          default_remove_on_unreact: guildJson.config?.default_remove_on_unreact ?? initialDefaults.default_remove_on_unreact,
-        };
-        setDefaults(nextDefaults);
-        setSavedDefaults(nextDefaults);
-        return json.data as ReactionRole[];
-      }
-      setError(guildJson.error ?? 'Failed to load reaction role defaults');
-      return null;
+      setRoles([...parsed.data]);
+      return [...parsed.data];
     } catch {
       setError('Failed to load reaction roles');
       return null;
@@ -140,9 +120,30 @@ export default function ReactionRolesPage() {
     }
   }, []);
 
+  const readDefaults = useCallback(async (): Promise<GuildDefaultsReadback | null> => {
+    try {
+      const response = await fetch('/api/guild');
+      const raw: unknown = await response.json();
+      const parsed = parseGuildDefaultsResponse(raw);
+      if (parsed.kind === 'error') {
+        setError(parsed.message);
+        return null;
+      }
+      return parsed.data;
+    } catch {
+      setError('Failed to load reaction role defaults');
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
-    fetchRoles();
-  }, [fetchRoles]);
+    void fetchRoles();
+    void readDefaults().then((readback) => {
+      if (!readback) return;
+      setDefaults(readback.defaults);
+      setSavedDefaults(readback.defaults);
+    });
+  }, [fetchRoles, readDefaults]);
 
   useAutoRefresh('reaction_role_panels', undefined, fetchRoles);
 
@@ -173,7 +174,9 @@ export default function ReactionRolesPage() {
   };
 
   const save = async () => {
+    if (mappingSaveInFlight.current) return;
     setError(null);
+    setMappingReadback(null);
     const selectedTarget = knownTargets.find((target) => target.key === selectedTargetKey);
     const linkedTarget = parseReactionRoleMessageReference(messageLink);
     const target = selectedTarget ?? (linkedTarget.kind === 'valid'
@@ -203,21 +206,38 @@ export default function ReactionRolesPage() {
       log_actions: form.log_actions,
     };
 
+    mappingSaveInFlight.current = true;
+    setMappingSaving(true);
     try {
       const res = await fetch('/api/reaction-roles', {
         method: editingId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const json = await res.json();
-      if (json.success) {
+      const raw: unknown = await res.json();
+      const parsed = parseReactionRoleMutationResponse(raw);
+      if (parsed.kind === 'success') {
+        const mutation = parsed.data;
         const readback = await fetchRoles();
-        const mappingReadBack = readback?.some((role) => role.id === json.data.id) ?? false;
-        if (mappingReadBack) {
+        const observed = readback?.find((role) => role.id === mutation.id);
+        const mappingReadBack = observed !== undefined && mappingMatchesRequest(observed, {
+          id: mutation.id,
+          channel_id: payload.channel_id,
+          message_id: payload.message_id,
+          emoji: payload.emoji,
+          role_id: payload.role_id,
+          exclusive_group: payload.exclusive_group,
+          require_role: payload.require_role,
+          require_level: payload.require_level,
+          max_per_group: payload.max_per_group,
+          remove_on_unreact: payload.remove_on_unreact,
+          log_actions: payload.log_actions,
+        });
+        if (mappingReadBack && observed) {
           setMappingReadback({
-            key: `${json.data.channel_id}:${json.data.message_id}`,
-            channelId: json.data.channel_id,
-            messageId: json.data.message_id,
+            key: `${observed.channel_id}:${observed.message_id}`,
+            channelId: observed.channel_id,
+            messageId: observed.message_id,
           });
         }
         setShowForm(false);
@@ -228,59 +248,121 @@ export default function ReactionRolesPage() {
           variant: mappingReadBack ? 'success' : 'error',
         });
       } else {
-        setError(json.error);
+        setError(parsed.message);
       }
     } catch {
       setError('Failed to save reaction role');
+    } finally {
+      mappingSaveInFlight.current = false;
+      setMappingSaving(false);
     }
   };
 
   const saveDefaults = async () => {
-    const patch = Object.fromEntries(
-      Object.entries(defaults).filter(([key, value]) => savedDefaults[key as keyof ReactionRoleDefaults] !== value),
-    );
-    if (Object.keys(patch).length === 0) return;
+    if (defaultsSaveInFlight.current) return;
+    const changedKeys = reactionRoleDefaultKeys.filter((key) => savedDefaults[key] !== defaults[key]);
+    if (changedKeys.length === 0) return;
 
-    const res = await fetch('/api/guild', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
-    if (!res.ok) {
-      toast({ title: 'Failed to save defaults', variant: 'error' });
-      return;
+    defaultsSaveInFlight.current = true;
+    setDefaultsSaving(true);
+    const requestedDefaults = defaults;
+    const patch = Object.fromEntries(changedKeys.map((key) => [key, requestedDefaults[key]]));
+    try {
+      const response = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const raw: unknown = await response.json();
+      const mutation = parseSuccessResponse(raw, 'Failed to save defaults');
+      if (mutation.kind === 'error') {
+        toast({ title: mutation.message, variant: 'error' });
+        return;
+      }
+
+      const readback = await readDefaults();
+      const confirmed = readback !== null && defaultsMatchPatch(readback, requestedDefaults, changedKeys);
+      if (confirmed && readback) {
+        setDefaults(readback.defaults);
+        setSavedDefaults(readback.defaults);
+      } else {
+        setDefaults(requestedDefaults);
+      }
+      toast({
+        title: confirmed
+          ? 'Defaults saved and read back from this server'
+          : 'Defaults saved; server readback is unavailable',
+        variant: confirmed ? 'success' : 'error',
+      });
+    } catch (caught) {
+      if (caught instanceof TypeError) {
+        toast({ title: 'Failed to save defaults', variant: 'error' });
+        return;
+      }
+      throw caught;
+    } finally {
+      defaultsSaveInFlight.current = false;
+      setDefaultsSaving(false);
     }
-    const readbackLoaded = (await fetchRoles()) !== null;
-    toast({
-      title: readbackLoaded
-        ? 'Defaults saved and read back from this server'
-        : 'Defaults saved; server readback is unavailable',
-      variant: readbackLoaded ? 'success' : 'error',
-    });
   };
 
   const toggleActive = async (rr: ReactionRole) => {
+    if (roleMutationInFlight.current !== null) return;
+    roleMutationInFlight.current = rr.id;
+    setPendingRoleId(rr.id);
     try {
       const res = await fetch('/api/reaction-roles', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: rr.id, active: !rr.active }),
       });
-      const json = await res.json();
-      if (json.success) {
-        setRoles(roles.map((r) => (r.id === rr.id ? json.data : r)));
+      const raw: unknown = await res.json();
+      const parsed = parseReactionRoleMutationResponse(raw);
+      if (parsed.kind === 'error') {
+        setError(parsed.message);
+        return;
       }
+      const readback = await fetchRoles();
+      const confirmed = readback?.some((role) => role.id === rr.id && role.active === !rr.active) ?? false;
+      toast({
+        title: confirmed
+          ? 'Mapping status saved and read back'
+          : 'Mapping status saved; server readback is unavailable',
+        variant: confirmed ? 'success' : 'error',
+      });
     } catch {
       setError('Failed to toggle reaction role');
+    } finally {
+      roleMutationInFlight.current = null;
+      setPendingRoleId(null);
     }
   };
 
   const deleteRole = async (id: string) => {
+    if (roleMutationInFlight.current !== null) return;
+    roleMutationInFlight.current = id;
+    setPendingRoleId(id);
     try {
       const res = await fetch(`/api/reaction-roles?id=${id}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (json.success) {
-        setRoles(roles.filter((r) => r.id !== id));
-        toast({ title: 'Reaction role deleted', variant: 'success' });
+      const raw: unknown = await res.json();
+      const parsed = parseSuccessResponse(raw, 'Failed to delete reaction role');
+      if (parsed.kind === 'error') {
+        setError(parsed.message);
+        return;
       }
+      const readback = await fetchRoles();
+      const confirmed = readback !== null && readback.every((role) => role.id !== id);
+      toast({
+        title: confirmed
+          ? 'Reaction role deleted and read back'
+          : 'Reaction role deletion is awaiting server readback',
+        variant: confirmed ? 'success' : 'error',
+      });
     } catch {
       setError('Failed to delete reaction role');
+    } finally {
+      roleMutationInFlight.current = null;
+      setPendingRoleId(null);
     }
   };
 
@@ -297,9 +379,7 @@ export default function ReactionRolesPage() {
   const previewTarget = selectedTarget ?? (linkedTarget.kind === 'valid'
     ? { key: `${linkedTarget.channelId}:${linkedTarget.messageId}`, channelId: linkedTarget.channelId, messageId: linkedTarget.messageId }
     : null);
-  const defaultsDirty = Object.entries(defaults).some(
-    ([key, value]) => savedDefaults[key as keyof ReactionRoleDefaults] !== value,
-  );
+  const defaultsDirty = reactionRoleDefaultKeys.some((key) => savedDefaults[key] !== defaults[key]);
 
   if (loading) {
     return <CardListSkeleton />;
@@ -337,7 +417,7 @@ export default function ReactionRolesPage() {
           <label>Max per group <input type="number" min={0} max={25} value={defaults.default_max_per_group} onChange={(e) => setDefaults({ ...defaults, default_max_per_group: Number(e.target.value) })} className="ml-2 w-16 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
           <label>Required level <input type="number" min={0} max={1000} value={defaults.default_require_level} onChange={(e) => setDefaults({ ...defaults, default_require_level: Number(e.target.value) })} className="ml-2 w-16 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
         </div>
-        {defaultsDirty && <div className="flex gap-2"><button onClick={saveDefaults} className="rounded-input bg-discord-accent px-3 py-2 text-sm font-medium text-white">Save defaults</button><button onClick={() => setDefaults(savedDefaults)} className="rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-secondary">Cancel defaults</button></div>}
+        {defaultsDirty && <div className="flex gap-2"><button type="button" onClick={saveDefaults} disabled={defaultsSaving} className="rounded-input bg-discord-accent px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">{defaultsSaving ? 'Saving defaults…' : 'Save defaults'}</button><button type="button" onClick={() => setDefaults(savedDefaults)} disabled={defaultsSaving} className="rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-secondary disabled:cursor-not-allowed disabled:opacity-50">Cancel defaults</button></div>}
       </section>
 
       {mappingReadback && (
@@ -440,11 +520,11 @@ export default function ReactionRolesPage() {
               </div>
             </div>
             <div className="mt-6 flex justify-end gap-3">
-              <button onClick={() => setShowForm(false)} className="rounded-input bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-primary/50 transition-standard">
+              <button type="button" onClick={() => setShowForm(false)} disabled={mappingSaving} className="rounded-input bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-primary/50 transition-standard disabled:cursor-not-allowed disabled:opacity-50">
                 Cancel
               </button>
-              <button onClick={save} className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard">
-                {editingId ? 'Save mapping' : 'Save mapping'}
+              <button type="button" onClick={save} disabled={mappingSaving} aria-busy={mappingSaving} className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard disabled:cursor-not-allowed disabled:opacity-50">
+                {mappingSaving ? 'Saving mapping…' : 'Save mapping'}
               </button>
             </div>
           </div>
@@ -496,16 +576,24 @@ export default function ReactionRolesPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div
-                      className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${rr.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={rr.active}
+                      aria-label={`Toggle ${rr.emoji} mapping`}
+                      aria-busy={pendingRoleId === rr.id}
+                      disabled={pendingRoleId !== null}
+                      className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-input focus-visible:outline-none"
                       onClick={() => toggleActive(rr)}
                     >
-                      <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${rr.active ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                    </div>
-                    <button onClick={() => openEditor(rr)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
+                      <span className={`relative h-5 w-9 rounded-full transition-colors ${rr.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`} aria-hidden="true">
+                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${rr.active ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                      </span>
+                    </button>
+                    <button onClick={() => openEditor(rr)} disabled={pendingRoleId !== null} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard disabled:cursor-not-allowed disabled:opacity-50">
                       Edit
                     </button>
-                    <button onClick={() => setConfirmDelete({ id: rr.id, emoji: rr.emoji })} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                    <button onClick={() => setConfirmDelete({ id: rr.id, emoji: rr.emoji })} disabled={pendingRoleId !== null} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard disabled:cursor-not-allowed disabled:opacity-50">
                       Delete
                     </button>
                   </div>
