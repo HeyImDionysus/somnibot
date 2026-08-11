@@ -120,6 +120,7 @@ const COMPOSE_FILE = 'docker-compose.prod.yml';
 const CADDY_FILE = 'services/caddy/Caddyfile';
 const FUNNEL_COMPOSE_OVERRIDE_FILE = '.somnibot/launcher-tailscale-funnel.compose.yml';
 const COMPOSE_PROJECT_NAME = 'somnibot-prod';
+const FUNNEL_DISABLED_CADDY_DOMAIN = 'funnel-disabled.invalid';
 
 function trim(value: string | undefined): string {
   return value?.trim() ?? '';
@@ -182,7 +183,7 @@ function buildEnvironmentVariables(
   authProvider: Pick<VpsDeploymentPlanInput, 'supabaseAccessTokenReady' | 'supabaseDiscordAuthProviderConfigured'>,
 ): VpsDeploymentEnvVar[] {
   return [
-    envVar('DOMAIN', publicAccessMode === 'domain' ? domain : '', { secret: false, required: publicAccessMode === 'domain', source: 'derived' }),
+    envVar('DOMAIN', publicAccessMode === 'domain' ? domain : FUNNEL_DISABLED_CADDY_DOMAIN, { secret: false, required: publicAccessMode === 'domain', source: 'derived' }),
     envVar('COMPOSE_PROJECT_NAME', projectName, { secret: false, required: true, source: 'derived' }),
     envVar('NODE_ENV', 'production', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_RUNTIME_MODE', 'vps', { secret: false, required: true, source: 'derived' }),

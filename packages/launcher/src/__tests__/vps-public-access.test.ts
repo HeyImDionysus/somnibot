@@ -1,6 +1,13 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { parseEnv } from 'node:util';
 import { describe, expect, it } from 'vitest';
+import type { LauncherConfig } from '../main/config-store';
 import { buildSetupStatus } from '../main/setup-flow';
 import { buildVpsDeploymentPlan, buildVpsFunnelComposeOverride } from '../main/vps-deployment-plan';
+import { materializeVpsDeploymentPlan, type PersistedVpsSecrets } from '../main/vps-env-materializer';
 
 const baseInput = {
   runtimeMode: 'vps',
@@ -11,6 +18,51 @@ const baseInput = {
   paypalReady: true,
   supabaseAccessTokenReady: true,
 };
+
+const funnelConfig = {
+  discordToken: 'discord-token',
+  discordApplicationId: 'discord-application-id',
+  discordClientSecret: 'discord-client-secret',
+  discordGuildId: '',
+  guilds: [],
+  supabaseUrl: 'https://projectref.supabase.co',
+  supabaseSecretKey: 'supabase-secret',
+  supabasePublishableKey: 'supabase-publishable',
+  supabaseDbPassword: 'database-password',
+  supabaseAccessToken: 'supabase-access-token',
+  supabaseDiscordAuthProviderConfigured: false,
+  paypalClientId: 'paypal-client-id',
+  paypalClientSecret: 'paypal-client-secret',
+  paypalWebhookId: 'paypal-webhook-id',
+  paypalWebhookProofKey: '',
+  paypalSandbox: true,
+  vpsCsrfSecret: 'csrf-secret',
+  vpsNextAuthSecret: 'next-auth-secret',
+  vpsWebhookReplaySecret: 'webhook-replay-secret',
+  vpsValkeyPassword: 'valkey-password',
+  vpsLavalinkPassword: 'lavalink-password',
+  runtimeMode: 'vps',
+  publicCallbackBaseUrl: '',
+  vpsPublicAccessMode: 'tailscale-funnel',
+  vpsDomain: '',
+  vpsTailscaleFunnelUrl: 'https://somnibot-vps.tailbd9d28.ts.net',
+  vpsTailscaleFunnelVerifiedUrl: 'https://somnibot-vps.tailbd9d28.ts.net',
+  vpsSshHost: '203.0.113.10',
+  vpsSshUser: 'deploy',
+  vpsDeployPath: '/opt/somnibot',
+  firstRunComplete: false,
+  lavalinkEnabled: true,
+  autoInstallOnQuit: true,
+  keychainRequired: true,
+  ownerBrandName: 'SomniBot',
+  updatePromptBeforeDownload: true,
+  sdkCacheTtlMs: 60_000,
+  lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
+} satisfies LauncherConfig & PersistedVpsSecrets;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 describe('VPS public access modes', () => {
   it('keeps the conventional domain and Caddy contract', () => {
@@ -69,6 +121,55 @@ describe('VPS public access modes', () => {
     expect(composeOverride).toContain('127.0.0.1:3456:3000');
     expect(composeOverride).toContain('profiles: ["somnibot-domain-edge"]');
     expect(composeOverride).not.toContain('0.0.0.0:3456');
+  });
+
+  it('parses the generated Funnel environment and override with real Docker Compose', () => {
+    // Given the exact environment and override that the launcher streams to a Funnel VPS.
+    const plan = buildVpsDeploymentPlan({
+      ...funnelConfig,
+      credentialReady: true,
+      paypalReady: true,
+      supabaseAccessTokenReady: true,
+    });
+    const materialized = materializeVpsDeploymentPlan(plan, funnelConfig);
+    const envFile = materialized.commands.find(command => command.id === 'write-env-file')?.sensitiveStdin;
+    const composeOverride = materialized.commands.find(command => command.id === 'write-funnel-compose-override')?.sensitiveStdin;
+    expect(envFile).toBeTypeOf('string');
+    expect(composeOverride).toBeTypeOf('string');
+    const environment = parseEnv(envFile ?? '');
+    expect(environment.DOMAIN).toBe('funnel-disabled.invalid');
+    expect(environment.DASHBOARD_URL).toBe('https://somnibot-vps.tailbd9d28.ts.net');
+    expect(environment.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('https://somnibot-vps.tailbd9d28.ts.net');
+    expect(environment.PAYPAL_WEBHOOK_URL).toBe('https://somnibot-vps.tailbd9d28.ts.net/api/paypal/webhook');
+
+    const root = mkdtempSync(path.join(tmpdir(), 'somnibot-funnel-compose-'));
+    try {
+      writeFileSync(path.join(root, '.env'), envFile ?? '');
+      writeFileSync(path.join(root, 'docker-compose.prod.yml'), readFileSync(new URL('../../../../docker-compose.prod.yml', import.meta.url)));
+      writeFileSync(path.join(root, 'launcher-tailscale-funnel.compose.yml'), composeOverride ?? '');
+
+      // When the real Compose parser resolves the generated files.
+      const composeArgs = [
+        'compose',
+        '--env-file', '.env',
+        '-f', 'docker-compose.prod.yml',
+        '-f', 'launcher-tailscale-funnel.compose.yml',
+      ];
+      const result = spawnSync('docker', [...composeArgs, 'config', '--format', 'json'], { cwd: root, encoding: 'utf8' });
+
+      // Then interpolation and the loopback-only profile override are valid.
+      expect(result.status, result.stderr).toBe(0);
+      const parsed: unknown = JSON.parse(result.stdout);
+      expect(isRecord(parsed)).toBe(true);
+      if (!isRecord(parsed)) throw new Error('Docker Compose config must return a JSON object.');
+      const services = isRecord(parsed.services) ? parsed.services : {};
+      expect(Object.keys(services)).not.toContain('caddy');
+      const dashboard = isRecord(services.dashboard) ? services.dashboard : {};
+      const ports = Array.isArray(dashboard.ports) ? dashboard.ports : [];
+      expect(ports).toContainEqual(expect.objectContaining({ host_ip: '127.0.0.1', published: '3456', target: 3000 }));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('blocks Funnel mode when the URL is invalid, unverified, or verified for a different host', () => {

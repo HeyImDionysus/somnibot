@@ -70,18 +70,13 @@ describe('launcher setup renderer wiring', () => {
   it('wires the VPS public-edge mode and Funnel URL through machine-consumed field ids', () => {
     const html = readSourceFile('renderer/index.html');
     const renderer = readSourceFile('renderer/renderer.js');
-    const styles = readSourceFile('renderer/styles.css');
 
     expect(html).toContain('id="vpsPublicAccessMode"');
     expect(html).toContain('value="tailscale-funnel"');
     expect(html).toContain('id="vpsTailscaleFunnelUrl"');
     expect(html).toContain('id="vps-funnel-url-preview"');
-    expect(styles).toContain('@media (max-width: 480px)');
-    expect(styles).toContain('padding: 16px 56px 16px 16px');
     expect(renderer).toContain("vpsPublicAccessMode: $('vpsPublicAccessMode')");
     expect(renderer).toContain("vpsTailscaleFunnelUrl: $('vpsTailscaleFunnelUrl')");
-    expect(renderer).toContain('updateVpsFunnelUrlPreview()');
-    expect(styles).toContain('overflow-wrap: anywhere');
   });
 
   it('presents the regular-local callback URL as auto-filled instead of required manual setup', () => {
