@@ -74,6 +74,10 @@ export default function PetsPage() {
         economy_pet_feed_cost: readConfirmedNumber(result.config, 'economy_pet_feed_cost'),
         economy_pet_train_cost: readConfirmedNumber(result.config, 'economy_pet_train_cost'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

@@ -101,6 +101,10 @@ export default function HeistPage() {
         economy_heist_success_base_pct: readConfirmedNumber(result.config, 'economy_heist_success_base_pct'),
         economy_heist_entry_fee: readConfirmedNumber(result.config, 'economy_heist_entry_fee'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Heist settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

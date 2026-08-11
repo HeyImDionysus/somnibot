@@ -109,6 +109,10 @@ export default function AdventuresPage() {
         economy_adventure_ticket_cost: readConfirmedNumber(result.config, 'economy_adventure_ticket_cost'),
         economy_adventure_max_scenes: readConfirmedNumber(result.config, 'economy_adventure_max_scenes'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

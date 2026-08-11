@@ -282,6 +282,10 @@ export default function FarmingPage() {
         economy_farming_wilt_enabled: readConfirmedBoolean(result.config, 'economy_farming_wilt_enabled'),
         economy_fertilizer_time_reduction_pct: readConfirmedNumber(result.config, 'economy_fertilizer_time_reduction_pct'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved', variant: 'success' });
       return 'saved' as const;
     } catch {

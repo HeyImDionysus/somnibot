@@ -67,14 +67,10 @@ async function installShellRoutes(page: Page): Promise<void> {
   await page.route('**/api/counts', (route) => fulfillJson(route, { success: true, data: {} }));
 }
 
-async function installGuildRoute(page: Page, config: GuildConfig, rejectPatch = false): Promise<void> {
+async function installGuildRoute(page: Page, config: GuildConfig): Promise<void> {
   await page.route('**/api/guild', async (route) => {
     if (route.request().method() === 'GET') {
       await fulfillJson(route, { success: true, config, guild: { id: 'guild-economy-proof' } });
-      return;
-    }
-    if (rejectPatch) {
-      await fulfillJson(route, { error: 'Rejected for browser proof' }, 500);
       return;
     }
     Object.assign(config, route.request().postDataJSON());
@@ -86,7 +82,7 @@ test.beforeEach(async ({ page }) => {
   await installShellRoutes(page);
 });
 
-test('restores the confirmed games value when a PATCH fails and keeps zero editable', async ({ page }) => {
+test('reads back concurrent authoritative games state when a PATCH fails and keeps zero editable', async ({ page }) => {
   const config: GuildConfig = {
     economy_games_enabled: true,
     economy_daily_loss_limit: 5000,
@@ -98,7 +94,15 @@ test('restores the confirmed games value when a PATCH fails and keeps zero edita
     economy_lottery_ticket_price: 100,
     economy_lottery_max_tickets: 10,
   };
-  await installGuildRoute(page, config, true);
+  await page.route('**/api/guild', async (route) => {
+    if (route.request().method() === 'PATCH') {
+      config.economy_daily_loss_limit = 7200;
+      config.economy_lottery_ticket_price = 125;
+      await fulfillJson(route, { error: 'Rejected for browser proof' }, 500);
+      return;
+    }
+    await fulfillJson(route, { success: true, config, guild: { id: 'guild-economy-proof' } });
+  });
   await page.goto('/economy/games', { waitUntil: 'domcontentloaded' });
 
   const lossLimit = page.getByRole('spinbutton', { name: /Daily Loss Limit/ });
@@ -106,7 +110,8 @@ test('restores the confirmed games value when a PATCH fails and keeps zero edita
   await expect(lossLimit).toHaveValue('0');
   await lossLimit.blur();
   await expect(lossLimit).toBeEnabled({ timeout: 20_000 });
-  await expect(lossLimit).toHaveValue('5000');
+  await expect(lossLimit).toHaveValue('7200');
+  await expect(page.getByRole('spinbutton', { name: /Ticket Price/ })).toHaveValue('125');
   await expect(page.getByText(/restored the last confirmed value/i)).toBeVisible();
 });
 

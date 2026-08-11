@@ -111,6 +111,10 @@ export default function GamesPage() {
         economy_lottery_ticket_price: readConfirmedNumber(result.config, 'economy_lottery_ticket_price'),
         economy_lottery_max_tickets: readConfirmedNumber(result.config, 'economy_lottery_max_tickets'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save', variant: 'error' });
+        return 'failed' as const;
+      }
       const [target] = Object.entries(patch)[0] ?? ['setting'];
       const value = result.config[target];
       toast({

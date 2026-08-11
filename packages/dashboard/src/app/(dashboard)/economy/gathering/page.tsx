@@ -294,6 +294,10 @@ export default function GatheringPage() {
         economy_gathering_enabled: readConfirmedBoolean(result.config, 'economy_gathering_enabled'),
         economy_gathering_cooldown_seconds: readConfirmedNumber(result.config, 'economy_gathering_cooldown_seconds'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved', variant: 'success' });
       return 'saved' as const;
     } catch {

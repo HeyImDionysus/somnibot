@@ -7,32 +7,13 @@ type SaveGuildConfig = (patch: GuildConfigPatch) => Promise<GuildConfigReadback>
 
 export type CoordinatedGuildConfigSave =
   | { readonly status: 'confirmed'; readonly config: GuildConfigReadback }
+  | { readonly status: 'failed'; readonly config: GuildConfigReadback }
   | { readonly status: 'superseded' };
 
 export class GuildConfigSaveError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly confirmedConfig?: GuildConfigReadback) {
     super(message);
     this.name = 'GuildConfigSaveError';
-  }
-}
-
-export class RequestVersionFence {
-  private requestedVersion = 0;
-  private publishedVersion = 0;
-
-  request(): number {
-    this.requestedVersion += 1;
-    return this.requestedVersion;
-  }
-
-  isLatest(version: number): boolean {
-    return version === this.requestedVersion;
-  }
-
-  publish(version: number): boolean {
-    if (version <= this.publishedVersion) return false;
-    this.publishedVersion = version;
-    return true;
   }
 }
 
@@ -60,14 +41,7 @@ export function readConfirmedString(config: GuildConfigReadback, key: string): s
   return value;
 }
 
-export async function saveGuildConfigWithReadback(patch: GuildConfigPatch): Promise<GuildConfigReadback> {
-  const response = await fetch('/api/guild', {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  });
-  if (!response.ok) throw new GuildConfigSaveError('The server rejected the settings change.');
-
+async function readGuildConfig(): Promise<GuildConfigReadback> {
   const readbackResponse = await fetch('/api/guild', { cache: 'no-store' });
   if (!readbackResponse.ok) {
     throw new GuildConfigSaveError('The change was sent, but its saved value could not be confirmed.');
@@ -80,9 +54,29 @@ export async function saveGuildConfigWithReadback(patch: GuildConfigPatch): Prom
   return body.config;
 }
 
+export async function saveGuildConfigWithReadback(patch: GuildConfigPatch): Promise<GuildConfigReadback> {
+  const response = await fetch('/api/guild', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    let confirmedConfig: GuildConfigReadback;
+    try {
+      confirmedConfig = await readGuildConfig();
+    } catch {
+      throw new GuildConfigSaveError('The server rejected the settings change.');
+    }
+    throw new GuildConfigSaveError('The server rejected the settings change.', confirmedConfig);
+  }
+
+  return readGuildConfig();
+}
+
 export class GuildConfigSaveCoordinator {
   private queue: Promise<void> = Promise.resolve();
-  private readonly versions = new RequestVersionFence();
+  private requestedVersion = 0;
+  private publishedVersion = 0;
   private lastConfirmed: { readonly version: number; readonly config: GuildConfigReadback } | null = null;
 
   constructor(private readonly saveOperation: SaveGuildConfig = saveGuildConfigWithReadback) {}
@@ -96,21 +90,32 @@ export class GuildConfigSaveCoordinator {
   }
 
   async save(patch: GuildConfigPatch): Promise<CoordinatedGuildConfigSave> {
-    const request = this.versions.request();
+    const request = ++this.requestedVersion;
     const operation = this.queue.then(() => this.saveOperation(patch));
     this.queue = operation.then(() => undefined, () => undefined);
 
     try {
       const config = await operation;
       this.lastConfirmed = { version: request, config };
-      if (!this.versions.isLatest(request)) await this.waitForQueuedRequests();
+      if (request !== this.requestedVersion) await this.waitForQueuedRequests();
 
-      if (this.lastConfirmed.version !== request || !this.versions.publish(request)) {
+      if (this.lastConfirmed.version !== request || request <= this.publishedVersion) {
         return { status: 'superseded' };
       }
+      this.publishedVersion = request;
       return { status: 'confirmed', config };
     } catch (error) {
-      if (!this.versions.isLatest(request)) return { status: 'superseded' };
+      const config = error instanceof GuildConfigSaveError ? error.confirmedConfig : undefined;
+      if (config) {
+        this.lastConfirmed = { version: request, config };
+        if (request !== this.requestedVersion) await this.waitForQueuedRequests();
+        if (this.lastConfirmed.version !== request || request <= this.publishedVersion) {
+          return { status: 'superseded' };
+        }
+        this.publishedVersion = request;
+        return { status: 'failed', config };
+      }
+      if (request !== this.requestedVersion) return { status: 'superseded' };
       throw error;
     }
   }

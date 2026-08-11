@@ -120,6 +120,10 @@ export default function FishingPage() {
         economy_fishing_collection_reward_enabled: readConfirmedBoolean(result.config, 'economy_fishing_collection_reward_enabled'),
         economy_fishing_collection_reward_coins: readConfirmedNumber(result.config, 'economy_fishing_collection_reward_coins'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

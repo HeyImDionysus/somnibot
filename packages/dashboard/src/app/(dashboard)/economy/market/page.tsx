@@ -78,6 +78,10 @@ export default function MarketPage() {
         economy_market_max_listings: readConfirmedNumber(result.config, 'economy_market_max_listings'),
         economy_market_max_price_per_unit: readConfirmedNumber(result.config, 'economy_market_max_price_per_unit'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

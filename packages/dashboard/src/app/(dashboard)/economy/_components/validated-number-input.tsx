@@ -31,10 +31,13 @@ export function ValidatedNumberInput({
   const [draft, setDraft] = useState(String(value));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [restorePending, setRestorePending] = useState(false);
 
   useEffect(() => {
-    if (!saving && error === null) setDraft(String(value));
-  }, [error, saving, value]);
+    if (!saving && (error === null || restorePending)) {
+      setDraft(String(value));
+    }
+  }, [error, restorePending, saving, value]);
 
   const commit = async (): Promise<void> => {
     const trimmed = draft.trim();
@@ -62,7 +65,7 @@ export function ValidatedNumberInput({
     const result = await onCommit(parsed);
     setSaving(false);
     if (result === 'failed') {
-      setDraft(String(value));
+      setRestorePending(true);
       setError('Save failed; restored the last confirmed value.');
     }
   };
@@ -88,6 +91,7 @@ export function ValidatedNumberInput({
         aria-describedby={describedBy}
         onChange={(event) => {
           setDraft(event.target.value);
+          setRestorePending(false);
           setError(null);
         }}
         onBlur={() => void commit()}

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GuildConfigSaveCoordinator,
   GuildConfigSaveError,
-  RequestVersionFence,
   saveGuildConfigWithReadback,
   type GuildConfigPatch,
   type GuildConfigReadback,
@@ -25,6 +24,20 @@ describe('saveGuildConfigWithReadback', () => {
     const config = await saveGuildConfigWithReadback({ economy_daily_loss_limit: 101 });
 
     expect(config.economy_daily_loss_limit).toBe(100);
+  });
+
+  it('attaches an authoritative readback when the PATCH is rejected', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: true,
+        config: { economy_daily_loss_limit: 7200, economy_lottery_ticket_price: 125 },
+      }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(saveGuildConfigWithReadback({ economy_daily_loss_limit: 6000 })).rejects.toMatchObject({
+      confirmedConfig: { economy_daily_loss_limit: 7200, economy_lottery_ticket_price: 125 },
+    });
   });
 });
 
@@ -101,15 +114,16 @@ describe('GuildConfigSaveCoordinator', () => {
     });
     await expect(newer).rejects.toThrow('newer request failed');
   });
-});
 
-describe('RequestVersionFence', () => {
-  it('rejects an older response that arrives after a newer version published', () => {
-    const fence = new RequestVersionFence();
-    const older = fence.request();
-    const newer = fence.request();
+  it('returns the authoritative recovery state when the latest save fails', async () => {
+    const recovered = { economy_daily_loss_limit: 7200, economy_lottery_ticket_price: 125 };
+    const coordinator = new GuildConfigSaveCoordinator(async () => {
+      throw new GuildConfigSaveError('save failed', recovered);
+    });
 
-    expect(fence.publish(newer)).toBe(true);
-    expect(fence.publish(older)).toBe(false);
+    await expect(coordinator.save({ economy_daily_loss_limit: 6000 })).resolves.toEqual({
+      status: 'failed',
+      config: recovered,
+    });
   });
 });

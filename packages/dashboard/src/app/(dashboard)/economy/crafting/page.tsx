@@ -308,6 +308,10 @@ export default function CraftingPage() {
         economy_crafting_enabled: readConfirmedBoolean(result.config, 'economy_crafting_enabled'),
         economy_crafting_cooldown_seconds: readConfirmedNumber(result.config, 'economy_crafting_cooldown_seconds'),
       });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved', variant: 'success' });
       return 'saved' as const;
     } catch {
