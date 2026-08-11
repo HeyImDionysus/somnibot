@@ -24,7 +24,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const LAUNCHER_DIR = path.join(ROOT, 'packages', 'launcher');
 const STAGING = path.join(LAUNCHER_DIR, '.resources');
-const RELEASE_DIR = path.join(LAUNCHER_DIR, 'release');
+const releaseDirName = process.env.SOMNIBOT_RELEASE_DIR?.trim() || 'release';
+const RELEASE_DIR = path.resolve(LAUNCHER_DIR, releaseDirName);
+if (
+  RELEASE_DIR === LAUNCHER_DIR
+  || !RELEASE_DIR.startsWith(`${LAUNCHER_DIR}${path.sep}`)
+) {
+  throw new Error('SOMNIBOT_RELEASE_DIR must resolve inside packages/launcher.');
+}
 
 /* ── Parse CLI args ────────────────────────────────────────────────── */
 
@@ -487,7 +494,15 @@ function buildElectron() {
 
   // Run electron-builder from the launcher directory.
   // GH_TOKEN env var enables GitHub Releases publishing.
-  runPnpm(['exec', 'electron-builder', ...platformFlags.split(' ').filter(Boolean), '--config', 'electron-builder.yml'], {
+  const releaseOutput = path.relative(LAUNCHER_DIR, RELEASE_DIR).split(path.sep).join('/');
+  runPnpm([
+    'exec',
+    'electron-builder',
+    ...platformFlags.split(' ').filter(Boolean),
+    '--config',
+    'electron-builder.yml',
+    `--config.directories.output=${releaseOutput}`,
+  ], {
     cwd: LAUNCHER_DIR,
   });
 
@@ -556,7 +571,7 @@ function printSummary() {
     const size = statSync(path.join(RELEASE_DIR, f)).size;
     console.log(`   ${f}  (${formatMB(size)})`);
   }
-  console.log(`\n   Location: packages/launcher/release/`);
+  console.log(`\n   Location: ${path.relative(ROOT, RELEASE_DIR).split(path.sep).join('/')}/`);
   console.log('\n🎉 Build pipeline complete!\n');
 }
 

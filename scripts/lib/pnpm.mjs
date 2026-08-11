@@ -11,12 +11,12 @@ function canRun(command, args = ['--version']) {
 }
 
 export function resolvePnpmCommand() {
-  if (canRun('pnpm')) {
-    return { command: 'pnpm', prefix: [] };
-  }
-
   if (canRun('corepack', ['pnpm', '--version'])) {
     return { command: 'corepack', prefix: ['pnpm'] };
+  }
+
+  if (canRun('pnpm')) {
+    return { command: 'pnpm', prefix: [] };
   }
 
   throw new Error('pnpm is not available. Install Node.js 22+ and run: corepack enable');
