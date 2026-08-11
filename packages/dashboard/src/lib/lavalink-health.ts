@@ -1,7 +1,14 @@
+export const LAVALINK_SNAPSHOT_STALE_SECONDS = 120;
+
+type ObservedLavalinkHealth = {
+  readonly snapshotAt: string;
+};
+
 export type LavalinkHealth =
-  | { readonly state: 'connected' }
-  | { readonly state: 'disconnected' }
-  | { readonly state: 'unavailable' }
+  | ({ readonly state: 'connected' } & ObservedLavalinkHealth)
+  | ({ readonly state: 'disconnected' } & ObservedLavalinkHealth)
+  | ({ readonly state: 'unavailable' } & ObservedLavalinkHealth)
+  | ({ readonly state: 'stale' } & ObservedLavalinkHealth)
   | { readonly state: 'unknown' };
 
 export const UNKNOWN_LAVALINK_HEALTH = { state: 'unknown' } as const satisfies LavalinkHealth;
@@ -18,28 +25,37 @@ function isDiagnosticsLavalinkNode(value: unknown): value is DiagnosticsLavalink
   return isRecord(value) && typeof value.connected === 'boolean';
 }
 
-export function lavalinkHealthFromDiagnostics(diagnostics: unknown): LavalinkHealth {
+function healthSnapshotIsStale(bot: Record<string, unknown>, snapshotAt: string, nowMs: number): boolean | null {
+  const { staleSecs } = bot;
+  const snapshotMs = Date.parse(snapshotAt);
+  if (typeof staleSecs !== 'number' || !Number.isFinite(staleSecs) || staleSecs < 0 || !Number.isFinite(snapshotMs)) {
+    return null;
+  }
+  const snapshotAgeSeconds = (nowMs - snapshotMs) / 1000;
+  if (snapshotAgeSeconds < -30) return null;
+  return staleSecs >= LAVALINK_SNAPSHOT_STALE_SECONDS
+    || snapshotAgeSeconds >= LAVALINK_SNAPSHOT_STALE_SECONDS;
+}
+
+export function lavalinkHealthFromDiagnostics(diagnostics: unknown, nowMs = Date.now()): LavalinkHealth {
   if (!isRecord(diagnostics) || diagnostics.success !== true || !isRecord(diagnostics.data)) {
     return UNKNOWN_LAVALINK_HEALTH;
   }
 
-  const { lavalink } = diagnostics.data;
-  if (!isRecord(lavalink) || !Array.isArray(lavalink.nodes)) {
+  const { bot, lavalink } = diagnostics.data;
+  if (!isRecord(bot) || typeof bot.snapshotAt !== 'string' || !isRecord(lavalink) || !Array.isArray(lavalink.nodes)) {
     return UNKNOWN_LAVALINK_HEALTH;
   }
 
-  if (lavalink.nodes.length === 0) {
-    return { state: 'unavailable' };
-  }
+  const stale = healthSnapshotIsStale(bot, bot.snapshotAt, nowMs);
+  if (stale === null) return UNKNOWN_LAVALINK_HEALTH;
+  if (stale) return { state: 'stale', snapshotAt: bot.snapshotAt };
+  if (lavalink.nodes.length === 0) return { state: 'unavailable', snapshotAt: bot.snapshotAt };
 
   for (const node of lavalink.nodes) {
-    if (!isDiagnosticsLavalinkNode(node)) {
-      return UNKNOWN_LAVALINK_HEALTH;
-    }
-    if (node.connected) {
-      return { state: 'connected' };
-    }
+    if (!isDiagnosticsLavalinkNode(node)) return UNKNOWN_LAVALINK_HEALTH;
+    if (node.connected) return { state: 'connected', snapshotAt: bot.snapshotAt };
   }
 
-  return { state: 'disconnected' };
+  return { state: 'disconnected', snapshotAt: bot.snapshotAt };
 }

@@ -3,12 +3,12 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Swords, CheckCircle, XCircle, Clock, Minus } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface HeistConfig {
@@ -61,6 +61,7 @@ export default function HeistPage() {
   const [config, setConfig] = useState<HeistConfig>(DEFAULT_CONFIG);
   const [heists, setHeists] = useState<HeistRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -88,8 +89,18 @@ export default function HeistPage() {
 
   const saveConfig = async (patch: Partial<HeistConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_heist_enabled: readConfirmedBoolean(result.config, 'economy_heist_enabled'),
+        economy_heist_min_participants: readConfirmedNumber(result.config, 'economy_heist_min_participants'),
+        economy_heist_max_participants: readConfirmedNumber(result.config, 'economy_heist_max_participants'),
+        economy_heist_join_window_secs: readConfirmedNumber(result.config, 'economy_heist_join_window_secs'),
+        economy_heist_cooldown_seconds: readConfirmedNumber(result.config, 'economy_heist_cooldown_seconds'),
+        economy_heist_base_payout: readConfirmedNumber(result.config, 'economy_heist_base_payout'),
+        economy_heist_success_base_pct: readConfirmedNumber(result.config, 'economy_heist_success_base_pct'),
+        economy_heist_entry_fee: readConfirmedNumber(result.config, 'economy_heist_entry_fee'),
+      });
       toast({ title: 'Heist settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

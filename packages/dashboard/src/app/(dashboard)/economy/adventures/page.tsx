@@ -8,13 +8,13 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Swords, Plus, Pencil, Trash2 } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
@@ -73,6 +73,7 @@ export default function AdventuresPage() {
   const [editing, setEditing] = useState<(Omit<Adventure, 'id'> & { id?: string }) | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -100,8 +101,14 @@ export default function AdventuresPage() {
 
   const saveConfig = async (patch: Partial<AdventureConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_adventures_enabled: readConfirmedBoolean(result.config, 'economy_adventures_enabled'),
+        economy_adventure_daily_limit: readConfirmedNumber(result.config, 'economy_adventure_daily_limit'),
+        economy_adventure_ticket_cost: readConfirmedNumber(result.config, 'economy_adventure_ticket_cost'),
+        economy_adventure_max_scenes: readConfirmedNumber(result.config, 'economy_adventure_max_scenes'),
+      });
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

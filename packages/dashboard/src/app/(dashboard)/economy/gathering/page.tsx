@@ -8,13 +8,13 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Pickaxe, Plus, Pencil, Trash2 } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
@@ -254,6 +254,7 @@ export default function GatheringPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [filterSource, setFilterSource] = useState<SourceType | 'all'>('all');
   const { toast } = useToast();
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const fetchAll = useCallback(async () => {
     try {
@@ -287,8 +288,12 @@ export default function GatheringPage() {
   const saveSettings = async (patch: Partial<GatheringSettings>) => {
     setSaving(true);
     try {
-      await saveGuildConfigWithReadback(patch);
-      setSettings((prev) => prev ? { ...prev, ...patch } : prev);
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setSettings({
+        economy_gathering_enabled: readConfirmedBoolean(result.config, 'economy_gathering_enabled'),
+        economy_gathering_cooldown_seconds: readConfirmedNumber(result.config, 'economy_gathering_cooldown_seconds'),
+      });
       toast({ title: 'Settings saved', variant: 'success' });
       return 'saved' as const;
     } catch {

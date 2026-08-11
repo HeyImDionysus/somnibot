@@ -4,13 +4,13 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Trophy, Plus, Pencil, Trash2 } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface AchievementDef {
@@ -62,6 +62,7 @@ export default function AchievementsPage() {
   const [editing, setEditing] = useState<(Omit<AchievementDef, 'id'> & { id?: string }) | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -89,8 +90,16 @@ export default function AchievementsPage() {
 
   const saveConfig = async (patch: Partial<AchConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_achievements_enabled: readConfirmedBoolean(result.config, 'economy_achievements_enabled'),
+        economy_prestige_enabled: readConfirmedBoolean(result.config, 'economy_prestige_enabled'),
+        economy_prestige_multiplier_pct: readConfirmedNumber(result.config, 'economy_prestige_multiplier_pct'),
+        economy_prestige_min_level: readConfirmedNumber(result.config, 'economy_prestige_min_level'),
+        economy_prestige_min_net_worth: readConfirmedNumber(result.config, 'economy_prestige_min_net_worth'),
+        economy_prestige_max_level: readConfirmedNumber(result.config, 'economy_prestige_max_level'),
+      });
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

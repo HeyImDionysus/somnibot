@@ -4,13 +4,13 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { ScrollText, Plus, Pencil, Trash2 } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface QuestTemplate {
@@ -60,6 +60,7 @@ export default function QuestsPage() {
   const [editing, setEditing] = useState<(Omit<QuestTemplate, 'id'> & { id?: string }) | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -87,8 +88,14 @@ export default function QuestsPage() {
 
   const saveConfig = async (patch: Partial<QuestsConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_quests_enabled: readConfirmedBoolean(result.config, 'economy_quests_enabled'),
+        economy_daily_quest_count: readConfirmedNumber(result.config, 'economy_daily_quest_count'),
+        economy_weekly_quest_count: readConfirmedNumber(result.config, 'economy_weekly_quest_count'),
+        economy_quest_reward_base: readConfirmedNumber(result.config, 'economy_quest_reward_base'),
+      });
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

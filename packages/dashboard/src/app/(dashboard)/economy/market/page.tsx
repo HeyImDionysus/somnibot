@@ -8,11 +8,11 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { ShieldCheck, Store, ShoppingCart } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
@@ -41,6 +41,7 @@ export default function MarketPage() {
   const [config, setConfig] = useState<MarketConfig>(DEFAULT_CONFIG);
   const [activeListings, setActiveListings] = useState(0);
   const [loading, setLoading] = useState(true);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -68,8 +69,15 @@ export default function MarketPage() {
 
   const saveConfig = async (patch: Partial<MarketConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_market_enabled: readConfirmedBoolean(result.config, 'economy_market_enabled'),
+        economy_market_fee_pct: readConfirmedNumber(result.config, 'economy_market_fee_pct'),
+        economy_market_listing_days: readConfirmedNumber(result.config, 'economy_market_listing_days'),
+        economy_market_max_listings: readConfirmedNumber(result.config, 'economy_market_max_listings'),
+        economy_market_max_price_per_unit: readConfirmedNumber(result.config, 'economy_market_max_price_per_unit'),
+      });
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

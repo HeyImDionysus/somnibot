@@ -4,12 +4,12 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { PawPrint } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface PetsConfig {
@@ -40,6 +40,7 @@ export default function PetsPage() {
   const { toast } = useToast();
   const [config, setConfig] = useState<PetsConfig>(DEFAULT_CONFIG);
   const [loading, setLoading] = useState(true);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -60,8 +61,19 @@ export default function PetsPage() {
 
   const saveConfig = async (patch: Partial<PetsConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_pets_enabled: readConfirmedBoolean(result.config, 'economy_pets_enabled'),
+        economy_pet_decay_rate: readConfirmedNumber(result.config, 'economy_pet_decay_rate'),
+        economy_pet_decay_interval_hours: readConfirmedNumber(result.config, 'economy_pet_decay_interval_hours'),
+        economy_pet_low_stat_threshold: readConfirmedNumber(result.config, 'economy_pet_low_stat_threshold'),
+        economy_pet_notify_owner: readConfirmedBoolean(result.config, 'economy_pet_notify_owner'),
+        economy_pet_battle_enabled: readConfirmedBoolean(result.config, 'economy_pet_battle_enabled'),
+        economy_pet_prestige_enabled: readConfirmedBoolean(result.config, 'economy_pet_prestige_enabled'),
+        economy_pet_feed_cost: readConfirmedNumber(result.config, 'economy_pet_feed_cost'),
+        economy_pet_train_cost: readConfirmedNumber(result.config, 'economy_pet_train_cost'),
+      });
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

@@ -8,13 +8,13 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Fish, Plus, Pencil, Trash2 } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
@@ -78,6 +78,7 @@ export default function FishingPage() {
   const [editing, setEditing] = useState<(Omit<FishSpecies, 'id'> & { id?: string }) | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   // ── Fetch ─────────────────────────────────────────────
 
@@ -109,8 +110,16 @@ export default function FishingPage() {
 
   const saveConfig = async (patch: Partial<FishingConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_fishing_enabled: readConfirmedBoolean(result.config, 'economy_fishing_enabled'),
+        economy_fishing_cooldown_seconds: readConfirmedNumber(result.config, 'economy_fishing_cooldown_seconds'),
+        economy_fishing_junk_chance_pct: readConfirmedNumber(result.config, 'economy_fishing_junk_chance_pct'),
+        economy_fishing_treasure_chance_pct: readConfirmedNumber(result.config, 'economy_fishing_treasure_chance_pct'),
+        economy_fishing_collection_reward_enabled: readConfirmedBoolean(result.config, 'economy_fishing_collection_reward_enabled'),
+        economy_fishing_collection_reward_coins: readConfirmedNumber(result.config, 'economy_fishing_collection_reward_coins'),
+      });
       toast({ title: 'Settings saved!', variant: 'success' });
       return 'saved' as const;
     } catch {

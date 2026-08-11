@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useState } from 'react';
 
-type CommitResult = 'saved' | 'failed';
+type CommitResult = 'saved' | 'failed' | 'superseded';
 
 interface ValidatedNumberInputProps {
   readonly label: string;

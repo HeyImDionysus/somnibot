@@ -8,13 +8,13 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Sprout, Plus, Pencil, Trash2 } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
@@ -238,6 +238,7 @@ export default function FarmingPage() {
   const [editCrop, setEditCrop] = useState<Partial<Crop> | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const { toast } = useToast();
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const fetchAll = useCallback(async () => {
     try {
@@ -273,8 +274,14 @@ export default function FarmingPage() {
   const saveSettings = async (patch: Partial<FarmingSettings>) => {
     setSaving(true);
     try {
-      await saveGuildConfigWithReadback(patch);
-      setSettings((prev) => prev ? { ...prev, ...patch } : prev);
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setSettings({
+        economy_farming_enabled: readConfirmedBoolean(result.config, 'economy_farming_enabled'),
+        economy_farm_grid_size: readConfirmedNumber(result.config, 'economy_farm_grid_size'),
+        economy_farming_wilt_enabled: readConfirmedBoolean(result.config, 'economy_farming_wilt_enabled'),
+        economy_fertilizer_time_reduction_pct: readConfirmedNumber(result.config, 'economy_fertilizer_time_reduction_pct'),
+      });
       toast({ title: 'Settings saved', variant: 'success' });
       return 'saved' as const;
     } catch {

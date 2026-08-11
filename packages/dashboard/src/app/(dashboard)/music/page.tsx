@@ -60,7 +60,16 @@ const LAVALINK_STATUS_TEXT: Record<LavalinkHealth['state'], string> = {
   connected: 'Configured and connected via WebSocket; playback readiness is not reported separately.',
   disconnected: 'Configured, but disconnected; music playback is not ready.',
   unavailable: 'Not configured; music playback is not ready.',
+  stale: 'The last health snapshot is stale; current Lavalink readiness is unverified.',
   unknown: 'Configuration or live connection status could not be confirmed.',
+};
+
+const LAVALINK_STATUS_CLASS: Record<LavalinkHealth['state'], string> = {
+  connected: 'text-discord-success',
+  disconnected: 'text-discord-danger',
+  unavailable: 'text-discord-text-secondary',
+  stale: 'text-yellow-300',
+  unknown: 'text-discord-text-secondary',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -478,9 +487,12 @@ export default function MusicSettingsPage() {
               Configuration and observed runtime readiness are reported separately.
             </p>
             <div className="mt-4 space-y-2 text-sm" aria-live="polite">
-              <p className="text-discord-text-secondary">{LAVALINK_STATUS_TEXT[lavalinkHealth.state]}</p>
+              <p className={LAVALINK_STATUS_CLASS[lavalinkHealth.state]}>{LAVALINK_STATUS_TEXT[lavalinkHealth.state]}</p>
               <p className="text-xs text-discord-text-muted">
                 Last checked: {lavalinkCheckedAt ? lavalinkCheckedAt.toLocaleTimeString() : 'not checked yet'}
+              </p>
+              <p className="text-xs text-discord-text-muted">
+                Health snapshot: {'snapshotAt' in lavalinkHealth ? new Date(lavalinkHealth.snapshotAt).toLocaleString() : 'not verified'}
               </p>
               {lavalinkHealth.state !== 'connected' ? (
                 <p className="text-xs text-discord-text-muted">

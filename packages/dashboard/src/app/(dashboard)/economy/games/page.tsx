@@ -6,11 +6,11 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Gamepad2 } from 'lucide-react';
-import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber, readConfirmedString } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
@@ -67,6 +67,7 @@ export default function GamesPage() {
   const { toast } = useToast();
   const [config, setConfig] = useState<GamesConfig>(DEFAULT_CONFIG);
   const [loading, setLoading] = useState(true);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -97,9 +98,21 @@ export default function GamesPage() {
 
   const saveConfig = async (patch: Partial<GamesConfig>) => {
     try {
-      await saveGuildConfigWithReadback(patch);
-      setConfig((current) => ({ ...current, ...patch }));
-      const [target, value] = Object.entries(patch)[0] ?? ['setting', 'unknown'];
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_games_enabled: readConfirmedBoolean(result.config, 'economy_games_enabled'),
+        economy_daily_loss_limit: readConfirmedNumber(result.config, 'economy_daily_loss_limit'),
+        economy_coinflip_max_bet: readConfirmedNumber(result.config, 'economy_coinflip_max_bet'),
+        economy_slots_max_bet: readConfirmedNumber(result.config, 'economy_slots_max_bet'),
+        economy_blackjack_max_bet: readConfirmedNumber(result.config, 'economy_blackjack_max_bet'),
+        economy_lottery_enabled: readConfirmedBoolean(result.config, 'economy_lottery_enabled'),
+        economy_lottery_schedule: readConfirmedString(result.config, 'economy_lottery_schedule'),
+        economy_lottery_ticket_price: readConfirmedNumber(result.config, 'economy_lottery_ticket_price'),
+        economy_lottery_max_tickets: readConfirmedNumber(result.config, 'economy_lottery_max_tickets'),
+      });
+      const [target] = Object.entries(patch)[0] ?? ['setting'];
+      const value = result.config[target];
       toast({
         title: 'Mini-game setting confirmed',
         description: `${target} confirmed as ${String(value)} at ${new Date().toLocaleTimeString()}.`,
