@@ -108,14 +108,14 @@ export default function ReactionRolesPage() {
   const [mappingReadback, setMappingReadback] = useState<MessageTarget | null>(null);
 
 
-  const fetchRoles = useCallback(async (): Promise<boolean> => {
+  const fetchRoles = useCallback(async (): Promise<ReactionRole[] | null> => {
     try {
       const [res, guildRes] = await Promise.all([fetch('/api/reaction-roles'), fetch('/api/guild')]);
       const json = await res.json();
       if (json.success) setRoles(json.data);
       else {
         setError(json.error);
-        return false;
+        return null;
       }
       const guildJson = await guildRes.json();
       if (guildJson.success) {
@@ -128,13 +128,13 @@ export default function ReactionRolesPage() {
         };
         setDefaults(nextDefaults);
         setSavedDefaults(nextDefaults);
-        return true;
+        return json.data as ReactionRole[];
       }
       setError(guildJson.error ?? 'Failed to load reaction role defaults');
-      return false;
+      return null;
     } catch {
       setError('Failed to load reaction roles');
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
@@ -211,8 +211,9 @@ export default function ReactionRolesPage() {
       });
       const json = await res.json();
       if (json.success) {
-        const readbackLoaded = await fetchRoles();
-        if (readbackLoaded) {
+        const readback = await fetchRoles();
+        const mappingReadBack = readback?.some((role) => role.id === json.data.id) ?? false;
+        if (mappingReadBack) {
           setMappingReadback({
             key: `${json.data.channel_id}:${json.data.message_id}`,
             channelId: json.data.channel_id,
@@ -221,10 +222,10 @@ export default function ReactionRolesPage() {
         }
         setShowForm(false);
         toast({
-          title: readbackLoaded
+          title: mappingReadBack
             ? editingId ? 'Reaction role updated and read back' : 'Reaction role saved and read back'
             : 'Reaction role saved; server readback is unavailable',
-          variant: readbackLoaded ? 'success' : 'error',
+          variant: mappingReadBack ? 'success' : 'error',
         });
       } else {
         setError(json.error);
@@ -245,7 +246,7 @@ export default function ReactionRolesPage() {
       toast({ title: 'Failed to save defaults', variant: 'error' });
       return;
     }
-    const readbackLoaded = await fetchRoles();
+    const readbackLoaded = (await fetchRoles()) !== null;
     toast({
       title: readbackLoaded
         ? 'Defaults saved and read back from this server'
@@ -469,7 +470,8 @@ export default function ReactionRolesPage() {
                 <p className="text-xs text-discord-text-muted">Message ID (diagnostic): {mappings[0].message_id}</p>
               </div>
               <button onClick={async () => {
-                if (await fetchRoles()) {
+                const readback = await fetchRoles();
+                if (readback?.some((role) => role.id === mappings[0].id)) {
                   setMappingReadback(messageTargetFor(mappings[0]));
                   toast({ title: 'Saved mapping read back from the server', variant: 'success' });
                 } else {

@@ -108,7 +108,7 @@ function TicketMemberName({ id }: { id: string }) {
 function TicketPanelDestination({ panel, snapshot }: { panel: TicketPanel; snapshot: ChannelSnapshot | null }) {
   const channel = snapshot?.channels.find((candidate) => candidate.id === panel.channel_id);
   const snapshotAge = snapshot?.snapshotAt ? Date.now() - Date.parse(snapshot.snapshotAt) : Number.POSITIVE_INFINITY;
-  const stale = snapshotAge > 10 * 60 * 1_000;
+  const stale = !Number.isFinite(snapshotAge) || snapshotAge > 10 * 60 * 1_000;
 
   return (
     <div className="mt-2 text-xs text-discord-text-muted">

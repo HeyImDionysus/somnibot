@@ -189,7 +189,7 @@ test.describe('Community self-service browser flow', () => {
       success: true,
       channels: [{ id: CHANNEL_ID, name: 'role-picks', type: 0, position: 0 }],
       categories: [],
-      snapshotAt: '2000-01-01T00:00:00.000Z',
+      snapshotAt: 'not-a-timestamp',
       awaitingSnapshot: false,
     }));
 
