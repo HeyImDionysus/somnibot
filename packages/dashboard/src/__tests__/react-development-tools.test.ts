@@ -14,28 +14,16 @@ vi.mock('react-grab', () => {
 
 vi.mock('react-scan', () => ({ scan: diagnostics.scan }));
 
-const initialNodeEnvironment = process.env.NODE_ENV;
-const initialDevtoolsDisable = process.env.NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS;
-
 async function loadDevelopmentTools(nodeEnvironment: string, disableDevtools?: string) {
-  process.env.NODE_ENV = nodeEnvironment;
-  if (disableDevtools === undefined) {
-    delete process.env.NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS;
-  } else {
-    process.env.NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS = disableDevtools;
-  }
+  vi.stubEnv('NODE_ENV', nodeEnvironment);
+  vi.stubEnv('NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS', disableDevtools ?? '');
 
   vi.resetModules();
   return import('@/components/react-development-tools');
 }
 
 afterEach(() => {
-  process.env.NODE_ENV = initialNodeEnvironment;
-  if (initialDevtoolsDisable === undefined) {
-    delete process.env.NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS;
-  } else {
-    process.env.NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS = initialDevtoolsDisable;
-  }
+  vi.unstubAllEnvs();
   diagnostics.reactGrabImport.mockReset();
   diagnostics.scan.mockReset();
   vi.resetModules();
