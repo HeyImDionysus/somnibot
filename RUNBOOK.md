@@ -40,11 +40,15 @@ health server stays separate from the dashboard's `PORT=3000`. Use
 
 ```bash
 git pull origin main
-docker compose -f docker-compose.prod.yml up -d --build
+deploy_path=/opt/somnibot
+. "$deploy_path/scripts/lib/production-compose.sh"
+production_compose up -d --build
 ```
 
 The VPS stack keeps the dashboard, bot, Lavalink, and Valkey together on the VPS
-or private network. Caddy serves the public HTTPS dashboard domain.
+or private network. The helper fixes the Compose project to `somnibot-prod` and
+uses either bundled Caddy for domain mode or the loopback-only launcher override
+for Tailscale Funnel mode.
 
 ### CI
 All required GitHub checks must pass before merging: install, migration lint,
@@ -117,6 +121,8 @@ incident specifically requires it and that change has separate approval.
 ### VPS
 
 1. SSH to the VPS and enter the SomniBot checkout.
+   Preserve `.env`, `.env.rollback`, and `.somnibot/`; they hold the active
+   runtime identity and must survive a code rollback.
 2. Choose the last known-good commit:
    ```bash
    git fetch origin
@@ -124,17 +130,21 @@ incident specifically requires it and that change has separate approval.
    ```
 3. Check out the known-good commit and rebuild containers:
    ```bash
+   deploy_path=/opt/somnibot
+   . /usr/local/lib/somnibot/production-compose.sh
    git checkout <last-good-commit>
-   docker compose -f docker-compose.prod.yml up -d --build
+   production_compose up -d --build
    ```
+   The installed helper remains available even when the known-good checkout
+   predates the current recovery scripts.
 4. Verify:
    ```bash
-   docker compose -f docker-compose.prod.yml ps
+   production_compose ps
    curl -fsS https://your-domain.example/api/health
    ```
 5. Check logs if health is not green:
    ```bash
-   docker compose -f docker-compose.prod.yml logs --tail=100 dashboard bot caddy
+   production_compose logs --tail=100 dashboard bot valkey lavalink
    ```
 6. Treat HTTP fetch failure as a dashboard rollback failure. Treat
    `status: "degraded"` as a dependency alert, not a failed dashboard process

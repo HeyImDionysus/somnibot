@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
@@ -123,7 +123,8 @@ describe('VPS public access modes', () => {
       exposure: 'private',
       endpoint: '127.0.0.1:3456 -> dashboard:3000',
     }));
-    expect(plan.commands).toContainEqual(expect.objectContaining({ id: 'write-funnel-compose-override' }));
+    const writeOverride = plan.commands.find(command => command.id === 'write-funnel-compose-override');
+    expect(writeOverride).toBeDefined();
     expect(plan.commands).not.toContainEqual(expect.objectContaining({ id: 'remove-funnel-compose-override' }));
     expect(plan.commands.find(command => command.id === 'start-stack')?.args).toEqual(expect.arrayContaining([
       '-f',
@@ -132,6 +133,50 @@ describe('VPS public access modes', () => {
       '/opt/somnibot/.somnibot/launcher-tailscale-funnel.compose.yml',
     ]));
     const composeOverride = buildVpsFunnelComposeOverride();
+    const writerIndex = writeOverride?.args.indexOf('-c') ?? -1;
+    const writerScript = writeOverride?.args[writerIndex + 1] ?? '';
+    expect(writerScript).toContain('set -eu');
+    expect(writerScript).toContain('temp_path="$1.partial.$$"');
+    expect(writerScript).toContain('trap cleanup EXIT');
+    expect(writerScript).toContain("trap 'exit 1' HUP INT TERM");
+    expect(writerScript).toContain('mv -f -- "$temp_path" "$1"');
+    const root = mkdtempSync(path.join(tmpdir(), 'somnibot-funnel-override-write-'));
+    try {
+      const target = path.join(root, 'launcher-tailscale-funnel.compose.yml');
+      const moveCapture = path.join(root, 'move-source.txt');
+      const shell = process.platform === 'win32'
+        ? 'C:\\Program Files\\Git\\bin\\bash.exe'
+        : 'sh';
+      const shellTarget = target.replaceAll('\\', '/');
+      const shellMoveCapture = moveCapture.replaceAll('\\', '/');
+      const instrumentedWriter = [
+        'mv() { printf \'%s\\n\' "$3" > "$MOVE_CAPTURE"; command mv "$@"; }',
+        writerScript,
+      ].join('\n');
+      const written = spawnSync(shell, ['-c', instrumentedWriter, 'sh', shellTarget], {
+        encoding: 'utf8',
+        input: composeOverride,
+        env: { ...process.env, MOVE_CAPTURE: shellMoveCapture },
+      });
+      expect(written.status, written.stderr).toBe(0);
+      expect(readFileSync(target, 'utf8')).toBe(composeOverride);
+      const moveSource = readFileSync(moveCapture, 'utf8').trim();
+      const expectedPrefix = `${shellTarget}.partial.`;
+      expect(moveSource.startsWith(expectedPrefix)).toBe(true);
+      expect(moveSource.slice(expectedPrefix.length)).toMatch(/^\d+$/);
+
+      const failedTarget = path.join(root, 'failed-funnel.compose.yml');
+      const shellFailedTarget = failedTarget.replaceAll('\\', '/');
+      const failed = spawnSync(shell, ['-c', `mv() { return 19; }\n${writerScript}`, 'sh', shellFailedTarget], {
+        encoding: 'utf8',
+        input: composeOverride,
+      });
+      expect(failed.status).not.toBe(0);
+      expect(existsSync(failedTarget)).toBe(false);
+      expect(readdirSync(root).filter(name => name.startsWith('failed-funnel.compose.yml.partial.'))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
     expect(composeOverride).toContain('127.0.0.1:3456:3000');
     expect(composeOverride).toContain('profiles: ["somnibot-domain-edge"]');
     expect(composeOverride).not.toContain('0.0.0.0:3456');

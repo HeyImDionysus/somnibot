@@ -278,8 +278,15 @@ the proxy boundary must be corrected.
 Manual fallback: start the production stack on the VPS:
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+deploy_path=/opt/somnibot
+. "$deploy_path/scripts/lib/production-compose.sh"
+production_compose up -d --build
 ```
+
+The helper always uses Compose project `somnibot-prod` and automatically includes
+the launcher-managed Funnel override when it is active. Do not replace it with a
+bare `docker compose -f` command on a shared VPS: that can select a different
+project or start bundled Caddy alongside the host's existing HTTPS edge.
 
 ## 5. PayPal Webhooks
 

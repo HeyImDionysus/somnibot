@@ -18,6 +18,8 @@ const maintenanceExit = path.join(repoRoot, 'scripts', 'exit-runtime-maintenance
 const healthRecovery = path.join(repoRoot, 'scripts', 'production-health-recover.sh');
 const healthRecoveryInstaller = path.join(repoRoot, 'scripts', 'install-production-health-recovery.sh');
 const productionCompose = path.join(repoRoot, 'scripts', 'lib', 'production-compose.sh');
+const deploymentGuide = path.join(repoRoot, 'DEPLOYMENT.md');
+const runbook = path.join(repoRoot, 'RUNBOOK.md');
 const productionComposeConsumers = [
   path.join(repoRoot, 'scripts', 'backup-production-valkey.sh'),
   path.join(repoRoot, 'scripts', 'enter-runtime-maintenance.sh'),
@@ -134,6 +136,16 @@ describe('protected VPS environment scripts', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('documents VPS startup and rollback through the isolated production Compose contract', () => {
+    const deploymentSource = readFileSync(deploymentGuide, 'utf8');
+    const runbookSource = readFileSync(runbook, 'utf8');
+
+    expect(deploymentSource).toContain('. "$deploy_path/scripts/lib/production-compose.sh"');
+    expect(runbookSource).toContain('. /usr/local/lib/somnibot/production-compose.sh');
+    expect(deploymentSource).not.toContain('docker compose -f docker-compose.prod.yml up -d --build');
+    expect(runbookSource).not.toContain('docker compose -f docker-compose.prod.yml');
   });
 
   it('stages and restores handoff snapshots through fixed protected paths', () => {

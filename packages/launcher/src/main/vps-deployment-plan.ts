@@ -363,7 +363,7 @@ function buildCommands(
     }),
     ...(publicAccessMode === 'tailscale-funnel' ? [buildRemoteCommand(sshTarget, 'sh', [
       '-c',
-      'umask 077; mkdir -p -- "$(dirname -- "$1")"; cat > "$1"',
+      'set -eu; umask 077; temp_path="$1.partial.$$"; cleanup() { rm -f -- "$temp_path"; }; trap cleanup EXIT; trap \'exit 1\' HUP INT TERM; mkdir -p -- "$(dirname -- "$1")"; cat > "$temp_path"; chmod 0600 "$temp_path"; mv -f -- "$temp_path" "$1"; trap - EXIT HUP INT TERM',
       'sh',
       composeOverrideFilePath,
     ], {
