@@ -11,13 +11,15 @@ vi.mock('@/lib/paypal', () => ({
   getPayPalToken: vi.fn(),
 }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/store/paypal-plan-state', () => ({ ensurePayPalPlanState: vi.fn() }));
 
-import { POST } from '@/app/api/store/products/route';
+import { POST, PUT } from '@/app/api/store/products/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { notifyBot } from '@/lib/notify-bot';
 import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
 
 import {
   buildRequest,
@@ -100,6 +102,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
     (getPayPalRuntimeConfig as ReturnType<typeof vi.fn>).mockResolvedValue(paypalConfig);
+    (ensurePayPalPlanState as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
   });
 
   afterEach(() => {
@@ -354,6 +357,62 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
+  it('enforces a software-only storefront policy before product or provider writes', async () => {
+    const guildConfig = registerTable(mock, 'guild_config');
+    guildConfig.select.mockReturnValue(guildConfig);
+    guildConfig.eq.mockReturnValue(guildConfig);
+    guildConfig.maybeSingle.mockResolvedValue({
+      data: { product_types_enabled: ['license-key', 'subscription'] },
+      error: null,
+    });
+    const paypalFetch = vi.fn();
+    vi.stubGlobal('fetch', paypalFetch);
+
+    const response = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        ...baseProductBody,
+        type: 'subscription',
+        delivery_type: 'access_pass',
+      },
+    }));
+
+    expect(response.status).toBe(409);
+    expect(productsTable.insert).not.toHaveBeenCalled();
+    expect(paypalFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects an update that reintroduces Discord delivery under software-only policy', async () => {
+    const guildConfig = registerTable(mock, 'guild_config');
+    guildConfig.select.mockReturnValue(guildConfig);
+    guildConfig.eq.mockReturnValue(guildConfig);
+    guildConfig.maybeSingle.mockResolvedValue({
+      data: { product_types_enabled: ['license-key', 'subscription'] },
+      error: null,
+    });
+    productsTable.maybeSingle.mockResolvedValueOnce({
+      data: {
+        type: 'subscription',
+        delivery_type: 'license_key',
+        granted_role_ids: [],
+        granted_channel_ids: [],
+        active: false,
+      },
+      error: null,
+    });
+
+    const response = await PUT(buildRequest('/api/store/products', {
+      method: 'PUT',
+      body: {
+        id: '00000000-0000-4000-8000-000000000123',
+        delivery_type: 'mixed',
+      },
+    }));
+
+    expect(response.status).toBe(409);
+    expect(productsTable.update).not.toHaveBeenCalled();
+  });
+
   it('creates the PayPal trial cycle and persists the complete plan contract', async () => {
     (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('paypal-token');
     const paypalFetch = vi.fn()
@@ -395,6 +454,7 @@ describe('POST /api/store/products PayPal readiness', () => {
       expect.objectContaining({ tenure_type: 'TRIAL', total_cycles: 14, sequence: 1 }),
       expect.objectContaining({ tenure_type: 'REGULAR', sequence: 2 }),
     ]);
+    expect(providerBody.status).toBe('INACTIVE');
     expect(plansTable.insert).toHaveBeenCalledWith(expect.objectContaining({
       trial_days: 14,
       active: false,
@@ -407,16 +467,24 @@ describe('POST /api/store/products PayPal readiness', () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(jsonResponse({ id: 'PROD-RECOVERY' }))
       .mockResolvedValueOnce(jsonResponse({ id: 'PLAN-RECOVERY' })));
-    productsTable.single.mockResolvedValueOnce({
-      data: {
-        id: '00000000-0000-4000-8000-000000000123',
-        guild_id: 'guild-123',
-        name: 'Founder Pass',
-        type: 'subscription',
-        paypal_product_id: 'PROD-RECOVERY',
-      },
-      error: null,
-    });
+    const recoveryProduct = {
+      id: '00000000-0000-4000-8000-000000000123',
+      guild_id: 'guild-123',
+      name: 'Founder Pass',
+      type: 'subscription',
+      paypal_product_id: 'PROD-RECOVERY',
+      metadata: {},
+    };
+    productsTable.single
+      .mockResolvedValueOnce({ data: recoveryProduct, error: null })
+      .mockImplementationOnce(() => Promise.resolve({
+        data: {
+          id: recoveryProduct.id,
+          active: false,
+          metadata: productsTable.update.mock.calls.at(-1)?.[0]?.metadata,
+        },
+        error: null,
+      }));
     plansTable.single.mockResolvedValueOnce({
       data: null,
       error: { message: 'temporary plan insert failure' },
@@ -447,6 +515,7 @@ describe('POST /api/store/products PayPal readiness', () => {
         id: '00000000-0000-4000-8000-000000000123',
         paypal_product_id: 'PROD-RECOVERY',
         recovery_plan: {
+          id: expect.any(String),
           product_id: '00000000-0000-4000-8000-000000000123',
           paypal_plan_id: 'PLAN-RECOVERY',
           trial_days: 7,
@@ -456,6 +525,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     });
     expect(productsTable.update).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
     expect(productsTable.eq).toHaveBeenCalledWith('id', '00000000-0000-4000-8000-000000000123');
+    expect(ensurePayPalPlanState).toHaveBeenCalledWith(paypalConfig, 'PLAN-RECOVERY', false);
   });
 
   it('creates PayPal plans for paid subscription plans when the parent product price is zero', async () => {

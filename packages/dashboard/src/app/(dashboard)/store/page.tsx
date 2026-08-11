@@ -6,7 +6,6 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { z } from 'zod';
 import ProductFiles from '@/components/store/product-files';
 import StoreControlRoom from '@/components/store/store-control-room';
 import { PayPalOnboardingStatusPanel } from '@/components/store/paypal-onboarding-status';
@@ -22,7 +21,20 @@ import { ChannelPicker } from '@/components/shared/channel-picker';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
+import { Button } from '@/components/shared/button';
+import { Input, Select, Toggle } from '@/components/shared/input';
 import { getOperatorLicensingGuide } from '@/lib/store/operator-licensing-guide';
+import {
+  commercePlanRecoverySchema,
+  readPlanRecovery,
+  type CommercePlanRecovery,
+} from '@/lib/store/commerce-plan-recovery';
+import {
+  defaultStoreProductFacets,
+  evaluateStoreProductPolicy,
+  storeProductFacetOptions,
+  type StoreProductFacet,
+} from '@/lib/store/store-product-policy';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -78,7 +90,7 @@ const emptyForm: {
   name: '',
   description: '',
   type: 'one_time',
-  delivery_type: 'access_pass',
+  delivery_type: 'license_key',
   price_dollars: '',
   currency: 'USD',
   granted_role_ids: [],
@@ -96,19 +108,19 @@ const emptyPlan: SubscriptionPlanDraft = {
   active: true,
 };
 
-const pendingPlanRecoverySchema = z.object({
-  product_id: z.string().uuid(),
-  paypal_plan_id: z.string().min(1),
-  name: z.string().min(1),
-  interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']),
-  interval_count: z.number().int().min(1).max(12),
-  price_cents: z.number().int().min(0),
-  currency: z.string().length(3),
-  trial_days: z.number().int().min(0).max(365),
-  active: z.boolean(),
-});
+const productTypeOptions = [
+  { value: 'one_time', label: 'One-Time' },
+  { value: 'subscription', label: 'Subscription' },
+  { value: 'free', label: 'Free' },
+];
 
-type PendingPlanRecovery = z.infer<typeof pendingPlanRecoverySchema>;
+const deliveryTypeLabels: Record<Product['delivery_type'], string> = {
+  license_key: 'License Key',
+  file: 'File',
+  link: 'Link',
+  access_pass: 'Discord Access Pass',
+  mixed: 'Download + Discord Bundle',
+};
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -183,10 +195,10 @@ export default function StorePage() {
   const [planDraft, setPlanDraft] = useState<SubscriptionPlanDraft>(emptyPlan);
   const [integrationProduct, setIntegrationProduct] = useState<Product | null>(null);
   const [integrationRecovery, setIntegrationRecovery] = useState<{ readonly kind: 'license' | 'plan'; readonly message: string } | null>(null);
-  const [pendingPlanRecovery, setPendingPlanRecovery] = useState<PendingPlanRecovery | null>(null);
+  const [pendingPlanRecovery, setPendingPlanRecovery] = useState<CommercePlanRecovery | null>(null);
   const [paypalStatus, setPaypalStatus] = useState<PayPalOnboardingStatus | null>(null);
   const [storeControls, setStoreControls] = useState({
-    product_types_enabled: ['downloadable', 'license-key', 'discord-perk', 'subscription', 'virtual-good', 'ticket-service', 'free'],
+    product_types_enabled: [...defaultStoreProductFacets] as StoreProductFacet[],
     repeat_purchase_policy: 'unique' as 'unique' | 'stackable' | 'renewable' | 'seat-based',
     free_claim_policy: 'one-claim' as 'one-claim' | 'repeatable',
     gifting_enabled: true,
@@ -212,7 +224,19 @@ export default function StorePage() {
         fetch('/api/guild'),
       ]);
       const productsJson = await productsRes.json();
-      if (productsJson.success) setProducts(productsJson.data);
+      if (productsJson.success) {
+        const loadedProducts: Product[] = productsJson.data;
+        setProducts(loadedProducts);
+        const recoverable = loadedProducts.find((product) => readPlanRecovery(product.metadata));
+        if (recoverable) {
+          setIntegrationProduct(recoverable);
+          setPendingPlanRecovery(readPlanRecovery(recoverable.metadata));
+          setIntegrationRecovery({
+            kind: 'plan',
+            message: 'This inactive product has a saved subscription-plan recovery. Retry reconciles PayPal and the local plan before reactivation.',
+          });
+        }
+      }
       const guildJson = await guildRes.json();
       if (guildJson.config) {
         setStoreEnabled(guildJson.config.store_enabled ?? false);
@@ -362,6 +386,14 @@ export default function StorePage() {
         toast({ title: json.error ?? 'Failed to save commerce setting', variant: 'error' });
         return;
       }
+      const readbackResponse = await fetch('/api/guild');
+      const readback: { config?: Partial<typeof storeControls>; error?: string } = await readbackResponse.json();
+      const authoritativeValue = readback.config?.[key];
+      const matches = JSON.stringify(authoritativeValue ?? null) === JSON.stringify(payload ?? null);
+      if (!readbackResponse.ok || !matches) {
+        toast({ title: readback.error ?? 'Commerce setting saved, but authoritative readback did not match', variant: 'error' });
+        return;
+      }
       setStoreControls((prev) => ({ ...prev, [key]: value }));
       toast({ title: 'Commerce setting saved', variant: 'success' });
     } catch {
@@ -371,12 +403,28 @@ export default function StorePage() {
     }
   };
 
-  const toggleProductType = (type: string) => {
+  const toggleProductType = (type: StoreProductFacet) => {
     const current = storeControls.product_types_enabled;
     const next = current.includes(type) ? current.filter((v) => v !== type) : [...current, type];
     if (next.length === 0) {
       toast({ title: 'Enable at least one product type', variant: 'error' });
       return;
+    }
+    const nextPolicy = evaluateStoreProductPolicy(next);
+    if (nextPolicy.allowedDeliveryTypes.length === 0) {
+      toast({ title: 'Enable at least one fulfillment path', variant: 'error' });
+      return;
+    }
+    const typeAllowed = (form.type !== 'subscription' || next.includes('subscription'))
+      && (form.type !== 'free' || next.includes('free'));
+    if (!nextPolicy.allowedDeliveryTypes.includes(form.delivery_type) || !typeAllowed) {
+      setForm((current) => ({
+        ...current,
+        type: typeAllowed ? current.type : 'one_time',
+        delivery_type: nextPolicy.allowedDeliveryTypes[0] ?? 'license_key',
+        granted_role_ids: nextPolicy.discordAccessEnabled ? current.granted_role_ids : [],
+        granted_channel_ids: nextPolicy.discordAccessEnabled ? current.granted_channel_ids : [],
+      }));
     }
     void saveCommerceControl('product_types_enabled', next);
   };
@@ -464,17 +512,32 @@ export default function StorePage() {
     if (!integrationProduct || !integrationRecovery) return;
     try {
       if (integrationRecovery.kind === 'plan' && pendingPlanRecovery) {
-        const response = await fetch('/api/store/plans', {
+        const response = await fetch('/api/store/products/recover-plan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(pendingPlanRecovery),
+          body: JSON.stringify({ product_id: pendingPlanRecovery.product_id }),
         });
         const result: { success?: boolean; error?: string } = await response.json();
         if (!response.ok || result.success === false) {
           setIntegrationRecovery({ kind: 'plan', message: result.error ?? 'The plan still could not be saved.' });
           return;
         }
-        await readbackProduct(integrationProduct.id);
+        const verifiedProduct = await readbackProduct(integrationProduct.id);
+        const verifiedPlan = verifiedProduct?.plans?.find(
+          (plan) => plan.id === pendingPlanRecovery.id,
+        );
+        if (
+          !verifiedProduct
+          || verifiedProduct.active !== pendingPlanRecovery.product_active
+          || readPlanRecovery(verifiedProduct.metadata)
+          || !verifiedPlan
+        ) {
+          setIntegrationRecovery({
+            kind: 'plan',
+            message: 'Recovery completed, but authoritative product and plan readback did not match. Retry safely.',
+          });
+          return;
+        }
         setIntegrationRecovery(null);
         setPendingPlanRecovery(null);
         toast({ title: 'Subscription plan saved and verified', variant: 'success' });
@@ -484,7 +547,14 @@ export default function StorePage() {
       const policyError = await saveLicensePolicy(integrationProduct.id);
       setIntegrationRecovery(policyError ? { kind: 'license', message: policyError } : null);
       if (!policyError) {
-        await readbackProduct(integrationProduct.id);
+        const verifiedProduct = await readbackProduct(integrationProduct.id);
+        if (!verifiedProduct) {
+          setIntegrationRecovery({
+            kind: 'license',
+            message: 'The license policy was saved, but authoritative product readback failed. Retry safely.',
+          });
+          return;
+        }
         toast({ title: 'License policy saved and verified', variant: 'success' });
       }
     } catch {
@@ -539,7 +609,8 @@ export default function StorePage() {
           if (preserved) {
             const recoveryPlan = json.data?.recovery_plan;
             const parsedRecovery = json.code === 'PRODUCT_CREATED_PLAN_SAVE_FAILED'
-              ? pendingPlanRecoverySchema.safeParse(recoveryPlan)
+              || json.code === 'PRODUCT_CREATED_PLAN_COMPENSATION_FAILED'
+              ? commercePlanRecoverySchema.safeParse(recoveryPlan)
               : null;
             const planRecovery = parsedRecovery?.success ? parsedRecovery.data : null;
             setPendingPlanRecovery(planRecovery);
@@ -624,6 +695,15 @@ export default function StorePage() {
     deliveryType: form.delivery_type,
     grantedRoleCount: form.granted_role_ids.length,
   });
+  const storePolicy = evaluateStoreProductPolicy(storeControls.product_types_enabled);
+  const deliveryTypeOptions = storePolicy.allowedDeliveryTypes.map((value) => ({
+    value,
+    label: deliveryTypeLabels[value],
+  }));
+  const availableProductTypeOptions = productTypeOptions.filter((option) => (
+    (option.value !== 'subscription' || storePolicy.enabledFacets.includes('subscription'))
+    && (option.value !== 'free' || storePolicy.enabledFacets.includes('free'))
+  ));
 
   // ── Render ──
 
@@ -637,12 +717,7 @@ export default function StorePage() {
             Manage products, pricing, and delivery
           </p>
         </div>
-        <button
-          onClick={openCreate}
-          className="rounded-input bg-[#FF1493] px-4 py-2 text-sm font-medium text-white hover:bg-[#FF1493]/80 transition-standard"
-        >
-          + New Product
-        </button>
+        <Button onClick={openCreate}>New Product</Button>
       </div>
 
       {/* Stats Row */}
@@ -681,48 +756,8 @@ export default function StorePage() {
       {/* Commerce Toggles */}
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
         <h2 className="text-lg font-semibold text-discord-text-primary">Commerce Settings</h2>
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-sm font-medium text-discord-text-primary">Store</span>
-            <p className="text-xs text-discord-text-muted">
-              Enable or disable the store system. When disabled, /store commands and buy buttons are blocked.
-            </p>
-          </div>
-          <button
-            onClick={() => toggleStoreEnabled(!storeEnabled)}
-            disabled={togglingStore}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              storeEnabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
-            }`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                storeEnabled ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-        </div>
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-sm font-medium text-discord-text-primary">PayPal Payments</span>
-            <p className="text-xs text-discord-text-muted">
-              Enable PayPal as a payment provider. Requires PayPal API credentials in Settings.
-            </p>
-          </div>
-          <button
-            onClick={() => togglePaypalEnabled(!paypalEnabled)}
-            disabled={togglingPaypal}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              paypalEnabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
-            }`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                paypalEnabled ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-        </div>
+        <Toggle label="Store" description="Enable or disable /store commands and buy buttons." checked={storeEnabled} onChange={toggleStoreEnabled} disabled={togglingStore} />
+        <Toggle label="PayPal payments" description="Requires PayPal API credentials in Settings." checked={paypalEnabled} onChange={togglePaypalEnabled} disabled={togglingPaypal} />
         <div className="flex items-center justify-between">
           <div>
             <span className="text-sm font-medium text-discord-text-primary">Subscription Grace Period</span>
@@ -731,22 +766,23 @@ export default function StorePage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <input
+            <Input
+              id="subscription-grace-days"
               type="number"
               min={1}
               max={30}
               value={gracePeriodDays}
               onChange={(e) => setGracePeriodDays(parseInt(e.target.value) || 0)}
-              className="w-20 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+              className="w-20"
             />
             <span className="text-xs text-discord-text-muted">days</span>
-            <button
+            <Button
+              size="sm"
               onClick={() => saveGracePeriod(gracePeriodDays)}
               disabled={savingGrace}
-              className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
             >
               {savingGrace ? '…' : 'Save'}
-            </button>
+            </Button>
           </div>
         </div>
         <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4 space-y-3">
@@ -755,80 +791,57 @@ export default function StorePage() {
             <p className="text-xs text-discord-text-muted">Sandbox is the default. These controls never expose credentials or initiate a live payment.</p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="text-xs text-discord-text-muted">Environment<select value={paypalEnvironment} onChange={(e) => { const environment = e.target.value as 'sandbox' | 'live'; setPaypalEnvironment(environment); if (environment === 'sandbox') setLiveModeConfirmed(false); }} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"><option value="sandbox">Sandbox</option><option value="live">Live (real money)</option></select></label>
-            <label className="text-xs text-discord-text-muted">Refund strategy<select value={paypalRefundStrategy} onChange={(e) => setPaypalRefundStrategy(e.target.value as 'provider-first' | 'local-first')} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"><option value="provider-first">Provider first</option><option value="local-first">Local first (manual review)</option></select></label>
-            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={paypalLegacyTolerance} onChange={(e) => setPaypalLegacyTolerance(e.target.checked)} /> Allow legacy USD sale tolerance</label>
-            <label className="text-xs text-discord-text-muted">Stale processing window (ms)<input type="number" min={60000} max={86400000} value={paypalStaleMs} onChange={(e) => setPaypalStaleMs(Number(e.target.value) || 60000)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
-            <label className="text-xs text-discord-text-muted">Webhook verify attempts<input type="number" min={1} max={10} value={paypalVerifyAttempts} onChange={(e) => setPaypalVerifyAttempts(Number(e.target.value) || 1)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
+            <Select id="paypal-environment" label="Environment" value={paypalEnvironment} onChange={(event) => { const environment = event.target.value === 'live' ? 'live' : 'sandbox'; setPaypalEnvironment(environment); if (environment === 'sandbox') setLiveModeConfirmed(false); }} options={[{ value: 'sandbox', label: 'Sandbox' }, { value: 'live', label: 'Live (real money)' }]} className="bg-discord-bg-primary" />
+            <Select id="paypal-refund-strategy" label="Refund strategy" value={paypalRefundStrategy} onChange={(event) => setPaypalRefundStrategy(event.target.value === 'local-first' ? 'local-first' : 'provider-first')} options={[{ value: 'provider-first', label: 'Provider first' }, { value: 'local-first', label: 'Local first (manual review)' }]} className="bg-discord-bg-primary" />
+            <Toggle label="Allow legacy USD sale tolerance" checked={paypalLegacyTolerance} onChange={setPaypalLegacyTolerance} />
+            <Input id="paypal-stale-window" label="Stale processing window (ms)" type="number" min={60000} max={86400000} value={paypalStaleMs} onChange={(event) => setPaypalStaleMs(Number(event.target.value) || 60000)} className="bg-discord-bg-primary" />
+            <Input id="paypal-verify-attempts" label="Webhook verify attempts" type="number" min={1} max={10} value={paypalVerifyAttempts} onChange={(event) => setPaypalVerifyAttempts(Number(event.target.value) || 1)} className="bg-discord-bg-primary" />
           </div>
-          {paypalEnvironment === 'live' && <label className="flex items-start gap-2 rounded-input border border-discord-danger/50 bg-discord-danger/10 p-3 text-sm text-discord-text-secondary"><input type="checkbox" checked={liveModeConfirmed} onChange={(e) => setLiveModeConfirmed(e.target.checked)} /><span><strong className="text-discord-text-primary">I confirm this switches checkout to Live PayPal and can accept real customer money.</strong><span className="mt-1 block text-xs">Complete sandbox purchase, signed-webhook, fulfillment, license validation, and deactivation checks first.</span></span></label>}
-          <button onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy || (paypalEnvironment === 'live' && !liveModeConfirmed)} className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</button>
+          {paypalEnvironment === 'live' && <div className="rounded-input border border-discord-danger/50 bg-discord-danger/10 p-3"><Toggle label="I confirm this switches checkout to Live PayPal and can accept real customer money." description="Complete sandbox purchase, signed-webhook, fulfillment, license validation, and deactivation checks first." checked={liveModeConfirmed} onChange={setLiveModeConfirmed} /></div>}
+          <Button size="sm" onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy || (paypalEnvironment === 'live' && !liveModeConfirmed)}>{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</Button>
         </div>
 
         <div className="border-t border-discord-border-subtle pt-4 space-y-4">
           <h3 className="text-sm font-semibold text-discord-text-primary">Storefront policy</h3>
           <div>
-            <p className="mb-2 text-xs text-discord-text-muted">Product types shown in /store</p>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {['downloadable', 'license-key', 'discord-perk', 'subscription', 'virtual-good', 'ticket-service', 'free'].map((type) => (
-                <label key={type} className="flex items-center gap-2 text-xs text-discord-text-secondary">
-                  <input type="checkbox" checked={storeControls.product_types_enabled.includes(type)} onChange={() => toggleProductType(type)} />
-                  {type}
-                </label>
+            <p className="mb-2 text-xs text-discord-text-muted">Choose which product and fulfillment paths owners can create and customers can see.</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {storeProductFacetOptions.map((option) => (
+                <Toggle
+                  key={option.value}
+                  label={option.label}
+                  description={option.description}
+                  checked={storeControls.product_types_enabled.includes(option.value)}
+                  onChange={() => toggleProductType(option.value)}
+                  disabled={savingControl === 'product_types_enabled'}
+                />
               ))}
             </div>
+            {!storePolicy.discordAccessEnabled && <p className="mt-2 text-xs text-discord-success" role="status">Software-only mode: Discord access passes, mixed bundles, role grants, and channel grants are hidden and rejected by the API.</p>}
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <label className="text-xs text-discord-text-muted">Repeat purchase policy
-              <select value={storeControls.repeat_purchase_policy} onChange={(e) => void saveCommerceControl('repeat_purchase_policy', e.target.value as typeof storeControls.repeat_purchase_policy)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
-                <option value="unique">Unique</option><option value="stackable">Stackable</option><option value="renewable">Renewable</option><option value="seat-based">Seat-based</option>
-              </select>
-            </label>
-            <label className="text-xs text-discord-text-muted">Free claim policy
-              <select value={storeControls.free_claim_policy} onChange={(e) => void saveCommerceControl('free_claim_policy', e.target.value as typeof storeControls.free_claim_policy)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
-                <option value="one-claim">One claim</option><option value="repeatable">Repeatable</option>
-              </select>
-            </label>
-            <label className="text-xs text-discord-text-muted">Max storefront products
-              <input type="number" min={1} max={9} value={storeControls.max_storefront_products} onChange={(e) => setStoreControls((p) => ({ ...p, max_storefront_products: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('max_storefront_products', storeControls.max_storefront_products)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
-            </label>
-            <label className="text-xs text-discord-text-muted">Store brand source
-              <select value={storeControls.store_brand_source} onChange={(e) => void saveCommerceControl('store_brand_source', e.target.value as typeof storeControls.store_brand_source)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
-                <option value="guild-profile">Guild profile</option><option value="custom">Custom brand kit</option>
-              </select>
-            </label>
+            <Select label="Repeat purchase policy" value={storeControls.repeat_purchase_policy} onChange={(e) => void saveCommerceControl('repeat_purchase_policy', e.target.value as typeof storeControls.repeat_purchase_policy)} options={[{ value: 'unique', label: 'Unique' }, { value: 'stackable', label: 'Stackable' }, { value: 'renewable', label: 'Renewable' }, { value: 'seat-based', label: 'Seat-based' }]} />
+            <Select label="Free claim policy" value={storeControls.free_claim_policy} onChange={(e) => void saveCommerceControl('free_claim_policy', e.target.value as typeof storeControls.free_claim_policy)} options={[{ value: 'one-claim', label: 'One claim' }, { value: 'repeatable', label: 'Repeatable' }]} />
+            <Input label="Max storefront products" type="number" min={1} max={9} value={storeControls.max_storefront_products} onChange={(e) => setStoreControls((p) => ({ ...p, max_storefront_products: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('max_storefront_products', storeControls.max_storefront_products)} />
+            <Select label="Store brand source" value={storeControls.store_brand_source} onChange={(e) => void saveCommerceControl('store_brand_source', e.target.value as typeof storeControls.store_brand_source)} options={[{ value: 'guild-profile', label: 'Guild profile' }, { value: 'custom', label: 'Custom brand kit' }]} />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.gifting_enabled} onChange={(e) => void saveCommerceControl('gifting_enabled', e.target.checked)} /> Enable gifting</label>
-            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.public_celebration_enabled} onChange={(e) => void saveCommerceControl('public_celebration_enabled', e.target.checked)} /> Public purchase celebrations</label>
+            <Toggle label="Enable gifting" checked={storeControls.gifting_enabled} onChange={(checked) => void saveCommerceControl('gifting_enabled', checked)} />
+            <Toggle label="Public purchase celebrations" checked={storeControls.public_celebration_enabled} onChange={(checked) => void saveCommerceControl('public_celebration_enabled', checked)} />
           </div>
-          <label className="block text-xs text-discord-text-muted">Celebration channel ID (leave blank to keep celebrations private)
-            <input value={storeControls.celebration_channel_id} onChange={(e) => setStoreControls((p) => ({ ...p, celebration_channel_id: e.target.value }))} onBlur={() => void saveCommerceControl('celebration_channel_id', storeControls.celebration_channel_id)} placeholder="Discord channel ID" className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
-          </label>
+          <Input label="Celebration channel ID (leave blank to keep celebrations private)" value={storeControls.celebration_channel_id} onChange={(e) => setStoreControls((p) => ({ ...p, celebration_channel_id: e.target.value }))} onBlur={() => void saveCommerceControl('celebration_channel_id', storeControls.celebration_channel_id)} placeholder="Discord channel ID" />
 
           <h3 className="border-t border-discord-border-subtle pt-4 text-sm font-semibold text-discord-text-primary">Customer portal policy</h3>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <label className="text-xs text-discord-text-muted">Session TTL (ms)
-              <input type="number" min={3600000} max={2592000000} value={storeControls.portal_session_ttl_ms} onChange={(e) => setStoreControls((p) => ({ ...p, portal_session_ttl_ms: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('portal_session_ttl_ms', storeControls.portal_session_ttl_ms)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
-            </label>
-            <label className="text-xs text-discord-text-muted">Download link TTL (ms)
-              <input type="number" min={60000} max={3600000} value={storeControls.download_link_ttl_ms} onChange={(e) => setStoreControls((p) => ({ ...p, download_link_ttl_ms: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('download_link_ttl_ms', storeControls.download_link_ttl_ms)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary" />
-            </label>
-            <label className="text-xs text-discord-text-muted">Cancellation timing
-              <select value={storeControls.cancellation_timing} onChange={(e) => void saveCommerceControl('cancellation_timing', e.target.value as typeof storeControls.cancellation_timing)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
-                <option value="end-of-term">End of term</option><option value="immediate">Immediate</option>
-              </select>
-            </label>
-            <label className="text-xs text-discord-text-muted">Portal brand source
-              <select value={storeControls.portal_brand_source} onChange={(e) => void saveCommerceControl('portal_brand_source', e.target.value as typeof storeControls.portal_brand_source)} className="mt-1 w-full rounded-md bg-discord-bg-tertiary px-2 py-1.5 text-sm text-discord-text-primary">
-                <option value="guild-profile">Guild profile</option><option value="custom">Custom brand kit</option>
-              </select>
-            </label>
+            <Input label="Session TTL (ms)" type="number" min={3600000} max={2592000000} value={storeControls.portal_session_ttl_ms} onChange={(e) => setStoreControls((p) => ({ ...p, portal_session_ttl_ms: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('portal_session_ttl_ms', storeControls.portal_session_ttl_ms)} />
+            <Input label="Download link TTL (ms)" type="number" min={60000} max={3600000} value={storeControls.download_link_ttl_ms} onChange={(e) => setStoreControls((p) => ({ ...p, download_link_ttl_ms: Number(e.target.value) }))} onBlur={() => void saveCommerceControl('download_link_ttl_ms', storeControls.download_link_ttl_ms)} />
+            <Select label="Cancellation timing" value={storeControls.cancellation_timing} onChange={(e) => void saveCommerceControl('cancellation_timing', e.target.value as typeof storeControls.cancellation_timing)} options={[{ value: 'end-of-term', label: 'End of term' }, { value: 'immediate', label: 'Immediate' }]} />
+            <Select label="Portal brand source" value={storeControls.portal_brand_source} onChange={(e) => void saveCommerceControl('portal_brand_source', e.target.value as typeof storeControls.portal_brand_source)} options={[{ value: 'guild-profile', label: 'Guild profile' }, { value: 'custom', label: 'Custom brand kit' }]} />
           </div>
           <div className="grid gap-3 sm:grid-cols-3">
-            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.self_service_cancellation} onChange={(e) => void saveCommerceControl('self_service_cancellation', e.target.checked)} /> Self-service cancellation</label>
-            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.refund_requests_enabled} onChange={(e) => void saveCommerceControl('refund_requests_enabled', e.target.checked)} /> Refund requests</label>
-            <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={storeControls.service_requests_enabled} onChange={(e) => void saveCommerceControl('service_requests_enabled', e.target.checked)} /> Service requests</label>
+            <Toggle label="Self-service cancellation" checked={storeControls.self_service_cancellation} onChange={(checked) => void saveCommerceControl('self_service_cancellation', checked)} />
+            <Toggle label="Refund requests" checked={storeControls.refund_requests_enabled} onChange={(checked) => void saveCommerceControl('refund_requests_enabled', checked)} />
+            <Toggle label="Service requests" checked={storeControls.service_requests_enabled} onChange={(checked) => void saveCommerceControl('service_requests_enabled', checked)} />
           </div>
           {savingControl && <p className="text-xs text-discord-text-muted">Saving…</p>}
         </div>
@@ -841,72 +854,10 @@ export default function StorePage() {
             {editingId ? 'Edit Product' : 'New Product'}
           </h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Name *
-              </label>
-              <input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
-                placeholder="Product name"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Price ($) *
-              </label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-discord-text-muted">$</span>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={form.type === 'free' ? '0.00' : form.price_dollars}
-                  disabled={form.type === 'free'}
-                  onChange={(e) => setForm({ ...form, price_dollars: e.target.value })}
-                  className="w-full rounded-input bg-discord-bg-tertiary pl-7 pr-3 py-2 text-sm text-discord-text-primary outline-none"
-                  placeholder="9.99"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Type
-              </label>
-              <select
-                value={form.type}
-                onChange={(e) =>
-                  setForm({ ...form, type: e.target.value as 'one_time' | 'subscription' | 'free', price_dollars: e.target.value === 'free' ? '0.00' : form.price_dollars })
-                }
-                className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
-              >
-                <option value="one_time">One-Time</option>
-                <option value="subscription">Subscription</option>
-                <option value="free">Free</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Delivery Type
-              </label>
-              <select
-                value={form.delivery_type}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    delivery_type: e.target.value as 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed',
-                  })
-                }
-                className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
-              >
-                <option value="access_pass">Access Pass</option>
-                <option value="license_key">License Key</option>
-                <option value="file">File</option>
-                <option value="link">Link</option>
-                <option value="mixed">Mixed</option>
-              </select>
-            </div>
+            <Input id="product-name" label="Name *" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Product name" />
+            <Input id="product-price" label="Price ($) *" type="number" step="0.01" min="0" value={form.type === 'free' ? '0.00' : form.price_dollars} disabled={form.type === 'free'} onChange={(event) => setForm({ ...form, price_dollars: event.target.value })} placeholder="9.99" />
+            <Select id="product-type" label="Type" value={form.type} onChange={(event) => { const type = event.target.value === 'subscription' ? 'subscription' : event.target.value === 'free' ? 'free' : 'one_time'; setForm({ ...form, type, price_dollars: type === 'free' ? '0.00' : form.price_dollars }); }} options={availableProductTypeOptions} />
+            <Select id="product-delivery-type" label="Delivery type" value={form.delivery_type} onChange={(event) => { const deliveryType = storePolicy.allowedDeliveryTypes.find((value) => value === event.target.value); if (deliveryType) setForm({ ...form, delivery_type: deliveryType }); }} options={deliveryTypeOptions} />
             <div
               className="sm:col-span-2 rounded-lg border border-discord-accent/40 bg-discord-accent/10 p-4"
               aria-live="polite"
@@ -942,57 +893,27 @@ export default function StorePage() {
               <div className="sm:col-span-2 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4">
                 <h3 className="text-sm font-semibold text-discord-text-primary">License recovery controls</h3>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label data-control-id="key-prefix" className="text-xs text-discord-text-muted">
-                    Key prefix
-                    <input
+                  <div data-control-id="key-prefix">
+                    <Input
+                      id="license-key-prefix"
+                      label="Key prefix"
                       value={licenseKeyPrefix}
                       maxLength={8}
                       pattern="[A-Z]{2,8}"
                       onChange={(e) => setLicenseKeyPrefix(e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 8))}
-                      className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"
+                      className="bg-discord-bg-primary"
                       aria-describedby="license-key-prefix-help"
                     />
-                    <span id="license-key-prefix-help" className="mt-1 block text-[11px]">2–8 uppercase letters; applied to future keys and rotations.</span>
-                  </label>
-                  <label data-control-id="max-devices" className="text-xs text-discord-text-muted">
-                    Maximum devices
-                    <input type="number" min={1} max={100} value={licenseMaxDevices} onChange={(e) => setLicenseMaxDevices(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-                  </label>
-                  <label data-control-id="heartbeat-interval-ms" className="text-xs text-discord-text-muted">
-                    Heartbeat interval (ms)
-                    <input type="number" min={60000} max={86400000} step={1000} value={licenseHeartbeatMs} onChange={(e) => setLicenseHeartbeatMs(Math.max(60000, Math.min(86400000, Number(e.target.value) || 60000)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-                  </label>
-                  <label data-control-id="sdk-cache-ttl-ms" className="text-xs text-discord-text-muted">
-                    SDK cache TTL (ms)
-                    <input type="number" min={1000} max={3600000} step={1000} value={licenseSdkCacheTtlMs} onChange={(e) => setLicenseSdkCacheTtlMs(Math.max(1000, Math.min(3600000, Number(e.target.value) || 1000)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-                  </label>
-                  <label data-control-id="offline-grace-period-seconds" className="text-xs text-discord-text-muted">
-                    Offline grace (seconds)
-                    <input type="number" min={0} max={604800} value={licenseOfflineGraceSeconds} onChange={(e) => setLicenseOfflineGraceSeconds(Math.max(0, Math.min(604800, Number(e.target.value) || 0)))} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-                  </label>
-                  <label data-control-id="feature-flags" className="text-xs text-discord-text-muted">
-                    SDK feature flags
-                    <input value={licenseFeatureFlags} onChange={(e) => setLicenseFeatureFlags(e.target.value)} placeholder="pro-mode, exports" className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-                  </label>
-                  <label data-control-id="rotation-policy" className="text-xs text-discord-text-muted">
-                    Rotation policy
-                    <select
-                      value={rotationPolicy}
-                      onChange={(e) => setRotationPolicy(e.target.value as 'rotate-and-invalidate' | 'disabled')}
-                      className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"
-                    >
-                      <option value="rotate-and-invalidate">Rotate and invalidate old key</option>
-                      <option value="disabled">Disable self-service rotation</option>
-                    </select>
-                  </label>
-                  <label data-control-id="self-service-device-removal" className="flex items-center gap-2 pt-5 text-sm text-discord-text-secondary">
-                    <input type="checkbox" checked={selfServiceDeviceRemoval} onChange={(e) => setSelfServiceDeviceRemoval(e.target.checked)} />
-                    Allow buyers to remove their own devices
-                  </label>
-                  <label data-control-id="require-discord-guild-membership" className="flex items-center gap-2 pt-5 text-sm text-discord-text-secondary">
-                    <input type="checkbox" checked={licenseRequireMembership} onChange={(e) => setLicenseRequireMembership(e.target.checked)} />
-                    Require Discord guild membership during validation
-                  </label>
+                    <span id="license-key-prefix-help" className="mt-1 block text-[11px] text-discord-text-muted">2–8 uppercase letters; applied to future keys and rotations.</span>
+                  </div>
+                  <div data-control-id="max-devices"><Input id="license-max-devices" label="Maximum devices" type="number" min={1} max={100} value={licenseMaxDevices} onChange={(event) => setLicenseMaxDevices(Math.max(1, Math.min(100, Number(event.target.value) || 1)))} className="bg-discord-bg-primary" /></div>
+                  <div data-control-id="heartbeat-interval-ms"><Input id="license-heartbeat-ms" label="Heartbeat interval (ms)" type="number" min={60000} max={86400000} step={1000} value={licenseHeartbeatMs} onChange={(event) => setLicenseHeartbeatMs(Math.max(60000, Math.min(86400000, Number(event.target.value) || 60000)))} className="bg-discord-bg-primary" /></div>
+                  <div data-control-id="sdk-cache-ttl-ms"><Input id="license-cache-ttl" label="SDK cache TTL (ms)" type="number" min={1000} max={3600000} step={1000} value={licenseSdkCacheTtlMs} onChange={(event) => setLicenseSdkCacheTtlMs(Math.max(1000, Math.min(3600000, Number(event.target.value) || 1000)))} className="bg-discord-bg-primary" /></div>
+                  <div data-control-id="offline-grace-period-seconds"><Input id="license-offline-grace" label="Offline grace (seconds)" type="number" min={0} max={604800} value={licenseOfflineGraceSeconds} onChange={(event) => setLicenseOfflineGraceSeconds(Math.max(0, Math.min(604800, Number(event.target.value) || 0)))} className="bg-discord-bg-primary" /></div>
+                  <div data-control-id="feature-flags"><Input id="license-feature-flags" label="SDK feature flags" value={licenseFeatureFlags} onChange={(event) => setLicenseFeatureFlags(event.target.value)} placeholder="pro-mode, exports" className="bg-discord-bg-primary" /></div>
+                  <div data-control-id="rotation-policy"><Select id="license-rotation-policy" label="Rotation policy" value={rotationPolicy} onChange={(event) => setRotationPolicy(event.target.value === 'disabled' ? 'disabled' : 'rotate-and-invalidate')} options={[{ value: 'rotate-and-invalidate', label: 'Rotate and invalidate old key' }, { value: 'disabled', label: 'Disable self-service rotation' }]} className="bg-discord-bg-primary" /></div>
+                  <div data-control-id="self-service-device-removal" className="pt-5"><Toggle label="Allow buyers to remove their own devices" checked={selfServiceDeviceRemoval} onChange={setSelfServiceDeviceRemoval} /></div>
+                  <div data-control-id="require-discord-guild-membership" className="pt-5"><Toggle label="Require Discord guild membership during validation" checked={licenseRequireMembership} onChange={setLicenseRequireMembership} /></div>
                   <div data-control-id="store-keys-hashed" className="rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-muted">
                     <strong className="text-discord-text-secondary">Store keys hashed: locked on</strong>
                     <p className="mt-1">Only SHA-256 hashes plus prefix/suffix are persisted. Plaintext is delivered once and never recoverable.</p>
@@ -1012,66 +933,48 @@ export default function StorePage() {
                 />
               </div>
             )}
-            <div>
-              <RolePicker
+            {storePolicy.discordAccessEnabled && (
+              <>
+              <div><RolePicker
                 label="Granted Roles"
                 hint="Roles given to buyers on purchase"
                 value={form.granted_role_ids}
-                onChange={(v) => setForm({ ...form, granted_role_ids: (v as string[]) ?? [] })}
+                onChange={(value) => setForm({ ...form, granted_role_ids: Array.isArray(value) ? value : [] })}
                 multi
                 hideManaged
                 requireAssignable
                 placeholder="Select roles to grant…"
-              />
-            </div>
-            <div>
-              <ChannelPicker
+              /></div>
+              <div><ChannelPicker
                 label="Granted Channels"
                 hint="Channels made visible to buyers on purchase"
                 value={form.granted_channel_ids}
-                onChange={(v) => setForm({ ...form, granted_channel_ids: (v as string[]) ?? [] })}
+                onChange={(value) => setForm({ ...form, granted_channel_ids: Array.isArray(value) ? value : [] })}
                 multi
                 channelTypes={['text', 'announcement', 'forum']}
                 requiredBotPermissions={['ManageChannels']}
                 placeholder="Select channels to grant…"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Currency
-              </label>
-              <input
-                value={form.currency}
-                onChange={(e) => setForm({ ...form, currency: e.target.value })}
-                className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
-                placeholder="USD"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={form.active}
-                onChange={(e) => setForm({ ...form, active: e.target.checked })}
-                className="h-4 w-4 rounded bg-discord-bg-tertiary"
-              />
-              <label className="text-sm text-discord-text-secondary">Active</label>
-            </div>
+              /></div>
+              </>
+            )}
+            <Input id="product-currency" label="Currency" value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value })} placeholder="USD" />
+            <div className="pt-5"><Toggle label="Active" checked={form.active} onChange={(active) => setForm({ ...form, active })} /></div>
           </div>
 
           <div className="mt-4 flex gap-2">
-            <button
+            <Button
+              variant="success"
               onClick={save}
               disabled={saving || !form.name}
-              className="rounded-input bg-discord-success px-4 py-2 text-sm font-medium text-white hover:bg-discord-success/80 transition-standard disabled:opacity-50"
             >
               {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="secondary"
               onClick={() => setShowForm(false)}
-              className="rounded-input bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-tertiary/80 transition-standard"
             >
               Cancel
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -1125,34 +1028,34 @@ export default function StorePage() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <button
+                  <Button
+                    size="sm"
+                    variant={p.active ? 'success' : 'secondary'}
                     onClick={() => toggleActive(p)}
-                    className={`rounded-input px-3 py-1 text-xs font-medium transition-standard ${
-                      p.active
-                        ? 'bg-discord-success/20 text-discord-success hover:bg-discord-success/30'
-                        : 'bg-discord-bg-tertiary text-discord-text-muted hover:text-discord-text-secondary'
-                    }`}
                   >
                     {p.active ? 'Active' : 'Inactive'}
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
                     onClick={() => { setFilesProductId(p.id); setFilesProductName(p.name); }}
-                    className="rounded-input bg-discord-bg-tertiary px-3 py-1 text-xs text-discord-text-secondary hover:text-discord-text-primary transition-standard"
                   >
                     📁 Files
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
                     onClick={() => openEdit(p)}
-                    className="rounded-input bg-discord-bg-tertiary px-3 py-1 text-xs text-discord-text-secondary hover:text-discord-text-primary transition-standard"
                   >
                     Edit
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
                     onClick={() => setConfirmDelete({ id: p.id, name: p.name })}
-                    className="rounded-input bg-discord-danger/20 px-3 py-1 text-xs text-discord-danger hover:bg-discord-danger/30 transition-standard"
                   >
                     Delete
-                  </button>
+                  </Button>
                 </div>
               </div>
             );
@@ -1165,12 +1068,13 @@ export default function StorePage() {
         <div className="mt-6">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-base font-semibold text-white">Product Files</h2>
-            <button
+            <Button
+              size="sm"
+              variant="ghost"
               onClick={() => setFilesProductId(null)}
-              className="text-xs text-discord-text-muted hover:text-white"
             >
               ✕ Close
-            </button>
+            </Button>
           </div>
           <ProductFiles productId={filesProductId} productName={filesProductName} />
         </div>

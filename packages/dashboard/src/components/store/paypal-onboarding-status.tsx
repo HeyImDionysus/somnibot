@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { useCallback, useEffect, useState } from 'react';
+import { Button } from '@/components/shared/button';
 import { describePayPalReadiness } from '@/lib/store/commerce-onboarding';
 import type { PayPalOnboardingStatus } from './onboarding-types';
 
@@ -43,7 +44,7 @@ export function PayPalOnboardingStatusPanel({ onStatus }: Props) {
           <h2 id="paypal-onboarding-heading" className="text-lg font-semibold text-discord-text-primary">PayPal onboarding</h2>
           <p className="mt-1 text-xs text-discord-text-muted">Observed configuration and webhook evidence for the selected server. No payment is started by this check.</p>
         </div>
-        <button type="button" onClick={() => void check()} disabled={checking} className="rounded-input bg-discord-bg-active px-3 py-2 text-xs text-discord-text-primary disabled:opacity-50">{checking ? 'Checking…' : 'Check again'}</button>
+        <Button type="button" variant="secondary" size="sm" onClick={() => void check()} disabled={checking}>{checking ? 'Checking…' : 'Check again'}</Button>
       </div>
       {readiness && status && (
         <div className={`mt-4 rounded-input border p-3 ${readiness.ready ? 'border-discord-success/50 bg-discord-success/10' : 'border-discord-warning/50 bg-discord-warning/10'}`} aria-live="polite">

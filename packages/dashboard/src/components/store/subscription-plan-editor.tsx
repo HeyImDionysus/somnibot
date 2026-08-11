@@ -2,6 +2,8 @@
 
 import * as React from 'react';
 import { useEffect, useState } from 'react';
+import { Button } from '@/components/shared/button';
+import { Input, Select, Toggle } from '@/components/shared/input';
 import type {
   BillingInterval,
   SubscriptionPlan,
@@ -60,27 +62,12 @@ export function SubscriptionPlanEditor({
     change: (update: Partial<SubscriptionPlanDraft>) => void,
   ) => (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      <label className="text-xs text-discord-text-muted">Plan name
-        <input value={value.name} onChange={(event) => change({ name: event.target.value })} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-      </label>
-      <label className="text-xs text-discord-text-muted">Billing interval
-        <select value={value.interval_unit} onChange={(event) => change({ interval_unit: event.target.value as BillingInterval })} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary">
-          {intervalOptions.map((interval) => <option key={interval} value={interval}>{interval.toLowerCase()}</option>)}
-        </select>
-      </label>
-      <label className="text-xs text-discord-text-muted">Charge every
-        <input type="number" min={1} max={12} value={value.interval_count} onChange={(event) => change({ interval_count: Math.max(1, Math.min(12, Number(event.target.value) || 1)) })} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-      </label>
-      <label className="text-xs text-discord-text-muted">Price ({currency})
-        <input type="number" min={0} step="0.01" value={(value.price_cents / 100).toFixed(2)} onChange={(event) => change({ price_cents: Math.max(0, Math.round((Number(event.target.value) || 0) * 100)) })} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-      </label>
-      <label className="text-xs text-discord-text-muted">Free trial (days)
-        <input type="number" min={0} max={365} value={value.trial_days} onChange={(event) => change({ trial_days: Math.max(0, Math.min(365, Number(event.target.value) || 0)) })} className="mt-1 w-full rounded-input bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" />
-      </label>
-      <label className="flex items-center gap-2 pt-5 text-sm text-discord-text-secondary">
-        <input type="checkbox" checked={value.active} onChange={(event) => change({ active: event.target.checked })} />
-        Available for new subscriptions
-      </label>
+      <Input id="plan-name" label="Plan name" value={value.name} onChange={(event) => change({ name: event.target.value })} className="bg-discord-bg-primary" />
+      <Select id="plan-interval" label="Billing interval" value={value.interval_unit} onChange={(event) => change({ interval_unit: event.target.value as BillingInterval })} options={intervalOptions.map((interval) => ({ value: interval, label: interval.toLowerCase() }))} className="bg-discord-bg-primary" />
+      <Input id="plan-interval-count" label="Charge every" type="number" min={1} max={12} value={value.interval_count} onChange={(event) => change({ interval_count: Math.max(1, Math.min(12, Number(event.target.value) || 1)) })} className="bg-discord-bg-primary" />
+      <Input id="plan-price" label={`Price (${currency})`} type="number" min={0} step="0.01" value={(value.price_cents / 100).toFixed(2)} onChange={(event) => change({ price_cents: Math.max(0, Math.round((Number(event.target.value) || 0) * 100)) })} className="bg-discord-bg-primary" />
+      <Input id="plan-trial-days" label="Free trial (days)" type="number" min={0} max={365} value={value.trial_days} onChange={(event) => change({ trial_days: Math.max(0, Math.min(365, Number(event.target.value) || 0)) })} className="bg-discord-bg-primary" />
+      <div className="pt-5"><Toggle label="Available for new subscriptions" checked={value.active} onChange={(active) => change({ active })} /></div>
     </div>
   );
 
@@ -98,7 +85,7 @@ export function SubscriptionPlanEditor({
             </dl>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-mono text-[11px] text-discord-text-muted">PayPal plan ID: {plan.paypal_plan_id ?? 'Not assigned'}</span>
-              <button type="button" disabled={checking} onClick={() => void refreshExisting()} className="rounded-input bg-discord-bg-active px-3 py-2 text-xs font-medium text-discord-text-primary disabled:opacity-50">{checking ? 'Checking…' : 'Refresh saved plan'}</button>
+              <Button type="button" variant="secondary" size="sm" disabled={checking} onClick={() => void refreshExisting()}>{checking ? 'Checking…' : 'Refresh saved plan'}</Button>
             </div>
             <p className="text-[11px] text-discord-text-muted">PayPal does not safely rewrite an existing plan&apos;s cadence or trial. Create the intended plan during product setup; this view reports the saved contract without pretending a local edit changed PayPal.</p>
           </div>

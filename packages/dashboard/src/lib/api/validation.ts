@@ -236,6 +236,7 @@ const reservedCommerceMetadataKeys = [
   'grant_role_id',
   'historical_grant_role_ids',
   'role_duration_hours',
+  'commerce_plan_recovery',
 ] as const;
 
 const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
@@ -244,8 +245,7 @@ const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message:
-          `Commerce metadata key "${key}" is no longer supported; migrate role grants to canonical granted_role_ids.`,
+        message: `Commerce metadata key "${key}" is reserved for server-managed state.`,
       });
     }
   }
@@ -264,7 +264,7 @@ const productCreate = z.object({
   name: safeName,
   description: safeDescription,
   type: z.enum(['one_time', 'subscription', 'free']).default('one_time'),
-  delivery_type: z.string().max(32).optional(),
+  delivery_type: z.enum(['file', 'link', 'access_pass', 'license_key', 'mixed']),
   price_cents: z.number().int().min(0).max(999999).default(0),
   currency: z.string()
     .regex(/^[A-Za-z]{3}$/)
@@ -275,7 +275,7 @@ const productCreate = z.object({
   active: z.boolean().default(true),
   sort_order: z.number().int().min(0).max(999).default(0),
   metadata: productMetadata.optional(),
-  plans: z.array(productPlanDefinition).max(50).optional(),
+  plans: z.array(productPlanDefinition).max(1).optional(),
 });
 
 // STRICT update schema — mass-assignment guard.

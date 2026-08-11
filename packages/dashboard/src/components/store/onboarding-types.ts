@@ -21,6 +21,9 @@ export type SubscriptionPlanDraft = Omit<
 export type CommerceProductIdentity = {
   readonly id: string;
   readonly name: string;
+  readonly type: 'one_time' | 'subscription' | 'free';
+  readonly delivery_type: 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed';
+  readonly granted_role_ids: readonly string[];
   readonly paypal_product_id: string | null;
   readonly plans?: readonly SubscriptionPlan[];
 };
