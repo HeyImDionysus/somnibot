@@ -1,12 +1,10 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 import { useState } from 'react';
 import { Button } from '@/components/shared/button';
-import {
-  buildLicensingAddendumPrompt,
-  buildProductIntegrationGuide,
-} from '@/lib/store/commerce-onboarding';
+import { buildProductIntegrationGuide } from '@/lib/store/commerce-onboarding';
 import type { CommerceProductIdentity } from './onboarding-types';
 
 type Props = {
@@ -44,7 +42,6 @@ export function ProductIntegrationPanel({
   onRetry,
 }: Props) {
   const guide = buildProductIntegrationGuide(product);
-  const prompt = buildLicensingAddendumPrompt(product, apiBase);
   return (
     <section className="rounded-card border border-discord-accent/40 bg-discord-bg-secondary p-5" aria-labelledby="integration-heading">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -80,13 +77,12 @@ export function ProductIntegrationPanel({
         <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-discord-text-secondary">
           {guide.steps.map((step) => <li key={step}>{step}</li>)}
         </ol>
-        <div className="mt-4">
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-discord-text-muted">Reusable licensing addendum</h4>
-          <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap rounded-input bg-discord-bg-floating p-3 text-xs text-discord-text-secondary"><code>{prompt}</code></pre>
-          <Button type="button" size="sm" onClick={() => void navigator.clipboard.writeText(prompt)} className="mt-2">
-            Copy licensing addendum
-          </Button>
-        </div>
+        <p className="mt-4 text-xs text-discord-text-muted">
+          Need an implementation contract for this or another project? The independent Prompt Generator never changes this saved product.
+        </p>
+        <Link href="/project-licensing" className="mt-2 inline-flex h-8 items-center rounded-input bg-discord-bg-active px-3 text-xs font-medium text-discord-text-primary hover:bg-discord-border-strong">
+          Open Prompt Generator
+        </Link>
       </div>
       <div className="mt-5 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
         <h3 className="text-sm font-semibold text-discord-text-primary">Validate safely in sandbox</h3>

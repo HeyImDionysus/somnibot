@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildLicensingAddendumPrompt,
   buildProductIntegrationGuide,
   describePayPalReadiness,
 } from '@/lib/store/commerce-onboarding';
@@ -92,36 +91,4 @@ describe('commerce creator onboarding contracts', () => {
     expect(readiness).toMatchObject({ ready: true, state: 'ready' });
   });
 
-  it('builds one dynamic prompt that tells the implementer to inspect the actual project', () => {
-    const prompt = buildLicensingAddendumPrompt(
-      product('license_key'),
-      'https://dashboard.example.com/api',
-    );
-
-    expect(prompt).toContain('LICENSING_MODE: DYNAMIC');
-    expect(prompt).toContain('inspect this project before choosing an integration');
-    expect(prompt).toContain('/license/validate');
-    expect(prompt).toContain('/license/heartbeat');
-    expect(prompt).toContain('/license/deactivate');
-    expect(prompt).toContain('DISCORD_BUYER_ROLE_IDS: 123456789012345678');
-    expect(prompt).toContain('DISCORD_BUYER_CHANNEL_IDS: 234567890123456789');
-    expect(prompt).toContain('remove them after refund or revocation');
-    expect(prompt).toContain("PRODUCT_ID: 00000000-0000-4000-8000-000000000123");
-    expect(prompt).not.toContain('Choose Node');
-    expect(prompt).not.toContain('Choose Rust');
-  });
-
-  it('builds one static prompt with entitlement, watermark, and truthful revocation requirements', () => {
-    const prompt = buildLicensingAddendumPrompt(
-      product('file'),
-      'https://dashboard.example.com/api',
-    );
-
-    expect(prompt).toContain('LICENSING_MODE: STATIC');
-    expect(prompt).toContain('buyer-specific derivative');
-    expect(prompt).toContain('cryptographically signed watermark manifest');
-    expect(prompt).toContain('block every future download, update, and replacement link');
-    expect(prompt).toContain('cannot erase copies already downloaded');
-    expect(prompt).toContain('Discord mirrors fulfillment');
-  });
 });

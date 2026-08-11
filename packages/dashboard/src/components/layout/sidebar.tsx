@@ -181,9 +181,10 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Analytics', href: '/analytics', icon: TrendingUp },
       { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
+      { label: 'Prompt Generator', href: '/project-licensing', icon: FileCode2 },
       { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal', badge: PendingOrdersBadge },
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
-      { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
+      { label: 'Licensing', href: '/licenses', icon: Key, requires: 'paypal' },
       { label: 'Requests', href: '/store/requests', icon: MessageSquareWarning, requires: 'paypal', badge: PendingRequestsBadge },
       // Promotions (/store/promotions) is deliberately NOT linked: nothing in
       // checkout redeems a coupon, so the nav must not advertise a discount

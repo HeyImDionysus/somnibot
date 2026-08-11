@@ -122,9 +122,8 @@ test('creator completes sandbox product onboarding without source-reading', asyn
   await expect(page.getByText('PROD-SANDBOX-123')).toBeVisible();
   await expect(page.getByText('PLAN-SANDBOX-456')).toBeVisible();
   await expect(page.getByText('does not mint an administrator test key', { exact: false })).toBeVisible();
-  await expect(page.getByText('LICENSING_MODE: DYNAMIC', { exact: false })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Copy licensing addendum' })).toBeVisible();
-  await expect(page.getByLabel('Project type or runtime')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Open Prompt Generator' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copy licensing addendum' })).toHaveCount(0);
   const integrationPanel = page.locator('section[aria-labelledby="integration-heading"]');
   const paypalPolicyPanel = page.locator('section[aria-labelledby="paypal-processing-policy-heading"]');
 
