@@ -10,6 +10,8 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Trophy, Plus, Pencil, Trash2 } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface AchievementDef {
   id: string;
@@ -86,18 +88,14 @@ export default function AchievementsPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<AchConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
+      setConfig((current) => ({ ...current, ...patch }));
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -165,30 +163,10 @@ export default function AchievementsPage() {
         <div className="bg-discord-bg-secondary rounded-lg p-4">
           <h3 className="font-semibold text-discord-text-primary mb-3">⭐ Prestige Settings</h3>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div>
-              <label className="text-sm text-discord-text-secondary">Multiplier Per Level (%)</label>
-              <input type="number" min={1} max={100} value={config.economy_prestige_multiplier_pct}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_multiplier_pct: parseInt(e.target.value) || 10 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Min Level Required</label>
-              <input type="number" min={1} value={config.economy_prestige_min_level}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_min_level: parseInt(e.target.value) || 50 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Min Net Worth</label>
-              <input type="number" min={0} value={config.economy_prestige_min_net_worth}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_min_net_worth: parseInt(e.target.value) || 1000000 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Maximum Prestige Level</label>
-              <input type="number" min={1} max={2147483647} value={config.economy_prestige_max_level}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_max_level: parseInt(e.target.value, 10) || 10 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
+            <ValidatedNumberInput label="Prestige Multiplier per Level (%)" help="Bonus percentage added by each prestige level." value={config.economy_prestige_multiplier_pct} onCommit={(value) => saveConfig({ economy_prestige_multiplier_pct: value })} min={1} max={100} />
+            <ValidatedNumberInput label="Minimum Level for Prestige" help="Level a member must reach before prestiging." value={config.economy_prestige_min_level} onCommit={(value) => saveConfig({ economy_prestige_min_level: value })} min={1} />
+            <ValidatedNumberInput label="Minimum Net Worth (coins)" help="Coin net worth required before prestiging; 0 removes this requirement." value={config.economy_prestige_min_net_worth} onCommit={(value) => saveConfig({ economy_prestige_min_net_worth: value })} min={0} />
+            <ValidatedNumberInput label="Maximum Prestige Level" help="Highest prestige level a member can reach." value={config.economy_prestige_max_level} onCommit={(value) => saveConfig({ economy_prestige_max_level: value })} min={1} max={2147483647} />
           </div>
         </div>
       )}
@@ -220,8 +198,8 @@ export default function AchievementsPage() {
                     </span>
                   </div>
                   <div className="flex gap-1">
-                    <button onClick={() => setEditing({ ...a })} className="p-1 hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
-                    <button onClick={() => setDeleteId(a.id)} className="p-1 hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
+                    <button type="button" aria-label={`Edit ${a.name}`} onClick={() => setEditing({ ...a })} className="flex h-11 w-11 items-center justify-center rounded hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
+                    <button type="button" aria-label={`Delete ${a.name}`} onClick={() => setDeleteId(a.id)} className="flex h-11 w-11 items-center justify-center rounded hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
                   </div>
                 </div>
               ))}

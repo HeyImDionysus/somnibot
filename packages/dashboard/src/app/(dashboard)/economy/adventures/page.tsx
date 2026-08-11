@@ -14,6 +14,8 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Swords, Plus, Pencil, Trash2 } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -97,18 +99,14 @@ export default function AdventuresPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<AdventureConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
+      setConfig((current) => ({ ...current, ...patch }));
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -184,45 +182,9 @@ export default function AdventuresPage() {
               }`} />
             </button>
           </div>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Daily Limit</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_adventure_daily_limit}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_adventure_daily_limit: parseInt(e.target.value) || 3 })
-              }
-              min={1}
-              max={50}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Ticket Cost (coins)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_adventure_ticket_cost}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_adventure_ticket_cost: parseInt(e.target.value) || 100 })
-              }
-              min={0}
-              max={1000000}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Max Scenes per Adventure</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_adventure_max_scenes}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_adventure_max_scenes: parseInt(e.target.value) || 10 })
-              }
-              min={3}
-              max={30}
-            />
-          </label>
+          <ValidatedNumberInput label="Daily Adventure Limit" help="Maximum adventures one member can start per day." value={config.economy_adventure_daily_limit} onCommit={(value) => saveConfig({ economy_adventure_daily_limit: value })} min={1} max={50} />
+          <ValidatedNumberInput label="Adventure Ticket Cost (coins)" help="Coins charged to start an adventure; 0 makes tickets free." value={config.economy_adventure_ticket_cost} onCommit={(value) => saveConfig({ economy_adventure_ticket_cost: value })} min={0} max={1000000} />
+          <ValidatedNumberInput label="Maximum Scenes per Adventure" help="Hard cap on scenes generated for one adventure." value={config.economy_adventure_max_scenes} onCommit={(value) => saveConfig({ economy_adventure_max_scenes: value })} min={3} max={30} />
         </div>
       </div>
 
@@ -249,10 +211,10 @@ export default function AdventuresPage() {
                 </div>
               </div>
               <div className="flex gap-1">
-                <button onClick={() => setEditing(a)} className="rounded p-2 hover:bg-discord-bg-tertiary">
+                <button type="button" aria-label={`Edit ${a.name}`} onClick={() => setEditing(a)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Pencil className="h-4 w-4 text-discord-text-secondary" />
                 </button>
-                <button onClick={() => setDeleteId(a.id)} className="rounded p-2 hover:bg-discord-bg-tertiary">
+                <button type="button" aria-label={`Delete ${a.name}`} onClick={() => setDeleteId(a.id)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Trash2 className="h-4 w-4 text-red-400" />
                 </button>
               </div>

@@ -9,6 +9,8 @@ import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { PawPrint } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface PetsConfig {
   economy_pets_enabled: boolean;
@@ -57,18 +59,14 @@ export default function PetsPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<PetsConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
+      setConfig((current) => ({ ...current, ...patch }));
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -98,38 +96,11 @@ export default function PetsPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="bg-discord-bg-secondary rounded-lg p-4 space-y-3">
             <h3 className="font-semibold text-discord-text-primary">Care Settings</h3>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Stat Decay Rate (%/day)</label>
-              <input type="number" min={0} max={100} value={config.economy_pet_decay_rate}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_decay_rate: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Feed Cost (coins)</label>
-              <input type="number" min={0} value={config.economy_pet_feed_cost}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_feed_cost: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Train Cost (coins)</label>
-              <input type="number" min={0} value={config.economy_pet_train_cost}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_train_cost: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Decay Check Interval (hours)</label>
-              <input type="number" min={1} max={168} value={config.economy_pet_decay_interval_hours}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_decay_interval_hours: parseInt(e.target.value) || 1 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-              <p className="text-xs text-discord-text-secondary mt-1">How often the bot checks and applies stat decay.</p>
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Low Stat Warning Threshold (%)</label>
-              <input type="number" min={0} max={100} value={config.economy_pet_low_stat_threshold}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_low_stat_threshold: parseInt(e.target.value) || 20 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-              <p className="text-xs text-discord-text-secondary mt-1">Pets below this threshold are marked as sad or sick.</p>
-            </div>
+            <ValidatedNumberInput label="Stat Decay Rate (% per day)" help="Daily care-stat loss; 0 disables decay." value={config.economy_pet_decay_rate} onCommit={(value) => saveConfig({ economy_pet_decay_rate: value })} min={0} max={100} />
+            <ValidatedNumberInput label="Feed Cost (coins)" help="Coins charged each time a member feeds a pet; 0 makes feeding free." value={config.economy_pet_feed_cost} onCommit={(value) => saveConfig({ economy_pet_feed_cost: value })} min={0} />
+            <ValidatedNumberInput label="Training Cost (coins)" help="Coins charged for each training action; 0 makes training free." value={config.economy_pet_train_cost} onCommit={(value) => saveConfig({ economy_pet_train_cost: value })} min={0} />
+            <ValidatedNumberInput label="Decay Check Interval (hours)" help="How often the bot checks and applies stat decay." value={config.economy_pet_decay_interval_hours} onCommit={(value) => saveConfig({ economy_pet_decay_interval_hours: value })} min={1} max={168} />
+            <ValidatedNumberInput label="Low Stat Warning Threshold (%)" help="Pets below this percentage are marked sad or sick; 0 disables the warning threshold." value={config.economy_pet_low_stat_threshold} onCommit={(value) => saveConfig({ economy_pet_low_stat_threshold: value })} min={0} max={100} />
           </div>
 
           <div className="bg-discord-bg-secondary rounded-lg p-4 space-y-3">

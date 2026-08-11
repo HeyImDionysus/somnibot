@@ -10,6 +10,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Gamepad2 } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -59,22 +61,6 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
   );
 }
 
-function NumberField({ label, value, onChange, min, max }: { label: string; value: number; onChange: (v: number) => void; min?: number; max?: number }) {
-  return (
-    <div>
-      <span className="block text-sm text-discord-text-secondary mb-1">{label}</span>
-      <input
-        type="number"
-        className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
-        value={value}
-        min={min}
-        max={max}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(Number(e.target.value))}
-      />
-    </div>
-  );
-}
-
 // ── Page ──────────────────────────────────────────────────
 
 export default function GamesPage() {
@@ -110,18 +96,19 @@ export default function GamesPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<GamesConfig>) => {
-    const updated = { ...config, ...patch };
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updated),
+      await saveGuildConfigWithReadback(patch);
+      setConfig((current) => ({ ...current, ...patch }));
+      const [target, value] = Object.entries(patch)[0] ?? ['setting', 'unknown'];
+      toast({
+        title: 'Mini-game setting confirmed',
+        description: `${target} confirmed as ${String(value)} at ${new Date().toLocaleTimeString()}.`,
+        variant: 'success',
       });
-      if (!res.ok) throw new Error();
-      setConfig(updated);
-      toast({ title: 'Settings saved', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -138,10 +125,10 @@ export default function GamesPage() {
         <h2 className="text-lg font-semibold text-discord-text-primary">Mini-Games</h2>
         <Toggle label="Enable Mini-Games" checked={config.economy_games_enabled} onChange={(v) => saveConfig({ economy_games_enabled: v })} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <NumberField label="Daily Loss Limit (0 = none)" value={config.economy_daily_loss_limit} onChange={(v) => saveConfig({ economy_daily_loss_limit: v })} min={0} />
-          <NumberField label="Coinflip Max Bet" value={config.economy_coinflip_max_bet} onChange={(v) => saveConfig({ economy_coinflip_max_bet: v })} min={0} />
-          <NumberField label="Slots Max Bet" value={config.economy_slots_max_bet} onChange={(v) => saveConfig({ economy_slots_max_bet: v })} min={0} />
-          <NumberField label="Blackjack Max Bet" value={config.economy_blackjack_max_bet} onChange={(v) => saveConfig({ economy_blackjack_max_bet: v })} min={0} />
+          <ValidatedNumberInput label="Daily Loss Limit (coins)" help="Maximum coins a member can lose per day; 0 removes the limit." value={config.economy_daily_loss_limit} onCommit={(value) => saveConfig({ economy_daily_loss_limit: value })} min={0} />
+          <ValidatedNumberInput label="Coinflip Maximum Bet (coins)" help="Largest coinflip wager a member can place; 0 disables coinflip wagering." value={config.economy_coinflip_max_bet} onCommit={(value) => saveConfig({ economy_coinflip_max_bet: value })} min={0} />
+          <ValidatedNumberInput label="Slots Maximum Bet (coins)" help="Largest slots wager a member can place; 0 disables slots wagering." value={config.economy_slots_max_bet} onCommit={(value) => saveConfig({ economy_slots_max_bet: value })} min={0} />
+          <ValidatedNumberInput label="Blackjack Maximum Bet (coins)" help="Largest blackjack wager a member can place; 0 disables blackjack wagering." value={config.economy_blackjack_max_bet} onCommit={(value) => saveConfig({ economy_blackjack_max_bet: value })} min={0} />
         </div>
       </div>
 
@@ -151,8 +138,11 @@ export default function GamesPage() {
         <Toggle label="Enable Lottery" checked={config.economy_lottery_enabled} onChange={(v) => saveConfig({ economy_lottery_enabled: v })} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div>
-            <span className="block text-sm text-discord-text-secondary mb-1">Drawing Schedule</span>
+            <label htmlFor="lottery-drawing-schedule" className="block text-sm text-discord-text-secondary mb-1">
+              Drawing Schedule
+            </label>
             <select
+              id="lottery-drawing-schedule"
               className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
               value={config.economy_lottery_schedule}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => saveConfig({ economy_lottery_schedule: e.target.value })}
@@ -163,8 +153,8 @@ export default function GamesPage() {
               <option value="monthly">Monthly</option>
             </select>
           </div>
-          <NumberField label="Ticket Price" value={config.economy_lottery_ticket_price} onChange={(v) => saveConfig({ economy_lottery_ticket_price: v })} min={1} />
-          <NumberField label="Max Tickets per Member" value={config.economy_lottery_max_tickets} onChange={(v) => saveConfig({ economy_lottery_max_tickets: v })} min={1} max={100} />
+          <ValidatedNumberInput label="Ticket Price (coins)" help="Coins charged for each lottery ticket." value={config.economy_lottery_ticket_price} onCommit={(value) => saveConfig({ economy_lottery_ticket_price: value })} min={1} />
+          <ValidatedNumberInput label="Maximum Tickets per Member" help="Ticket purchase cap for one drawing." value={config.economy_lottery_max_tickets} onCommit={(value) => saveConfig({ economy_lottery_max_tickets: value })} min={1} max={100} />
         </div>
       </div>
     </div>

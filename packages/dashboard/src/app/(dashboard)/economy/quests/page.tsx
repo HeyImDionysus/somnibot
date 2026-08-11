@@ -10,6 +10,8 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { ScrollText, Plus, Pencil, Trash2 } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface QuestTemplate {
   id: string;
@@ -84,18 +86,14 @@ export default function QuestsPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<QuestsConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
+      setConfig((current) => ({ ...current, ...patch }));
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -155,24 +153,9 @@ export default function QuestsPage() {
       ) : (
         <>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-discord-bg-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Daily Quest Count</label>
-              <input type="number" min={1} max={10} value={config.economy_daily_quest_count}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_daily_quest_count: parseInt(e.target.value) || 3 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div className="bg-discord-bg-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Weekly Quest Count</label>
-              <input type="number" min={1} max={5} value={config.economy_weekly_quest_count}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_weekly_quest_count: parseInt(e.target.value) || 1 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div className="bg-discord-bg-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Base Reward (coins)</label>
-              <input type="number" min={0} value={config.economy_quest_reward_base}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_quest_reward_base: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Daily Quest Count" help="Quest slots assigned to each member every day." value={config.economy_daily_quest_count} onCommit={(value) => saveConfig({ economy_daily_quest_count: value })} min={1} max={10} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Weekly Quest Count" help="Quest slots assigned to each member every week." value={config.economy_weekly_quest_count} onCommit={(value) => saveConfig({ economy_weekly_quest_count: value })} min={1} max={5} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Base Quest Reward (coins)" help="Default coin reward before template overrides; 0 gives no coin reward." value={config.economy_quest_reward_base} onCommit={(value) => saveConfig({ economy_quest_reward_base: value })} min={0} /></div>
           </div>
 
           <div className="flex items-center justify-between">
@@ -199,8 +182,8 @@ export default function QuestsPage() {
                     </span>
                   </div>
                   <div className="flex gap-1">
-                    <button onClick={() => setEditing({ ...q })} className="p-1 hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
-                    <button onClick={() => setDeleteId(q.id)} className="p-1 hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
+                    <button type="button" aria-label={`Edit ${q.title}`} onClick={() => setEditing({ ...q })} className="flex h-11 w-11 items-center justify-center rounded hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
+                    <button type="button" aria-label={`Delete ${q.title}`} onClick={() => setDeleteId(q.id)} className="flex h-11 w-11 items-center justify-center rounded hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
                   </div>
                 </div>
               ))}

@@ -15,6 +15,7 @@ import {
   UNKNOWN_LAVALINK_HEALTH,
   type LavalinkHealth,
 } from '@/lib/lavalink-health';
+import { ValidatedNumberInput } from '../economy/_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -56,11 +57,38 @@ const DEFAULT_CONFIG: MusicConfig = {
 };
 
 const LAVALINK_STATUS_TEXT: Record<LavalinkHealth['state'], string> = {
-  connected: 'At least one node is connected via WebSocket',
-  disconnected: 'All configured nodes are disconnected',
-  unavailable: 'No Lavalink node is configured',
-  unknown: 'Lavalink status is unavailable',
+  connected: 'Configured and connected via WebSocket; playback readiness is not reported separately.',
+  disconnected: 'Configured, but disconnected; music playback is not ready.',
+  unavailable: 'Not configured; music playback is not ready.',
+  unknown: 'Configuration or live connection status could not be confirmed.',
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isMusicConfig(value: unknown): value is MusicConfig {
+  if (!isRecord(value)) return false;
+  return typeof value.music_enabled === 'boolean'
+    && typeof value.music_default_volume === 'number'
+    && (typeof value.dj_role_id === 'string' || value.dj_role_id === null)
+    && typeof value.music_auto_leave_minutes === 'number'
+    && typeof value.music_auto_destroy_minutes === 'number'
+    && typeof value.max_queue_length === 'number'
+    && typeof value.allow_duplicates === 'boolean'
+    && typeof value.per_user_queue_cap === 'number'
+    && typeof value.vote_skip_threshold_percent === 'number'
+    && typeof value.self_skip_enabled === 'boolean'
+    && typeof value.requester_move_enabled === 'boolean'
+    && typeof value.priority_voting_enabled === 'boolean';
+}
+
+class MusicReadbackError extends Error {
+  constructor() {
+    super('Music settings readback failed');
+    this.name = 'MusicReadbackError';
+  }
+}
 
 // ── Component ─────────────────────────────────────────────
 
@@ -68,15 +96,21 @@ export default function MusicSettingsPage() {
   const { toast } = useToast();
 
   const [config, setConfig] = useState<MusicConfig>(DEFAULT_CONFIG);
+  const [confirmedConfig, setConfirmedConfig] = useState<MusicConfig>(DEFAULT_CONFIG);
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [lavalinkHealth, setLavalinkHealth] = useState<LavalinkHealth>(UNKNOWN_LAVALINK_HEALTH);
+  const [lavalinkCheckedAt, setLavalinkCheckedAt] = useState<Date | null>(null);
+  const [checkingLavalink, setCheckingLavalink] = useState(false);
   useUnsavedWarning(dirty);
 
   const fetchConfig = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
       const [musicRes, rolesRes] = await Promise.all([
         fetch('/api/music'),
@@ -84,10 +118,13 @@ export default function MusicSettingsPage() {
       ]);
 
       const musicJson = await musicRes.json();
-      if (musicJson.success) {
+      if (musicJson.success && isMusicConfig(musicJson.data)) {
         setConfig(musicJson.data);
+        setConfirmedConfig(musicJson.data);
+        setConfigLoaded(true);
       } else {
-        setError(musicJson.error);
+        setConfigLoaded(false);
+        setError(typeof musicJson.error === 'string' ? musicJson.error : 'Music settings could not be verified.');
         toast({ title: musicJson.error || 'Failed to load music config', variant: 'error' });
       }
 
@@ -100,6 +137,7 @@ export default function MusicSettingsPage() {
         );
       }
     } catch {
+      setConfigLoaded(false);
       setError('Failed to load music settings');
     } finally {
       setLoading(false);
@@ -107,6 +145,7 @@ export default function MusicSettingsPage() {
   }, [toast]);
 
   const fetchLavalinkHealth = useCallback(async () => {
+    setCheckingLavalink(true);
     try {
       const res = await fetch('/api/diagnostics');
       if (!res.ok) {
@@ -116,6 +155,9 @@ export default function MusicSettingsPage() {
       setLavalinkHealth(lavalinkHealthFromDiagnostics(await res.json()));
     } catch {
       setLavalinkHealth(UNKNOWN_LAVALINK_HEALTH);
+    } finally {
+      setLavalinkCheckedAt(new Date());
+      setCheckingLavalink(false);
     }
   }, []);
 
@@ -141,19 +183,30 @@ export default function MusicSettingsPage() {
         body: JSON.stringify(config),
       });
 
-      const json = await res.json();
+      const json: unknown = await res.json();
 
-      if (json.success) {
+      if (isRecord(json) && json.success === true) {
+        const readback = await fetch('/api/music', { cache: 'no-store' });
+        const readbackJson: unknown = await readback.json();
+        if (!readback.ok || !isRecord(readbackJson) || readbackJson.success !== true || !isMusicConfig(readbackJson.data)) {
+          throw new MusicReadbackError();
+        }
+        setConfig(readbackJson.data);
+        setConfirmedConfig(readbackJson.data);
         toast({ title: 'Music settings saved', variant: 'success' });
         setDirty(false);
       } else {
-        const msg = json.error || 'Failed to save';
+        const msg = isRecord(json) && typeof json.error === 'string' ? json.error : 'Failed to save';
+        setConfig(confirmedConfig);
+        setDirty(false);
         setError(msg);
         toast({ title: msg, variant: 'error' });
       }
     } catch {
-      setError('Failed to save music settings');
-      toast({ title: 'Failed to save music settings', variant: 'error' });
+      setConfig(confirmedConfig);
+      setDirty(false);
+      setError('Failed to save music settings; restored the last confirmed values.');
+      toast({ title: 'Failed to save music settings; restored confirmed values', variant: 'error' });
     } finally {
       setSaving(false);
     }
@@ -161,6 +214,27 @@ export default function MusicSettingsPage() {
 
   if (loading) {
     return <ConfigSkeleton />;
+  }
+
+  if (!configLoaded) {
+    return (
+      <div className="mx-auto max-w-3xl space-y-4 p-6">
+        <h1 className="text-2xl font-bold text-discord-text-primary">🎵 Music Settings</h1>
+        <div role="alert" className="rounded-lg border border-discord-danger/40 bg-discord-danger/10 p-5">
+          <h2 className="font-semibold text-discord-danger">Music settings unavailable</h2>
+          <p className="mt-2 text-sm text-discord-text-secondary">
+            {error ?? 'The saved configuration could not be verified. Editing is disabled until it can be read.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => void fetchConfig()}
+            className="mt-4 min-h-11 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
+          >
+            Retry loading settings
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -206,8 +280,12 @@ export default function MusicSettingsPage() {
             </p>
           </div>
           <button
+            type="button"
+            role="switch"
+            aria-label="Enable Music System"
+            aria-checked={config.music_enabled}
             onClick={() => updateField('music_enabled', !config.music_enabled)}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+            className={`relative inline-flex h-11 w-11 items-center rounded-full transition-colors ${
               config.music_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
             }`}
           >
@@ -271,20 +349,8 @@ export default function MusicSettingsPage() {
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-sm font-medium text-discord-text-secondary">Maximum Queue Length</label>
-                <p className="mt-0.5 text-xs text-discord-text-muted">Maximum tracks held for this guild (1–5,000).</p>
-                <input type="number" min={1} max={5000} value={config.max_queue_length}
-                  onChange={(e) => updateField('max_queue_length', Math.max(1, Math.min(5000, parseInt(e.target.value, 10) || 1)))}
-                  className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-discord-text-secondary">Per-User Queue Cap</label>
-                <p className="mt-0.5 text-xs text-discord-text-muted">Maximum queued tracks attributed to one requester (1–500).</p>
-                <input type="number" min={1} max={500} value={config.per_user_queue_cap}
-                  onChange={(e) => updateField('per_user_queue_cap', Math.max(1, Math.min(500, parseInt(e.target.value, 10) || 1)))}
-                  className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none" />
-              </div>
+              <ValidatedNumberInput label="Maximum Queue Length (tracks)" help="Maximum tracks held for this server." value={config.max_queue_length} min={1} max={5000} onCommit={async (value) => { updateField('max_queue_length', value); return 'saved'; }} />
+              <ValidatedNumberInput label="Per-Member Queue Cap (tracks)" help="Maximum queued tracks attributed to one requester." value={config.per_user_queue_cap} min={1} max={500} onCommit={async (value) => { updateField('per_user_queue_cap', value); return 'saved'; }} />
             </div>
             <label className="flex items-start gap-3 cursor-pointer pt-2 border-t border-discord-border-subtle">
               <input type="checkbox" checked={config.allow_duplicates}
@@ -378,42 +444,12 @@ export default function MusicSettingsPage() {
 
             {/* Auto-leave timeout */}
             <div>
-              <label className="block text-sm font-medium text-discord-text-secondary">
-                Auto-Leave Timeout
-              </label>
-              <p className="mt-0.5 text-xs text-discord-text-muted">
-                Leave voice when the channel is empty for this many minutes (1–60).
-              </p>
-              <input
-                type="number"
-                min={1}
-                max={60}
-                value={config.music_auto_leave_minutes}
-                onChange={(e) =>
-                  updateField('music_auto_leave_minutes', Math.max(1, Math.min(60, parseInt(e.target.value, 10) || 5)))
-                }
-                className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
-              />
+              <ValidatedNumberInput label="Auto-Leave Timeout (minutes)" help="Leave voice after the channel remains empty for this long." value={config.music_auto_leave_minutes} min={1} max={60} onCommit={async (value) => { updateField('music_auto_leave_minutes', value); return 'saved'; }} className="mt-2 w-32 rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" />
             </div>
 
             {/* Auto-destroy timeout */}
             <div>
-              <label className="block text-sm font-medium text-discord-text-secondary">
-                Inactivity Timeout
-              </label>
-              <p className="mt-0.5 text-xs text-discord-text-muted">
-                Destroy the player after this many minutes of inactivity (1–120).
-              </p>
-              <input
-                type="number"
-                min={1}
-                max={120}
-                value={config.music_auto_destroy_minutes}
-                onChange={(e) =>
-                  updateField('music_auto_destroy_minutes', Math.max(1, Math.min(120, parseInt(e.target.value, 10) || 30)))
-                }
-                className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
-              />
+              <ValidatedNumberInput label="Inactivity Timeout (minutes)" help="Destroy an inactive player after this long." value={config.music_auto_destroy_minutes} min={1} max={120} onCommit={async (value) => { updateField('music_auto_destroy_minutes', value); return 'saved'; }} className="mt-2 w-32 rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary" />
             </div>
 
             {/* Always-on behaviors */}
@@ -439,10 +475,21 @@ export default function MusicSettingsPage() {
           <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
             <h2 className="text-lg font-semibold text-discord-text-primary">Lavalink Node</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
-              Live Lavalink diagnostics are reported below.
+              Configuration and observed runtime readiness are reported separately.
             </p>
-            <div className="mt-4 flex items-center gap-2 text-sm">
-              <span className="text-discord-text-secondary">{LAVALINK_STATUS_TEXT[lavalinkHealth.state]}</span>
+            <div className="mt-4 space-y-2 text-sm" aria-live="polite">
+              <p className="text-discord-text-secondary">{LAVALINK_STATUS_TEXT[lavalinkHealth.state]}</p>
+              <p className="text-xs text-discord-text-muted">
+                Last checked: {lavalinkCheckedAt ? lavalinkCheckedAt.toLocaleTimeString() : 'not checked yet'}
+              </p>
+              {lavalinkHealth.state !== 'connected' ? (
+                <p className="text-xs text-discord-text-muted">
+                  Open <a href="/diagnostics" className="text-discord-accent hover:underline">Diagnostics</a> to inspect node details, then restart the Lavalink service or bot connection before retrying.
+                </p>
+              ) : null}
+              <button type="button" onClick={() => void fetchLavalinkHealth()} disabled={checkingLavalink} className="min-h-11 rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary hover:bg-discord-bg-hover disabled:opacity-50">
+                {checkingLavalink ? 'Checking Lavalink…' : 'Check Lavalink again'}
+              </button>
             </div>
           </div>
 

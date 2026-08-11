@@ -12,6 +12,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { ShieldCheck, Store, ShoppingCart } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -65,18 +67,14 @@ export default function MarketPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<MarketConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
+      setConfig((current) => ({ ...current, ...patch }));
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -132,58 +130,10 @@ export default function MarketPage() {
               }`} />
             </button>
           </div>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Transaction Fee (%)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_market_fee_pct}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_market_fee_pct: parseInt(e.target.value) || 5 })
-              }
-              min={0}
-              max={50}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Listing Duration (days)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_market_listing_days}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_market_listing_days: parseInt(e.target.value) || 7 })
-              }
-              min={1}
-              max={30}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Max Listings per Player</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_market_max_listings}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_market_max_listings: parseInt(e.target.value) || 10 })
-              }
-              min={1}
-              max={50}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Maximum Price per Unit (coins)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_market_max_price_per_unit}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_market_max_price_per_unit: parseInt(e.target.value, 10) || 1000000000 })
-              }
-              min={1}
-              max={2147483647}
-            />
-          </label>
+          <ValidatedNumberInput label="Transaction Fee (%)" help="Percent of each sale removed from the coin economy; 0 charges no fee." value={config.economy_market_fee_pct} onCommit={(value) => saveConfig({ economy_market_fee_pct: value })} min={0} max={50} />
+          <ValidatedNumberInput label="Listing Duration (days)" help="Days before an unsold listing expires." value={config.economy_market_listing_days} onCommit={(value) => saveConfig({ economy_market_listing_days: value })} min={1} max={30} />
+          <ValidatedNumberInput label="Maximum Listings per Member" help="Active listing cap for one member." value={config.economy_market_max_listings} onCommit={(value) => saveConfig({ economy_market_max_listings: value })} min={1} max={50} />
+          <ValidatedNumberInput label="Maximum Unit Price (coins)" help="Largest coin price allowed for one listed unit." value={config.economy_market_max_price_per_unit} onCommit={(value) => saveConfig({ economy_market_max_price_per_unit: value })} min={1} max={2147483647} />
         </div>
       </div>
 

@@ -14,6 +14,8 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Hammer, Plus, Pencil, Trash2 } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -177,7 +179,8 @@ function RecipeFormModal({
               {(form.inputs ?? []).length > 1 && (
                 <button
                   type="button"
-                  className="p-1 text-discord-text-secondary hover:text-red-400"
+                  aria-label={`Remove ingredient ${idx + 1}`}
+                  className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-red-400"
                   onClick={() => removeInput(idx)}
                 >
                   <Trash2 size={16} />
@@ -298,16 +301,13 @@ export default function CraftingPage() {
   const saveSettings = async (patch: Partial<CraftingSettings>) => {
     setSaving(true);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
       setSettings((prev) => prev ? { ...prev, ...patch } : prev);
       toast({ title: 'Settings saved', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     } finally {
       setSaving(false);
     }
@@ -392,22 +392,7 @@ export default function CraftingPage() {
               />
               <span className="text-sm text-discord-text-primary">Enable Crafting</span>
             </label>
-            <label className="flex items-center gap-2">
-              <span className="text-xs text-discord-text-secondary">Default Cooldown (s)</span>
-              <input
-                type="number"
-                className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-                min={0}
-                max={86400}
-                value={settings.economy_crafting_cooldown_seconds}
-                onChange={(e) => {
-                  const v = Math.max(0, parseInt(e.target.value, 10) || 0);
-                  setSettings((p) => p ? { ...p, economy_crafting_cooldown_seconds: v } : p);
-                }}
-                onBlur={() => saveSettings({ economy_crafting_cooldown_seconds: settings.economy_crafting_cooldown_seconds })}
-                disabled={saving}
-              />
-            </label>
+            <ValidatedNumberInput label="Default Crafting Cooldown (seconds)" help="Wait time between recipes when a recipe has no override; 0 removes the cooldown." value={settings.economy_crafting_cooldown_seconds} onCommit={(value) => saveSettings({ economy_crafting_cooldown_seconds: value })} min={0} max={86400} disabled={saving} className="mt-1 w-28 rounded-input border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary" />
           </div>
         </div>
       )}
@@ -444,16 +429,16 @@ export default function CraftingPage() {
               </div>
               <div className="flex items-center gap-1 ml-2">
                 <button
-                  className="p-2 text-discord-text-secondary hover:text-discord-text-primary"
+                  className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-discord-text-primary"
                   onClick={() => setEditRecipe(recipe)}
-                  title="Edit"
+                  aria-label={`Edit ${recipe.name}`}
                 >
                   <Pencil size={16} />
                 </button>
                 <button
-                  className="p-2 text-discord-text-secondary hover:text-red-400"
+                  className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-red-400"
                   onClick={() => setDeleteId(recipe.id)}
-                  title="Delete"
+                  aria-label={`Delete ${recipe.name}`}
                 >
                   <Trash2 size={16} />
                 </button>

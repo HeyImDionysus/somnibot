@@ -14,6 +14,8 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Sprout, Plus, Pencil, Trash2 } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -271,16 +273,13 @@ export default function FarmingPage() {
   const saveSettings = async (patch: Partial<FarmingSettings>) => {
     setSaving(true);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
       setSettings((prev) => prev ? { ...prev, ...patch } : prev);
       toast({ title: 'Settings saved', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     } finally {
       setSaving(false);
     }
@@ -377,38 +376,8 @@ export default function FarmingPage() {
             </label>
           </div>
           <div className="flex flex-wrap gap-6">
-            <label className="flex items-center gap-2">
-              <span className="text-xs text-discord-text-secondary">Grid Size</span>
-              <input
-                type="number"
-                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-                min={1}
-                max={25}
-                value={settings.economy_farm_grid_size}
-                onChange={(e) => {
-                  const v = Math.max(1, Math.min(25, parseInt(e.target.value, 10) || 9));
-                  setSettings((p) => p ? { ...p, economy_farm_grid_size: v } : p);
-                }}
-                onBlur={() => saveSettings({ economy_farm_grid_size: settings.economy_farm_grid_size })}
-                disabled={saving}
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              <span className="text-xs text-discord-text-secondary">Fertilizer Reduction (%)</span>
-              <input
-                type="number"
-                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-                min={0}
-                max={90}
-                value={settings.economy_fertilizer_time_reduction_pct}
-                onChange={(e) => {
-                  const v = Math.max(0, Math.min(90, parseInt(e.target.value, 10) || 50));
-                  setSettings((p) => p ? { ...p, economy_fertilizer_time_reduction_pct: v } : p);
-                }}
-                onBlur={() => saveSettings({ economy_fertilizer_time_reduction_pct: settings.economy_fertilizer_time_reduction_pct })}
-                disabled={saving}
-              />
-            </label>
+            <ValidatedNumberInput label="Farm Grid Size (plots)" help="Number of plots available to each member." value={settings.economy_farm_grid_size} onCommit={(value) => saveSettings({ economy_farm_grid_size: value })} min={1} max={25} disabled={saving} className="mt-1 w-24 rounded-input border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary" />
+            <ValidatedNumberInput label="Fertilizer Time Reduction (%)" help="Percent removed from crop grow time; 0 gives no speed-up." value={settings.economy_fertilizer_time_reduction_pct} onCommit={(value) => saveSettings({ economy_fertilizer_time_reduction_pct: value })} min={0} max={90} disabled={saving} className="mt-1 w-24 rounded-input border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary" />
           </div>
         </div>
       )}
@@ -445,16 +414,16 @@ export default function FarmingPage() {
               </div>
               <div className="flex items-center gap-1 ml-2">
                 <button
-                  className="p-2 text-discord-text-secondary hover:text-discord-text-primary"
+                  className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-discord-text-primary"
                   onClick={() => setEditCrop(crop)}
-                  title="Edit"
+                  aria-label={`Edit ${crop.name}`}
                 >
                   <Pencil size={16} />
                 </button>
                 <button
-                  className="p-2 text-discord-text-secondary hover:text-red-400"
+                  className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-red-400"
                   onClick={() => setDeleteId(crop.id)}
-                  title="Delete"
+                  aria-label={`Delete ${crop.name}`}
                 >
                   <Trash2 size={16} />
                 </button>

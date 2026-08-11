@@ -14,6 +14,8 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Fish, Plus, Pencil, Trash2 } from 'lucide-react';
+import { saveGuildConfigWithReadback } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -106,18 +108,14 @@ export default function FishingPage() {
   // ── Config save ───────────────────────────────────────
 
   const saveConfig = async (patch: Partial<FishingConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error();
+      await saveGuildConfigWithReadback(patch);
+      setConfig((current) => ({ ...current, ...patch }));
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -195,45 +193,9 @@ export default function FishingPage() {
               }`} />
             </button>
           </div>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Cooldown (seconds)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_fishing_cooldown_seconds}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_fishing_cooldown_seconds: parseInt(e.target.value) || 30 })
-              }
-              min={5}
-              max={3600}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Junk Chance (%)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_fishing_junk_chance_pct}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_fishing_junk_chance_pct: parseInt(e.target.value) || 15 })
-              }
-              min={0}
-              max={100}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Treasure Chance (%)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_fishing_treasure_chance_pct}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_fishing_treasure_chance_pct: parseInt(e.target.value) || 5 })
-              }
-              min={0}
-              max={100}
-            />
-          </label>
+          <ValidatedNumberInput label="Fishing Cooldown (seconds)" help="Wait time between fishing attempts." value={config.economy_fishing_cooldown_seconds} onCommit={(value) => saveConfig({ economy_fishing_cooldown_seconds: value })} min={5} max={3600} />
+          <ValidatedNumberInput label="Junk Catch Chance (%)" help="Percent chance that an attempt returns junk; 0 disables junk catches." value={config.economy_fishing_junk_chance_pct} onCommit={(value) => saveConfig({ economy_fishing_junk_chance_pct: value })} min={0} max={100} />
+          <ValidatedNumberInput label="Treasure Catch Chance (%)" help="Percent chance that an attempt returns treasure; 0 disables treasure catches." value={config.economy_fishing_treasure_chance_pct} onCommit={(value) => saveConfig({ economy_fishing_treasure_chance_pct: value })} min={0} max={100} />
           <div className="flex items-center justify-between">
             <span className="text-sm text-discord-text-primary">Collection Completion Reward</span>
             <button
@@ -250,19 +212,7 @@ export default function FishingPage() {
               }`} />
             </button>
           </div>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Collection Reward (coins)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-              value={config.economy_fishing_collection_reward_coins}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_fishing_collection_reward_coins: parseInt(e.target.value, 10) || 5000 })
-              }
-              min={1}
-              max={2147483647}
-            />
-          </label>
+          <ValidatedNumberInput label="Collection Reward (coins)" help="Coins awarded when a member completes the fish collection." value={config.economy_fishing_collection_reward_coins} onCommit={(value) => saveConfig({ economy_fishing_collection_reward_coins: value })} min={1} max={2147483647} />
         </div>
       </div>
 
@@ -288,10 +238,10 @@ export default function FishingPage() {
                 </div>
               </div>
               <div className="flex gap-1">
-                <button onClick={() => setEditing(s)} className="rounded p-2 hover:bg-discord-bg-tertiary">
+                <button type="button" aria-label={`Edit ${s.name}`} onClick={() => setEditing(s)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Pencil className="h-4 w-4 text-discord-text-secondary" />
                 </button>
-                <button onClick={() => setDeleteId(s.id)} className="rounded p-2 hover:bg-discord-bg-tertiary">
+                <button type="button" aria-label={`Delete ${s.name}`} onClick={() => setDeleteId(s.id)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Trash2 className="h-4 w-4 text-red-400" />
                 </button>
               </div>
