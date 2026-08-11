@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { stat, writeFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 
 const product = {
@@ -130,9 +130,11 @@ test('creator completes sandbox product onboarding without source-reading', asyn
 
   const evidence = process.env.COMMERCE_EVIDENCE_DIR
     ?? path.resolve(process.cwd(), '../../.omo/evidence/dashboard-commerce-self-service/visual');
+  await mkdir(evidence, { recursive: true });
+  await integrationPanel.scrollIntoViewIfNeeded();
   await writeFile(
     path.join(evidence, 'store-onboarding-desktop.png'),
-    await integrationPanel.screenshot(),
+    await page.screenshot(),
   );
 
   await page.getByLabel('Environment').selectOption('live');
@@ -140,16 +142,19 @@ test('creator completes sandbox product onboarding without source-reading', asyn
   await expect(savePolicy).toBeDisabled();
   await page.getByText('I confirm this switches checkout to Live PayPal', { exact: false }).click();
   await expect(savePolicy).toBeEnabled();
+  await paypalPolicyPanel.scrollIntoViewIfNeeded();
   await writeFile(
     path.join(evidence, 'store-live-gate-desktop.png'),
-    await paypalPolicyPanel.screenshot(),
+    await page.screenshot(),
   );
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole('heading', { name: 'Integrate Creator Pro' })).toBeVisible();
+  await integrationPanel.scrollIntoViewIfNeeded();
+  await page.locator('#main-content').evaluate((element) => element.scrollBy(0, -180));
   await writeFile(
     path.join(evidence, 'store-onboarding-mobile.png'),
-    await integrationPanel.screenshot(),
+    await page.screenshot(),
   );
   await expect(stat(path.join(evidence, 'store-onboarding-desktop.png')).then((file) => file.size)).resolves.toBeGreaterThan(0);
   await expect(stat(path.join(evidence, 'store-live-gate-desktop.png')).then((file) => file.size)).resolves.toBeGreaterThan(0);
