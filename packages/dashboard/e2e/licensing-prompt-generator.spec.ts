@@ -7,6 +7,11 @@ test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
 test('owner generates and reuses a stateless project licensing prompt', async ({ page }) => {
   const writes: string[] = [];
+  const clientErrors: string[] = [];
+  page.on('pageerror', (error) => clientErrors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') clientErrors.push(message.text());
+  });
   await page.route('**/api/**', async (route) => {
     if (route.request().method() !== 'GET') writes.push(route.request().method());
     await route.fulfill({ json: { success: true, data: [] } });
@@ -19,7 +24,9 @@ test('owner generates and reuses a stateless project licensing prompt', async ({
   await expect(page.getByLabel(/Store product ID/i)).toHaveCount(0);
   await expect(page.getByLabel('SomniBot API base')).toHaveCount(0);
   await expect(page.getByLabel(/Discord benefits/i)).toHaveCount(0);
+  await expect(page.getByLabel(/current Discord membership/i)).toHaveCount(0);
   await expect(page.getByText('Set automatically from this dashboard deployment')).toBeVisible();
+  expect(clientErrors).toEqual([]);
 
   const copyButton = page.getByRole('button', { name: 'Copy prompt' });
   await expect(copyButton).toBeDisabled();

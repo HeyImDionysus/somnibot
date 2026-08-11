@@ -105,6 +105,18 @@ describe('middleware health access', () => {
     expect(res.headers.get('content-security-policy')).toContain("style-src 'self' 'unsafe-inline'");
   });
 
+  it('allows development tooling without weakening the production policy', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health'));
+    const csp = res.headers.get('content-security-policy');
+
+    expect(csp).toContain("script-src 'self' 'nonce-");
+    expect(csp).toContain("'strict-dynamic' 'unsafe-eval'");
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'");
+    vi.unstubAllEnvs();
+  });
+
   it('allows first-run setup page without public Supabase env', async () => {
     const res = await runWithoutPublicSupabaseEnv('/setup');
 

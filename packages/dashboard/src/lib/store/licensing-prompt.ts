@@ -71,7 +71,6 @@ export type LicensingPromptDraft = {
   readonly maxInstallations: number;
   readonly heartbeatSeconds: number;
   readonly offlineGraceSeconds: number;
-  readonly requireDiscordMembership: boolean;
 };
 
 const baseEnvelopeSchema = z.object({
@@ -95,7 +94,6 @@ const dynamicEnvelopeSchema = baseEnvelopeSchema.extend({
     maxInstallations: z.number().int().min(1),
     heartbeatSeconds: z.number().int().min(30),
     offlineGraceSeconds: z.number().int().min(0),
-    requireDiscordMembership: z.boolean(),
   }),
   staticPolicy: z.null(),
 });
@@ -152,7 +150,6 @@ export function buildLicensingPromptEnvelope(draft: LicensingPromptDraft): Licen
           maxInstallations: draft.maxInstallations,
           heartbeatSeconds: draft.heartbeatSeconds,
           offlineGraceSeconds: draft.offlineGraceSeconds,
-          requireDiscordMembership: draft.requireDiscordMembership,
         },
         staticPolicy: null,
       });

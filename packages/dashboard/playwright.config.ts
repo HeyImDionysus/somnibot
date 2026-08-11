@@ -11,6 +11,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const startLocalServer = !process.env.CI || process.env.PLAYWRIGHT_START_SERVER === '1';
+const authenticatedDashboardSpecs =
+  /(?:team-invitations|community-flow|commerce-onboarding|licensing-product-overview|licensing-prompt-generator|shared-foundations)\.spec\.ts/;
 
 export default defineConfig({
   testDir: './e2e',
@@ -30,12 +32,12 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      testIgnore: /(?:team-invitations|community-flow)\.spec\.ts/,
+      testIgnore: authenticatedDashboardSpecs,
       use: { ...devices['Desktop Chrome'] },
     },
     {
       name: 'chromium-local-launcher',
-      testMatch: /(?:team-invitations|community-flow)\.spec\.ts/,
+      testMatch: authenticatedDashboardSpecs,
       use: {
         ...devices['Desktop Chrome'],
         baseURL: process.env.PLAYWRIGHT_LOCAL_BASE_URL ?? 'http://localhost:3001',
@@ -61,6 +63,7 @@ export default defineConfig({
               CSRF_SECRET: 'csrf-secret-playwright-32chars-minimum',
               NEXTAUTH_SECRET: 'nextauth-secret-playwright-32chars-minimum',
               WEBHOOK_REPLAY_SECRET: 'webhook-replay-secret-playwright-32chars',
+              NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS: '1',
             },
             port: 3000,
             reuseExistingServer: true,
@@ -82,6 +85,7 @@ export default defineConfig({
               WEBHOOK_REPLAY_SECRET: 'webhook-replay-secret-playwright-32chars',
               SOMNIBOT_DASHBOARD_LOCAL_MODE: '1',
               SESSION_TOKEN: 'playwright-local-session-token',
+              NEXT_PUBLIC_DISABLE_REACT_DEVTOOLS: '1',
             },
             port: 3001,
             reuseExistingServer: true,

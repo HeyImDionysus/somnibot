@@ -242,10 +242,13 @@ const reservedCommerceMetadataKeys = [
 const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
   for (const key of reservedCommerceMetadataKeys) {
     if (Object.prototype.hasOwnProperty.call(metadata, key)) {
+      const message = key === 'commerce_plan_recovery'
+        ? `Commerce metadata key "${key}" is reserved for server-managed state.`
+        : `Legacy commerce metadata key "${key}" is not accepted. Put permanent product role benefits in granted_role_ids instead.`;
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message: `Commerce metadata key "${key}" is reserved for server-managed state.`,
+        message,
       });
     }
   }

@@ -203,7 +203,9 @@ function product(overrides: Row = {}): Row {
     type: 'subscription',
     active: true,
     price_cents: 1000,
+    delivery_type: 'file',
     granted_role_ids: [],
+    granted_channel_ids: [],
     metadata: {},
     ...overrides,
   };
@@ -273,7 +275,7 @@ function productBody(overrides: Row = {}) {
     name: 'Product',
     description: 'Description',
     type: 'one_time',
-    delivery_type: 'access_pass',
+    delivery_type: 'file',
     price_cents: 1000,
     currency: 'USD',
     granted_role_ids: [],

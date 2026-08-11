@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Copy, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/shared/button';
-import { Input, Select, Toggle } from '@/components/shared/input';
+import { Input, Select } from '@/components/shared/input';
 import {
   buildLicensingPromptEnvelope,
   renderLicensingPrompt,
@@ -24,7 +24,6 @@ const INITIAL_DRAFT: LicensingPromptDraft = {
   maxInstallations: 1,
   heartbeatSeconds: 300,
   offlineGraceSeconds: 86400,
-  requireDiscordMembership: false,
 };
 
 const LICENSING_MODES: readonly LicensingPromptMode[] = ['dynamic', 'static'];
@@ -170,7 +169,6 @@ export function LicensingPromptGenerator() {
               <Input label="Heartbeat seconds" type="number" min={30} value={draft.heartbeatSeconds} onChange={(event) => update('heartbeatSeconds', Math.max(30, Number(event.target.value)))} />
               <Input label="Offline grace seconds" type="number" min={0} value={draft.offlineGraceSeconds} onChange={(event) => update('offlineGraceSeconds', Math.max(0, Number(event.target.value)))} />
             </div>
-            <Toggle label="Require current Discord membership" description="Optional product policy, not proof of purchase." checked={draft.requireDiscordMembership} onChange={(checked) => update('requireDiscordMembership', checked)} />
           </div>
         ) : (
           <TextAreaField id="licensing-output-formats" label="Output formats" value={draft.outputFormats} onChange={(value) => update('outputFormats', value)} placeholder="List every delivered format, including future variants that need a verified buyer-derivative transformer." />

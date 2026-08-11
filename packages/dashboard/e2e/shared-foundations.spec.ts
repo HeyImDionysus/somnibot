@@ -16,6 +16,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200): Promise<v
 
 async function installSharedFoundationRoutes(page: Page): Promise<void> {
   let invitationRequests = 0;
+  let pendingInvitations: unknown[] = [];
   await page.route('**/api/rbac/roles*', async (route) => {
     if (route.request().method() === 'DELETE') {
       await fulfillJson(route, { success: true });
@@ -30,13 +31,34 @@ async function installSharedFoundationRoutes(page: Page): Promise<void> {
         await fulfillJson(route, { error: 'Could not send invitation' }, 400);
         return;
       }
+      const requestBody: unknown = route.request().postDataJSON();
+      expect(requestBody).toEqual({
+        discord_id: '223456789012345695',
+        role_id: CUSTOM_ROLE.id,
+      });
+      pendingInvitations = [{
+        id: 'invitation-browser-proof',
+        discord_id: '223456789012345695',
+        role_id: CUSTOM_ROLE.id,
+        status: 'pending',
+        dm_status: 'queued',
+        delivery_mode: 'dm',
+        invited_by: 'owner-browser-proof',
+        expires_at: '2026-08-14T12:00:00.000Z',
+        created_at: '2026-08-11T12:00:00.000Z',
+        dashboard_roles: {
+          name: CUSTOM_ROLE.name,
+          description: CUSTOM_ROLE.description,
+          priority: CUSTOM_ROLE.priority,
+        },
+      }];
       await fulfillJson(route, { success: true, mode: 'invitation' });
       return;
     }
     await fulfillJson(route, { success: true, data: [] });
   });
   await page.route('**/api/rbac/invitations*', (route) =>
-    fulfillJson(route, { success: true, data: [] }),
+    fulfillJson(route, { success: true, data: pendingInvitations }),
   );
   await page.route('**/api/guild', (route) => fulfillJson(route, { success: true, data: {} }));
   await page.route('**/api/guilds', (route) => fulfillJson(route, { success: true, data: [] }));
@@ -183,7 +205,9 @@ test.describe('Shared dashboard accessibility foundations', () => {
     expect((await failedInvitationResponse).status()).toBe(400);
 
     // Then: the failure is assertive and still has a named dismissal action.
-    const errorToast = page.getByRole('alert').filter({ hasText: 'Could not send invitation' });
+    const errorToast = page.getByRole('alert').filter({
+      has: page.getByRole('button', { name: 'Dismiss Could not send invitation notification' }),
+    });
     await expect(errorToast).toContainText('Could not send invitation');
     await expect(
       errorToast.getByRole('button', { name: /Dismiss .* notification/ }),

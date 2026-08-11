@@ -17,10 +17,11 @@ function generateNonce(): string {
 
 function buildCspHeader(nonce: string): string {
   const inlineCompat = process.env.SOMNIBOT_CSP_INLINE_COMPAT === '1';
+  const developmentMode = process.env.NODE_ENV === 'development';
   const scriptSrc = inlineCompat
-    ? "script-src 'self' 'unsafe-inline'"
-    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`;
-  const styleSrc = inlineCompat
+    ? `script-src 'self' 'unsafe-inline'${developmentMode ? " 'unsafe-eval'" : ''}`
+    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${developmentMode ? " 'unsafe-eval'" : ''}`;
+  const styleSrc = inlineCompat || developmentMode
     ? "style-src 'self' 'unsafe-inline'"
     : `style-src 'self' 'nonce-${nonce}'`;
 

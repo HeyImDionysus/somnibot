@@ -20,7 +20,6 @@ const dynamicDraft: LicensingPromptDraft = {
   maxInstallations: 3,
   heartbeatSeconds: 300,
   offlineGraceSeconds: 86_400,
-  requireDiscordMembership: false,
 };
 
 describe('licensing prompt generator contract', () => {
@@ -47,7 +46,6 @@ describe('licensing prompt generator contract', () => {
         maxInstallations: 3,
         heartbeatSeconds: 300,
         offlineGraceSeconds: 86_400,
-        requireDiscordMembership: false,
       },
       staticPolicy: null,
     });
