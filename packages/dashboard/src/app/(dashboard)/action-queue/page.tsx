@@ -14,7 +14,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { requireApiSuccess } from '@/lib/client-api-result';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 import { Fragment } from 'react';
 
 // ── Types ─────────────────────────────────────────────────
@@ -39,6 +39,22 @@ interface Pagination {
   pageSize: number;
   total: number;
   totalPages: number;
+}
+
+function isDlqItem(value: unknown): value is DlqItem {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.action === 'string'
+    && isApiRecord(value.payload)
+    && (typeof value.error_message === 'string' || value.error_message === null)
+    && typeof value.retry_count === 'number'
+    && typeof value.max_retries === 'number'
+    && (typeof value.original_id === 'string' || value.original_id === null)
+    && typeof value.failed_at === 'string'
+    && typeof value.acknowledged === 'boolean'
+    && (typeof value.acknowledged_at === 'string' || value.acknowledged_at === null)
+    && typeof value.retried === 'boolean'
+    && (typeof value.retried_at === 'string' || value.retried_at === null);
 }
 
 type FilterType = 'pending' | 'acknowledged' | 'retried' | 'all';
@@ -73,19 +89,21 @@ export default function ActionQueuePage() {
           `/api/action-queue?page=${page}&pageSize=20&filter=${filter}`,
         );
         const json = await requireApiSuccess(res, 'Could not load the action queue. Retry from this page.');
-        if (!json.data || typeof json.data !== 'object') {
+        const data = requireApiRecord(json, 'data', 'The action queue returned an invalid readback. Retry from this page.');
+        const nextItems = requireApiArray(data, 'items', isDlqItem, 'The action queue returned an invalid readback. Retry from this page.');
+        if (!isApiRecord(data.pagination)
+          || typeof data.pagination.page !== 'number'
+          || typeof data.pagination.pageSize !== 'number'
+          || typeof data.pagination.total !== 'number'
+          || typeof data.pagination.totalPages !== 'number') {
           throw new Error('The action queue returned an invalid readback. Retry from this page.');
         }
-        const data = json.data as { items?: unknown; pagination?: unknown };
-        if (!Array.isArray(data.items) || !data.pagination || typeof data.pagination !== 'object') {
-          throw new Error('The action queue returned an invalid readback. Retry from this page.');
-        }
-        setItems(data.items as DlqItem[]);
-        setPagination(data.pagination as Pagination);
-        return true;
+        setItems(nextItems);
+        setPagination({ page: data.pagination.page, pageSize: data.pagination.pageSize, total: data.pagination.total, totalPages: data.pagination.totalPages });
+        return nextItems;
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unknown error');
-        return false;
+        return null;
       } finally {
         setLoading(false);
       }
@@ -113,10 +131,14 @@ export default function ActionQueuePage() {
           ? 'Could not replay the selected action. Nothing was marked retried.'
           : 'Could not dismiss the selected action. It remains pending.',
       );
-      if (!await fetchItems(pagination.page)) {
-        setError('The queue accepted the action, but its updated state could not be confirmed. Keep your selection and reload before retrying.');
-        return;
-      }
+      const nextItems = await fetchItems(pagination.page);
+      requireReadback(
+        nextItems !== null && pendingAction.ids.every((id) => {
+          const item = nextItems.find((candidate) => candidate.id === id);
+          return !item || (pendingAction.action === 'retry' ? item.retried : item.acknowledged);
+        }),
+        'The queue accepted the action, but the targeted items still have their previous state in the authoritative readback. Keep your selection and reload before retrying.',
+      );
       setSelectedIds(new Set());
       setPendingAction(null);
     } catch (err) {

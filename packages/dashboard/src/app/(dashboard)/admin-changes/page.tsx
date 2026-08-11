@@ -6,7 +6,7 @@
 
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { requireApiSuccess } from '@/lib/client-api-result';
+import { isApiRecord, requireApiArray, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
@@ -30,6 +30,26 @@ interface AdminChange {
   blast_radius: string;
   requires_confirmation: boolean;
   created_at: string;
+}
+
+function isAdminChange(value: unknown): value is AdminChange {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.actor_id === 'string'
+    && typeof value.action === 'string'
+    && typeof value.target_type === 'string'
+    && (typeof value.target_id === 'string' || value.target_id === null)
+    && typeof value.description === 'string'
+    && (isApiRecord(value.before_state) || value.before_state === null)
+    && (isApiRecord(value.after_state) || value.after_state === null)
+    && typeof value.is_undoable === 'boolean'
+    && typeof value.is_undone === 'boolean'
+    && (typeof value.undone_at === 'string' || value.undone_at === null)
+    && (typeof value.undone_by === 'string' || value.undone_by === null)
+    && (typeof value.undo_change_id === 'string' || value.undo_change_id === null)
+    && typeof value.blast_radius === 'string'
+    && typeof value.requires_confirmation === 'boolean'
+    && typeof value.created_at === 'string';
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -66,15 +86,12 @@ export default function AdminChangesPage() {
       if (undoableOnly) params.set('undoable', 'true');
       const res = await fetch(`/api/admin-changes?${params}`);
       const json = await requireApiSuccess(res, 'Could not load admin changes. Retry from this page.');
-      if (Array.isArray(json.data)) {
-        setChanges(json.data as AdminChange[]);
-        return true;
-      }
-      setError('The admin-change service returned an invalid readback. Retry from this page.');
-      return false;
+      const nextChanges = requireApiArray(json, 'data', isAdminChange, 'The admin-change service returned an invalid readback. Retry from this page.');
+      setChanges(nextChanges);
+      return nextChanges;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load admin changes. Retry from this page.');
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
@@ -93,10 +110,11 @@ export default function AdminChangesPage() {
         body: JSON.stringify({ action: 'undo', id: confirmUndo.id }),
       });
       await requireApiSuccess(res, 'Could not undo this change. The recorded state is unchanged.');
-      if (!await load()) {
-        setError('The undo was accepted, but the updated change record could not be confirmed. Keep this dialog open and reload before retrying.');
-        return;
-      }
+      const nextChanges = await load();
+      requireReadback(
+        nextChanges?.some((change) => change.id === confirmUndo.id && change.is_undone && !change.is_undoable) === true,
+        'The undo was accepted, but the targeted change still has its previous state in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: 'Change undone', variant: 'success' });
       setConfirmUndo(null);
     } catch (undoError) {

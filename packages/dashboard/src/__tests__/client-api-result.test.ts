@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { ClientApiError, requireApiSuccess } from '@/lib/client-api-result';
+import {
+  ClientApiError,
+  hasStringId,
+  requireApiArray,
+  requireApiSuccess,
+  requireReadback,
+} from '@/lib/client-api-result';
 
 describe('requireApiSuccess', () => {
   it('rejects an HTTP failure with the API recovery message', async () => {
@@ -34,5 +40,18 @@ describe('requireApiSuccess', () => {
       success: true,
       data: { enabled: true },
     });
+  });
+
+  it('rejects a malformed success payload at the client boundary', () => {
+    expect(() => requireApiArray(
+      { success: true, data: [{ id: 42 }] },
+      'data',
+      hasStringId,
+      'Malformed readback',
+    )).toThrow(new ClientApiError('Malformed readback', 502));
+  });
+
+  it('rejects a successful mutation whose authoritative readback is stale', () => {
+    expect(() => requireReadback(false, 'Stale readback')).toThrow(new ClientApiError('Stale readback', 409));
   });
 });

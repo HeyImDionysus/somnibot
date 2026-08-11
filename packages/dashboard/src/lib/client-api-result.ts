@@ -7,8 +7,9 @@ export class ClientApiError extends Error {
 }
 
 export type ApiPayload = Readonly<Record<string, unknown>>;
+export type ApiValueGuard<T> = (value: unknown) => value is T;
 
-function isRecord(value: unknown): value is ApiPayload {
+export function isApiRecord(value: unknown): value is ApiPayload {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
@@ -32,7 +33,7 @@ export async function requireApiSuccess(
     );
   }
 
-  if (!isRecord(decoded)) {
+  if (!isApiRecord(decoded)) {
     throw new ClientApiError(fallback, response.status);
   }
 
@@ -41,4 +42,37 @@ export async function requireApiSuccess(
   }
 
   return decoded;
+}
+
+export function requireApiArray<T>(
+  payload: ApiPayload,
+  key: string,
+  guard: ApiValueGuard<T>,
+  fallback: string,
+): T[] {
+  const value = payload[key];
+  if (!Array.isArray(value) || !value.every(guard)) {
+    throw new ClientApiError(fallback, 502);
+  }
+  return value;
+}
+
+export function requireApiRecord(
+  payload: ApiPayload,
+  key: string,
+  fallback: string,
+): ApiPayload {
+  const value = payload[key];
+  if (!isApiRecord(value)) {
+    throw new ClientApiError(fallback, 502);
+  }
+  return value;
+}
+
+export function requireReadback(confirmed: boolean, message: string): void {
+  if (!confirmed) throw new ClientApiError(message, 409);
+}
+
+export function hasStringId(value: unknown): value is ApiPayload & { readonly id: string } {
+  return isApiRecord(value) && typeof value.id === 'string' && value.id.length > 0;
 }

@@ -12,7 +12,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { requireApiSuccess } from '@/lib/client-api-result';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 import {
   canRepairDriftItem,
   EXTRA_RESOURCE_WARNING,
@@ -43,6 +43,31 @@ interface SyncStatus {
   lastSyncAt: string | null;
   driftDetected: boolean;
   driftItems: DriftItem[];
+}
+
+function isDriftItem(value: unknown): value is DriftItem {
+  return isApiRecord(value)
+    && typeof value.type === 'string'
+    && (value.severity === 'critical' || value.severity === 'warning' || value.severity === 'info')
+    && typeof value.entityType === 'string'
+    && typeof value.entityName === 'string'
+    && (typeof value.entityDiscordId === 'string' || value.entityDiscordId === undefined)
+    && typeof value.description === 'string'
+    && (value.suggestedAction === 'repair' || value.suggestedAction === 'accept' || value.suggestedAction === 'ignore');
+}
+
+function isSameDriftItem(left: DriftItem, right: DriftItem): boolean {
+  return left.type === right.type
+    && left.entityType === right.entityType
+    && left.entityName === right.entityName
+    && left.entityDiscordId === right.entityDiscordId;
+}
+
+function syncConfigMatches(left: SyncConfig, right: SyncConfig): boolean {
+  return left.sync_enabled === right.sync_enabled
+    && left.sync_interval_minutes === right.sync_interval_minutes
+    && left.sync_auto_repair === right.sync_auto_repair
+    && left.sync_auto_repair_everyone === right.sync_auto_repair_everyone;
 }
 
 type PendingSyncAction =
@@ -78,15 +103,26 @@ export default function SyncPage() {
     try {
       const res = await fetch('/api/sync/status');
       const json = await requireApiSuccess(res, 'Could not load sync status. Retry from this page.');
-      if (json.data && typeof json.data === 'object') {
-        setStatus(json.data as SyncStatus);
-        return true;
+      const data = requireApiRecord(json, 'data', 'The sync service returned an invalid readback. Retry from this page.');
+      const config = requireApiRecord(data, 'config', 'The sync service returned an invalid configuration readback. Retry from this page.');
+      const driftItems = requireApiArray(data, 'driftItems', isDriftItem, 'The sync service returned invalid drift items. Retry from this page.');
+      if (typeof config.sync_enabled !== 'boolean' || typeof config.sync_interval_minutes !== 'number'
+        || typeof config.sync_auto_repair !== 'boolean' || typeof config.sync_auto_repair_everyone !== 'boolean'
+        || (typeof data.lastSyncAt !== 'string' && data.lastSyncAt !== null)
+        || typeof data.driftDetected !== 'boolean') {
+        throw new Error('The sync service returned an invalid readback. Retry from this page.');
       }
-      setError('The sync service returned an invalid readback. Retry from this page.');
-      return false;
+      const nextStatus: SyncStatus = {
+        config: { sync_enabled: config.sync_enabled, sync_interval_minutes: config.sync_interval_minutes, sync_auto_repair: config.sync_auto_repair, sync_auto_repair_everyone: config.sync_auto_repair_everyone },
+        lastSyncAt: data.lastSyncAt,
+        driftDetected: data.driftDetected,
+        driftItems,
+      };
+      setStatus(nextStatus);
+      return nextStatus;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load sync status. Retry from this page.');
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
@@ -110,10 +146,11 @@ export default function SyncPage() {
         body: JSON.stringify(status.config),
       });
       await requireApiSuccess(res, 'Could not save sync settings. Your edits are still here; correct the value or retry.');
-      if (!await loadStatus()) {
-        setError('Settings were accepted, but the saved sync configuration could not be confirmed. Keep this page open and reload before retrying.');
-        return;
-      }
+      const nextStatus = await loadStatus();
+      requireReadback(
+        nextStatus !== null && syncConfigMatches(nextStatus.config, status.config),
+        'Settings were accepted, but the authoritative sync configuration still has previous values. Keep this page open and reload before retrying.',
+      );
       toast({ title: 'Settings saved', variant: 'success' });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
@@ -149,10 +186,13 @@ export default function SyncPage() {
         ),
       });
       await requireApiSuccess(res, `Could not ${pendingAction.action === 'clear_all' ? 'clear the drift notices' : pendingAction.action + ' this drift item'}. No confirmed change was applied.`);
-      if (!await loadStatus()) {
-        setError('The sync action was accepted, but the updated drift state could not be confirmed. Keep this dialog open and reload before retrying.');
-        return;
-      }
+      const nextStatus = await loadStatus();
+      requireReadback(
+        nextStatus !== null && (pendingAction.action === 'clear_all'
+          ? nextStatus.driftItems.length === 0
+          : !nextStatus.driftItems.some((item) => isSameDriftItem(item, pendingAction.item))),
+        'The sync action was accepted, but the targeted drift still appears in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: pendingAction.action === 'clear_all' ? 'Drift notices cleared' : `Drift item ${pendingAction.action}ed`, variant: 'success' });
       setPendingAction(null);
     } catch (err) {

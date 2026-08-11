@@ -6,7 +6,7 @@
 
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { requireApiSuccess } from '@/lib/client-api-result';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
@@ -51,6 +51,39 @@ interface DLQSummary {
   exhausted: number;
   resolved: number;
   discarded: number;
+}
+
+function isDeadLetterItem(value: unknown): value is DeadLetterItem {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.event_type === 'string'
+    && typeof value.source === 'string'
+    && isApiRecord(value.payload)
+    && (typeof value.error_message === 'string' || value.error_message === null)
+    && (typeof value.error_stack === 'string' || value.error_stack === null)
+    && typeof value.retry_count === 'number'
+    && typeof value.max_retries === 'number'
+    && typeof value.status === 'string'
+    && typeof value.first_failed_at === 'string'
+    && (typeof value.last_retry_at === 'string' || value.last_retry_at === null)
+    && (typeof value.resolved_at === 'string' || value.resolved_at === null)
+    && (typeof value.resolved_by === 'string' || value.resolved_by === null)
+    && (typeof value.resolution_note === 'string' || value.resolution_note === null)
+    && typeof value.created_at === 'string';
+}
+
+function isWorkflowEvent(value: unknown): value is WorkflowEvent {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.event_type === 'string'
+    && typeof value.source === 'string'
+    && (typeof value.correlation_id === 'string' || value.correlation_id === null)
+    && isApiRecord(value.payload)
+    && (typeof value.result === 'string' || value.result === null)
+    && (typeof value.error_message === 'string' || value.error_message === null)
+    && (typeof value.duration_ms === 'number' || value.duration_ms === null)
+    && (typeof value.parent_event_id === 'string' || value.parent_event_id === null)
+    && typeof value.created_at === 'string';
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -103,7 +136,7 @@ export default function WorkflowsPage() {
       if (resultFilter) params.set('result', resultFilter);
       const res = await fetch(`/api/workflows/events?${params}`);
       const json = await requireApiSuccess(res, 'Could not load workflow events. Retry from this page.');
-      if (Array.isArray(json.data)) setEvents(json.data as WorkflowEvent[]);
+      setEvents(requireApiArray(json, 'data', isWorkflowEvent, 'The workflow event readback was invalid. Retry from this page.'));
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not load workflow events. Retry from this page.');
     } finally {
@@ -118,12 +151,18 @@ export default function WorkflowsPage() {
       if (dlqStatusFilter) params.set('status', dlqStatusFilter);
       const res = await fetch(`/api/workflows/dead-letter?${params}`);
       const json = await requireApiSuccess(res, 'Could not load the dead-letter queue. Retry from this page.');
-      if (Array.isArray(json.data)) setDlqItems(json.data as DeadLetterItem[]);
-      if (json.summary && typeof json.summary === 'object') setDlqSummary(json.summary as DLQSummary);
-      return true;
+      const nextItems = requireApiArray(json, 'data', isDeadLetterItem, 'The dead-letter queue readback was invalid. Retry from this page.');
+      const summary = requireApiRecord(json, 'summary', 'The dead-letter queue summary was invalid. Retry from this page.');
+      if (typeof summary.total !== 'number' || typeof summary.pending !== 'number' || typeof summary.retrying !== 'number'
+        || typeof summary.exhausted !== 'number' || typeof summary.resolved !== 'number' || typeof summary.discarded !== 'number') {
+        throw new Error('The dead-letter queue summary was invalid. Retry from this page.');
+      }
+      setDlqItems(nextItems);
+      setDlqSummary({ total: summary.total, pending: summary.pending, retrying: summary.retrying, exhausted: summary.exhausted, resolved: summary.resolved, discarded: summary.discarded });
+      return nextItems;
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not load the dead-letter queue. Retry from this page.');
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
@@ -149,10 +188,17 @@ export default function WorkflowsPage() {
         }),
       });
       await requireApiSuccess(res, `Could not ${pendingAction.action} this queue item. It has not been changed.`);
-      if (!await loadDLQ()) {
-        setActionError('The queue accepted the action, but its updated state could not be confirmed. Keep this dialog open and reload before retrying.');
-        return;
-      }
+      const nextItems = await loadDLQ();
+      const updated = nextItems?.find((item) => item.id === pendingAction.item.id);
+      requireReadback(
+        nextItems !== null && (
+          !updated
+          || (pendingAction.action === 'retry' && (updated.status === 'retrying' || updated.retry_count > pendingAction.item.retry_count))
+          || (pendingAction.action === 'resolve' && updated.status === 'resolved')
+          || (pendingAction.action === 'discard' && updated.status === 'discarded')
+        ),
+        'The queue accepted the action, but the targeted item still has its previous state in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: `Queue item ${pendingAction.action === 'retry' ? 'replayed' : pendingAction.action === 'discard' ? 'discarded' : 'resolved'}`, variant: 'success' });
       setPendingAction(null);
     } catch (error) {

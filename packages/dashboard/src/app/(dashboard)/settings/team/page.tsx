@@ -10,7 +10,7 @@ import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { UserCog } from 'lucide-react';
-import { requireApiSuccess } from '@/lib/client-api-result';
+import { isApiRecord, requireApiArray, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -45,6 +45,81 @@ interface PendingInvitation {
   expires_at: string;
   created_at: string;
   dashboard_roles: { name: string; description: string | null; priority: number } | null;
+}
+
+interface TeamControls {
+  team_direct_assignment_enabled: boolean;
+  team_invite_dm_enabled: boolean;
+  team_max_pending_invitations: number;
+  team_invitation_expiry_ms: number;
+}
+
+function isDashboardRole(value: unknown): value is DashboardRole {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && (typeof value.description === 'string' || value.description === null)
+    && Array.isArray(value.permissions) && value.permissions.every((permission) => typeof permission === 'string')
+    && typeof value.is_system === 'boolean'
+    && typeof value.priority === 'number'
+    && Array.isArray(value.dashboard_user_roles);
+}
+
+function isTeamMember(value: unknown): value is TeamMember {
+  return isApiRecord(value)
+    && typeof value.discord_id === 'string'
+    && Array.isArray(value.roles)
+    && value.roles.every((assignment) => isApiRecord(assignment)
+      && typeof assignment.assignment_id === 'string'
+      && (assignment.role === null || (isApiRecord(assignment.role)
+        && typeof assignment.role.name === 'string'
+        && typeof assignment.role.description === 'string'
+        && Array.isArray(assignment.role.permissions)
+        && assignment.role.permissions.every((permission) => typeof permission === 'string')
+        && typeof assignment.role.priority === 'number'))
+      && typeof assignment.assigned_at === 'string'
+      && (typeof assignment.assigned_by === 'string' || assignment.assigned_by === null));
+}
+
+function isPendingInvitation(value: unknown): value is PendingInvitation {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.discord_id === 'string'
+    && typeof value.role_id === 'string'
+    && typeof value.status === 'string'
+    && typeof value.dm_status === 'string'
+    && (typeof value.delivery_mode === 'string' || value.delivery_mode === null)
+    && (typeof value.invited_by === 'string' || value.invited_by === null)
+    && typeof value.expires_at === 'string'
+    && typeof value.created_at === 'string'
+    && (value.dashboard_roles === null || (isApiRecord(value.dashboard_roles)
+      && typeof value.dashboard_roles.name === 'string'
+      && (typeof value.dashboard_roles.description === 'string' || value.dashboard_roles.description === null)
+      && typeof value.dashboard_roles.priority === 'number'));
+}
+
+function parseTeamControls(value: unknown): TeamControls | null {
+  if (!isApiRecord(value)
+    || typeof value.team_direct_assignment_enabled !== 'boolean'
+    || typeof value.team_invite_dm_enabled !== 'boolean'
+    || typeof value.team_max_pending_invitations !== 'number'
+    || typeof value.team_invitation_expiry_ms !== 'number') return null;
+  return {
+    team_direct_assignment_enabled: value.team_direct_assignment_enabled,
+    team_invite_dm_enabled: value.team_invite_dm_enabled,
+    team_max_pending_invitations: value.team_max_pending_invitations,
+    team_invitation_expiry_ms: value.team_invitation_expiry_ms,
+  };
+}
+
+function teamControlsReflectPatch(controls: TeamControls, patch: Record<string, string | number | boolean>): boolean {
+  return Object.entries(patch).every(([key, value]) => {
+    if (key === 'team_direct_assignment_enabled') return controls.team_direct_assignment_enabled === value;
+    if (key === 'team_invite_dm_enabled') return controls.team_invite_dm_enabled === value;
+    if (key === 'team_max_pending_invitations') return controls.team_max_pending_invitations === value;
+    if (key === 'team_invitation_expiry_ms') return controls.team_invitation_expiry_ms === value;
+    return false;
+  });
 }
 
 // ── Permission display ────────────────────────────────────
@@ -111,6 +186,7 @@ export default function TeamSettingsPage() {
   const [maxPending, setMaxPending] = useState(25);
   const [expiryMs, setExpiryMs] = useState(259_200_000);
   const [ctrlSaving, setCtrlSaving] = useState(false);
+  const [controlsReady, setControlsReady] = useState(false);
   const [ctrlError, setCtrlError] = useState<string | null>(null);
   const [roles, setRoles] = useState<DashboardRole[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -135,22 +211,25 @@ export default function TeamSettingsPage() {
   const loadRoles = useCallback(async () => {
     const res = await fetch('/api/rbac/roles');
     const json = await requireApiSuccess(res, 'Could not read back dashboard roles. Retry from this page.');
-    if (!Array.isArray(json.data)) throw new Error('The roles readback was invalid. Retry from this page.');
-    setRoles(json.data as DashboardRole[]);
+    const nextRoles = requireApiArray(json, 'data', isDashboardRole, 'The roles readback was invalid. Retry from this page.');
+    setRoles(nextRoles);
+    return nextRoles;
   }, []);
 
   const loadMembers = useCallback(async () => {
     const res = await fetch('/api/rbac/users');
     const json = await requireApiSuccess(res, 'Could not read back team members. Retry from this page.');
-    if (!Array.isArray(json.data)) throw new Error('The team-member readback was invalid. Retry from this page.');
-    setMembers(json.data as TeamMember[]);
+    const nextMembers = requireApiArray(json, 'data', isTeamMember, 'The team-member readback was invalid. Retry from this page.');
+    setMembers(nextMembers);
+    return nextMembers;
   }, []);
 
   const loadInvitations = useCallback(async () => {
     const res = await fetch('/api/rbac/invitations');
     const json = await requireApiSuccess(res, 'Could not read back pending invitations. Retry from this page.');
-    if (!Array.isArray(json.data)) throw new Error('The invitation readback was invalid. Retry from this page.');
-    setInvitations(json.data as PendingInvitation[]);
+    const nextInvitations = requireApiArray(json, 'data', isPendingInvitation, 'The invitation readback was invalid. Retry from this page.');
+    setInvitations(nextInvitations);
+    return nextInvitations;
   }, []);
 
   const loadAll = useCallback(async () => {
@@ -177,7 +256,16 @@ export default function TeamSettingsPage() {
         body: JSON.stringify({ discord_id: newDiscordId, role_id: selectedRoleId }),
       });
       const json = await requireApiSuccess(res, 'Could not add this member. Check the Discord user ID and selected role, then retry.');
-      await Promise.all([loadMembers(), loadInvitations()]);
+      if (json.mode !== 'direct' && json.mode !== 'invitation') throw new Error('The add-member response was malformed. Your fields are still here; reload before retrying.');
+      const [nextMembers, nextInvitations] = await Promise.all([loadMembers(), loadInvitations()]);
+      const selectedRole = roles.find((role) => role.id === selectedRoleId);
+      requireReadback(
+        json.mode === 'direct'
+          ? nextMembers.some((member) => member.discord_id === newDiscordId
+            && member.roles.some((assignment) => assignment.role?.name === selectedRole?.name))
+          : nextInvitations.some((invitation) => invitation.discord_id === newDiscordId && invitation.role_id === selectedRoleId && invitation.status === 'pending'),
+        'The access mutation was accepted, but the targeted member or invitation is missing from the authoritative readback. Your fields are still here; reload before retrying.',
+      );
       toast(
         json.mode === 'direct'
           ? { title: 'Role assigned', variant: 'success' }
@@ -210,8 +298,19 @@ export default function TeamSettingsPage() {
           ? 'Could not remove this role assignment. The member still has access.'
           : 'Could not revoke this invitation. It remains usable.',
       );
-      if (confirmRemoval.kind === 'assignment') await loadMembers();
-      else await loadInvitations();
+      if (confirmRemoval.kind === 'assignment') {
+        const nextMembers = await loadMembers();
+        requireReadback(
+          !nextMembers.some((member) => member.roles.some((assignment) => assignment.assignment_id === confirmRemoval.id)),
+          'The removal was accepted, but the targeted role assignment remains in the authoritative readback. Keep this dialog open and reload before retrying.',
+        );
+      } else {
+        const nextInvitations = await loadInvitations();
+        requireReadback(
+          !nextInvitations.some((invitation) => invitation.id === confirmRemoval.id),
+          'The revoke was accepted, but the targeted invitation remains in the authoritative readback. Keep this dialog open and reload before retrying.',
+        );
+      }
       toast({ title: confirmRemoval.kind === 'assignment' ? 'Role assignment removed' : 'Invitation revoked', variant: 'success' });
       setConfirmRemoval(null);
     } catch (removeError) {
@@ -227,7 +326,14 @@ export default function TeamSettingsPage() {
     try {
       const res = await fetch(`/api/rbac/invitations/${invitationId}/resend`, { method: 'POST' });
       const json = await requireApiSuccess(res, 'Could not resend this invitation. The existing invitation remains valid.');
-      await loadInvitations();
+      if (json.mode !== 'dm' && json.mode !== 'dashboard') throw new Error('The resend response was malformed. The existing invitation remains valid.');
+      const nextInvitations = await loadInvitations();
+      requireReadback(
+        nextInvitations.some((invitation) => invitation.id === invitationId
+          && invitation.status === 'pending'
+          && invitation.dm_status === (json.mode === 'dm' ? 'queued' : 'skipped')),
+        'The resend was accepted, but the targeted invitation delivery state is unchanged in the authoritative readback. Reload before retrying.',
+      );
       toast({ title: typeof json.message === 'string' ? json.message : 'Invitation delivery re-queued', variant: 'success' });
     } catch (resendError) {
       const message = resendError instanceof Error ? resendError.message : 'Could not resend this invitation. Retry from this page.';
@@ -247,7 +353,14 @@ export default function TeamSettingsPage() {
         body: JSON.stringify({ name: newRoleName, description: newRoleDesc, permissions: newRolePerms }),
       });
       await requireApiSuccess(response, 'Could not create this role. Your name, description, and permission choices are still here.');
-      await loadRoles();
+      const nextRoles = await loadRoles();
+      requireReadback(
+        nextRoles.some((role) => role.name === newRoleName
+          && (role.description ?? '') === newRoleDesc
+          && role.permissions.length === newRolePerms.length
+          && newRolePerms.every((permission) => role.permissions.includes(permission))),
+        'The role was accepted, but the targeted role is missing or stale in the authoritative readback. Your role fields are still here; reload before retrying.',
+      );
       setNewRoleName('');
       setNewRoleDesc('');
       setNewRolePerms([]);
@@ -272,7 +385,13 @@ export default function TeamSettingsPage() {
         body: JSON.stringify({ id: roleId, permissions: editPerms }),
       });
       await requireApiSuccess(response, 'Could not save these permissions. Your permission choices are still selected.');
-      await loadRoles();
+      const nextRoles = await loadRoles();
+      requireReadback(
+        nextRoles.some((role) => role.id === roleId
+          && role.permissions.length === editPerms.length
+          && editPerms.every((permission) => role.permissions.includes(permission))),
+        'The permissions were accepted, but the targeted role still has its previous permissions in the authoritative readback. Your choices remain selected; reload before retrying.',
+      );
       setEditingRole(null);
       toast({ title: 'Role permissions saved', variant: 'success' });
     } catch (saveError) {
@@ -290,7 +409,11 @@ export default function TeamSettingsPage() {
     try {
       const response = await fetch(`/api/rbac/roles?id=${roleId}`, { method: 'DELETE' });
       await requireApiSuccess(response, 'Could not delete this role. It remains available and assigned.');
-      await loadRoles();
+      const nextRoles = await loadRoles();
+      requireReadback(
+        !nextRoles.some((role) => role.id === roleId),
+        'The delete was accepted, but the targeted role remains in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: 'Role deleted', variant: 'success' });
       setConfirmDeleteRole(null);
     } catch (deleteError) {
@@ -310,20 +433,19 @@ export default function TeamSettingsPage() {
     const response = await fetch('/api/guild');
     const body = await requireApiSuccess(response, 'Could not read team invitation controls. Retry from this page.');
     const candidate = body.data ?? body.config ?? body;
-    if (!candidate || typeof candidate !== 'object') {
-      throw new Error('The server returned an invalid team-controls readback. Retry from this page.');
-    }
-    const cfg = candidate as Record<string, unknown>;
-    setDirectAssign(typeof cfg.team_direct_assignment_enabled === 'boolean' ? cfg.team_direct_assignment_enabled : false);
-    setInviteDm(typeof cfg.team_invite_dm_enabled === 'boolean' ? cfg.team_invite_dm_enabled : true);
-    setMaxPending(typeof cfg.team_max_pending_invitations === 'number' ? cfg.team_max_pending_invitations : 25);
-    setExpiryMs(typeof cfg.team_invitation_expiry_ms === 'number' ? cfg.team_invitation_expiry_ms : 259_200_000);
+    const controls = parseTeamControls(candidate);
+    if (!controls) throw new Error('The server returned an invalid team-controls readback. Retry from this page.');
+    setDirectAssign(controls.team_direct_assignment_enabled);
+    setInviteDm(controls.team_invite_dm_enabled);
+    setMaxPending(controls.team_max_pending_invitations);
+    setExpiryMs(controls.team_invitation_expiry_ms);
+    return controls;
   }, []);
 
   useEffect(() => {
     void loadTeamControls().catch((controlsError: unknown) => {
       setCtrlError(controlsError instanceof Error ? controlsError.message : 'Could not load team invitation controls.');
-    });
+    }).finally(() => setControlsReady(true));
   }, [loadTeamControls]);
 
   const saveTeamControls = async (patch: Record<string, string | number | boolean>) => {
@@ -336,7 +458,11 @@ export default function TeamSettingsPage() {
         body: JSON.stringify(patch),
       });
       await requireApiSuccess(res, 'Could not save that setting. Your selected value is still shown; correct it or retry.');
-      await loadTeamControls();
+      const controls = await loadTeamControls();
+      requireReadback(
+        teamControlsReflectPatch(controls, patch),
+        'The setting was accepted, but the authoritative team-controls readback still has the previous value. Your selected value remains shown; reload before retrying.',
+      );
     } catch (controlsError) {
       setCtrlError(controlsError instanceof Error ? controlsError.message : 'Could not reach the server to save that setting.');
     } finally {
@@ -370,7 +496,7 @@ export default function TeamSettingsPage() {
               type="checkbox"
               className="mt-1 rounded"
               checked={directAssign}
-              disabled={ctrlSaving}
+              disabled={ctrlSaving || !controlsReady}
               onChange={(e) => {
                 setDirectAssign(e.target.checked);
                 void saveTeamControls({ team_direct_assignment_enabled: e.target.checked });
@@ -390,7 +516,7 @@ export default function TeamSettingsPage() {
               type="checkbox"
               className="mt-1 rounded"
               checked={inviteDm}
-              disabled={ctrlSaving}
+              disabled={ctrlSaving || !controlsReady}
               onChange={(e) => {
                 setInviteDm(e.target.checked);
                 void saveTeamControls({ team_invite_dm_enabled: e.target.checked });
@@ -412,7 +538,7 @@ export default function TeamSettingsPage() {
                 min={1}
                 max={100}
                 value={maxPending}
-                disabled={ctrlSaving}
+                disabled={ctrlSaving || !controlsReady}
                 onChange={(e) => setMaxPending(Number(e.target.value))}
                 onBlur={(e) => void saveTeamControls({ team_max_pending_invitations: Number(e.target.value) })}
                 className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
@@ -422,7 +548,7 @@ export default function TeamSettingsPage() {
               <span className="text-discord-text-muted">Invitations expire after</span>
               <select
                 value={String(expiryMs)}
-                disabled={ctrlSaving}
+                disabled={ctrlSaving || !controlsReady}
                 onChange={(e) => {
                   setExpiryMs(Number(e.target.value));
                   void saveTeamControls({ team_invitation_expiry_ms: Number(e.target.value) });

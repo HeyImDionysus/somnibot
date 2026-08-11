@@ -8,7 +8,7 @@
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 import { useToast } from '@/components/shared/toast';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { requireApiSuccess } from '@/lib/client-api-result';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
@@ -28,6 +28,24 @@ interface Infraction {
   pardoned_at: string | null;
   expires_at: string | null;
   created_at: string;
+}
+
+function isInfraction(value: unknown): value is Infraction {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.guild_id === 'string'
+    && typeof value.member_id === 'string'
+    && typeof value.moderator_id === 'string'
+    && typeof value.type === 'string'
+    && typeof value.reason === 'string'
+    && (typeof value.automod_rule_id === 'string' || value.automod_rule_id === null)
+    && (typeof value.duration_minutes === 'number' || value.duration_minutes === null)
+    && typeof value.active === 'boolean'
+    && typeof value.pardoned === 'boolean'
+    && (typeof value.pardoned_by === 'string' || value.pardoned_by === null)
+    && (typeof value.pardoned_at === 'string' || value.pardoned_at === null)
+    && (typeof value.expires_at === 'string' || value.expires_at === null)
+    && typeof value.created_at === 'string';
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -73,14 +91,14 @@ export default function InfractionsPage() {
 
       const res = await fetch(`/api/moderation/infractions?${params}`);
       const json = await requireApiSuccess(res, 'Could not load infractions. Retry from this page.');
-      if (Array.isArray(json.data)) setInfractions(json.data as Infraction[]);
-      if (typeof json.total === 'number') setTotal(json.total);
-      if (Array.isArray(json.data) && typeof json.total === 'number') return true;
-      setError('The infraction service returned an invalid readback. Retry from this page.');
-      return false;
+      const nextInfractions = requireApiArray(json, 'data', isInfraction, 'The infraction service returned an invalid readback. Retry from this page.');
+      if (typeof json.total !== 'number') throw new Error('The infraction service returned an invalid readback. Retry from this page.');
+      setInfractions(nextInfractions);
+      setTotal(json.total);
+      return nextInfractions;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load infractions. Retry from this page.');
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
@@ -104,10 +122,11 @@ export default function InfractionsPage() {
         body: JSON.stringify({ id: confirmPardon.id, action: 'pardon' }),
       });
       await requireApiSuccess(res, 'Could not pardon this infraction. It remains active and still counts toward escalation.');
-      if (!await loadInfractions()) {
-        setError('The pardon was accepted, but the infraction history could not be confirmed. Keep this dialog open and reload before retrying.');
-        return;
-      }
+      const nextInfractions = await loadInfractions();
+      requireReadback(
+        nextInfractions?.some((infraction) => infraction.id === confirmPardon.id && infraction.pardoned && !infraction.active) === true,
+        'The pardon was accepted, but the targeted infraction still has its previous state in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: 'Infraction pardoned', variant: 'success' });
       setConfirmPardon(null);
     } catch (err) {
@@ -135,11 +154,17 @@ export default function InfractionsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(manualForm),
       });
-      await requireApiSuccess(res, 'Could not record this infraction. Your member, type, and reason are still here; correct them or retry.');
-      if (!await loadInfractions()) {
-        setError('The infraction was accepted, but its history readback failed. Your fields are still here; reload before retrying.');
-        return;
-      }
+      const mutation = await requireApiSuccess(res, 'Could not record this infraction. Your member, type, and reason are still here; correct them or retry.');
+      const created = requireApiRecord(mutation, 'data', 'The infraction response was malformed. Your fields are still here; reload before retrying.');
+      if (typeof created.id !== 'string') throw new Error('The infraction response was malformed. Your fields are still here; reload before retrying.');
+      const nextInfractions = await loadInfractions();
+      requireReadback(
+        nextInfractions?.some((infraction) => infraction.id === created.id
+          && infraction.member_id === manualForm.member_id
+          && infraction.type === manualForm.type
+          && infraction.reason === manualForm.reason) === true,
+        'The infraction was accepted, but the new history entry is missing from the authoritative readback. Your fields are still here; reload before retrying.',
+      );
       toast({
         title: `${manualForm.type.charAt(0).toUpperCase() + manualForm.type.slice(1)} recorded in history`,
         variant: 'success',

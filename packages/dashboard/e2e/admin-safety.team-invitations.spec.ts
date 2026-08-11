@@ -28,6 +28,7 @@ test.describe('Dashboard admin mutation safety', () => {
       retried_at: null,
     };
     let rejectReplay = true;
+    let reflectReplay = false;
     let replayRequest: unknown;
 
     await page.route('**/api/action-queue**', async (route) => {
@@ -37,7 +38,7 @@ test.describe('Dashboard admin mutation safety', () => {
           await fulfillJson(route, { success: false, error: 'Discord is still unavailable. Retry after checking bot health.' }, 503);
           return;
         }
-        item.retried = true;
+        if (reflectReplay) item.retried = true;
         await fulfillJson(route, { success: true });
         return;
       }
@@ -61,6 +62,10 @@ test.describe('Dashboard admin mutation safety', () => {
     await expect(dialog).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('action-queue-replay-error.png'), fullPage: true });
     rejectReplay = false;
+    await dialog.getByRole('button', { name: 'Replay action' }).click();
+    await expect(page.getByText(/authoritative readback/)).toBeVisible();
+    await expect(dialog).toBeVisible();
+    reflectReplay = true;
     await dialog.getByRole('button', { name: 'Replay action' }).click();
     await expect(dialog).not.toBeVisible();
     await expect(page.getByRole('table').getByText('Retried', { exact: true })).toBeVisible();
@@ -275,33 +280,112 @@ test.describe('Dashboard admin mutation safety', () => {
     await page.screenshot({ path: testInfo.outputPath('diagnostics-webhook-replay-confirmation.png'), fullPage: true });
   });
 
+  test('prevents duplicate alert acknowledgement and rejects a stale active-alert readback', async ({ page }) => {
+    await installCsrfApi(page);
+    const alert = {
+      id: 'alert-7',
+      alert_type: 'memory_high',
+      severity: 'warning',
+      title: 'Memory pressure',
+      message: 'Memory is above the configured threshold.',
+      acknowledged: false,
+      resolved: false,
+      created_at: '2030-01-01T12:00:00.000Z',
+    };
+    let patchRequests = 0;
+    await page.route('**/api/alerts**', async (route) => {
+      if (route.request().method() === 'PATCH') {
+        patchRequests += 1;
+        await fulfillJson(route, { success: true });
+        return;
+      }
+      await fulfillJson(route, { success: true, data: { alerts: [alert] } });
+    });
+    await page.route('**/api/diagnostics', (route) => fulfillJson(route, {
+      success: true,
+      data: {
+        guidedMode: false,
+        thresholds: { memoryRssMb: 512, wsPingMs: 500, webhookErrorRate: 0.25 },
+        snapshotIntervalMs: 60_000,
+        bot: { online: true, uptimeSeconds: 3600, memoryRssMb: 600, memoryHeapMb: 120, wsPing: 42, guildMemberCount: 12, activeVoiceConnections: 0, snapshotAt: '2030-01-01T12:00:00.000Z', staleSecs: 5 },
+        lavalink: { nodes: [] },
+        valkey: { connected: true, memoryMb: 8 },
+        supabase: { healthy: true },
+        webhooks: { total: 0, success: 0, error: 0, duplicate: 0, pending: 0 },
+        sync: { lastSync: null, lastSyncDetails: null, lastDrift: null, lastDriftDetails: null },
+        automations: { activeCount: 0 },
+        scheduledMessages: { activeCount: 0 },
+        dlq: { pendingCount: 0 },
+        healthMetrics: {},
+      },
+    }));
+    await page.route('**/api/webhooks?*', (route) => fulfillJson(route, {
+      success: true,
+      data: [],
+      pagination: { page: 1, pageSize: 25, total: 0, totalPages: 0 },
+    }));
+
+    await page.goto('/diagnostics');
+    await page.getByRole('button', { name: 'Acknowledge' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await dialog.getByRole('button', { name: 'Acknowledge alert' }).evaluate((button) => {
+      button.click();
+      button.click();
+    });
+    await expect.poll(() => patchRequests).toBe(1);
+    await expect(dialog).toBeVisible();
+    await expect(page.getByText(/alert remains in the authoritative active list/)).toBeVisible();
+  });
+
   test('names the moderation rule before deletion', async ({ page }, testInfo) => {
     await installCsrfApi(page);
     const rule = {
       id: 'rule-delete-9',
-      guild_id: 'guild-1',
       name: 'Repeated invite links',
-      description: 'Blocks repeated invite links.',
+      type: 'invite_filter',
       enabled: true,
-      rule_type: 'regex',
-      pattern: 'discord\\.gg',
-      threshold: null,
+      config: { allowOwnServer: false },
       action: 'delete',
-      action_duration: null,
-      warn_message: null,
+      mute_duration_minutes: null,
       exempt_roles: [],
       exempt_channels: [],
-      log_enabled: true,
+      log_to_mod_channel: true,
       created_at: '2030-01-01T12:00:00.000Z',
-      updated_at: '2030-01-01T12:00:00.000Z',
     };
-    await page.route('**/api/moderation/rules**', (route) => fulfillJson(route, { success: true, data: [rule] }));
+    let deleteRequests = 0;
+    await page.route('**/api/moderation/rules**', async (route) => {
+      if (route.request().method() === 'DELETE') {
+        deleteRequests += 1;
+        await fulfillJson(route, { success: true });
+        return;
+      }
+      await fulfillJson(route, { success: true, data: [rule] });
+    });
 
     await page.goto('/moderation/rules');
     await page.getByRole('button', { name: 'Delete Repeated invite links' }).click();
     const dialog = page.getByRole('alertdialog');
     await expect(dialog).toContainText('Repeated invite links');
     await expect(dialog).toContainText('stop protecting the server immediately');
+    await dialog.getByRole('button', { name: 'Delete Rule' }).evaluate((button) => {
+      button.click();
+      button.click();
+    });
+    await expect.poll(() => deleteRequests).toBe(1);
+    await expect(dialog).toBeVisible();
+    await expect(page.getByText(/rule still appears in the authoritative readback/).first()).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('moderation-rule-delete-confirmation.png'), fullPage: true });
+  });
+
+  test('fails closed when a successful rule list payload is malformed', async ({ page }) => {
+    await installCsrfApi(page);
+    await page.route('**/api/moderation/rules**', (route) => fulfillJson(route, {
+      success: true,
+      data: [{ id: 42, name: 'Malformed rule' }],
+    }));
+
+    await page.goto('/moderation/rules');
+    await expect(page.getByText('The auto-mod service returned an invalid readback. Retry from this page.')).toBeVisible();
+    await expect(page.getByRole('button', { name: /Delete Malformed rule/ })).toHaveCount(0);
   });
 });

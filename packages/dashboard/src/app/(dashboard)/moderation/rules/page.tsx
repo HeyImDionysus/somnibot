@@ -8,9 +8,9 @@
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { useToast } from '@/components/shared/toast';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { requireApiSuccess } from '@/lib/client-api-result';
+import { isApiRecord, requireApiArray, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 interface AutoModRule {
@@ -25,6 +25,22 @@ interface AutoModRule {
   exempt_channels: string[];
   log_to_mod_channel: boolean;
   created_at: string;
+}
+
+function isAutoModRule(value: unknown): value is AutoModRule {
+  if (!isApiRecord(value)) return false;
+  const rule = value;
+  return typeof rule.id === 'string'
+    && typeof rule.name === 'string'
+    && typeof rule.type === 'string'
+    && typeof rule.enabled === 'boolean'
+    && !!rule.config && typeof rule.config === 'object' && !Array.isArray(rule.config)
+    && typeof rule.action === 'string'
+    && (typeof rule.mute_duration_minutes === 'number' || rule.mute_duration_minutes === null)
+    && Array.isArray(rule.exempt_roles) && rule.exempt_roles.every((role) => typeof role === 'string')
+    && Array.isArray(rule.exempt_channels) && rule.exempt_channels.every((channel) => typeof channel === 'string')
+    && typeof rule.log_to_mod_channel === 'boolean'
+    && typeof rule.created_at === 'string';
 }
 
 const RULE_TYPES = [
@@ -67,6 +83,8 @@ export default function AutoModRulesPage() {
   const [editingRule, setEditingRule] = useState<Partial<AutoModRule> | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const deleteInFlightRef = useRef(false);
   const [confirmDelete, setConfirmDelete] = useState<{ readonly id: string; readonly name: string } | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
   const { toast } = useToast();
@@ -75,15 +93,12 @@ export default function AutoModRulesPage() {
     try {
       const res = await fetch('/api/moderation/rules');
       const json = await requireApiSuccess(res, 'Could not load auto-mod rules. Retry from this page.');
-      if (Array.isArray(json.data)) {
-        setRules(json.data as AutoModRule[]);
-        return true;
-      }
-      setError('The auto-mod service returned an invalid readback. Retry from this page.');
-      return false;
+      const nextRules = requireApiArray(json, 'data', isAutoModRule, 'The auto-mod service returned an invalid readback. Retry from this page.');
+      setRules(nextRules);
+      return nextRules;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load auto-mod rules. Retry from this page.');
-      return false;
+      return null;
     } finally {
       setLoading(false);
     }
@@ -133,10 +148,17 @@ export default function AutoModRulesPage() {
         body: JSON.stringify(editingRule),
       });
       await requireApiSuccess(res, 'Could not save this rule. Your rule fields are still here; correct them or retry.');
-      if (!await loadRules()) {
-        setError('The rule was accepted, but its saved state could not be confirmed. Your rule fields are still here; reload before retrying.');
-        return;
-      }
+      const nextRules = await loadRules();
+      const savedRule = nextRules?.find((rule) => isCreating ? rule.name === editingRule.name : rule.id === editingRule.id);
+      requireReadback(
+        !!savedRule
+          && savedRule.name === editingRule.name
+          && savedRule.type === editingRule.type
+          && savedRule.enabled === editingRule.enabled
+          && savedRule.action === editingRule.action
+          && JSON.stringify(savedRule.config) === JSON.stringify(editingRule.config),
+        'The rule mutation was accepted, but the authoritative readback is stale. Your rule fields are still here; reload before retrying.',
+      );
       setEditingRule(null);
       toast({ title: isCreating ? 'Rule created' : 'Rule updated', variant: 'success' });
     } catch (err) {
@@ -149,19 +171,26 @@ export default function AutoModRulesPage() {
   };
 
   const handleDelete = async (ruleId: string) => {
+    if (deleteInFlightRef.current) return;
+    deleteInFlightRef.current = true;
+    setDeleting(true);
     try {
       const res = await fetch(`/api/moderation/rules?id=${ruleId}`, { method: 'DELETE' });
       await requireApiSuccess(res, 'Could not delete this rule. It remains active.');
-      if (!await loadRules()) {
-        setError('The delete was accepted, but the updated rules list could not be confirmed. Keep this dialog open and reload before retrying.');
-        return;
-      }
+      const nextRules = await loadRules();
+      requireReadback(
+        nextRules !== null && !nextRules.some((rule) => rule.id === ruleId),
+        'The delete was accepted, but the rule still appears in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: 'Rule deleted', variant: 'success' });
       setConfirmDelete(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to delete rule';
       setError(msg);
       toast({ title: msg, variant: 'error' });
+    } finally {
+      deleteInFlightRef.current = false;
+      setDeleting(false);
     }
   };
 
@@ -173,10 +202,11 @@ export default function AutoModRulesPage() {
         body: JSON.stringify({ id: rule.id, enabled: !rule.enabled }),
       });
       await requireApiSuccess(res, `Could not ${rule.enabled ? 'disable' : 'enable'} this rule. Its current state is unchanged.`);
-      if (!await loadRules()) {
-        setError('The rule state change was accepted, but its updated state could not be confirmed. Reload before retrying.');
-        return;
-      }
+      const nextRules = await loadRules();
+      requireReadback(
+        nextRules?.some((candidate) => candidate.id === rule.id && candidate.enabled === !rule.enabled) === true,
+        'The rule state change was accepted, but the authoritative readback still has the old state. Reload before retrying.',
+      );
       toast({ title: rule.enabled ? 'Rule disabled' : 'Rule enabled', variant: 'success' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to toggle rule';
@@ -314,10 +344,13 @@ export default function AutoModRulesPage() {
         description={confirmDelete ? `Delete auto-mod rule “${confirmDelete.name}” (${confirmDelete.id}). It will stop protecting the server immediately and cannot be undone.` : undefined}
         confirmLabel="Delete Rule"
         variant="danger"
+        loading={deleting}
         onConfirm={() => {
           if (confirmDelete) return handleDelete(confirmDelete.id);
         }}
-        onCancel={() => setConfirmDelete(null)}
+        onCancel={() => {
+          if (!deleting) setConfirmDelete(null);
+        }}
       />
     </div>
   );
