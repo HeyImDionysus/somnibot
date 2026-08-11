@@ -11,7 +11,7 @@ case "$deploy_path" in
   */../*|*/..) echo "deploy path must not contain parent traversal" >&2; exit 64 ;;
 esac
 
-compose_file="$deploy_path/docker-compose.prod.yml"
+. "$deploy_path/scripts/lib/production-compose.sh"
 state_dir=/var/lib/somnibot-health-recovery
 lock_file="$state_dir/recovery.lock"
 max_attempts=5
@@ -36,7 +36,7 @@ log() {
   printf '%s\n' "$*"
 }
 
-containers=$(docker compose -f "$compose_file" ps --all --quiet)
+containers=$(production_compose ps --all --quiet)
 if [ -z "$containers" ]; then
   stack_state="$state_dir/_stack.state"
   now=$(date +%s)
@@ -58,7 +58,7 @@ if [ -z "$containers" ]; then
   attempts=$((attempts + 1))
   printf '%s|%s\n' "$attempts" "$first_attempt" > "$stack_state"
   log "No production containers exist; starting the exact Compose project (attempt $attempts/$max_attempts)."
-  docker compose -f "$compose_file" up -d
+  production_compose up -d
   exit $?
 fi
 rm -f "$state_dir/_stack.state"
@@ -107,8 +107,8 @@ for container_id in $containers; do
   printf '%s|%s\n' "$attempts" "$first_attempt" > "$state_file"
   log "Recovering $service from $status/$health (attempt $attempts/$max_attempts)."
   if [ "$status" = running ]; then
-    docker compose -f "$compose_file" restart "$service"
+    production_compose restart "$service"
   else
-    docker compose -f "$compose_file" up -d --no-deps "$service"
+    production_compose up -d --no-deps "$service"
   fi
 done

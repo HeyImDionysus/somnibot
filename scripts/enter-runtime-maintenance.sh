@@ -13,7 +13,7 @@ case "$deploy_path" in
 esac
 case "$scope" in consumers|all) ;; *) echo "invalid maintenance scope" >&2; exit 64 ;; esac
 
-compose_file="$deploy_path/docker-compose.prod.yml"
+. "$deploy_path/scripts/lib/production-compose.sh"
 state_dir=/var/lib/somnibot-health-recovery
 maintenance_file="$state_dir/maintenance"
 [ -f "$compose_file" ] || { echo "compose file not found: $compose_file" >&2; exit 66; }
@@ -26,7 +26,7 @@ printf '%s\n' "runtime-handoff:$scope" > "$maintenance_file.partial"
 mv "$maintenance_file.partial" "$maintenance_file"
 
 if [ "$scope" = consumers ]; then
-  docker compose -f "$compose_file" stop bot dashboard
+  production_compose stop bot dashboard
 else
-  docker compose -f "$compose_file" stop
+  production_compose stop
 fi

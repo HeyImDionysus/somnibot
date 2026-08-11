@@ -12,7 +12,7 @@ case "$deploy_path" in
   */../*|*/..) echo "deploy path must not contain parent traversal" >&2; exit 64 ;;
 esac
 
-compose_file="$deploy_path/docker-compose.prod.yml"
+. "$deploy_path/scripts/lib/production-compose.sh"
 backup_root=${SOMNIBOT_BACKUP_DIR:-/var/backups/somnibot}
 backup_dir="$backup_root/valkey"
 if [ "$(dirname "$backup_file")" != "$backup_dir" ]; then
@@ -36,29 +36,29 @@ flock 8
 exec 9>/var/backups/somnibot/valkey-backup.lock
 flock 9
 
-container_id=$(docker compose -f "$compose_file" ps --quiet valkey)
+container_id=$(production_compose ps --quiet valkey)
 [ -n "$container_id" ] || { echo "Valkey container must be running before restore" >&2; exit 69; }
 
 validation_file=/tmp/somnibot-valkey-restore-validation.rdb
 docker cp "$backup_file" "$container_id:$validation_file" >/dev/null
-docker compose -f "$compose_file" exec -T valkey valkey-check-rdb "$validation_file" >/dev/null
-docker compose -f "$compose_file" exec -T valkey rm -f "$validation_file"
+production_compose exec -T valkey valkey-check-rdb "$validation_file" >/dev/null
+production_compose exec -T valkey rm -f "$validation_file"
 
-docker compose -f "$compose_file" stop valkey
+production_compose stop valkey
 restore_failed=true
 restore_cleanup() {
   if [ "$restore_failed" = true ]; then
-    docker compose -f "$compose_file" start valkey >/dev/null 2>&1 || true
+    production_compose start valkey >/dev/null 2>&1 || true
   fi
 }
 trap restore_cleanup EXIT INT TERM
 
 docker cp "$backup_file" "$container_id:/data/dump.rdb" >/dev/null
-docker compose -f "$compose_file" start valkey
+production_compose start valkey
 
 attempt=0
 while [ "$attempt" -lt 30 ]; do
-  if docker compose -f "$compose_file" exec -T valkey valkey-cli ping 2>/dev/null | grep -q '^PONG$'; then
+  if production_compose exec -T valkey valkey-cli ping 2>/dev/null | grep -q '^PONG$'; then
     restore_failed=false
     trap - EXIT INT TERM
     logger -t somnibot-backup -- "Restored Valkey from $(basename "$backup_file")"

@@ -23,7 +23,8 @@ if [ ! -f "$source_script" ]; then
 fi
 backup_script="$deploy_path/scripts/backup-production-valkey.sh"
 restore_script="$deploy_path/scripts/restore-production-valkey.sh"
-for required_script in "$backup_script" "$restore_script"; do
+compose_helper="$deploy_path/scripts/lib/production-compose.sh"
+for required_script in "$backup_script" "$restore_script" "$compose_helper"; do
   [ -f "$required_script" ] || { echo "production script not found: $required_script" >&2; exit 66; }
 done
 

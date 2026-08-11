@@ -16,6 +16,16 @@ const handoffExporter = path.join(repoRoot, 'scripts', 'export-handoff-valkey.sh
 const maintenanceEnter = path.join(repoRoot, 'scripts', 'enter-runtime-maintenance.sh');
 const maintenanceExit = path.join(repoRoot, 'scripts', 'exit-runtime-maintenance.sh');
 const healthRecovery = path.join(repoRoot, 'scripts', 'production-health-recover.sh');
+const healthRecoveryInstaller = path.join(repoRoot, 'scripts', 'install-production-health-recovery.sh');
+const productionCompose = path.join(repoRoot, 'scripts', 'lib', 'production-compose.sh');
+const productionComposeConsumers = [
+  path.join(repoRoot, 'scripts', 'backup-production-valkey.sh'),
+  path.join(repoRoot, 'scripts', 'enter-runtime-maintenance.sh'),
+  path.join(repoRoot, 'scripts', 'export-handoff-valkey.sh'),
+  path.join(repoRoot, 'scripts', 'production-health-recover.sh'),
+  path.join(repoRoot, 'scripts', 'restore-handoff-valkey.sh'),
+  path.join(repoRoot, 'scripts', 'restore-production-valkey.sh'),
+];
 
 describe('protected VPS environment scripts', () => {
   it('keeps credential input out of SSH shell strings and cleans temp files on every exit', () => {
@@ -41,10 +51,27 @@ describe('protected VPS environment scripts', () => {
     expect(enterSource).toContain('flock 8');
     expect(enterSource).toContain('> "$maintenance_file.partial"');
     expect(enterSource).toContain('stop bot dashboard');
-    expect(enterSource).toContain('docker compose -f "$compose_file" stop');
+    expect(enterSource).toContain('production_compose stop');
     expect(exitSource).toContain('flock 8');
     expect(exitSource).toContain('rm -f "$state_dir/maintenance"');
     expect(recoverySource).toContain('if [ -f "$state_dir/maintenance" ]');
+  });
+
+  it('keeps every production Compose caller in the isolated project and Funnel override', () => {
+    const helperSource = readFileSync(productionCompose, 'utf8');
+    const installerSource = readFileSync(healthRecoveryInstaller, 'utf8');
+
+    expect(helperSource).toContain('compose_project_name=somnibot-prod');
+    expect(helperSource).toContain('.somnibot/launcher-tailscale-funnel.compose.yml');
+    expect(helperSource).toContain('--project-name "$compose_project_name"');
+    expect(helperSource).toContain('-f "$compose_override_file"');
+    expect(installerSource).toContain('scripts/lib/production-compose.sh');
+
+    for (const script of productionComposeConsumers) {
+      const source = readFileSync(script, 'utf8');
+      expect(source, script).toContain('. "$deploy_path/scripts/lib/production-compose.sh"');
+      expect(source, script).not.toContain('docker compose -f "$compose_file"');
+    }
   });
 
   it('stages and restores handoff snapshots through fixed protected paths', () => {
