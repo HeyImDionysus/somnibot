@@ -10,6 +10,7 @@ import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { UserCog } from 'lucide-react';
+import { requireApiSuccess } from '@/lib/client-api-result';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -93,6 +94,13 @@ function dmStatusLabel(inv: PendingInvitation): string {
 export default function TeamSettingsPage() {
   const { toast } = useToast();
   const [confirmDeleteRole, setConfirmDeleteRole] = useState<{ id: string; name: string } | null>(null);
+  const [confirmRemoval, setConfirmRemoval] = useState<
+    | { readonly kind: 'assignment'; readonly id: string; readonly memberId: string; readonly roleName: string }
+    | { readonly kind: 'invitation'; readonly id: string; readonly memberId: string; readonly roleName: string }
+    | null
+  >(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [mutationLoading, setMutationLoading] = useState(false);
 
   const [tab, setTab] = useState<'members' | 'roles'>('members');
   // Invitation controls. These columns and the bot's sweeper have existed since
@@ -126,135 +134,197 @@ export default function TeamSettingsPage() {
 
   const loadRoles = useCallback(async () => {
     const res = await fetch('/api/rbac/roles');
-    const json = await res.json();
-    if (json.success) setRoles(json.data);
+    const json = await requireApiSuccess(res, 'Could not read back dashboard roles. Retry from this page.');
+    if (!Array.isArray(json.data)) throw new Error('The roles readback was invalid. Retry from this page.');
+    setRoles(json.data as DashboardRole[]);
   }, []);
 
   const loadMembers = useCallback(async () => {
     const res = await fetch('/api/rbac/users');
-    const json = await res.json();
-    if (json.success) setMembers(json.data);
+    const json = await requireApiSuccess(res, 'Could not read back team members. Retry from this page.');
+    if (!Array.isArray(json.data)) throw new Error('The team-member readback was invalid. Retry from this page.');
+    setMembers(json.data as TeamMember[]);
   }, []);
 
   const loadInvitations = useCallback(async () => {
     const res = await fetch('/api/rbac/invitations');
-    const json = await res.json();
-    if (json.success) setInvitations(json.data);
+    const json = await requireApiSuccess(res, 'Could not read back pending invitations. Retry from this page.');
+    if (!Array.isArray(json.data)) throw new Error('The invitation readback was invalid. Retry from this page.');
+    setInvitations(json.data as PendingInvitation[]);
   }, []);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([loadRoles(), loadMembers(), loadInvitations()]);
-    setLoading(false);
+    try {
+      await Promise.all([loadRoles(), loadMembers(), loadInvitations()]);
+    } catch (loadError) {
+      setMutationError(loadError instanceof Error ? loadError.message : 'Could not load team access. Retry from this page.');
+    } finally {
+      setLoading(false);
+    }
   }, [loadRoles, loadMembers, loadInvitations]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
   const addMember = async () => {
     if (!newDiscordId || !selectedRoleId) return;
-    const res = await fetch('/api/rbac/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ discord_id: newDiscordId, role_id: selectedRoleId }),
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      toast({ title: json.error || 'Could not send invitation', variant: 'error' });
-      return;
+    setMutationLoading(true);
+    setMutationError(null);
+    try {
+      const res = await fetch('/api/rbac/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discord_id: newDiscordId, role_id: selectedRoleId }),
+      });
+      const json = await requireApiSuccess(res, 'Could not add this member. Check the Discord user ID and selected role, then retry.');
+      await Promise.all([loadMembers(), loadInvitations()]);
+      toast(
+        json.mode === 'direct'
+          ? { title: 'Role assigned', variant: 'success' }
+          : { title: 'Invitation sent — the member gains access once they accept', variant: 'success' },
+      );
+      setNewDiscordId('');
+      setSelectedRoleId('');
+      setShowAddMember(false);
+    } catch (addError) {
+      const message = addError instanceof Error ? addError.message : 'Could not add this member. Check the fields and retry.';
+      setMutationError(message);
+      toast({ title: message, variant: 'error' });
+    } finally {
+      setMutationLoading(false);
     }
-    // Default (consent) model returns mode:'invitation'; the owner may have
-    // enabled direct assignment (mode:'direct').
-    toast(
-      json.mode === 'direct'
-        ? { title: 'Role assigned', variant: 'success' }
-        : { title: 'Invitation sent — the member gains access once they accept', variant: 'success' },
-    );
-    setNewDiscordId('');
-    setSelectedRoleId('');
-    setShowAddMember(false);
-    loadMembers();
-    loadInvitations();
   };
 
-  const removeMemberRole = async (assignmentId: string) => {
-    await fetch(`/api/rbac/users?id=${assignmentId}`, { method: 'DELETE' });
-    loadMembers();
-  };
-
-  const revokeInvitation = async (invitationId: string) => {
-    const res = await fetch(`/api/rbac/invitations/${invitationId}`, { method: 'DELETE' });
-    if (res.ok) {
-      toast({ title: 'Invitation revoked', variant: 'success' });
-    } else {
-      const json = await res.json().catch(() => ({}));
-      toast({ title: json.error || 'Could not revoke invitation', variant: 'error' });
+  const executeRemoval = async () => {
+    if (!confirmRemoval) return;
+    setMutationLoading(true);
+    setMutationError(null);
+    try {
+      const url = confirmRemoval.kind === 'assignment'
+        ? `/api/rbac/users?id=${confirmRemoval.id}`
+        : `/api/rbac/invitations/${confirmRemoval.id}`;
+      const res = await fetch(url, { method: 'DELETE' });
+      await requireApiSuccess(
+        res,
+        confirmRemoval.kind === 'assignment'
+          ? 'Could not remove this role assignment. The member still has access.'
+          : 'Could not revoke this invitation. It remains usable.',
+      );
+      if (confirmRemoval.kind === 'assignment') await loadMembers();
+      else await loadInvitations();
+      toast({ title: confirmRemoval.kind === 'assignment' ? 'Role assignment removed' : 'Invitation revoked', variant: 'success' });
+      setConfirmRemoval(null);
+    } catch (removeError) {
+      const message = removeError instanceof Error ? removeError.message : 'Could not remove this access. Retry from this page.';
+      setMutationError(message);
+      toast({ title: message, variant: 'error' });
+    } finally {
+      setMutationLoading(false);
     }
-    loadInvitations();
   };
 
   const resendInvitation = async (invitationId: string) => {
-    const res = await fetch(`/api/rbac/invitations/${invitationId}/resend`, { method: 'POST' });
-    const json = await res.json().catch(() => ({}));
-    if (res.ok) {
-      toast({ title: json.message || 'Invitation delivery re-queued', variant: 'success' });
-    } else {
-      toast({ title: json.error || 'Could not resend invitation', variant: 'error' });
+    try {
+      const res = await fetch(`/api/rbac/invitations/${invitationId}/resend`, { method: 'POST' });
+      const json = await requireApiSuccess(res, 'Could not resend this invitation. The existing invitation remains valid.');
+      await loadInvitations();
+      toast({ title: typeof json.message === 'string' ? json.message : 'Invitation delivery re-queued', variant: 'success' });
+    } catch (resendError) {
+      const message = resendError instanceof Error ? resendError.message : 'Could not resend this invitation. Retry from this page.';
+      setMutationError(message);
+      toast({ title: message, variant: 'error' });
     }
-    loadInvitations();
   };
 
   const createRole = async () => {
     if (!newRoleName.trim()) return;
-    await fetch('/api/rbac/roles', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newRoleName, description: newRoleDesc, permissions: newRolePerms }),
-    });
-    setNewRoleName('');
-    setNewRoleDesc('');
-    setNewRolePerms([]);
-    setShowAddRole(false);
-    loadRoles();
+    setMutationLoading(true);
+    setMutationError(null);
+    try {
+      const response = await fetch('/api/rbac/roles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newRoleName, description: newRoleDesc, permissions: newRolePerms }),
+      });
+      await requireApiSuccess(response, 'Could not create this role. Your name, description, and permission choices are still here.');
+      await loadRoles();
+      setNewRoleName('');
+      setNewRoleDesc('');
+      setNewRolePerms([]);
+      setShowAddRole(false);
+      toast({ title: 'Role created', variant: 'success' });
+    } catch (createError) {
+      const message = createError instanceof Error ? createError.message : 'Could not create this role. Retry from this page.';
+      setMutationError(message);
+      toast({ title: message, variant: 'error' });
+    } finally {
+      setMutationLoading(false);
+    }
   };
 
   const saveRolePerms = async (roleId: string) => {
-    await fetch('/api/rbac/roles', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: roleId, permissions: editPerms }),
-    });
-    setEditingRole(null);
-    loadRoles();
+    setMutationLoading(true);
+    setMutationError(null);
+    try {
+      const response = await fetch('/api/rbac/roles', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: roleId, permissions: editPerms }),
+      });
+      await requireApiSuccess(response, 'Could not save these permissions. Your permission choices are still selected.');
+      await loadRoles();
+      setEditingRole(null);
+      toast({ title: 'Role permissions saved', variant: 'success' });
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : 'Could not save these permissions. Retry from this page.';
+      setMutationError(message);
+      toast({ title: message, variant: 'error' });
+    } finally {
+      setMutationLoading(false);
+    }
   };
 
   const deleteRole = async (roleId: string) => {
-    await fetch(`/api/rbac/roles?id=${roleId}`, { method: 'DELETE' });
-    loadRoles();
+    setMutationLoading(true);
+    setMutationError(null);
+    try {
+      const response = await fetch(`/api/rbac/roles?id=${roleId}`, { method: 'DELETE' });
+      await requireApiSuccess(response, 'Could not delete this role. It remains available and assigned.');
+      await loadRoles();
+      toast({ title: 'Role deleted', variant: 'success' });
+      setConfirmDeleteRole(null);
+    } catch (deleteError) {
+      const message = deleteError instanceof Error ? deleteError.message : 'Could not delete this role. Retry from this page.';
+      setMutationError(message);
+      toast({ title: message, variant: 'error' });
+    } finally {
+      setMutationLoading(false);
+    }
   };
 
   const togglePerm = (perm: string, perms: string[], setPerms: (p: string[]) => void) => {
     setPerms(perms.includes(perm) ? perms.filter(p => p !== perm) : [...perms, perm]);
   };
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/guild');
-        if (!res.ok) return;
-        const body = await res.json();
-        const cfg = (body?.data ?? body?.config ?? body) as Record<string, unknown>;
-        if (cancelled || !cfg) return;
-        setDirectAssign((cfg.team_direct_assignment_enabled as boolean | undefined) ?? false);
-        setInviteDm((cfg.team_invite_dm_enabled as boolean | undefined) ?? true);
-        setMaxPending((cfg.team_max_pending_invitations as number | undefined) ?? 25);
-        setExpiryMs((cfg.team_invitation_expiry_ms as number | undefined) ?? 259_200_000);
-      } catch {
-        // Non-fatal: the members/roles tabs still work without this card.
-      }
-    })();
-    return () => { cancelled = true; };
+  const loadTeamControls = useCallback(async () => {
+    const response = await fetch('/api/guild');
+    const body = await requireApiSuccess(response, 'Could not read team invitation controls. Retry from this page.');
+    const candidate = body.data ?? body.config ?? body;
+    if (!candidate || typeof candidate !== 'object') {
+      throw new Error('The server returned an invalid team-controls readback. Retry from this page.');
+    }
+    const cfg = candidate as Record<string, unknown>;
+    setDirectAssign(typeof cfg.team_direct_assignment_enabled === 'boolean' ? cfg.team_direct_assignment_enabled : false);
+    setInviteDm(typeof cfg.team_invite_dm_enabled === 'boolean' ? cfg.team_invite_dm_enabled : true);
+    setMaxPending(typeof cfg.team_max_pending_invitations === 'number' ? cfg.team_max_pending_invitations : 25);
+    setExpiryMs(typeof cfg.team_invitation_expiry_ms === 'number' ? cfg.team_invitation_expiry_ms : 259_200_000);
   }, []);
+
+  useEffect(() => {
+    void loadTeamControls().catch((controlsError: unknown) => {
+      setCtrlError(controlsError instanceof Error ? controlsError.message : 'Could not load team invitation controls.');
+    });
+  }, [loadTeamControls]);
 
   const saveTeamControls = async (patch: Record<string, string | number | boolean>) => {
     setCtrlSaving(true);
@@ -265,12 +335,10 @@ export default function TeamSettingsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setCtrlError((body as { error?: string }).error ?? 'Could not save that setting.');
-      }
-    } catch {
-      setCtrlError('Could not reach the server to save that setting.');
+      await requireApiSuccess(res, 'Could not save that setting. Your selected value is still shown; correct it or retry.');
+      await loadTeamControls();
+    } catch (controlsError) {
+      setCtrlError(controlsError instanceof Error ? controlsError.message : 'Could not reach the server to save that setting.');
     } finally {
       setCtrlSaving(false);
     }
@@ -282,6 +350,12 @@ export default function TeamSettingsPage() {
         <h1 className="text-2xl font-bold text-discord-text-primary">Team</h1>
         <p className="mt-1 text-sm text-discord-text-muted">Manage dashboard access with role-based permissions</p>
       </div>
+
+      {mutationError && (
+        <p role="alert" className="rounded-card border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+          {mutationError}
+        </p>
+      )}
 
       {/* How invitations work */}
       <div className="rounded-lg bg-discord-bg-secondary p-4">
@@ -399,13 +473,17 @@ export default function TeamSettingsPage() {
           {showAddMember && (
             <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-3">
               <h3 className="text-sm font-semibold text-discord-text-primary">Add Team Member</h3>
+              <label htmlFor="team-discord-id" className="text-xs text-discord-text-muted">Member Discord ID</label>
               <input
+                id="team-discord-id"
                 value={newDiscordId}
                 onChange={(e) => setNewDiscordId(e.target.value)}
                 placeholder="Discord User ID…"
                 className="w-full rounded-md bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none font-mono"
               />
+              <label htmlFor="team-role" className="text-xs text-discord-text-muted">Dashboard role</label>
               <select
+                id="team-role"
                 value={selectedRoleId}
                 onChange={(e) => setSelectedRoleId(e.target.value)}
                 className="w-full rounded-md bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
@@ -417,6 +495,7 @@ export default function TeamSettingsPage() {
               </select>
               <button
                 onClick={addMember}
+                disabled={mutationLoading || !newDiscordId || !selectedRoleId}
                 className="rounded-md bg-[#FF1493] px-4 py-2 text-sm font-medium text-white hover:bg-[#FF1493]/80 transition-colors"
               >
                 Assign Role
@@ -462,7 +541,12 @@ export default function TeamSettingsPage() {
                         Resend
                       </button>
                       <button
-                        onClick={() => void revokeInvitation(inv.id)}
+                        onClick={() => setConfirmRemoval({
+                          kind: 'invitation',
+                          id: inv.id,
+                          memberId: inv.discord_id,
+                          roleName: inv.dashboard_roles?.name ?? 'selected role',
+                        })}
                         className="text-xs text-discord-text-muted hover:text-red-400 transition-colors"
                         title="Revoke invitation"
                       >
@@ -493,9 +577,14 @@ export default function TeamSettingsPage() {
                             {r.role?.name || 'Unknown'}
                           </span>
                           <button
-                            onClick={() => removeMemberRole(r.assignment_id)}
+                            onClick={() => setConfirmRemoval({
+                              kind: 'assignment',
+                              id: r.assignment_id,
+                              memberId: member.discord_id,
+                              roleName: r.role?.name ?? 'Unknown role',
+                            })}
                             className="text-xs text-discord-text-muted hover:text-red-400 transition-colors"
-                            title="Remove role"
+                            aria-label={`Remove ${r.role?.name ?? 'role'} from member ${member.discord_id}`}
                           >
                             ✕
                           </button>
@@ -526,13 +615,17 @@ export default function TeamSettingsPage() {
           {showAddRole && (
             <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-3">
               <h3 className="text-sm font-semibold text-discord-text-primary">Create Custom Role</h3>
+              <label htmlFor="new-role-name" className="text-xs text-discord-text-muted">Role name</label>
               <input
+                id="new-role-name"
                 value={newRoleName}
                 onChange={(e) => setNewRoleName(e.target.value)}
                 placeholder="Role name…"
                 className="w-full rounded-md bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
               />
+              <label htmlFor="new-role-description" className="text-xs text-discord-text-muted">Role description</label>
               <input
+                id="new-role-description"
                 value={newRoleDesc}
                 onChange={(e) => setNewRoleDesc(e.target.value)}
                 placeholder="Description (optional)…"
@@ -543,6 +636,7 @@ export default function TeamSettingsPage() {
                   <button
                     key={perm}
                     onClick={() => togglePerm(perm, newRolePerms, setNewRolePerms)}
+                    aria-pressed={newRolePerms.includes(perm)}
                     className={`rounded-md px-2 py-1 text-xs transition-colors ${
                       newRolePerms.includes(perm)
                         ? 'bg-[#FF1493]/20 text-[#FF1493]'
@@ -555,6 +649,7 @@ export default function TeamSettingsPage() {
               </div>
               <button
                 onClick={createRole}
+                disabled={mutationLoading || !newRoleName.trim()}
                 className="rounded-md bg-[#FF1493] px-4 py-2 text-sm font-medium text-white hover:bg-[#FF1493]/80 transition-colors"
               >
                 Create
@@ -614,6 +709,7 @@ export default function TeamSettingsPage() {
                       <button
                         key={perm}
                         onClick={() => togglePerm(perm, editPerms, setEditPerms)}
+                        aria-pressed={editPerms.includes(perm)}
                         className={`rounded-md px-2 py-1 text-xs transition-colors ${
                           editPerms.includes(perm)
                             ? 'bg-[#FF1493]/20 text-[#FF1493]'
@@ -626,6 +722,7 @@ export default function TeamSettingsPage() {
                   </div>
                   <button
                     onClick={() => saveRolePerms(role.id)}
+                    disabled={mutationLoading}
                     className="rounded-md bg-discord-success/20 px-3 py-1.5 text-xs font-medium text-discord-success hover:bg-discord-success/30 transition-colors"
                   >
                     Save Permissions
@@ -652,13 +749,28 @@ export default function TeamSettingsPage() {
         description={`Delete role "${confirmDeleteRole?.name}"? Members assigned this role will lose these permissions.`}
         confirmLabel="Delete"
         variant="danger"
-        onConfirm={async () => {
-          if (confirmDeleteRole) {
-            await deleteRole(confirmDeleteRole.id);
-            setConfirmDeleteRole(null);
-          }
+        loading={mutationLoading}
+        onConfirm={() => {
+          if (confirmDeleteRole) return deleteRole(confirmDeleteRole.id);
         }}
-        onCancel={() => setConfirmDeleteRole(null)}
+        onCancel={() => {
+          if (!mutationLoading) setConfirmDeleteRole(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmRemoval !== null}
+        title={confirmRemoval?.kind === 'assignment' ? 'Remove team role' : 'Revoke team invitation'}
+        description={confirmRemoval ? confirmRemoval.kind === 'assignment'
+          ? `Remove “${confirmRemoval.roleName}” from Discord member ${confirmRemoval.memberId}. The member immediately loses every dashboard permission granted only by this role.`
+          : `Revoke the pending “${confirmRemoval.roleName}” invitation for Discord member ${confirmRemoval.memberId}. The invitation link can no longer grant dashboard access.` : undefined}
+        confirmLabel={confirmRemoval?.kind === 'assignment' ? 'Remove role access' : 'Revoke invitation'}
+        variant="danger"
+        loading={mutationLoading}
+        onConfirm={executeRemoval}
+        onCancel={() => {
+          if (!mutationLoading) setConfirmRemoval(null);
+        }}
       />
     </div>
   );
