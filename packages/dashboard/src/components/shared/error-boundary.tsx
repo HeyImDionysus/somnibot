@@ -51,8 +51,12 @@ export class ErrorBoundary extends Component<Props, State> {
       }
 
       return (
-        <div className="flex min-h-[300px] flex-col items-center justify-center rounded-lg border border-discord-danger/30 bg-discord-danger/5 p-8">
-          <AlertTriangle className="mb-4 h-10 w-10 text-discord-danger" />
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="flex min-h-[300px] flex-col items-center justify-center rounded-card border border-discord-danger/30 bg-discord-danger/5 p-8 text-center"
+        >
+          <AlertTriangle aria-hidden="true" className="mb-4 h-10 w-10 text-discord-danger" />
           <h2 className="mb-2 text-lg font-semibold text-discord-text-primary">
             Something went wrong
           </h2>
@@ -61,14 +65,15 @@ export class ErrorBoundary extends Component<Props, State> {
               ? `The ${this.props.section} section encountered an error.`
               : 'This section encountered an error.'}
           </p>
-          <p className="mb-4 max-w-md text-center text-xs text-discord-text-muted/70">
-            {this.state.error?.message || 'An unexpected error occurred.'}
+          <p className="mb-4 max-w-md text-xs text-discord-text-muted/70">
+            Retry the section. If it fails again, reload the dashboard and check diagnostics.
           </p>
           <button
+            type="button"
             onClick={this.handleRetry}
             className="flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-colors"
           >
-            <RefreshCw size={14} />
+            <RefreshCw aria-hidden="true" size={14} />
             Retry
           </button>
         </div>

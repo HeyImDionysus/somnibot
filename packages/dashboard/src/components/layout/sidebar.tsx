@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useState, useCallback, type ComponentType } from 'react';
+import { useEffect, useRef, useState, useCallback, type ComponentType } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { GuildSelector } from '@/components/guild-selector';
 import {
@@ -46,6 +46,8 @@ import {
   History,
   UserCog,
   ChevronDown,
+  Menu,
+  X,
   Coins,
   Store,
   Hammer,
@@ -258,10 +260,33 @@ export function Sidebar() {
   const pathname = usePathname();
   const [user, setUser] = useState<UserInfo | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     setCollapsed(loadCollapsed());
   }, []);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setMobileOpen(false);
+      requestAnimationFrame(() => mobileTriggerRef.current?.focus());
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [mobileOpen]);
 
   useEffect(() => {
     (async () => {
@@ -307,7 +332,50 @@ export function Sidebar() {
   );
 
   return (
-    <aside className="flex h-screen w-60 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary">
+    <>
+      <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between border-b border-discord-border-subtle bg-discord-bg-secondary px-3 md:hidden">
+        <div className="flex items-center gap-2.5">
+          <Image
+            src="/somnibot-logo.png"
+            alt=""
+            width={36}
+            height={36}
+            className="h-9 w-9 rounded-input object-cover ring-1 ring-white/10"
+          />
+          <span className="text-base font-medium text-discord-text-primary">SomniBot</span>
+        </div>
+        <button
+          ref={mobileTriggerRef}
+          type="button"
+          aria-label={mobileOpen ? 'Close dashboard navigation' : 'Open dashboard navigation'}
+          aria-expanded={mobileOpen}
+          aria-controls="dashboard-navigation"
+          onClick={() => setMobileOpen((open) => !open)}
+          className="inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-secondary transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary"
+        >
+          {mobileOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
+        </button>
+      </header>
+
+      {mobileOpen ? (
+        <button
+          type="button"
+          aria-label="Close dashboard navigation"
+          onClick={() => {
+            setMobileOpen(false);
+            requestAnimationFrame(() => mobileTriggerRef.current?.focus());
+          }}
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px] md:hidden"
+        />
+      ) : null}
+
+      <aside
+        id="dashboard-navigation"
+        className={cn(
+          'fixed inset-y-0 left-0 z-50 flex h-[100dvh] w-60 shrink-0 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary transition-transform md:static md:z-auto md:translate-x-0',
+          mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full md:visible',
+        )}
+      >
       {/* Brand */}
       <div className="flex h-14 items-center gap-2.5 border-b border-discord-border-subtle px-3">
         <div className="h-9 w-9 shrink-0 overflow-hidden rounded-xl ring-1 ring-white/10">
@@ -320,6 +388,17 @@ export function Sidebar() {
           />
         </div>
         <span className="text-base font-medium text-discord-text-primary">SomniBot</span>
+        <button
+          type="button"
+          aria-label="Close dashboard navigation"
+          onClick={() => {
+            setMobileOpen(false);
+            requestAnimationFrame(() => mobileTriggerRef.current?.focus());
+          }}
+          className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-muted transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary md:hidden"
+        >
+          <X size={20} aria-hidden="true" />
+        </button>
       </div>
 
       {/* Guild Selector (multi-guild — V53 Phase 4) */}
@@ -327,7 +406,7 @@ export function Sidebar() {
 
       {/* Navigation */}
       <SidebarBadgesProvider>
-      <nav className="flex-1 overflow-y-auto px-2 py-3">
+      <nav aria-label="Dashboard navigation" className="flex-1 overflow-y-auto px-2 py-3">
         {navigation.map((group) => {
           const isCollapsed = collapsed[group.id] && !group.alwaysOpen && !groupHasActive(group);
 
@@ -340,12 +419,16 @@ export function Sidebar() {
                 </h3>
               ) : (
                 <button
+                  type="button"
                   onClick={() => toggleGroup(group.id)}
+                  aria-expanded={!isCollapsed}
+                  aria-controls={`${group.id}-navigation-group`}
                   className="mb-1.5 flex w-full items-center justify-between px-2.5 text-[11px] font-medium uppercase tracking-wide text-discord-text-muted hover:text-discord-text-secondary transition-colors"
                 >
                   <span>{group.title}</span>
                   <ChevronDown
                     size={12}
+                    aria-hidden="true"
                     className={cn(
                       'transition-transform duration-200',
                       isCollapsed && '-rotate-90',
@@ -356,6 +439,7 @@ export function Sidebar() {
 
               {/* Items — animate collapse */}
               <div
+                id={`${group.id}-navigation-group`}
                 className={cn(
                   'overflow-hidden transition-all duration-200',
                   // The max-height is only an animation device for the collapse
@@ -378,8 +462,15 @@ export function Sidebar() {
                       key={item.href}
                       href={isLocked ? '#' : item.href}
                       className={navRowClass(isActive, isLocked)}
-                      onClick={isLocked ? (e) => e.preventDefault() : undefined}
+                      onClick={(event) => {
+                        if (isLocked) {
+                          event.preventDefault();
+                          return;
+                        }
+                        setMobileOpen(false);
+                      }}
                       aria-disabled={isLocked}
+                      aria-current={isActive && !isLocked ? 'page' : undefined}
                     >
                       <Icon
                         size={18}
@@ -453,6 +544,7 @@ export function Sidebar() {
           </div>
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }
