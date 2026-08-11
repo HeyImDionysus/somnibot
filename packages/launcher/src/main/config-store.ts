@@ -506,7 +506,6 @@ export function clearConfig(): void {
  */
 export function buildEnvVars(
   config: LauncherConfig,
-  sessionToken: string,
 ): Record<string, string> {
   const paypalApiBase = config.paypalSandbox
     ? 'https://api-m.sandbox.paypal.com'
@@ -531,12 +530,6 @@ export function buildEnvVars(
     // Supabase — dashboard format
     NEXT_PUBLIC_SUPABASE_URL: config.supabaseUrl,
     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: config.supabasePublishableKey,
-
-    // Dashboard local-mode auth
-    // V10 Audit §12: Pass token via file to avoid /proc/environ exposure.
-    // The dashboard reads SESSION_TOKEN_FILE in instrumentation.ts.
-    // Fall back to env var for backward compatibility.
-    SESSION_TOKEN: sessionToken,
 
     // Security — reuse the portable instance generation across local restarts
     // and VPS handoffs. The fallback is only for legacy direct callers; normal

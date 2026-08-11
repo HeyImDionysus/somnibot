@@ -230,7 +230,6 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('const preparedSecrets = ensurePersistedVpsSecrets(config);');
     expect(main).toContain('saveConfig(preparedSecrets.patch);');
     expect(main).toContain('setLavalinkPassword(runtimeConfig.vpsLavalinkPassword);');
-    expect(main).toContain('buildEnvVars(runtimeConfig, sessionToken);');
     expect(configStore).toContain('CSRF_SECRET: config.vpsCsrfSecret || randomBytes(32)');
     expect(configStore).toContain('NEXTAUTH_SECRET: config.vpsNextAuthSecret || randomBytes(32)');
     expect(configStore).toContain('WEBHOOK_REPLAY_SECRET: config.vpsWebhookReplaySecret || randomBytes(32)');

@@ -902,9 +902,9 @@ async function startLocalStack(
   });
 
   sessionToken = crypto.randomBytes(32).toString('hex');
-  const envVars = buildEnvVars(runtimeConfig, sessionToken);
+  const envVars = buildEnvVars(runtimeConfig);
   if (cancelled()) return cancelAndStop();
-  await startAll(envVars);
+  await startAll(envVars, sessionToken);
   if (cancelled()) return cancelAndStop();
   lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(runtimeConfig);
 

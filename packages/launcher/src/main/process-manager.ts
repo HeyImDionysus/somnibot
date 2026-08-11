@@ -11,12 +11,13 @@
  * - Lavalink status included in getStatus()
  */
 
-import { execFile, fork, type ChildProcess } from 'node:child_process';
+import { execFile, execFileSync, fork, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
@@ -118,6 +119,8 @@ const recoveryState: Record<ManagedService, RecoveryState> = {
 };
 let desiredRunning = false;
 let lastStartEnv: Record<string, string> | null = null;
+let lastStartSessionToken: string | null = null;
+let dashboardSessionTokenFile: string | null = null;
 let stopPromise: Promise<void> | null = null;
 
 /**
@@ -176,7 +179,7 @@ function markServiceStable(service: ManagedService, launchedProcess: ChildProces
 
 function scheduleRecovery(service: ManagedService, reason: string): void {
   const state = recoveryState[service];
-  if (!desiredRunning || !lastStartEnv || state.restartTimer || activeProcess(service)) return;
+  if (!desiredRunning || !lastStartEnv || !lastStartSessionToken || state.restartTimer || activeProcess(service)) return;
 
   if (state.attempts >= PROCESS_RESTART_MAX_ATTEMPTS) {
     if (service === 'bot') botStatus = 'error';
@@ -190,15 +193,27 @@ function scheduleRecovery(service: ManagedService, reason: string): void {
   state.attempts += 1;
   const attempt = state.attempts;
   const delayMs = processRestartDelayMs(attempt);
+  const recoveryEnv = lastStartEnv;
+  const recoverySessionToken = lastStartSessionToken;
   broadcastStatus({
     error: `${service === 'bot' ? 'Bot' : 'Dashboard'} stopped unexpectedly. Restarting in ${Math.ceil(delayMs / 1_000)}s (attempt ${attempt}/${PROCESS_RESTART_MAX_ATTEMPTS}). ${reason}`,
   });
 
   state.restartTimer = setTimeout(() => {
     state.restartTimer = null;
-    if (!desiredRunning || !lastStartEnv || activeProcess(service)) return;
-    if (service === 'bot') startBotProcess(lastStartEnv);
-    else startDashboardProcess(lastStartEnv);
+    if (!desiredRunning || activeProcess(service)) return;
+    try {
+      if (service === 'bot') startBotProcess(recoveryEnv);
+      else startDashboardProcess(recoveryEnv, recoverySessionToken);
+    } catch (error) {
+      if (service === 'bot') botStatus = 'error';
+      else dashboardStatus = 'error';
+      const detail = error instanceof Error ? error.message : 'unknown error';
+      broadcastStatus({
+        error: `${service === 'bot' ? 'Bot' : 'Dashboard'} restart failed: ${detail}`,
+      });
+      scheduleRecovery(service, `${service === 'bot' ? 'Bot' : 'Dashboard'} restart failed: ${detail}`);
+    }
   }, delayMs);
   state.restartTimer.unref?.();
 }
@@ -579,8 +594,10 @@ function startBotProcess(envVars: Record<string, string>): void {
 
   // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
   // Avoids leaking parent-process env (cloud provider secrets, etc.) to children.
+  const { SESSION_TOKEN: ignoredSessionToken, ...botEnvVars } = envVars;
+  void ignoredSessionToken;
   botProcess = fork(entryPath, [], {
-    env: { ...safeParentEnv(), ...envVars, MIGRATIONS_DIR: getMigrationsDir() },
+    env: { ...safeParentEnv(), ...botEnvVars, MIGRATIONS_DIR: getMigrationsDir() },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });
@@ -705,38 +722,74 @@ function startBotProcess(envVars: Record<string, string>): void {
 /*  Dashboard process                                                  */
 /* ------------------------------------------------------------------ */
 
-function startDashboardProcess(envVars: Record<string, string>): void {
+export function createDashboardSessionTokenFile(sessionToken: string): string {
+  if (!sessionToken) {
+    throw new Error('Dashboard session-token file could not be created.');
+  }
+
+  const tokenDir = path.join(os.tmpdir(), 'somnibot-launcher');
+  const tokenFile = path.join(tokenDir, `session-${randomUUID()}.tok`);
+  try {
+    fs.mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(tokenDir, 0o700);
+    fs.writeFileSync(tokenFile, sessionToken, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    if (process.platform === 'win32') {
+      const username = process.env.USERNAME;
+      if (!username) throw new Error('Windows username is unavailable.');
+      execFileSync('icacls', [
+        tokenFile,
+        '/inheritance:r',
+        '/grant:r', username + ':(R,W)',
+      ], { stdio: 'ignore', windowsHide: true });
+    }
+    return tokenFile;
+  } catch {
+    try {
+      fs.rmSync(tokenFile, { force: true });
+    } catch {
+      console.warn('[ProcessManager] Could not remove an incomplete dashboard session-token file.');
+    }
+    throw new Error('Dashboard session-token file could not be created.');
+  }
+}
+
+function removeDashboardSessionTokenFile(): void {
+  const tokenFile = dashboardSessionTokenFile;
+  dashboardSessionTokenFile = null;
+  if (!tokenFile) return;
+  try {
+    fs.rmSync(tokenFile, { force: true });
+  } catch {
+    console.warn('[ProcessManager] Could not remove a dashboard session-token file.');
+  }
+}
+
+function startDashboardProcess(envVars: Record<string, string>, sessionToken: string): void {
   const entryPath = getDashboardEntryPath();
+  const tokenFile = createDashboardSessionTokenFile(sessionToken);
+  dashboardSessionTokenFile = tokenFile;
   dashboardStatus = 'starting';
   broadcastStatus();
 
-  // V10 Audit §12: Write SESSION_TOKEN to a temp file with restrictive
-  // permissions instead of passing it solely via env. The dashboard reads
-  // the file path from SESSION_TOKEN_FILE in instrumentation.ts and deletes
-  // the file after reading. The env var is still set as a fallback.
+  const { SESSION_TOKEN: ignoredSessionToken, ...dashboardEnvVars } = envVars;
+  void ignoredSessionToken;
   const dashEnv: Record<string, string> = {
     ...safeParentEnv(),
-    ...envVars,
+    ...dashboardEnvVars,
     SOMNIBOT_DASHBOARD_LOCAL_MODE: '1',
+    SESSION_TOKEN_FILE: tokenFile,
   };
-  if (envVars.SESSION_TOKEN) {
-    try {
-      const tokenDir = path.join(os.tmpdir(), 'somnibot-launcher');
-      fs.mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
-      const tokenFile = path.join(tokenDir, `session-${Date.now()}.tok`);
-      fs.writeFileSync(tokenFile, envVars.SESSION_TOKEN, { mode: 0o600 });
-      dashEnv.SESSION_TOKEN_FILE = tokenFile;
-    } catch {
-      // Fall back to env-only if temp file fails (e.g., Windows FS quirks)
-    }
-  }
-
   // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
-  dashboardProcess = fork(entryPath, [], {
-    env: dashEnv,
-    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-    silent: true,
-  });
+  try {
+    dashboardProcess = fork(entryPath, [], {
+      env: dashEnv,
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      silent: true,
+    });
+  } catch (error) {
+    removeDashboardSessionTokenFile();
+    throw error;
+  }
   const launchedDashboardProcess = dashboardProcess;
 
   // Persist PID for stale-process cleanup
@@ -781,6 +834,7 @@ function startDashboardProcess(envVars: Record<string, string>): void {
     const state = recoveryState.dashboard;
     if (state.stableTimer) clearTimeout(state.stableTimer);
     state.stableTimer = null;
+    removeDashboardSessionTokenFile();
     dashboardStatus = 'offline';
     dashboardProcess = null;
     persistPid('dashboard', null);
@@ -804,6 +858,7 @@ function startDashboardProcess(envVars: Record<string, string>): void {
     const state = recoveryState.dashboard;
     if (state.stableTimer) clearTimeout(state.stableTimer);
     state.stableTimer = null;
+    removeDashboardSessionTokenFile();
     dashboardStatus = 'error';
     dashboardProcess = null;
     persistPid('dashboard', null);
@@ -865,16 +920,27 @@ function persistPid(name: 'bot' | 'dashboard', pid: number | null): void {
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
-export async function startAll(envVars: Record<string, string>): Promise<void> {
+export async function startAll(envVars: Record<string, string>, sessionToken: string): Promise<void> {
   if (botProcess || dashboardProcess) {
     await stopAll();
   }
 
+  const { SESSION_TOKEN: ignoredSessionToken, ...serviceEnv } = envVars;
+  void ignoredSessionToken;
   clearRecoveryState(true);
   desiredRunning = true;
-  lastStartEnv = { ...envVars };
-  startBotProcess(envVars);
-  startDashboardProcess(envVars);
+  lastStartEnv = { ...serviceEnv };
+  lastStartSessionToken = sessionToken;
+  try {
+    startDashboardProcess(serviceEnv, sessionToken);
+    startBotProcess(serviceEnv);
+  } catch (error) {
+    desiredRunning = false;
+    lastStartEnv = null;
+    lastStartSessionToken = null;
+    await stopAll();
+    throw error;
+  }
   startHeartbeatMonitor();
 }
 
@@ -883,6 +949,8 @@ export function stopAll(): Promise<void> {
 
   desiredRunning = false;
   lastStartEnv = null;
+  lastStartSessionToken = null;
+  removeDashboardSessionTokenFile();
   clearRecoveryState(true);
   stopHeartbeatMonitor();
   clearBotReadyTimeout();
