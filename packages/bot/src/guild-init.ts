@@ -167,6 +167,35 @@ export function initializeMarketFeature(
   }
 }
 
+export function initializeLotteryFeature(
+  ctx: GuildContext,
+  client: SomniClient,
+  allCommands: RESTPostAPIApplicationCommandsJSONBody[],
+  scheduleDraws: boolean,
+): void {
+  const manager = new LotteryManager(ctx.supabase, client);
+  registerLotteryManager(manager, ctx.guildId);
+  ctx.setManager('lottery', manager);
+  if (scheduleDraws) manager.scheduleLotteryDraws(ctx.guildId);
+  const commands = buildLotteryCommands();
+  for (const command of Object.values(commands)) {
+    allCommands.push(command.toJSON());
+  }
+}
+
+export function initializePollsFeature(
+  ctx: GuildContext,
+  allCommands: RESTPostAPIApplicationCommandsJSONBody[],
+): void {
+  const manager = new PollsManager(ctx.supabase);
+  registerPollsManager(manager, ctx.guildId);
+  ctx.setManager('polls', manager);
+  const commands = buildPollCommands();
+  for (const command of Object.values(commands)) {
+    allCommands.push(command.toJSON());
+  }
+}
+
 export function getCommunityChannelMappings(
   guild: Pick<Guild, 'rulesChannelId' | 'publicUpdatesChannelId' | 'safetyAlertsChannelId'> & {
     channels: { cache: { has(discordId: string): boolean } };
@@ -523,19 +552,8 @@ export async function initGuildFeatures(
         const cmds = buildGameCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
-      if (guildCfg.economy_lottery_enabled) {
-        const mgr = new LotteryManager(supabase, client);
-        registerLotteryManager(mgr, guildId); ctx.setManager('lottery', mgr);
-        mgr.scheduleLotteryDraws(guildId);
-        const cmds = buildLotteryCommands();
-        for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
-      }
-      if (guildCfg.polls_enabled || guildCfg.predictions_enabled) {
-        const mgr = new PollsManager(supabase);
-        registerPollsManager(mgr, guildId); ctx.setManager('polls', mgr);
-        const cmds = buildPollCommands();
-        for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
-      }
+      initializeLotteryFeature(ctx, client, allCommands, guildCfg.economy_lottery_enabled);
+      initializePollsFeature(ctx, allCommands);
       if (guildCfg.economy_pets_enabled) {
         const mgr = new PetsManager(supabase, client, valkey);
         registerPetsManager(mgr, guildId); ctx.setManager('pets', mgr);

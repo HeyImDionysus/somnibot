@@ -33,7 +33,16 @@ vi.mock('../features/tickets/index.js', () => ({}));
 vi.mock('../features/music/index.js', () => ({}));
 vi.mock('../features/welcome/index.js', () => ({}));
 vi.mock('../features/adventures/index.js', () => ({ unregisterAdventureManager: vi.fn() }));
-vi.mock('../features/polls/index.js', () => ({ unregisterPollsManager: vi.fn() }));
+const pollsRegistration = vi.hoisted(() => ({ register: vi.fn() }));
+vi.mock('../features/polls/index.js', () => ({
+  PollsManager: class {},
+  buildPollCommands: () => ({
+    poll: { toJSON: () => ({ name: 'poll', description: 'Create and manage polls' }) },
+    predict: { toJSON: () => ({ name: 'predict', description: 'Create and manage predictions' }) },
+  }),
+  registerPollsManager: pollsRegistration.register,
+  unregisterPollsManager: vi.fn(),
+}));
 vi.mock('../features/heist/index.js', () => ({ unregisterHeistManager: vi.fn() }));
 vi.mock('../features/farming/index.js', () => ({ unregisterFarmingManager: vi.fn() }));
 const marketRegistration = vi.hoisted(() => ({
@@ -52,7 +61,15 @@ vi.mock('../features/gathering/index.js', () => ({ unregisterGatheringManager: v
 vi.mock('../features/giveaways/index.js', () => ({}));
 vi.mock('../features/pets/index.js', () => ({ unregisterPetsManager: vi.fn() }));
 vi.mock('../features/fishing/index.js', () => ({ unregisterFishingManager: vi.fn() }));
-vi.mock('../features/lottery/index.js', () => ({ unregisterLotteryManager: vi.fn() }));
+const lotteryRegistration = vi.hoisted(() => ({ register: vi.fn(), schedule: vi.fn() }));
+vi.mock('../features/lottery/index.js', () => ({
+  LotteryManager: class { scheduleLotteryDraws = lotteryRegistration.schedule; },
+  buildLotteryCommands: () => ({
+    lottery: { toJSON: () => ({ name: 'lottery', description: 'Buy lottery tickets' }) },
+  }),
+  registerLotteryManager: lotteryRegistration.register,
+  unregisterLotteryManager: vi.fn(),
+}));
 vi.mock('../features/games/index.js', () => ({ unregisterGamesManager: vi.fn() }));
 vi.mock('../features/commerce/index.js', () => ({}));
 vi.mock('../features/achievements/index.js', () => ({ unregisterAchievementsManager: vi.fn() }));
@@ -95,7 +112,13 @@ vi.mock('../services/alert-service.js', () => ({
   AlertService: class { send = vi.fn(); },
 }));
 
-import { destroyGuildServices, getCommunityChannelMappings, initializeMarketFeature } from '../guild-init.js';
+import {
+  destroyGuildServices,
+  getCommunityChannelMappings,
+  initializeLotteryFeature,
+  initializeMarketFeature,
+  initializePollsFeature,
+} from '../guild-init.js';
 import { unregisterEconomyManager } from '../features/economy/index.js';
 
 describe('guild-init', () => {
@@ -120,6 +143,45 @@ describe('guild-init', () => {
     expect(marketRegistration.register).toHaveBeenCalledOnce();
     expect(ctx.setManager).toHaveBeenCalledWith('market', expect.anything());
     expect(commands).toContainEqual(expect.objectContaining({ name: 'market' }));
+  });
+
+  it('registers /lottery while disabled without starting its draw producer', () => {
+    const ctx = {
+      guildId: 'guild-1',
+      supabase: {},
+      setManager: vi.fn(),
+    };
+    const commands: Array<{ name: string }> = [];
+
+    initializeLotteryFeature(
+      ctx as unknown as Parameters<typeof initializeLotteryFeature>[0],
+      {} as Parameters<typeof initializeLotteryFeature>[1],
+      commands as unknown as Parameters<typeof initializeLotteryFeature>[2],
+      false,
+    );
+
+    expect(lotteryRegistration.register).toHaveBeenCalledOnce();
+    expect(ctx.setManager).toHaveBeenCalledWith('lottery', expect.anything());
+    expect(lotteryRegistration.schedule).not.toHaveBeenCalled();
+    expect(commands).toContainEqual(expect.objectContaining({ name: 'lottery' }));
+  });
+
+  it('registers /poll and /predict while both features are disabled', () => {
+    const ctx = {
+      guildId: 'guild-1',
+      supabase: {},
+      setManager: vi.fn(),
+    };
+    const commands: Array<{ name: string }> = [];
+
+    initializePollsFeature(
+      ctx as unknown as Parameters<typeof initializePollsFeature>[0],
+      commands as unknown as Parameters<typeof initializePollsFeature>[1],
+    );
+
+    expect(pollsRegistration.register).toHaveBeenCalledOnce();
+    expect(ctx.setManager).toHaveBeenCalledWith('polls', expect.anything());
+    expect(commands.map((command) => command.name)).toEqual(['poll', 'predict']);
   });
 
   it('destroyGuildServices works on empty context (no services)', async () => {
