@@ -149,8 +149,21 @@
 
         <div id="vps-runtime-fields" class="runtime-fields hidden">
           <div class="field">
+            <label for="vpsPublicAccessMode">Public access</label>
+            <select id="vpsPublicAccessMode">
+              <option value="domain">Conventional domain + Caddy</option>
+              <option value="tailscale-funnel">Tailscale Funnel (no domain purchase)</option>
+            </select>
+          </div>
+          <div class="field" id="vps-domain-field">
             <label for="vpsDomain">VPS Domain <span class="req">*</span></label>
             <input type="text" id="vpsDomain" placeholder="somnibot.example.com" autocomplete="off" inputmode="url" />
+          </div>
+          <div class="field hidden" id="vps-tailscale-funnel-field">
+            <label for="vpsTailscaleFunnelUrl">Tailscale Funnel URL <span class="req">*</span></label>
+            <input type="url" id="vpsTailscaleFunnelUrl" placeholder="https://somnibot-vps.example.ts.net" autocomplete="off" inputmode="url" />
+            <p class="runtime-hint vps-funnel-url-preview">Current Funnel base: <strong id="vps-funnel-url-preview">Not set yet</strong></p>
+            <p class="runtime-hint">Use the exact HTTPS *.ts.net URL. SSH preflight checks remote install/login/policy/Funnel status. Login stays a bounded manual step; the launcher never asks for or sends a Tailscale auth key to the VPS.</p>
           </div>
           <div class="field-row">
             <div class="field">

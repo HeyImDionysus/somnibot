@@ -67,6 +67,23 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('inputmode="url"');
   });
 
+  it('wires the VPS public-edge mode and Funnel URL through machine-consumed field ids', () => {
+    const html = readSourceFile('renderer/index.html');
+    const renderer = readSourceFile('renderer/renderer.js');
+    const styles = readSourceFile('renderer/styles.css');
+
+    expect(html).toContain('id="vpsPublicAccessMode"');
+    expect(html).toContain('value="tailscale-funnel"');
+    expect(html).toContain('id="vpsTailscaleFunnelUrl"');
+    expect(html).toContain('id="vps-funnel-url-preview"');
+    expect(styles).toContain('@media (max-width: 480px)');
+    expect(styles).toContain('padding: 16px 56px 16px 16px');
+    expect(renderer).toContain("vpsPublicAccessMode: $('vpsPublicAccessMode')");
+    expect(renderer).toContain("vpsTailscaleFunnelUrl: $('vpsTailscaleFunnelUrl')");
+    expect(renderer).toContain('updateVpsFunnelUrlPreview()');
+    expect(styles).toContain('overflow-wrap: anywhere');
+  });
+
   it('presents the regular-local callback URL as auto-filled instead of required manual setup', () => {
     const html = readSourceFile('renderer/index.html');
     const renderer = readSourceFile('renderer/renderer.js');
@@ -79,7 +96,9 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('tailscaleReadinessState: runtimeMode === \'regular-local\' ? latestTailscaleReadiness?.state : undefined');
     expect(renderer).toContain('tailscaleAuthKeyReady: fields.tailscaleAuthKey.value.trim().length > 0');
     expect(renderer).toContain('latestTailscaleReadiness = readiness;');
-    expect(renderer).toContain('const firstSetupField = runtimeMode === \'vps\' ? runtimeFields.vpsDomain : fields.discordToken;');
+    expect(renderer).toContain("runtimeFields.vpsPublicAccessMode.value === 'tailscale-funnel'");
+    expect(renderer).toContain('? runtimeFields.vpsTailscaleFunnelUrl');
+    expect(renderer).toContain(': runtimeFields.vpsDomain');
   });
 
   it('keeps Supabase project discovery in the main process and applies only readiness to the renderer', () => {
@@ -433,6 +452,11 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('vpsSshHost: input.vpsSshHost ?? config.vpsSshHost');
     expect(main).toContain('vpsSshUser: input.vpsSshUser ?? config.vpsSshUser');
     expect(main).toContain('vpsDeployPath: input.vpsDeployPath ?? config.vpsDeployPath');
+    expect(main).toContain("'vpsPublicAccessMode'");
+    expect(main).toContain("'vpsTailscaleFunnelUrl'");
+    expect(main).toContain('vpsPublicAccessMode: config.vpsPublicAccessMode');
+    expect(main).toContain('vpsTailscaleFunnelUrl: config.vpsTailscaleFunnelUrl');
+    expect(main).toContain("sanitized.vpsTailscaleFunnelVerifiedUrl = ''");
     expect(main).toContain('credentialReady: input.credentialReady ?? Boolean(');
     expect(main).toContain('providerValidation: input.providerValidation');
     expect(main).toContain('paypalReady: input.paypalReady ?? Boolean(');

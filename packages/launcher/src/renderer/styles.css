@@ -1260,6 +1260,26 @@ footer {
   color: var(--text-secondary);
 }
 
+.vps-funnel-url-preview strong {
+  color: var(--text-secondary);
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  main {
+    padding: 16px 56px 16px 16px;
+  }
+
+  .runtime-choice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .field-row {
+    flex-direction: column;
+  }
+}
+
 .log-panel {
   position: fixed;
   bottom: 0;

@@ -32,7 +32,9 @@ const fields = {
 
 const runtimeFields = {
   publicCallbackBaseUrl: $('publicCallbackBaseUrl'),
+  vpsPublicAccessMode: $('vpsPublicAccessMode'),
   vpsDomain: $('vpsDomain'),
+  vpsTailscaleFunnelUrl: $('vpsTailscaleFunnelUrl'),
   vpsSshHost: $('vpsSshHost'),
   vpsSshUser: $('vpsSshUser'),
   vpsDeployPath: $('vpsDeployPath'),
@@ -77,6 +79,9 @@ const runtimeModeLabel = $('runtime-mode-label');
 const runtimeSection = $('runtime-section');
 const regularRuntimeFields = $('regular-runtime-fields');
 const vpsRuntimeFields = $('vps-runtime-fields');
+const vpsDomainField = $('vps-domain-field');
+const vpsTailscaleFunnelField = $('vps-tailscale-funnel-field');
+const vpsFunnelUrlPreview = $('vps-funnel-url-preview');
 const runtimeSteps = $('runtime-steps');
 const summaryDashboardLabel = $('summary-dashboard-label');
 const summaryPublicCallbackLabel = $('summary-public-callback-label');
@@ -163,6 +168,7 @@ function applyConfigToForm(config) {
     if (config[key]) input.value = config[key];
   }
   tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
+  setVpsPublicAccessMode(config.vpsPublicAccessMode, { refresh: false });
   setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
   updateDiscordInviteButton();
   updatePayPalWebhookButton();
@@ -239,6 +245,10 @@ async function init() {
         tailscalePublicCallbackBaseUrl = input.value.trim();
         latestCallbackProbe = null;
       }
+      if (input === runtimeFields.vpsPublicAccessMode) {
+        setVpsPublicAccessMode(input.value, { refresh: false });
+      }
+      if (input === runtimeFields.vpsTailscaleFunnelUrl) updateVpsFunnelUrlPreview();
       latestPayPalWebhook = null;
       latestVpsHealthProof = null;
       updatePayPalWebhookButton();
@@ -406,6 +416,20 @@ function setRuntimeMode(mode, options = {}) {
     saveConfig();
     refreshSetupStatus();
   }
+}
+
+function setVpsPublicAccessMode(mode, options = {}) {
+  const selected = mode === 'tailscale-funnel' ? 'tailscale-funnel' : 'domain';
+  runtimeFields.vpsPublicAccessMode.value = selected;
+  const usesFunnel = selected === 'tailscale-funnel';
+  vpsDomainField.classList.toggle('hidden', usesFunnel);
+  vpsTailscaleFunnelField.classList.toggle('hidden', !usesFunnel);
+  updateVpsFunnelUrlPreview();
+  if (options.refresh !== false) refreshSetupStatus();
+}
+
+function updateVpsFunnelUrlPreview() {
+  vpsFunnelUrlPreview.textContent = runtimeFields.vpsTailscaleFunnelUrl.value.trim() || 'Not set yet';
 }
 
 async function refreshSetupStatus(options = {}) {
@@ -631,7 +655,9 @@ function renderDeploymentPlan(plan, isVpsStatus) {
         '</div>' +
         '<span class="deployment-plan-badge blocked">Blocked</span>' +
       '</div>' +
-      `<div class="deployment-plan-section"><h4>Blocked by</h4>${reasons}</div>`
+      `<div class="deployment-plan-section"><h4>Blocked by</h4>${reasons}</div>` +
+      renderDeploymentActions(plan, true) +
+      renderPreflightResult(vpsPreflightResult)
     );
     return;
   }
@@ -643,14 +669,15 @@ function renderDeploymentPlan(plan, isVpsStatus) {
   const warnings = plan.warnings.length > 0
     ? `<div class="deployment-plan-section warning"><h4>Warnings</h4>${renderList(plan.warnings)}</div>`
     : '';
+  const funnelMode = target.publicAccessMode === 'tailscale-funnel';
 
   vpsDeploymentPlan.innerHTML = (
     '<div class="deployment-plan-header">' +
       '<div>' +
         '<h3>VPS deployment plan</h3>' +
-      '<p>Review the plan, run the read-only SSH/prerequisite preflight, then use explicit approval before runtime installation, checkout, credential, or container changes.</p>' +
+      `<p>${funnelMode ? 'The Funnel mapping is verified, but the deployment is not ready until public HTTPS health proof passes. ' : ''}Review the plan, run the read-only SSH/prerequisite preflight, then use explicit approval before runtime installation, checkout, credential, or container changes.</p>` +
       '</div>' +
-      '<span class="deployment-plan-badge ready">Ready</span>' +
+      `<span class="deployment-plan-badge ready">${funnelMode ? 'Plan reviewable' : 'Ready'}</span>` +
     '</div>' +
     renderDeploymentActions(plan) +
     renderPreflightResult(vpsPreflightResult) +
@@ -673,12 +700,12 @@ function renderDeploymentPlan(plan, isVpsStatus) {
       `${renderPlanRows(plan.serviceLayout.map(service => [service.name, `${service.role} (${service.exposure}; ${service.endpoint})`]))}` +
     '</div>' +
     '<div class="deployment-plan-section">' +
-      '<h4>Caddy/reverse proxy</h4>' +
+      (reverseProxy ? '<h4>Caddy/reverse proxy</h4>' : '<h4>Tailscale Funnel edge</h4>') +
       `${reverseProxy ? renderPlanRows([
         ['Caddyfile', reverseProxy.filePath],
         ['Public ports', reverseProxy.publicPorts.join(', ')],
         ['Upstream', reverseProxy.upstream],
-      ]) + renderList(reverseProxy.outline) : ''}` +
+      ]) + renderList(reverseProxy.outline) : '<p>Bundled Caddy is disabled. The dashboard is published only on 127.0.0.1:3456 for the host Tailscale Funnel.</p>'}` +
     '</div>' +
     '<div class="deployment-plan-section">' +
       '<h4>Service commands</h4>' +
@@ -793,20 +820,24 @@ function formatCompletionStatus(status) {
   return labels[status] || status;
 }
 
-function renderDeploymentActions(plan) {
-  const disabled = isVpsDeploymentActionRunning || !plan.canApprove;
-  const disabledAttr = disabled ? ' disabled' : '';
+function renderDeploymentActions(plan, preflightOnly = false) {
+  const deployDisabled = isVpsDeploymentActionRunning || !plan.canApprove;
+  const preflightDisabled = isVpsDeploymentActionRunning || !runtimeFields.vpsSshHost.value.trim()
+    || !runtimeFields.vpsSshUser.value.trim() || !runtimeFields.vpsDeployPath.value.trim();
+  const deployDisabledAttr = deployDisabled ? ' disabled' : '';
+  const preflightDisabledAttr = preflightDisabled ? ' disabled' : '';
   const preflightLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Run SSH Preflight';
   const dryRunLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Dry Run';
   const liveLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Run Deployment';
 
   return (
     '<div class="deployment-plan-actions">' +
-      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="preflight"${disabledAttr}>${escapeHtml(preflightLabel)}</button>` +
-      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="dry-run"${disabledAttr}>${escapeHtml(dryRunLabel)}</button>` +
-      `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="run-live"${disabledAttr}>${escapeHtml(liveLabel)}</button>` +
-      '<label class="deployment-rollback-sha"><span>Last-good commit SHA</span><input type="text" data-vps-last-good-commit maxlength="40" pattern="[0-9a-fA-F]{40}" placeholder="40 hexadecimal characters" autocomplete="off"></label>' +
-      `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="rollback"${disabledAttr}>Run approved rollback</button>` +
+      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="preflight"${preflightDisabledAttr}>${escapeHtml(preflightLabel)}</button>` +
+      (preflightOnly ? '' :
+        `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="dry-run"${deployDisabledAttr}>${escapeHtml(dryRunLabel)}</button>` +
+        `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="run-live"${deployDisabledAttr}>${escapeHtml(liveLabel)}</button>` +
+        '<label class="deployment-rollback-sha"><span>Last-good commit SHA</span><input type="text" data-vps-last-good-commit maxlength="40" pattern="[0-9a-fA-F]{40}" placeholder="40 hexadecimal characters" autocomplete="off"></label>' +
+        `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="rollback"${deployDisabledAttr}>Run approved rollback</button>`) +
     '</div>'
   );
 }
@@ -1080,7 +1111,7 @@ vpsDeploymentPlan?.addEventListener('click', async (event) => {
     await saveConfig();
     const currentSetup = await refreshSetupStatus();
     const plan = currentSetup?.deploymentPlan;
-    if (!plan || plan.status !== 'ready') {
+    if (!plan || (plan.status !== 'ready' && action !== 'preflight')) {
       showMessage('error', 'Finish the VPS deployment plan before running preflight or deployment actions.');
       return;
     }
@@ -1683,7 +1714,11 @@ async function initOnboarding() {
 function dismissOnboarding() {
   onboardingOverlay.classList.add('hidden');
   window.somnibot.completeFirstRun();
-  const firstSetupField = runtimeMode === 'vps' ? runtimeFields.vpsDomain : fields.discordToken;
+  const firstSetupField = runtimeMode === 'vps'
+    ? runtimeFields.vpsPublicAccessMode.value === 'tailscale-funnel'
+      ? runtimeFields.vpsTailscaleFunnelUrl
+      : runtimeFields.vpsDomain
+    : fields.discordToken;
   firstSetupField.focus();
 }
 
@@ -1693,12 +1728,12 @@ function renderOnboardingRuntimeStep() {
   const isVps = runtimeMode === 'vps';
   onboardingRuntimeTitle.textContent = isVps ? 'Prepare VPS Readiness' : 'Prepare Local Access';
   onboardingRuntimeDesc.textContent = isVps
-    ? 'VPS mode needs a domain, SSH target, and guided deployment readiness before credentials can be validated.'
+    ? 'VPS mode needs a conventional domain or verified Tailscale Funnel, plus an SSH target and guided deployment readiness.'
     : 'Regular local mode checks Tailscale, prepares Funnel, and fills the public callback URL for you.';
 
   const items = isVps
     ? [
-      ['Domain', 'Use the HTTPS domain that will serve the dashboard and receive provider callbacks.'],
+      ['Public access', 'Choose a conventional HTTPS domain with Caddy or an HTTPS *.ts.net Funnel URL verified through SSH preflight.'],
       ['SSH target', 'Enter host, user, and deploy path on the setup screen. Do not enter private keys or passwords.'],
       ['Guided deploy', 'The launcher can check a fresh target, install the supported runtime, provision or update the GitHub checkout, show the dry-run, and execute the approved deployment with redacted output.'],
     ]
