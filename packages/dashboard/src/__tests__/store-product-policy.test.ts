@@ -5,11 +5,17 @@ import {
 } from '@/lib/store/store-product-policy';
 
 describe('store product policy', () => {
-  it('makes a software-only policy exclude Discord access, mixed delivery, and grants', () => {
-    const policy = evaluateStoreProductPolicy(['license-key', 'subscription']);
+  it('exposes only dynamic and static delivery even when legacy facets remain stored', () => {
+    const policy = evaluateStoreProductPolicy([
+      'license-key',
+      'downloadable',
+      'discord-perk',
+      'virtual-good',
+      'subscription',
+    ]);
 
-    expect(policy.discordAccessEnabled).toBe(false);
-    expect(policy.allowedDeliveryTypes).toEqual(['license_key']);
+    expect(policy.discordFulfillmentEnabled).toBe(true);
+    expect(policy.allowedDeliveryTypes).toEqual(['license_key', 'file']);
     expect(validateStoreProductChoice(policy, {
       type: 'subscription',
       deliveryType: 'access_pass',
@@ -21,13 +27,26 @@ describe('store product policy', () => {
       deliveryType: 'license_key',
       grantedRoleIds: ['123456789012345678'],
       grantedChannelIds: [],
-    })).toMatchObject({ ok: false });
+    })).toEqual({ ok: true });
+    expect(validateStoreProductChoice(policy, {
+      type: 'subscription',
+      deliveryType: 'license_key',
+      grantedRoleIds: ['123456789012345678'],
+      grantedChannelIds: ['234567890123456789'],
+    })).toEqual({ ok: true });
+    expect(validateStoreProductChoice(policy, {
+      type: 'one_time',
+      deliveryType: 'file',
+      grantedRoleIds: ['123456789012345678'],
+      grantedChannelIds: ['234567890123456789'],
+    })).toEqual({ ok: true });
   });
 
-  it('requires explicit Discord and download facets for mixed delivery', () => {
-    expect(evaluateStoreProductPolicy(['downloadable']).allowedDeliveryTypes).not.toContain('mixed');
-    expect(evaluateStoreProductPolicy(['discord-perk']).allowedDeliveryTypes).not.toContain('mixed');
-    expect(evaluateStoreProductPolicy(['downloadable', 'discord-perk']).allowedDeliveryTypes).toContain('mixed');
+  it('keeps Discord benefits independent from legacy access-pass delivery types', () => {
+    const policy = evaluateStoreProductPolicy(['downloadable', 'discord-perk', 'virtual-good']);
+
+    expect(policy.discordFulfillmentEnabled).toBe(true);
+    expect(policy.allowedDeliveryTypes).toEqual(['file']);
   });
 
   it('requires the matching product facet for subscription and free products', () => {

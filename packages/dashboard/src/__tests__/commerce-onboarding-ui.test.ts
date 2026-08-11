@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildLicenseSdkSnippet,
+  buildLicensingAddendumPrompt,
   buildProductIntegrationGuide,
   describePayPalReadiness,
 } from '@/lib/store/commerce-onboarding';
@@ -18,9 +18,8 @@ function product(
     type: 'subscription',
     delivery_type: deliveryType,
     paypal_product_id: 'PROD-SANDBOX-123',
-    granted_role_ids: deliveryType === 'access_pass' || deliveryType === 'mixed'
-      ? ['123456789012345678']
-      : [],
+    granted_role_ids: ['123456789012345678'],
+    granted_channel_ids: ['234567890123456789'],
     plans: [{
       id: '00000000-0000-4000-8000-000000000456',
       product_id: '00000000-0000-4000-8000-000000000123',
@@ -51,29 +50,22 @@ function status(overrides: Partial<PayPalOnboardingStatus> = {}): PayPalOnboardi
 }
 
 describe('commerce creator onboarding contracts', () => {
-  it('exposes SDK and REST runtime paths only for license-key delivery', () => {
+  it('maps license-key delivery to one runtime-agnostic dynamic contract', () => {
     const guide = buildProductIntegrationGuide(product('license_key'));
 
-    expect(guide.kind).toBe('license');
-    expect(guide.runtimePaths.map((path) => path.id)).toEqual(['node', 'browser', 'native']);
-    expect(guide.runtimePaths.find((path) => path.id === 'browser')).toMatchObject({
-      sameOriginOnly: true,
-    });
-    expect(guide.nativeExamples.map((example) => example.language)).toEqual(['Python', '.NET', 'Rust']);
+    expect(guide.mode).toBe('dynamic');
+    expect(guide.title).toBe('Dynamic licensing');
   });
 
-  it.each([
-    ['file', 'download'],
-    ['link', 'download'],
-    ['access_pass', 'discord'],
-    ['mixed', 'mixed'],
-  ] as const)('maps %s delivery to %s fulfillment without SDK instructions', (deliveryType, kind) => {
+  it.each(['file', 'link', 'access_pass', 'mixed'] as const)(
+    'maps legacy %s delivery to the static contract instead of inventing a project type',
+    (deliveryType) => {
     const guide = buildProductIntegrationGuide(product(deliveryType));
 
-    expect(guide.kind).toBe(kind);
-    expect(guide.runtimePaths).toEqual([]);
-    expect(guide.nativeExamples).toEqual([]);
-  });
+      expect(guide.mode).toBe('static');
+      expect(guide.title).toBe('Static licensed delivery');
+    },
+  );
 
   it('degrades signed-webhook evidence after the freshness window', () => {
     const readiness = describePayPalReadiness(status({
@@ -100,12 +92,36 @@ describe('commerce creator onboarding contracts', () => {
     expect(readiness).toMatchObject({ ready: true, state: 'ready' });
   });
 
-  it('builds the TypeScript SDK snippet from authoritative identifiers', () => {
-    const licenseProduct = product('license_key');
-    const snippet = buildLicenseSdkSnippet(licenseProduct, 'https://dashboard.example.com/api');
+  it('builds one dynamic prompt that tells the implementer to inspect the actual project', () => {
+    const prompt = buildLicensingAddendumPrompt(
+      product('license_key'),
+      'https://dashboard.example.com/api',
+    );
 
-    expect(snippet).toContain(`productId: '${licenseProduct.id}'`);
-    expect(snippet).toContain("apiBase: 'https://dashboard.example.com/api'");
-    expect(snippet).toContain('await license.deactivate()');
+    expect(prompt).toContain('LICENSING_MODE: DYNAMIC');
+    expect(prompt).toContain('inspect this project before choosing an integration');
+    expect(prompt).toContain('/license/validate');
+    expect(prompt).toContain('/license/heartbeat');
+    expect(prompt).toContain('/license/deactivate');
+    expect(prompt).toContain('DISCORD_BUYER_ROLE_IDS: 123456789012345678');
+    expect(prompt).toContain('DISCORD_BUYER_CHANNEL_IDS: 234567890123456789');
+    expect(prompt).toContain('remove them after refund or revocation');
+    expect(prompt).toContain("PRODUCT_ID: 00000000-0000-4000-8000-000000000123");
+    expect(prompt).not.toContain('Choose Node');
+    expect(prompt).not.toContain('Choose Rust');
+  });
+
+  it('builds one static prompt with entitlement, watermark, and truthful revocation requirements', () => {
+    const prompt = buildLicensingAddendumPrompt(
+      product('file'),
+      'https://dashboard.example.com/api',
+    );
+
+    expect(prompt).toContain('LICENSING_MODE: STATIC');
+    expect(prompt).toContain('buyer-specific derivative');
+    expect(prompt).toContain('cryptographically signed watermark manifest');
+    expect(prompt).toContain('block every future download, update, and replacement link');
+    expect(prompt).toContain('cannot erase copies already downloaded');
+    expect(prompt).toContain('Discord mirrors fulfillment');
   });
 });

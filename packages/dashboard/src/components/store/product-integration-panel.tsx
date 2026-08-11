@@ -3,9 +3,8 @@
 import * as React from 'react';
 import { useState } from 'react';
 import { Button } from '@/components/shared/button';
-import { Select } from '@/components/shared/input';
 import {
-  buildLicenseSdkSnippet,
+  buildLicensingAddendumPrompt,
   buildProductIntegrationGuide,
 } from '@/lib/store/commerce-onboarding';
 import type { CommerceProductIdentity } from './onboarding-types';
@@ -44,10 +43,8 @@ export function ProductIntegrationPanel({
   recoveryActionLabel = 'Retry setup',
   onRetry,
 }: Props) {
-  const snippet = buildLicenseSdkSnippet(product, apiBase);
   const guide = buildProductIntegrationGuide(product);
-  const [runtimePath, setRuntimePath] = useState<'node' | 'browser' | 'native'>('node');
-  const selectedRuntime = guide.runtimePaths.find((path) => path.id === runtimePath);
+  const prompt = buildLicensingAddendumPrompt(product, apiBase);
   return (
     <section className="rounded-card border border-discord-accent/40 bg-discord-bg-secondary p-5" aria-labelledby="integration-heading">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -70,74 +67,41 @@ export function ProductIntegrationPanel({
         {product.plans?.map((plan) => <CopyValue key={plan.id} label={`${plan.name} — PayPal plan ID`} value={plan.paypal_plan_id ?? 'Not assigned'} />)}
         <CopyValue label="License API base" value={apiBase} />
       </div>
-      {guide.kind === 'license' ? (
-        <div className="mt-5 space-y-4">
-          <Select
-            id="license-runtime-path"
-            label="Project type or runtime"
-            value={runtimePath}
-            onChange={(event) => setRuntimePath(event.target.value === 'browser' ? 'browser' : event.target.value === 'native' ? 'native' : 'node')}
-            options={guide.runtimePaths.map((path) => ({ value: path.id, label: path.label }))}
-          />
-          {selectedRuntime?.sameOriginOnly && (
-            <p className="rounded-input border border-discord-warning/50 bg-discord-warning/10 p-3 text-xs text-discord-text-secondary" role="status">
-              Browser/PWA use is supported only when the app is served from the same origin as this dashboard. Cross-origin browser calls are not supported until an owner configures a product-scoped allowed-origin policy. Do not embed a license key in shipped JavaScript.
-            </p>
-          )}
-          {runtimePath === 'native' ? (
-            <div className="rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
-              <h3 className="text-sm font-semibold text-discord-text-primary">Use the JSON REST lifecycle</h3>
-              <p className="mt-1 text-xs text-discord-text-secondary">POST to <code>{apiBase}/license/validate</code>, then heartbeat the returned session and deactivate it on shutdown. Use request timeouts and treat the customer key as a secret.</p>
-              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                <CopyValue label="Validate" value={`${apiBase}/license/validate`} />
-                <CopyValue label="Heartbeat" value={`${apiBase}/license/heartbeat`} />
-                <CopyValue label="Deactivate" value={`${apiBase}/license/deactivate`} />
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {guide.nativeExamples.map((example) => (
-                  <a key={example.language} href={example.href} target="_blank" rel="noreferrer" className="rounded-input bg-discord-bg-active px-3 py-2 text-xs font-medium text-discord-text-primary hover:text-white">
-                    {example.language} example
-                  </a>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="grid gap-4 lg:grid-cols-2">
-              <div>
-                <h3 className="text-sm font-semibold text-discord-text-primary">1. Install the TypeScript SDK</h3>
-                <CopyValue label="npm (published package)" value="npm install @somnibot/license-sdk" />
-                <div className="mt-2"><CopyValue label="pnpm (published package)" value="pnpm add @somnibot/license-sdk" /></div>
-                <p className="mt-2 text-xs text-discord-text-muted">Inside this monorepo, use <code>pnpm --filter your-app add @somnibot/license-sdk@workspace:*</code>. External projects use the published package.</p>
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-discord-text-primary">2. Configure the SDK</h3>
-                <pre className="mt-2 max-h-80 overflow-auto rounded-input bg-discord-bg-floating p-3 text-xs text-discord-text-secondary"><code>{snippet}</code></pre>
-                <Button type="button" variant="secondary" size="sm" onClick={() => void navigator.clipboard.writeText(snippet)} className="mt-2">Copy TypeScript example</Button>
-              </div>
-            </div>
-          )}
+      <div className="mt-5 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-discord-text-primary">{guide.title}</h3>
+            <p className="mt-1 text-xs text-discord-text-secondary">{guide.summary}</p>
+          </div>
+          <span className="rounded-full bg-discord-accent/15 px-3 py-1 text-xs font-medium text-discord-accent">
+            {guide.mode === 'dynamic' ? 'Dynamic' : 'Static'}
+          </span>
         </div>
-      ) : (
-        <div className="mt-5 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
-          <h3 className="text-sm font-semibold text-discord-text-primary">Fulfill {product.name}</h3>
-          <p className="mt-1 text-xs text-discord-text-secondary">{guide.summary}</p>
-          <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-discord-text-secondary">
-            {guide.steps.map((step) => <li key={step}>{step}</li>)}
-          </ol>
+        <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-discord-text-secondary">
+          {guide.steps.map((step) => <li key={step}>{step}</li>)}
+        </ol>
+        <div className="mt-4">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-discord-text-muted">Reusable licensing addendum</h4>
+          <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap rounded-input bg-discord-bg-floating p-3 text-xs text-discord-text-secondary"><code>{prompt}</code></pre>
+          <Button type="button" size="sm" onClick={() => void navigator.clipboard.writeText(prompt)} className="mt-2">
+            Copy licensing addendum
+          </Button>
         </div>
-      )}
+      </div>
       <div className="mt-5 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
         <h3 className="text-sm font-semibold text-discord-text-primary">Validate safely in sandbox</h3>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-discord-text-secondary">
           <li>Keep PayPal in Sandbox and create or activate this product and plan.</li>
           <li>Buy through the normal storefront with a PayPal sandbox buyer account.</li>
           <li>Wait for the signed webhook and confirm the delivery described above.</li>
-          {guide.kind === 'license' && <li>Use the delivered customer key to confirm validation, heartbeat, device visibility, and deactivation.</li>}
+          {guide.mode === 'dynamic'
+            ? <li>Use the delivered customer key to confirm validation, heartbeat, device visibility, revocation, and deactivation.</li>
+            : <li>Confirm the buyer-specific derivative, signed manifest, single-use download, and future-access revocation.</li>}
         </ol>
-        {guide.kind === 'license' ? (
+        {guide.mode === 'dynamic' ? (
           <p className="mt-2 text-xs text-discord-warning">The dashboard does not mint an administrator test key: that would bypass purchase and fulfillment authority. Sandbox purchase exercises the supported path without real money.</p>
         ) : (
-          <p className="mt-2 text-xs text-discord-warning">This delivery type does not issue a license key. Validate the configured download or Discord entitlement through the normal sandbox purchase path.</p>
+          <p className="mt-2 text-xs text-discord-warning">Static revocation blocks future delivery but cannot erase a copy already downloaded. Watermarking supports attribution; it is not a remote-delete promise.</p>
         )}
       </div>
     </section>

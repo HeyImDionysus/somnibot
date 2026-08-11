@@ -115,11 +115,11 @@ const productTypeOptions = [
 ];
 
 const deliveryTypeLabels: Record<Product['delivery_type'], string> = {
-  license_key: 'License Key',
-  file: 'File',
-  link: 'Link',
-  access_pass: 'Discord Access Pass',
-  mixed: 'Download + Discord Bundle',
+  license_key: 'Dynamic',
+  file: 'Static',
+  link: 'Static',
+  access_pass: 'Static (legacy)',
+  mixed: 'Static (legacy)',
 };
 
 // ── Helpers ───────────────────────────────────────────────
@@ -422,8 +422,8 @@ export default function StorePage() {
         ...current,
         type: typeAllowed ? current.type : 'one_time',
         delivery_type: nextPolicy.allowedDeliveryTypes[0] ?? 'license_key',
-        granted_role_ids: nextPolicy.discordAccessEnabled ? current.granted_role_ids : [],
-        granted_channel_ids: nextPolicy.discordAccessEnabled ? current.granted_channel_ids : [],
+        granted_role_ids: nextPolicy.discordFulfillmentEnabled ? current.granted_role_ids : [],
+        granted_channel_ids: nextPolicy.discordFulfillmentEnabled ? current.granted_channel_ids : [],
       }));
     }
     void saveCommerceControl('product_types_enabled', next);
@@ -454,7 +454,7 @@ export default function StorePage() {
       name: p.name,
       description: p.description ?? '',
       type: p.type,
-      delivery_type: p.delivery_type,
+      delivery_type: p.delivery_type === 'license_key' ? 'license_key' : 'file',
       price_dollars: (p.price_cents / 100).toFixed(2),
       currency: p.currency,
       granted_role_ids: p.granted_role_ids,
@@ -785,9 +785,12 @@ export default function StorePage() {
             </Button>
           </div>
         </div>
-        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4 space-y-3">
+        <section
+          className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4 space-y-3"
+          aria-labelledby="paypal-processing-policy-heading"
+        >
           <div>
-            <span className="text-sm font-medium text-discord-text-primary">PayPal processing policy</span>
+            <h3 id="paypal-processing-policy-heading" className="text-sm font-medium text-discord-text-primary">PayPal processing policy</h3>
             <p className="text-xs text-discord-text-muted">Sandbox is the default. These controls never expose credentials or initiate a live payment.</p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -799,7 +802,7 @@ export default function StorePage() {
           </div>
           {paypalEnvironment === 'live' && <div className="rounded-input border border-discord-danger/50 bg-discord-danger/10 p-3"><Toggle label="I confirm this switches checkout to Live PayPal and can accept real customer money." description="Complete sandbox purchase, signed-webhook, fulfillment, license validation, and deactivation checks first." checked={liveModeConfirmed} onChange={setLiveModeConfirmed} /></div>}
           <Button size="sm" onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy || (paypalEnvironment === 'live' && !liveModeConfirmed)}>{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</Button>
-        </div>
+        </section>
 
         <div className="border-t border-discord-border-subtle pt-4 space-y-4">
           <h3 className="text-sm font-semibold text-discord-text-primary">Storefront policy</h3>
@@ -817,7 +820,7 @@ export default function StorePage() {
                 />
               ))}
             </div>
-            {!storePolicy.discordAccessEnabled && <p className="mt-2 text-xs text-discord-success" role="status">Software-only mode: Discord access passes, mixed bundles, role grants, and channel grants are hidden and rejected by the API.</p>}
+            <p className="mt-2 text-xs text-discord-success" role="status">The database entitlement remains authoritative. Optional product roles and private channels mirror fulfillment and are removed after refund or revocation; the Discord server itself is never sold as a product.</p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Select label="Repeat purchase policy" value={storeControls.repeat_purchase_policy} onChange={(e) => void saveCommerceControl('repeat_purchase_policy', e.target.value as typeof storeControls.repeat_purchase_policy)} options={[{ value: 'unique', label: 'Unique' }, { value: 'stackable', label: 'Stackable' }, { value: 'renewable', label: 'Renewable' }, { value: 'seat-based', label: 'Seat-based' }]} />
@@ -857,7 +860,7 @@ export default function StorePage() {
             <Input id="product-name" label="Name *" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Product name" />
             <Input id="product-price" label="Price ($) *" type="number" step="0.01" min="0" value={form.type === 'free' ? '0.00' : form.price_dollars} disabled={form.type === 'free'} onChange={(event) => setForm({ ...form, price_dollars: event.target.value })} placeholder="9.99" />
             <Select id="product-type" label="Type" value={form.type} onChange={(event) => { const type = event.target.value === 'subscription' ? 'subscription' : event.target.value === 'free' ? 'free' : 'one_time'; setForm({ ...form, type, price_dollars: type === 'free' ? '0.00' : form.price_dollars }); }} options={availableProductTypeOptions} />
-            <Select id="product-delivery-type" label="Delivery type" value={form.delivery_type} onChange={(event) => { const deliveryType = storePolicy.allowedDeliveryTypes.find((value) => value === event.target.value); if (deliveryType) setForm({ ...form, delivery_type: deliveryType }); }} options={deliveryTypeOptions} />
+            <Select id="product-delivery-type" label="Licensing mode" value={form.delivery_type} onChange={(event) => { const deliveryType = storePolicy.allowedDeliveryTypes.find((value) => value === event.target.value); if (deliveryType) setForm({ ...form, delivery_type: deliveryType }); }} options={deliveryTypeOptions} />
             <div
               className="sm:col-span-2 rounded-lg border border-discord-accent/40 bg-discord-accent/10 p-4"
               aria-live="polite"
@@ -933,28 +936,32 @@ export default function StorePage() {
                 />
               </div>
             )}
-            {storePolicy.discordAccessEnabled && (
+            {storePolicy.discordFulfillmentEnabled && (
               <>
-              <div><RolePicker
-                label="Granted Roles"
-                hint="Roles given to buyers on purchase"
-                value={form.granted_role_ids}
-                onChange={(value) => setForm({ ...form, granted_role_ids: Array.isArray(value) ? value : [] })}
-                multi
-                hideManaged
-                requireAssignable
-                placeholder="Select roles to grant…"
-              /></div>
-              <div><ChannelPicker
-                label="Granted Channels"
-                hint="Channels made visible to buyers on purchase"
-                value={form.granted_channel_ids}
-                onChange={(value) => setForm({ ...form, granted_channel_ids: Array.isArray(value) ? value : [] })}
-                multi
-                channelTypes={['text', 'announcement', 'forum']}
-                requiredBotPermissions={['ManageChannels']}
-                placeholder="Select channels to grant…"
-              /></div>
+              <div>
+                <RolePicker
+                  label="Product roles (optional)"
+                  hint="Granted after the entitlement is active and removed after refund or revocation. Roles mirror fulfillment but are not the licensing authority."
+                  value={form.granted_role_ids}
+                  onChange={(value) => setForm({ ...form, granted_role_ids: Array.isArray(value) ? value : [] })}
+                  multi
+                  hideManaged
+                  requireAssignable
+                  placeholder="Select product roles…"
+                />
+              </div>
+              <div>
+                <ChannelPicker
+                  label="Product channels (optional)"
+                  hint="Made visible after the entitlement is active and removed after refund or revocation. This is a benefit of this product, not a subscription to the server."
+                  value={form.granted_channel_ids}
+                  onChange={(value) => setForm({ ...form, granted_channel_ids: Array.isArray(value) ? value : [] })}
+                  multi
+                  channelTypes={['text', 'announcement', 'forum']}
+                  requiredBotPermissions={['ManageChannels']}
+                  placeholder="Select product channels…"
+                />
+              </div>
               </>
             )}
             <Input id="product-currency" label="Currency" value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value })} placeholder="USD" />

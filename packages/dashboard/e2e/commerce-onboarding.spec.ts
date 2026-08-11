@@ -77,7 +77,7 @@ test('creator completes sandbox product onboarding without source-reading', asyn
     if (pathname === '/api/store/onboarding') {
       await route.fulfill({ json: { success: true, data: {
         environment: 'sandbox',
-        apiBase: 'http://localhost:3011/api',
+        apiBase: 'http://localhost:3013/api',
         credentialsConfigured: true,
         webhookIdConfigured: true,
         webhookUrl: 'https://dashboard.example.com/api/paypal/webhook',
@@ -104,11 +104,15 @@ test('creator completes sandbox product onboarding without source-reading', asyn
 
   await page.goto('/store');
   await expect(page.getByRole('heading', { name: 'Store', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '+ New Product' }).click();
+  await page.getByRole('button', { name: 'New Product' }).click();
   await page.getByPlaceholder('Product name').fill('Creator Pro');
   await page.getByLabel('Price ($) *').fill('19.00');
   await page.getByLabel('Type').selectOption('subscription');
-  await page.getByLabel('Delivery Type').selectOption('license_key');
+  const licensingMode = page.getByLabel('Licensing mode');
+  await expect(licensingMode.locator('option')).toHaveText(['Dynamic', 'Static']);
+  await licensingMode.selectOption('license_key');
+  await expect(page.getByText('Product roles (optional)')).toBeVisible();
+  await expect(page.getByText('Product channels (optional)')).toBeVisible();
   await page.getByLabel('Plan name').fill('Monthly Pro');
   await page.getByLabel('Price (USD)').fill('19.00');
   await page.getByLabel('Free trial (days)').fill('14');
@@ -118,12 +122,17 @@ test('creator completes sandbox product onboarding without source-reading', asyn
   await expect(page.getByText('PROD-SANDBOX-123')).toBeVisible();
   await expect(page.getByText('PLAN-SANDBOX-456')).toBeVisible();
   await expect(page.getByText('does not mint an administrator test key', { exact: false })).toBeVisible();
+  await expect(page.getByText('LICENSING_MODE: DYNAMIC', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copy licensing addendum' })).toBeVisible();
+  await expect(page.getByLabel('Project type or runtime')).toHaveCount(0);
+  const integrationPanel = page.locator('section[aria-labelledby="integration-heading"]');
+  const paypalPolicyPanel = page.locator('section[aria-labelledby="paypal-processing-policy-heading"]');
 
   const evidence = process.env.COMMERCE_EVIDENCE_DIR
     ?? path.resolve(process.cwd(), '../../.omo/evidence/dashboard-commerce-self-service/visual');
   await writeFile(
     path.join(evidence, 'store-onboarding-desktop.png'),
-    await page.screenshot({ fullPage: true }),
+    await integrationPanel.screenshot(),
   );
 
   await page.getByLabel('Environment').selectOption('live');
@@ -133,14 +142,14 @@ test('creator completes sandbox product onboarding without source-reading', asyn
   await expect(savePolicy).toBeEnabled();
   await writeFile(
     path.join(evidence, 'store-live-gate-desktop.png'),
-    await page.screenshot({ fullPage: true }),
+    await paypalPolicyPanel.screenshot(),
   );
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole('heading', { name: 'Integrate Creator Pro' })).toBeVisible();
   await writeFile(
     path.join(evidence, 'store-onboarding-mobile.png'),
-    await page.screenshot({ fullPage: true }),
+    await integrationPanel.screenshot(),
   );
   await expect(stat(path.join(evidence, 'store-onboarding-desktop.png')).then((file) => file.size)).resolves.toBeGreaterThan(0);
   await expect(stat(path.join(evidence, 'store-live-gate-desktop.png')).then((file) => file.size)).resolves.toBeGreaterThan(0);

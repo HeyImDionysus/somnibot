@@ -12,6 +12,9 @@ vi.mock('@/lib/paypal', () => ({
 }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/store/paypal-plan-state', () => ({ ensurePayPalPlanState: vi.fn() }));
+vi.mock('@/lib/api/live-discord-facts', () => ({
+  validateAssignableDiscordTargets: vi.fn(),
+}));
 
 import { POST, PUT } from '@/app/api/store/products/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
@@ -20,6 +23,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
+import { validateAssignableDiscordTargets } from '@/lib/api/live-discord-facts';
 
 import {
   buildRequest,
@@ -103,6 +107,10 @@ describe('POST /api/store/products PayPal readiness', () => {
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
     (getPayPalRuntimeConfig as ReturnType<typeof vi.fn>).mockResolvedValue(paypalConfig);
     (ensurePayPalPlanState as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+    vi.mocked(validateAssignableDiscordTargets).mockResolvedValue({
+      ok: true,
+      snapshotAt: '2026-08-10T22:00:00.000Z',
+    });
   });
 
   afterEach(() => {
@@ -210,7 +218,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
-  it('creates zero-price one-time products without PayPal setup', async () => {
+  it('creates zero-price static products with optional Discord fulfillment without PayPal setup', async () => {
     (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     vi.stubGlobal('fetch', vi.fn());
 
@@ -232,6 +240,9 @@ describe('POST /api/store/products PayPal readiness', () => {
         name: 'Community Pass',
         price_cents: 0,
         type: 'one_time',
+        delivery_type: 'file',
+        granted_role_ids: ['123456789012345678'],
+        granted_channel_ids: ['234567890123456789'],
       },
     }));
     const body = await res.json();
@@ -246,7 +257,15 @@ describe('POST /api/store/products PayPal readiness', () => {
       paypal_product_id: null,
       price_cents: 0,
       type: 'one_time',
+      granted_role_ids: ['123456789012345678'],
+      granted_channel_ids: ['234567890123456789'],
     }));
+    expect(validateAssignableDiscordTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      'guild-1',
+      ['123456789012345678'],
+      ['234567890123456789'],
+    );
     expect(plansTable.insert).not.toHaveBeenCalled();
     expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-free-123' });
   });
@@ -357,7 +376,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
-  it('enforces a software-only storefront policy before product or provider writes', async () => {
+  it('rejects the legacy access-pass delivery type before product or provider writes', async () => {
     const guildConfig = registerTable(mock, 'guild_config');
     guildConfig.select.mockReturnValue(guildConfig);
     guildConfig.eq.mockReturnValue(guildConfig);
@@ -382,7 +401,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(paypalFetch).not.toHaveBeenCalled();
   });
 
-  it('rejects an update that reintroduces Discord delivery under software-only policy', async () => {
+  it('rejects the legacy mixed delivery type while preserving optional Discord fulfillment', async () => {
     const guildConfig = registerTable(mock, 'guild_config');
     guildConfig.select.mockReturnValue(guildConfig);
     guildConfig.eq.mockReturnValue(guildConfig);
