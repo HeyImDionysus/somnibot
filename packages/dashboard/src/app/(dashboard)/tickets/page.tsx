@@ -67,6 +67,26 @@ interface Ticket {
   closed_at: string | null;
 }
 
+interface LiveChannel {
+  readonly id: string;
+  readonly name: string;
+}
+
+interface ChannelSnapshot {
+  readonly channels: LiveChannel[];
+  readonly snapshotAt: string | null;
+  readonly awaitingSnapshot: boolean;
+}
+
+function isLiveChannel(value: unknown): value is LiveChannel {
+  return typeof value === 'object'
+    && value !== null
+    && 'id' in value
+    && 'name' in value
+    && typeof value.id === 'string'
+    && typeof value.name === 'string';
+}
+
 const COLOR_OPTIONS = [
   { value: 'blue', label: 'Blue', class: 'bg-blue-500' },
   { value: 'grey', label: 'Grey', class: 'bg-gray-500' },
@@ -83,6 +103,20 @@ function generateId(): string {
 function TicketMemberName({ id }: { id: string }) {
   const { resolveMember } = useDiscordNames({ memberIds: [id] });
   return <span>{resolveMember(id)}</span>;
+}
+
+function TicketPanelDestination({ panel, snapshot }: { panel: TicketPanel; snapshot: ChannelSnapshot | null }) {
+  const channel = snapshot?.channels.find((candidate) => candidate.id === panel.channel_id);
+  const snapshotAge = snapshot?.snapshotAt ? Date.now() - Date.parse(snapshot.snapshotAt) : Number.POSITIVE_INFINITY;
+  const stale = snapshotAge > 10 * 60 * 1_000;
+
+  return (
+    <div className="mt-2 text-xs text-discord-text-muted">
+      <p>Channel: {channel ? `#${channel.name}` : 'Saved channel not present in the latest bot snapshot'} • Max per user: {panel.max_open_per_user} • Managers: {panel.manager_roles.length} role(s)</p>
+      {(snapshot?.awaitingSnapshot || stale || !channel) && <p className="mt-1 text-discord-warning">Channel target warning: the bot snapshot is stale or unavailable. Refresh after the bot publishes a current snapshot before relying on this destination.</p>}
+      <p className="mt-1">Channel ID (diagnostic): <code>{panel.channel_id}</code></p>
+    </div>
+  );
 }
 
 export default function TicketsPage() {
@@ -104,6 +138,7 @@ export default function TicketsPage() {
   const [transcriptEnabled, setTranscriptEnabled] = useState(false);
   const [dmTranscript, setDmTranscript] = useState(false);
   const [togglingTranscript, setTogglingTranscript] = useState(false);
+  const [channelSnapshot, setChannelSnapshot] = useState<ChannelSnapshot | null>(null);
 
   const loadPanels = useCallback(async () => {
     try {
@@ -142,9 +177,28 @@ export default function TicketsPage() {
     }
   }, []);
 
+  const loadChannelSnapshot = useCallback(async () => {
+    try {
+      const res = await fetch('/api/channels');
+      const json = await res.json();
+      if (json.success) {
+        const channels = Array.isArray(json.channels)
+          ? json.channels.filter(isLiveChannel)
+          : [];
+        setChannelSnapshot({
+          channels,
+          snapshotAt: typeof json.snapshotAt === 'string' ? json.snapshotAt : null,
+          awaitingSnapshot: json.awaitingSnapshot === true,
+        });
+      }
+    } catch {
+      setChannelSnapshot({ channels: [], snapshotAt: null, awaitingSnapshot: true });
+    }
+  }, []);
+
   useEffect(() => {
-    Promise.all([loadPanels(), loadTickets(), loadGuildDefaults()]).finally(() => setLoading(false));
-  }, [loadPanels, loadTickets, loadGuildDefaults]);
+    Promise.all([loadPanels(), loadTickets(), loadGuildDefaults(), loadChannelSnapshot()]).finally(() => setLoading(false));
+  }, [loadPanels, loadTickets, loadGuildDefaults, loadChannelSnapshot]);
 
   const toggleTranscriptDefault = async (key: 'ticket_transcript_enabled' | 'ticket_dm_transcript', value: boolean) => {
     setTogglingTranscript(true);
@@ -856,9 +910,7 @@ export default function TicketsPage() {
                         </span>
                       ))}
                     </div>
-                    <div className="mt-2 text-xs text-discord-text-muted">
-                      Channel: {panel.channel_id} • Max per user: {panel.max_open_per_user} • Managers: {panel.manager_roles.length} role(s)
-                    </div>
+                    <TicketPanelDestination panel={panel} snapshot={channelSnapshot} />
                   </div>
                   <div className="flex items-center gap-2 ml-4">
                     <button

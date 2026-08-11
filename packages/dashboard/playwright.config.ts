@@ -30,15 +30,15 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      testIgnore: /team-invitations\.spec\.ts/,
+      testIgnore: /(?:team-invitations|community-flow)\.spec\.ts/,
       use: { ...devices['Desktop Chrome'] },
     },
     {
       name: 'chromium-local-launcher',
-      testMatch: /team-invitations\.spec\.ts/,
+      testMatch: /(?:team-invitations|community-flow)\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
-        baseURL: 'http://localhost:3001',
+        baseURL: process.env.PLAYWRIGHT_LOCAL_BASE_URL ?? 'http://localhost:3001',
       },
     },
   ],
