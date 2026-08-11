@@ -43,7 +43,10 @@ export default async function DashboardLayout({
         Skip to main content
       </a>
       <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden pt-14 md:pt-0">
+      <div
+        id="dashboard-content"
+        className="flex min-w-0 flex-1 flex-col overflow-hidden pt-14 md:pt-0"
+      >
         {/* V53 Phase 2: Bot offline/stale banner */}
         <BotStatusBanner />
         <main

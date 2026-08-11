@@ -26,11 +26,14 @@ describe('Shared dashboard accessibility foundations', () => {
     // Then: the control exposes both the existing help and its field error.
     const inputId = markup.match(/<input[^>]*\sid="([^"]+)"/)?.[1];
     const describedBy = markup.match(/aria-describedby="([^"]+)"/)?.[1];
+    const describedByIds = describedBy?.split(' ') ?? [];
+    const errorId = describedByIds.find((id) => id !== 'server-name-help');
     expect(inputId).toBeTruthy();
     expect(markup).toContain(`for="${inputId}"`);
     expect(markup).toContain('aria-invalid="true"');
-    expect(describedBy?.split(' ')).toContain('server-name-help');
-    expect(markup).toContain(`id="${describedBy?.split(' ')[1]}"`);
+    expect(describedByIds).toContain('server-name-help');
+    expect(errorId).toBeTruthy();
+    expect(markup).toContain(`id="${errorId}"`);
   });
 
   it('renders each confirmation with unique conditional relationships and a named close control', () => {

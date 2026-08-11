@@ -206,6 +206,14 @@ const navigation: NavGroup[] = [
 ];
 
 const STORAGE_KEY = 'somnibot-sidebar-collapsed';
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
 
 function loadCollapsed(): Record<string, boolean> {
   if (typeof window === 'undefined') return {};
@@ -262,6 +270,8 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [mobileOpen, setMobileOpen] = useState(false);
   const mobileTriggerRef = useRef<HTMLButtonElement>(null);
+  const mobileCloseRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     setCollapsed(loadCollapsed());
@@ -274,17 +284,45 @@ export function Sidebar() {
   useEffect(() => {
     if (!mobileOpen) return;
     const previousOverflow = document.body.style.overflow;
+    const dashboardContent = document.getElementById('dashboard-content');
+    const mobileTrigger = mobileTriggerRef.current;
+    const contentWasInert = dashboardContent?.inert ?? false;
     document.body.style.overflow = 'hidden';
+    if (dashboardContent) dashboardContent.inert = true;
+    const focusFrame = requestAnimationFrame(() => mobileCloseRef.current?.focus());
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      setMobileOpen(false);
-      requestAnimationFrame(() => mobileTriggerRef.current?.focus());
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setMobileOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const focusable = Array.from(
+        sidebarRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [],
+      ).filter((element) => !element.closest('[inert]'));
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        sidebarRef.current?.focus();
+        return;
+      }
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => {
+      cancelAnimationFrame(focusFrame);
       document.removeEventListener('keydown', handleKeyDown);
       document.body.style.overflow = previousOverflow;
+      if (dashboardContent) dashboardContent.inert = contentWasInert;
+      mobileTrigger?.focus();
     };
   }, [mobileOpen]);
 
@@ -333,7 +371,10 @@ export function Sidebar() {
 
   return (
     <>
-      <header className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between border-b border-discord-border-subtle bg-discord-bg-secondary px-3 md:hidden">
+      <header
+        inert={mobileOpen ? true : undefined}
+        className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between border-b border-discord-border-subtle bg-discord-bg-secondary px-3 md:hidden"
+      >
         <div className="flex items-center gap-2.5">
           <Image
             src="/somnibot-logo.png"
@@ -358,19 +399,21 @@ export function Sidebar() {
       </header>
 
       {mobileOpen ? (
-        <button
-          type="button"
-          aria-label="Close dashboard navigation"
-          onClick={() => {
-            setMobileOpen(false);
-            requestAnimationFrame(() => mobileTriggerRef.current?.focus());
-          }}
+        <div
+          data-testid="dashboard-navigation-backdrop"
+          aria-hidden="true"
+          onClick={() => setMobileOpen(false)}
           className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px] md:hidden"
         />
       ) : null}
 
       <aside
+        ref={sidebarRef}
         id="dashboard-navigation"
+        tabIndex={-1}
+        role={mobileOpen ? 'dialog' : undefined}
+        aria-modal={mobileOpen ? true : undefined}
+        aria-label={mobileOpen ? 'Dashboard navigation' : undefined}
         className={cn(
           'fixed inset-y-0 left-0 z-50 flex h-[100dvh] w-60 shrink-0 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary transition-transform md:static md:z-auto md:translate-x-0',
           mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full md:visible',
@@ -389,12 +432,10 @@ export function Sidebar() {
         </div>
         <span className="text-base font-medium text-discord-text-primary">SomniBot</span>
         <button
+          ref={mobileCloseRef}
           type="button"
           aria-label="Close dashboard navigation"
-          onClick={() => {
-            setMobileOpen(false);
-            requestAnimationFrame(() => mobileTriggerRef.current?.focus());
-          }}
+          onClick={() => setMobileOpen(false)}
           className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-muted transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary md:hidden"
         >
           <X size={20} aria-hidden="true" />
@@ -440,6 +481,7 @@ export function Sidebar() {
               {/* Items — animate collapse */}
               <div
                 id={`${group.id}-navigation-group`}
+                inert={isCollapsed ? true : undefined}
                 className={cn(
                   'overflow-hidden transition-all duration-200',
                   // The max-height is only an animation device for the collapse
@@ -465,9 +507,7 @@ export function Sidebar() {
                       onClick={(event) => {
                         if (isLocked) {
                           event.preventDefault();
-                          return;
                         }
-                        setMobileOpen(false);
                       }}
                       aria-disabled={isLocked}
                       aria-current={isActive && !isLocked ? 'page' : undefined}

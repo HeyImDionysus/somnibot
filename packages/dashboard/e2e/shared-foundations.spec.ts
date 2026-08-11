@@ -70,12 +70,44 @@ test.describe('Shared dashboard accessibility foundations', () => {
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
     await trigger.click();
 
-    // Then: the labeled navigation appears and Escape closes it back to its trigger.
+    // Then: the navigation is modal, backgrounds are inert, and focus wraps both ways.
     await expect(trigger).toHaveAttribute('aria-expanded', 'true');
     await expect(trigger).toHaveAccessibleName('Close dashboard navigation');
-    await expect(page.getByRole('navigation', { name: 'Dashboard navigation' })).toBeVisible();
+    const drawer = page.getByRole('dialog', { name: 'Dashboard navigation' });
+    const drawerClose = drawer.getByRole('button', { name: 'Close dashboard navigation' });
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveAttribute('aria-modal', 'true');
+    await expect(page.locator('#dashboard-content')).toHaveJSProperty('inert', true);
+    await expect(drawerClose).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(drawer.getByRole('link', { name: 'Settings', exact: true })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(drawerClose).toBeFocused();
     await page.screenshot({ path: testInfo.outputPath('mobile-navigation.png'), fullPage: true });
+
+    // When: the exposed backdrop is clicked.
+    await page.getByTestId('dashboard-navigation-backdrop').click({ position: { x: 300, y: 400 } });
+
+    // Then: the drawer closes, background interaction returns, and focus is restored.
+    await expect(drawer).not.toBeVisible();
+    await expect(page.locator('#dashboard-content')).toHaveJSProperty('inert', false);
+    await expect(trigger).toBeFocused();
+
+    // When: the active dashboard route changes while the drawer is open.
+    await trigger.click();
+    await page.evaluate(() => window.history.pushState({}, '', '/dashboard'));
+
+    // Then: the route closes the modal drawer and restores its trigger.
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(drawer).not.toBeVisible();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await expect(trigger).toBeFocused();
+
+    // When: the drawer is reopened and dismissed with Escape.
+    await trigger.click();
     await page.keyboard.press('Escape');
+
+    // Then: Escape closes it back to the same trigger.
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
     await expect(trigger).toBeFocused();
 
