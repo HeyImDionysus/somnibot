@@ -354,6 +354,110 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
+  it('creates the PayPal trial cycle and persists the complete plan contract', async () => {
+    (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('paypal-token');
+    const paypalFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'PROD-123' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'PLAN-123' }));
+    vi.stubGlobal('fetch', paypalFetch);
+
+    const product = {
+      id: 'product-123',
+      guild_id: 'guild-123',
+      name: 'Founder Pass',
+      type: 'subscription',
+      paypal_product_id: 'PROD-123',
+    };
+    productsTable.single
+      .mockResolvedValueOnce({ data: product, error: null })
+      .mockResolvedValueOnce({ data: { ...product, plans: [{ id: 'plan-db-123' }] }, error: null });
+    plansTable.single.mockResolvedValueOnce({ data: { id: 'plan-db-123' }, error: null });
+
+    const response = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        ...baseProductBody,
+        type: 'subscription',
+        plans: [{
+          name: 'Fourteen day monthly',
+          interval_unit: 'MONTH',
+          interval_count: 1,
+          price_cents: 2500,
+          trial_days: 14,
+          active: false,
+        }],
+      },
+    }));
+
+    expect(response.status).toBe(200);
+    const providerBody = JSON.parse(String(paypalFetch.mock.calls[1]?.[1]?.body));
+    expect(providerBody.billing_cycles).toEqual([
+      expect.objectContaining({ tenure_type: 'TRIAL', total_cycles: 14, sequence: 1 }),
+      expect.objectContaining({ tenure_type: 'REGULAR', sequence: 2 }),
+    ]);
+    expect(plansTable.insert).toHaveBeenCalledWith(expect.objectContaining({
+      trial_days: 14,
+      active: false,
+      paypal_plan_id: 'PLAN-123',
+    }));
+  });
+
+  it('returns a durable product and provider plan recovery contract when local plan persistence fails', async () => {
+    (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('paypal-token');
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'PROD-RECOVERY' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'PLAN-RECOVERY' })));
+    productsTable.single.mockResolvedValueOnce({
+      data: {
+        id: '00000000-0000-4000-8000-000000000123',
+        guild_id: 'guild-123',
+        name: 'Founder Pass',
+        type: 'subscription',
+        paypal_product_id: 'PROD-RECOVERY',
+      },
+      error: null,
+    });
+    plansTable.single.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'temporary plan insert failure' },
+    });
+
+    const response = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        ...baseProductBody,
+        type: 'subscription',
+        plans: [{
+          name: 'Monthly recovery',
+          interval_unit: 'MONTH',
+          interval_count: 1,
+          price_cents: 2500,
+          trial_days: 7,
+          active: true,
+        }],
+      },
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(body).toMatchObject({
+      success: false,
+      code: 'PRODUCT_CREATED_PLAN_SAVE_FAILED',
+      data: {
+        id: '00000000-0000-4000-8000-000000000123',
+        paypal_product_id: 'PROD-RECOVERY',
+        recovery_plan: {
+          product_id: '00000000-0000-4000-8000-000000000123',
+          paypal_plan_id: 'PLAN-RECOVERY',
+          trial_days: 7,
+          active: true,
+        },
+      },
+    });
+    expect(productsTable.update).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
+    expect(productsTable.eq).toHaveBeenCalledWith('id', '00000000-0000-4000-8000-000000000123');
+  });
+
   it('creates PayPal plans for paid subscription plans when the parent product price is zero', async () => {
     (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('paypal-token');
     vi.stubGlobal('fetch', vi.fn()

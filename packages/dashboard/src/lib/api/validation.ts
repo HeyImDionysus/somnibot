@@ -256,6 +256,8 @@ const productPlanDefinition = z.object({
   interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']).optional(),
   interval_count: z.number().int().min(1).max(12).optional(),
   price_cents: z.number().int().min(0).max(999999).optional(),
+  trial_days: z.number().int().min(0).max(365).optional(),
+  active: z.boolean().optional(),
 }).strict();
 
 const productCreate = z.object({

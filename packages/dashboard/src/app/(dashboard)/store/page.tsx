@@ -6,8 +6,17 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { z } from 'zod';
 import ProductFiles from '@/components/store/product-files';
 import StoreControlRoom from '@/components/store/store-control-room';
+import { PayPalOnboardingStatusPanel } from '@/components/store/paypal-onboarding-status';
+import { ProductIntegrationPanel } from '@/components/store/product-integration-panel';
+import { SubscriptionPlanEditor } from '@/components/store/subscription-plan-editor';
+import type {
+  PayPalOnboardingStatus,
+  SubscriptionPlan,
+  SubscriptionPlanDraft,
+} from '@/components/store/onboarding-types';
 import { RolePicker } from '@/components/shared/role-picker';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
@@ -38,18 +47,7 @@ interface Product {
   product_license_config?: LicenseConfig[];
 }
 
-interface Plan {
-  id: string;
-  product_id: string;
-  name: string;
-  paypal_plan_id: string | null;
-  interval_unit: string;
-  interval_count: number;
-  price_cents: number;
-  currency: string;
-  trial_days: number;
-  active: boolean;
-}
+type Plan = SubscriptionPlan;
 
 interface LicenseConfig {
   product_id: string;
@@ -87,6 +85,30 @@ const emptyForm: {
   granted_channel_ids: [],
   active: true,
 };
+
+const emptyPlan: SubscriptionPlanDraft = {
+  name: 'Standard monthly',
+  interval_unit: 'MONTH',
+  interval_count: 1,
+  price_cents: 0,
+  currency: 'USD',
+  trial_days: 0,
+  active: true,
+};
+
+const pendingPlanRecoverySchema = z.object({
+  product_id: z.string().uuid(),
+  paypal_plan_id: z.string().min(1),
+  name: z.string().min(1),
+  interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']),
+  interval_count: z.number().int().min(1).max(12),
+  price_cents: z.number().int().min(0),
+  currency: z.string().length(3),
+  trial_days: z.number().int().min(0).max(365),
+  active: z.boolean(),
+});
+
+type PendingPlanRecovery = z.infer<typeof pendingPlanRecoverySchema>;
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -157,6 +179,12 @@ export default function StorePage() {
   const [paypalStaleMs, setPaypalStaleMs] = useState(300000);
   const [paypalVerifyAttempts, setPaypalVerifyAttempts] = useState(3);
   const [savingPaypalPolicy, setSavingPaypalPolicy] = useState(false);
+  const [liveModeConfirmed, setLiveModeConfirmed] = useState(false);
+  const [planDraft, setPlanDraft] = useState<SubscriptionPlanDraft>(emptyPlan);
+  const [integrationProduct, setIntegrationProduct] = useState<Product | null>(null);
+  const [integrationRecovery, setIntegrationRecovery] = useState<{ readonly kind: 'license' | 'plan'; readonly message: string } | null>(null);
+  const [pendingPlanRecovery, setPendingPlanRecovery] = useState<PendingPlanRecovery | null>(null);
+  const [paypalStatus, setPaypalStatus] = useState<PayPalOnboardingStatus | null>(null);
   const [storeControls, setStoreControls] = useState({
     product_types_enabled: ['downloadable', 'license-key', 'discord-perk', 'subscription', 'virtual-good', 'ticket-service', 'free'],
     repeat_purchase_policy: 'unique' as 'unique' | 'stackable' | 'renewable' | 'seat-based',
@@ -242,6 +270,10 @@ export default function StorePage() {
   };
 
   const savePaypalPolicy = async () => {
+    if (paypalEnvironment === 'live' && !liveModeConfirmed) {
+      toast({ title: 'Confirm Live mode before saving', variant: 'error' });
+      return;
+    }
     setSavingPaypalPolicy(true);
     try {
       const response = await fetch('/api/guild', {
@@ -257,7 +289,13 @@ export default function StorePage() {
       });
       const body = await response.json();
       if (!response.ok || body.error) throw new Error(body.error ?? 'save failed');
-      toast({ title: 'PayPal policy saved', variant: 'success' });
+      const readback = await fetch('/api/guild');
+      const authoritative = await readback.json();
+      if (!readback.ok || authoritative.config?.paypal_environment !== paypalEnvironment) {
+        throw new Error('PayPal environment readback did not match');
+      }
+      setPaypalEnvironment(authoritative.config.paypal_environment);
+      toast({ title: 'PayPal policy saved and verified', variant: 'success' });
     } catch {
       toast({ title: 'Failed to save PayPal policy', variant: 'error' });
     } finally {
@@ -356,6 +394,9 @@ export default function StorePage() {
     setLicenseSdkCacheTtlMs(60000);
     setLicenseFeatureFlags('');
     setLicenseRequireMembership(true);
+    setPlanDraft(emptyPlan);
+    setIntegrationRecovery(null);
+    setPendingPlanRecovery(null);
     setEditingId(null);
     setShowForm(true);
   };
@@ -383,7 +424,75 @@ export default function StorePage() {
     setLicenseFeatureFlags((licenseConfig?.feature_flags ?? []).join(', '));
     setLicenseRequireMembership(licenseConfig?.require_discord_guild_membership ?? true);
     setEditingId(p.id);
+    setIntegrationProduct(p);
+    setPlanDraft(p.plans?.[0] ?? { ...emptyPlan, currency: p.currency, price_cents: p.price_cents });
     setShowForm(true);
+  };
+
+  const readbackProduct = async (productId: string): Promise<Product | null> => {
+    const response = await fetch('/api/store/products');
+    const body: { success?: boolean; data?: Product[] } = await response.json();
+    if (!response.ok || body.success === false || !body.data) return null;
+    const product = body.data.find((candidate) => candidate.id === productId) ?? null;
+    setProducts(body.data);
+    if (product) setIntegrationProduct(product);
+    return product;
+  };
+
+  const saveLicensePolicy = async (productId: string): Promise<string | null> => {
+    const configRes = await fetch(`/api/license/config/${productId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key_prefix: licenseKeyPrefix,
+        max_devices: licenseMaxDevices,
+        heartbeat_interval_ms: licenseHeartbeatMs,
+        sdk_cache_ttl_ms: licenseSdkCacheTtlMs,
+        offline_grace_period_seconds: licenseOfflineGraceSeconds,
+        feature_flags: licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean),
+        require_discord_guild_membership: licenseRequireMembership,
+        rotation_policy: rotationPolicy,
+        self_service_device_removal: selfServiceDeviceRemoval,
+      }),
+    });
+    if (configRes.ok) return null;
+    const result: { error?: string } = await configRes.json();
+    return result.error ?? 'The license policy could not be saved.';
+  };
+
+  const retryIntegrationRecovery = async () => {
+    if (!integrationProduct || !integrationRecovery) return;
+    try {
+      if (integrationRecovery.kind === 'plan' && pendingPlanRecovery) {
+        const response = await fetch('/api/store/plans', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pendingPlanRecovery),
+        });
+        const result: { success?: boolean; error?: string } = await response.json();
+        if (!response.ok || result.success === false) {
+          setIntegrationRecovery({ kind: 'plan', message: result.error ?? 'The plan still could not be saved.' });
+          return;
+        }
+        await readbackProduct(integrationProduct.id);
+        setIntegrationRecovery(null);
+        setPendingPlanRecovery(null);
+        toast({ title: 'Subscription plan saved and verified', variant: 'success' });
+        return;
+      }
+
+      const policyError = await saveLicensePolicy(integrationProduct.id);
+      setIntegrationRecovery(policyError ? { kind: 'license', message: policyError } : null);
+      if (!policyError) {
+        await readbackProduct(integrationProduct.id);
+        toast({ title: 'License policy saved and verified', variant: 'success' });
+      }
+    } catch {
+      setIntegrationRecovery({
+        kind: integrationRecovery.kind,
+        message: 'The retry could not reach the dashboard API. The product remains preserved; try again.',
+      });
+    }
   };
 
   const save = async () => {
@@ -411,6 +520,9 @@ export default function StorePage() {
         granted_role_ids: form.granted_role_ids,
         granted_channel_ids: form.granted_channel_ids,
         active: form.active,
+        ...(form.type === 'subscription' && !editingId ? {
+          plans: [{ ...planDraft, currency: form.currency.toUpperCase() }],
+        } : {}),
       };
 
       const res = await fetch('/api/store/products', {
@@ -420,39 +532,46 @@ export default function StorePage() {
       });
 
       const json = await res.json();
+      const productId = json.data?.id ?? editingId;
       if (!res.ok || json.success === false) {
+        if (productId && typeof productId === 'string') {
+          const preserved = await readbackProduct(productId);
+          if (preserved) {
+            const recoveryPlan = json.data?.recovery_plan;
+            const parsedRecovery = json.code === 'PRODUCT_CREATED_PLAN_SAVE_FAILED'
+              ? pendingPlanRecoverySchema.safeParse(recoveryPlan)
+              : null;
+            const planRecovery = parsedRecovery?.success ? parsedRecovery.data : null;
+            setPendingPlanRecovery(planRecovery);
+            setIntegrationRecovery({
+              kind: planRecovery ? 'plan' : 'license',
+              message: json.error ?? 'Product setup stopped after the product was created.',
+            });
+            setShowForm(false);
+          }
+        }
         toast({ title: json.error ?? 'Failed to save product', variant: 'error' });
         return;
       }
 
-      const productId = json.data?.id ?? editingId;
-      if (productId && (form.delivery_type === 'license_key' || form.delivery_type === 'mixed')) {
-        const configRes = await fetch(`/api/license/config/${productId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            key_prefix: licenseKeyPrefix,
-            max_devices: licenseMaxDevices,
-            heartbeat_interval_ms: licenseHeartbeatMs,
-            sdk_cache_ttl_ms: licenseSdkCacheTtlMs,
-            offline_grace_period_seconds: licenseOfflineGraceSeconds,
-            feature_flags: licenseFeatureFlags
-              .split(',')
-              .map((flag) => flag.trim())
-              .filter(Boolean),
-            require_discord_guild_membership: licenseRequireMembership,
-            rotation_policy: rotationPolicy,
-            self_service_device_removal: selfServiceDeviceRemoval,
-          }),
-        });
-        if (!configRes.ok) {
+      if (productId && form.delivery_type === 'license_key') {
+        const policyError = await saveLicensePolicy(productId);
+        if (policyError) {
+          await readbackProduct(productId);
+          setIntegrationRecovery({ kind: 'license', message: policyError });
+          setShowForm(false);
           toast({ title: 'Product saved, but license policy was not saved', variant: 'error' });
           return;
         }
       }
+      if (!productId || !(await readbackProduct(productId))) {
+        toast({ title: 'Product saved, but authoritative readback failed', variant: 'error' });
+        return;
+      }
+      setIntegrationRecovery(null);
+      setPendingPlanRecovery(null);
       setShowForm(false);
-      toast({ title: editingId ? 'Product updated' : 'Product created', variant: 'success' });
-      load();
+      toast({ title: editingId ? 'Product updated and verified' : 'Product created and verified', variant: 'success' });
     } catch {
       toast({ title: 'Network error — could not save product', variant: 'error' });
     } finally {
@@ -546,6 +665,19 @@ export default function StorePage() {
 
       <StoreControlRoom />
 
+      <PayPalOnboardingStatusPanel onStatus={setPaypalStatus} />
+
+      {integrationProduct && (
+        <ProductIntegrationPanel
+          product={integrationProduct}
+          apiBase={paypalStatus?.apiBase ?? '/api'}
+          environment={paypalStatus?.environment ?? paypalEnvironment}
+          recoveryMessage={integrationRecovery?.message}
+          recoveryActionLabel={integrationRecovery?.kind === 'plan' ? 'Retry plan save' : 'Retry license policy'}
+          onRetry={integrationRecovery ? () => { void retryIntegrationRecovery(); } : undefined}
+        />
+      )}
+
       {/* Commerce Toggles */}
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
         <h2 className="text-lg font-semibold text-discord-text-primary">Commerce Settings</h2>
@@ -623,13 +755,14 @@ export default function StorePage() {
             <p className="text-xs text-discord-text-muted">Sandbox is the default. These controls never expose credentials or initiate a live payment.</p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="text-xs text-discord-text-muted">Environment<select value={paypalEnvironment} onChange={(e) => setPaypalEnvironment(e.target.value as 'sandbox' | 'live')} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"><option value="sandbox">Sandbox</option><option value="live">Live (credentials required)</option></select></label>
+            <label className="text-xs text-discord-text-muted">Environment<select value={paypalEnvironment} onChange={(e) => { const environment = e.target.value as 'sandbox' | 'live'; setPaypalEnvironment(environment); if (environment === 'sandbox') setLiveModeConfirmed(false); }} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"><option value="sandbox">Sandbox</option><option value="live">Live (real money)</option></select></label>
             <label className="text-xs text-discord-text-muted">Refund strategy<select value={paypalRefundStrategy} onChange={(e) => setPaypalRefundStrategy(e.target.value as 'provider-first' | 'local-first')} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary"><option value="provider-first">Provider first</option><option value="local-first">Local first (manual review)</option></select></label>
             <label className="flex items-center gap-2 text-sm text-discord-text-secondary"><input type="checkbox" checked={paypalLegacyTolerance} onChange={(e) => setPaypalLegacyTolerance(e.target.checked)} /> Allow legacy USD sale tolerance</label>
             <label className="text-xs text-discord-text-muted">Stale processing window (ms)<input type="number" min={60000} max={86400000} value={paypalStaleMs} onChange={(e) => setPaypalStaleMs(Number(e.target.value) || 60000)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
             <label className="text-xs text-discord-text-muted">Webhook verify attempts<input type="number" min={1} max={10} value={paypalVerifyAttempts} onChange={(e) => setPaypalVerifyAttempts(Number(e.target.value) || 1)} className="mt-1 w-full rounded-md bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
           </div>
-          <button onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy} className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</button>
+          {paypalEnvironment === 'live' && <label className="flex items-start gap-2 rounded-input border border-discord-danger/50 bg-discord-danger/10 p-3 text-sm text-discord-text-secondary"><input type="checkbox" checked={liveModeConfirmed} onChange={(e) => setLiveModeConfirmed(e.target.checked)} /><span><strong className="text-discord-text-primary">I confirm this switches checkout to Live PayPal and can accept real customer money.</strong><span className="mt-1 block text-xs">Complete sandbox purchase, signed-webhook, fulfillment, license validation, and deactivation checks first.</span></span></label>}
+          <button onClick={() => void savePaypalPolicy()} disabled={savingPaypalPolicy || (paypalEnvironment === 'live' && !liveModeConfirmed)} className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{savingPaypalPolicy ? 'Saving…' : 'Save PayPal policy'}</button>
         </div>
 
         <div className="border-t border-discord-border-subtle pt-4 space-y-4">
@@ -805,7 +938,7 @@ export default function StorePage() {
                 placeholder="Product description"
               />
             </div>
-            {(form.delivery_type === 'license_key' || form.delivery_type === 'mixed') && (
+            {form.delivery_type === 'license_key' && (
               <div className="sm:col-span-2 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4">
                 <h3 className="text-sm font-semibold text-discord-text-primary">License recovery controls</h3>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -865,6 +998,18 @@ export default function StorePage() {
                     <p className="mt-1">Only SHA-256 hashes plus prefix/suffix are persisted. Plaintext is delivered once and never recoverable.</p>
                   </div>
                 </div>
+              </div>
+            )}
+            {form.type === 'subscription' && (
+              <div className="sm:col-span-2">
+                <SubscriptionPlanEditor
+                  productId={editingId}
+                  currency={form.currency.toUpperCase()}
+                  draft={planDraft}
+                  initialPlans={editingId ? (products.find((product) => product.id === editingId)?.plans ?? []) : []}
+                  onDraftChange={setPlanDraft}
+                  onReadback={(plans) => setProducts((current) => current.map((product) => product.id === editingId ? { ...product, plans: [...plans] } : product))}
+                />
               </div>
             )}
             <div>
