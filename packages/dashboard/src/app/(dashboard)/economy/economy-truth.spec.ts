@@ -240,7 +240,10 @@ test('music load failure exposes recovery without editable default settings', as
   }));
   await page.goto('/music', { waitUntil: 'domcontentloaded' });
 
-  await expect(page.getByRole('main').getByRole('alert')).toContainText('Saved music configuration could not be read');
+  const recoveryPanel = page.getByRole('main').getByRole('alert').filter({
+    has: page.getByRole('heading', { name: 'Music settings unavailable' }),
+  });
+  await expect(recoveryPanel).toContainText('Saved music configuration could not be read');
   await expect(page.getByRole('button', { name: 'Retry loading settings' })).toBeVisible();
   await expect(page.getByRole('spinbutton')).toHaveCount(0);
   await expect(page.getByRole('switch')).toHaveCount(0);
