@@ -36,8 +36,14 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 
 async function installTeamApi(
   page: Page,
-  state: { controls: TeamControls; invitations: Invitation[]; patches: Array<Record<string, unknown>> },
+  state: {
+    controls: TeamControls;
+    invitations: Invitation[];
+    patches: Array<Record<string, unknown>>;
+    userMutationError?: string;
+  },
 ) {
+  await page.route('**/api/csrf', (route) => fulfillJson(route, { token: 'team-browser-csrf-token' }));
   await page.route('**/api/rbac/roles', (route) => fulfillJson(route, { success: true, data: [ROLE] }));
 
   await page.route('**/api/rbac/users', async (route) => {
@@ -48,6 +54,10 @@ async function installTeamApi(
 
     const body = route.request().postDataJSON() as { discord_id: string; role_id: string };
     expect(body).toEqual({ discord_id: '223456789012345695', role_id: ROLE.id });
+    if (state.userMutationError) {
+      await fulfillJson(route, { success: false, error: state.userMutationError }, 409);
+      return;
+    }
     state.invitations = [{
       id: 'inv-browser-proof',
       discord_id: body.discord_id,
@@ -143,7 +153,7 @@ test.describe('Team invitation browser flow', () => {
     ]);
   });
 
-  test('sends a consent invitation and revokes it with visible feedback', async ({ page }) => {
+  test('sends a consent invitation and revokes it with visible feedback', async ({ page }, testInfo) => {
     const state = {
       controls: {
         team_direct_assignment_enabled: false,
@@ -172,7 +182,40 @@ test.describe('Team invitation browser flow', () => {
     await expect(page.getByText('The invitation is queued for one more DM attempt.')).toBeVisible();
 
     await page.getByRole('button', { name: 'Revoke', exact: true }).click();
+    const revokeDialog = page.getByRole('alertdialog');
+    await expect(revokeDialog).toContainText('223456789012345695');
+    await expect(revokeDialog).toContainText('can no longer grant dashboard access');
+    await page.screenshot({ path: testInfo.outputPath('team-invitation-revoke-confirmation.png'), fullPage: true });
+    await revokeDialog.getByRole('button', { name: 'Revoke invitation' }).click();
     await expect(page.getByText('Invitation revoked')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Pending Invitations' })).not.toBeVisible();
+  });
+
+  test('keeps RBAC invitation fields when the API rejects the mutation', async ({ page }) => {
+    const state = {
+      controls: {
+        team_direct_assignment_enabled: false,
+        team_invite_dm_enabled: true,
+        team_max_pending_invitations: 25,
+        team_invitation_expiry_ms: 259_200_000,
+      },
+      invitations: [] as Invitation[],
+      patches: [] as Array<Record<string, unknown>>,
+      userMutationError: 'This member cannot receive dashboard access until they join the server.',
+    };
+    await installTeamApi(page, state);
+    await page.goto('/settings/team');
+    await page.getByRole('button', { name: 'Add Member' }).click();
+
+    const memberId = page.getByRole('textbox', { name: 'Member Discord ID' });
+    const role = page.getByRole('combobox', { name: 'Dashboard role' });
+    await memberId.fill('223456789012345695');
+    await role.selectOption(ROLE.id);
+    await page.getByRole('button', { name: 'Assign Role' }).click();
+
+    await expect(page.getByText(state.userMutationError, { exact: true }).first()).toBeVisible();
+    await expect(memberId).toHaveValue('223456789012345695');
+    await expect(role).toHaveValue(ROLE.id);
+    await expect(page.getByRole('heading', { name: 'Add Team Member' })).toBeVisible();
   });
 });
