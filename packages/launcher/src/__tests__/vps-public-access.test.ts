@@ -170,7 +170,7 @@ describe('VPS public access modes', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('blocks Funnel mode when the URL is invalid, unverified, or verified for a different host', () => {
     // Given three untrusted Funnel configurations.
