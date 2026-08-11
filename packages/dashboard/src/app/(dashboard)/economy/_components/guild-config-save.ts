@@ -83,8 +83,17 @@ export async function saveGuildConfigWithReadback(patch: GuildConfigPatch): Prom
 export class GuildConfigSaveCoordinator {
   private queue: Promise<void> = Promise.resolve();
   private readonly versions = new RequestVersionFence();
+  private lastConfirmed: { readonly version: number; readonly config: GuildConfigReadback } | null = null;
 
   constructor(private readonly saveOperation: SaveGuildConfig = saveGuildConfigWithReadback) {}
+
+  private async waitForQueuedRequests(): Promise<void> {
+    while (true) {
+      const tail = this.queue;
+      await tail;
+      if (tail === this.queue) return;
+    }
+  }
 
   async save(patch: GuildConfigPatch): Promise<CoordinatedGuildConfigSave> {
     const request = this.versions.request();
@@ -93,9 +102,13 @@ export class GuildConfigSaveCoordinator {
 
     try {
       const config = await operation;
-      return this.versions.publish(request)
-        ? { status: 'confirmed', config }
-        : { status: 'superseded' };
+      this.lastConfirmed = { version: request, config };
+      if (!this.versions.isLatest(request)) await this.waitForQueuedRequests();
+
+      if (this.lastConfirmed.version !== request || !this.versions.publish(request)) {
+        return { status: 'superseded' };
+      }
+      return { status: 'confirmed', config };
     } catch (error) {
       if (!this.versions.isLatest(request)) return { status: 'superseded' };
       throw error;

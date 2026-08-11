@@ -29,7 +29,7 @@ describe('saveGuildConfigWithReadback', () => {
 });
 
 describe('GuildConfigSaveCoordinator', () => {
-  it('serializes concurrent saves and publishes authoritative states in request order', async () => {
+  it('serializes concurrent saves without publishing an older state over a newer edit', async () => {
     const calls: GuildConfigPatch[] = [];
     let releaseFirst = (): void => undefined;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
@@ -48,14 +48,11 @@ describe('GuildConfigSaveCoordinator', () => {
     expect(calls).toEqual([{ economy_daily_loss_limit: 5000 }]);
 
     releaseFirst();
-    await expect(older).resolves.toEqual({
-      status: 'confirmed',
-      config: { economy_daily_loss_limit: 5000, economy_lottery_ticket_price: 100 },
-    });
     await expect(newer).resolves.toEqual({
       status: 'confirmed',
       config: { economy_daily_loss_limit: 5000, economy_lottery_ticket_price: 125 },
     });
+    await expect(older).resolves.toEqual({ status: 'superseded' });
     expect(calls).toEqual([
       { economy_daily_loss_limit: 5000 },
       { economy_lottery_ticket_price: 125 },
@@ -86,7 +83,7 @@ describe('GuildConfigSaveCoordinator', () => {
     });
   });
 
-  it('keeps an older confirmed readback publishable when the newer save fails', async () => {
+  it('restores the older confirmed readback only after the newer save fails', async () => {
     let attempt = 0;
     const saveOperation = async (): Promise<GuildConfigReadback> => {
       attempt += 1;
