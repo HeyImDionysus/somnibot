@@ -31,6 +31,7 @@ describe('VPS deployment approval confirmation', () => {
         'quiesce-vps-state-consumers',
         'start-vps-valkey',
         'restore-transferred-valkey',
+        'remove-funnel-compose-override',
         'start-stack',
         'install-health-recovery',
         'end-vps-maintenance',

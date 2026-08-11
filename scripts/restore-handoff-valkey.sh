@@ -11,7 +11,12 @@ case "$deploy_path" in
   */../*|*/..) echo "deploy path must not contain parent traversal" >&2; exit 64 ;;
 esac
 
-. "$deploy_path/scripts/lib/production-compose.sh"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+compose_helper="$deploy_path/scripts/lib/production-compose.sh"
+if [ -f "$script_dir/production-compose.sh" ]; then
+  compose_helper="$script_dir/production-compose.sh"
+fi
+. "$compose_helper"
 handoff_dir="$deploy_path/.runtime-handoff"
 snapshot_file="$handoff_dir/valkey.rdb"
 checksum_file="$snapshot_file.sha256"

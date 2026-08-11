@@ -36,6 +36,7 @@ for command_name in docker flock logger systemctl; do
 done
 
 install -d -m 0755 /usr/local/lib/somnibot
+install -m 0755 "$compose_helper" /usr/local/lib/somnibot/production-compose.sh
 install -m 0755 "$source_script" /usr/local/lib/somnibot/production-health-recover.sh
 install -m 0755 "$backup_script" /usr/local/lib/somnibot/backup-production-valkey.sh
 install -m 0755 "$restore_script" /usr/local/lib/somnibot/restore-production-valkey.sh

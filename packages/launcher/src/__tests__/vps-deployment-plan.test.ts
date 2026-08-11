@@ -159,6 +159,10 @@ describe('VPS deployment plan generator', () => {
           'deploy@somnibot.example.com',
           'docker',
           'compose',
+          '--project-name',
+          'somnibot-prod',
+          '--project-directory',
+          '/opt/somnibot',
           '-f',
           '/opt/somnibot/docker-compose.prod.yml',
           'up',
@@ -417,10 +421,40 @@ describe('VPS deployment plan generator', () => {
     const restart = buildVpsRuntimeStartCommand(plan);
     expect(restart.id).toBe('restore-vps-stack');
     expect(restart.args).toContain('StrictHostKeyChecking=yes');
-    expect(restart.args.slice(-5)).toEqual([
-      'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'start',
+    expect(restart.args.slice(restart.args.indexOf('docker'))).toEqual([
+      'docker',
+      'compose',
+      '--project-name',
+      'somnibot-prod',
+      '--project-directory',
+      '/opt/somnibot',
+      '-f',
+      '/opt/somnibot/docker-compose.prod.yml',
+      'start',
     ]);
     expect(restart.commandCategory).toBe('rollback');
+
+    const funnelPlan = buildVpsDeploymentPlan({
+      ...completeVpsInput,
+      vpsPublicAccessMode: 'tailscale-funnel',
+      vpsDomain: '',
+      vpsTailscaleFunnelUrl: 'https://somnibot-vps.tailbd9d28.ts.net',
+      vpsTailscaleFunnelVerifiedUrl: 'https://somnibot-vps.tailbd9d28.ts.net',
+    });
+    const funnelRestart = buildVpsRuntimeStartCommand(funnelPlan);
+    expect(funnelRestart.args.slice(funnelRestart.args.indexOf('docker'))).toEqual([
+      'docker',
+      'compose',
+      '--project-name',
+      'somnibot-prod',
+      '--project-directory',
+      '/opt/somnibot',
+      '-f',
+      '/opt/somnibot/docker-compose.prod.yml',
+      '-f',
+      '/opt/somnibot/.somnibot/launcher-tailscale-funnel.compose.yml',
+      'start',
+    ]);
 
     const endMaintenance = buildVpsMaintenanceExitCommand(plan);
     expect(endMaintenance.args.slice(-5)).toEqual([

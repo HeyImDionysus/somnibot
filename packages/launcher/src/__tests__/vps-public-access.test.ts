@@ -77,6 +77,19 @@ describe('VPS public access modes', () => {
     expect(plan.target?.publicBaseUrl).toBe('https://bot.example.com');
     expect(plan.reverseProxy?.publicPorts).toEqual(['80/tcp', '443/tcp']);
     expect(plan.serviceLayout).toContainEqual(expect.objectContaining({ name: 'caddy', exposure: 'public' }));
+    const removeOverride = plan.commands.find(command => command.id === 'remove-funnel-compose-override');
+    expect(removeOverride?.args.slice(-4)).toEqual([
+      'rm',
+      '-f',
+      '--',
+      '/opt/somnibot/.somnibot/launcher-tailscale-funnel.compose.yml',
+    ]);
+    const commandIds = plan.commands.map(command => command.id);
+    expect(commandIds.indexOf('remove-funnel-compose-override'))
+      .toBeGreaterThan(commandIds.indexOf('restore-transferred-valkey'));
+    expect(commandIds.indexOf('remove-funnel-compose-override'))
+      .toBeLessThan(commandIds.indexOf('start-stack'));
+    expect(plan.commands).not.toContainEqual(expect.objectContaining({ id: 'write-funnel-compose-override' }));
   });
 
   it('allows a missing purchased domain only when the exact Funnel URL was remotely verified', () => {
@@ -111,6 +124,7 @@ describe('VPS public access modes', () => {
       endpoint: '127.0.0.1:3456 -> dashboard:3000',
     }));
     expect(plan.commands).toContainEqual(expect.objectContaining({ id: 'write-funnel-compose-override' }));
+    expect(plan.commands).not.toContainEqual(expect.objectContaining({ id: 'remove-funnel-compose-override' }));
     expect(plan.commands.find(command => command.id === 'start-stack')?.args).toEqual(expect.arrayContaining([
       '-f',
       '/opt/somnibot/docker-compose.prod.yml',

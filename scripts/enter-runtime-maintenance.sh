@@ -13,7 +13,12 @@ case "$deploy_path" in
 esac
 case "$scope" in consumers|all) ;; *) echo "invalid maintenance scope" >&2; exit 64 ;; esac
 
-. "$deploy_path/scripts/lib/production-compose.sh"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+compose_helper="$deploy_path/scripts/lib/production-compose.sh"
+if [ -f "$script_dir/production-compose.sh" ]; then
+  compose_helper="$script_dir/production-compose.sh"
+fi
+. "$compose_helper"
 state_dir=/var/lib/somnibot-health-recovery
 maintenance_file="$state_dir/maintenance"
 [ -f "$compose_file" ] || { echo "compose file not found: $compose_file" >&2; exit 66; }

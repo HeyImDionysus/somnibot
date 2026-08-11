@@ -66,11 +66,73 @@ describe('protected VPS environment scripts', () => {
     expect(helperSource).toContain('--project-name "$compose_project_name"');
     expect(helperSource).toContain('-f "$compose_override_file"');
     expect(installerSource).toContain('scripts/lib/production-compose.sh');
+    expect(installerSource).toContain('install -m 0755 "$compose_helper" /usr/local/lib/somnibot/production-compose.sh');
 
     for (const script of productionComposeConsumers) {
       const source = readFileSync(script, 'utf8');
-      expect(source, script).toContain('. "$deploy_path/scripts/lib/production-compose.sh"');
+      expect(source, script).toContain('compose_helper="$deploy_path/scripts/lib/production-compose.sh"');
+      expect(source, script).toContain('compose_helper="$script_dir/production-compose.sh"');
+      expect(source, script).toContain('. "$compose_helper"');
       expect(source, script).not.toContain('docker compose -f "$compose_file"');
+    }
+  });
+
+  it('executes production Compose in the isolated project with only the active public-access files', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'somnibot-production-compose-'));
+    const shell = process.platform === 'win32'
+      ? 'C:\\Program Files\\Git\\bin\\bash.exe'
+      : 'sh';
+    const shellPath = (value: string) => value.replaceAll('\\', '/');
+    const command = [
+      'set -eu',
+      '. "$PRODUCTION_COMPOSE_HELPER"',
+      'docker() { printf \'%s\\n\' "$*"; }',
+      'production_compose ps --all',
+    ].join('\n');
+    const run = () => spawnSync(shell, ['-c', command], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        deploy_path: shellPath(root),
+        PRODUCTION_COMPOSE_HELPER: shellPath(productionCompose),
+      },
+    });
+
+    try {
+      writeFileSync(path.join(root, 'docker-compose.prod.yml'), 'services: {}\n');
+      const domain = run();
+      expect(domain.status, domain.stderr).toBe(0);
+      expect(domain.stdout.trim()).toBe([
+        'compose',
+        '--project-name',
+        'somnibot-prod',
+        '--project-directory',
+        shellPath(root),
+        '-f',
+        `${shellPath(root)}/docker-compose.prod.yml`,
+        'ps',
+        '--all',
+      ].join(' '));
+
+      mkdirSync(path.join(root, '.somnibot'));
+      writeFileSync(path.join(root, '.somnibot', 'launcher-tailscale-funnel.compose.yml'), 'services: {}\n');
+      const funnel = run();
+      expect(funnel.status, funnel.stderr).toBe(0);
+      expect(funnel.stdout.trim()).toBe([
+        'compose',
+        '--project-name',
+        'somnibot-prod',
+        '--project-directory',
+        shellPath(root),
+        '-f',
+        `${shellPath(root)}/docker-compose.prod.yml`,
+        '-f',
+        `${shellPath(root)}/.somnibot/launcher-tailscale-funnel.compose.yml`,
+        'ps',
+        '--all',
+      ].join(' '));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

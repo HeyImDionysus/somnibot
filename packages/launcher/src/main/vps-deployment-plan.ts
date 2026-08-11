@@ -272,6 +272,23 @@ function buildRemoteCommand(
   return buildCommand('ssh', [...SSH_BASE_ARGS, '--', sshTarget, remoteExecutable, ...remoteArgs], options);
 }
 
+function buildComposeFileArgs(
+  deployPath: string,
+  projectName: string,
+  composeFilePath: string,
+  composeOverrideFilePath: string | null,
+): string[] {
+  return [
+    '--project-name',
+    projectName,
+    '--project-directory',
+    deployPath,
+    '-f',
+    composeFilePath,
+    ...(composeOverrideFilePath ? ['-f', composeOverrideFilePath] : []),
+  ];
+}
+
 function buildCommands(
   sshTarget: string,
   sshUser: string,
@@ -282,14 +299,16 @@ function buildCommands(
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
   const composeOverrideFilePath = joinPath(deployPath, FUNNEL_COMPOSE_OVERRIDE_FILE);
   const envFilePath = joinPath(deployPath, '.env');
-  const composeFileArgs = publicAccessMode === 'tailscale-funnel'
-    ? ['-f', composeFilePath, '-f', composeOverrideFilePath]
-    : ['-f', composeFilePath];
+  const composeFileArgs = buildComposeFileArgs(
+    deployPath,
+    COMPOSE_PROJECT_NAME,
+    composeFilePath,
+    publicAccessMode === 'tailscale-funnel' ? composeOverrideFilePath : null,
+  );
   const lavalinkProbeScript = [
     'docker',
     'compose',
-    '-f',
-    composeFilePath,
+    ...composeFileArgs,
     'exec',
     '-T',
     'bot',
@@ -396,6 +415,18 @@ function buildCommands(
       approvalRequired: true,
       commandCategory: 'service',
     }),
+    ...(publicAccessMode === 'domain' ? [buildRemoteCommand(
+      sshTarget,
+      'rm',
+      ['-f', '--', composeOverrideFilePath],
+      {
+        id: 'remove-funnel-compose-override',
+        label: 'Remove the inactive Tailscale Funnel Compose override',
+        changesRemote: true,
+        approvalRequired: true,
+        commandCategory: 'service',
+      },
+    )] : []),
     ...(publicAccessMode === 'tailscale-funnel' ? [buildRemoteCommand(sshTarget, 'docker', ['compose', ...composeFileArgs, 'stop', 'caddy'], {
       id: 'stop-bundled-caddy',
       label: 'Keep SomniBot bundled Caddy stopped for Tailscale Funnel mode',
@@ -482,9 +513,12 @@ function buildRollback(
   lastGoodCommit: string,
   composeOverrideFilePath: string | null,
 ): VpsDeploymentPlan['rollback'] {
-  const composeFileArgs = composeOverrideFilePath
-    ? ['-f', composeFilePath, '-f', composeOverrideFilePath]
-    : ['-f', composeFilePath];
+  const composeFileArgs = buildComposeFileArgs(
+    deployPath,
+    COMPOSE_PROJECT_NAME,
+    composeFilePath,
+    composeOverrideFilePath,
+  );
   return {
     summary: 'Return the VPS checkout to a last known-good commit, rebuild containers, and verify dashboard health before calling rollback complete.',
     commands: [
@@ -814,7 +848,16 @@ export function buildVpsRuntimeStartCommand(plan: VpsDeploymentPlan): VpsDeploym
   return buildRemoteCommand(
     plan.target.sshTarget,
     'docker',
-    ['compose', '-f', plan.target.composeFilePath, 'start'],
+    [
+      'compose',
+      ...buildComposeFileArgs(
+        plan.target.deployPath,
+        plan.target.composeProjectName,
+        plan.target.composeFilePath,
+        plan.target.composeOverrideFilePath,
+      ),
+      'start',
+    ],
     {
       id: 'restore-vps-stack',
       label: 'Restore the previously stopped VPS stack after a failed local handoff',
