@@ -83,6 +83,12 @@ function setupMocks(rows: Array<Record<string, unknown>>) {
   files.single.mockResolvedValue(productFile);
   files.maybeSingle.mockResolvedValue(productFile);
 
+  const products = registerTable(mock, 'products');
+  products.maybeSingle.mockResolvedValue({
+    data: { delivery_type: 'license_key' },
+    error: null,
+  });
+
   // The signed-link TTL is guild-configurable; no row means the bounded
   // five-minute default (300 seconds) used by this fixture.
   const guildConfig = registerTable(mock, 'guild_config');

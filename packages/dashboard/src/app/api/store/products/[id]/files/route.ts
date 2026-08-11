@@ -66,7 +66,7 @@ export async function POST(
   // buyers just gained a download.
   const { data: product } = await supabase
     .from('products')
-    .select('id, name')
+    .select('id, name, delivery_type')
     .eq('id', productId)
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -81,6 +81,16 @@ export async function POST(
   const parsed = await parseBody(req, schemas.productFile.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
+
+  if (product.delivery_type !== 'license_key') {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Static licensed products require an uploaded supported master so SomniBot can generate the buyer-specific derivative. Upload the file from the product file manager.',
+      },
+      { status: 409 },
+    );
+  }
 
   const { name, description, file_path, external_url, file_size_bytes, mime_type, sort_order } = body;
 

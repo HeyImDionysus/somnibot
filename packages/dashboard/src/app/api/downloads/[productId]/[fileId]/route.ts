@@ -16,6 +16,11 @@ import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { isEntitlementAccessLive } from '@somnibot/shared';
 import { selectDownloadEntitlement } from '@/lib/portal/select-entitlement';
+import {
+  createStaticDelivery,
+  isSupportedStaticFile,
+} from '@/lib/store/static-delivery';
+import { STATIC_FORMAT_SUMMARY } from '@/lib/store/static-format-contract';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -238,6 +243,32 @@ export async function GET(
     return NextResponse.json({ error: 'File not found' }, { status: 404 });
   }
 
+  const { data: product, error: productError } = await supabase
+    .from('products')
+    .select('delivery_type')
+    .eq('id', productId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  if (productError) {
+    return serviceUnavailable('Downloads product lookup', productError);
+  }
+  if (!product) {
+    return NextResponse.json({ error: 'Product not found' }, { status: 404 });
+  }
+  const staticDelivery = product.delivery_type !== 'license_key';
+  const fileName = typeof file.file_name === 'string'
+    ? file.file_name
+    : typeof file.display_name === 'string'
+      ? file.display_name
+      : typeof file.name === 'string'
+        ? file.name
+        : 'download';
+  const mimeType = typeof file.mime_type === 'string'
+    ? file.mime_type
+    : typeof file.content_type === 'string'
+      ? file.content_type
+      : null;
+
   /**
    * Consume a signed-link nonce only once every dependency check has succeeded
    * and a redirect target is ready. A 429/503, missing file, invalid URL, or
@@ -360,6 +391,15 @@ export async function GET(
 
   // If external URL, redirect — V6 Audit §2.4: enforce HTTPS
   if (file.external_url) {
+    if (staticDelivery) {
+      return NextResponse.json(
+        {
+          error: 'Static licensed products must use an uploaded supported file so SomniBot can create the buyer-specific derivative.',
+          retryable: false,
+        },
+        { status: 409 },
+      );
+    }
     try {
       const externalUrl = new URL(file.external_url);
       if (externalUrl.protocol !== 'https:') {
@@ -374,11 +414,77 @@ export async function GET(
     }
   }
 
-  // If Supabase storage path, generate signed URL
-  if (file.file_path) {
+  const storagePath = typeof file.storage_path === 'string'
+    ? file.storage_path
+    : typeof file.file_path === 'string'
+      ? file.file_path
+      : null;
+  const storageBucket = typeof file.storage_bucket === 'string'
+    ? file.storage_bucket
+    : typeof file.storage_path === 'string'
+      ? 'product-files'
+      : 'product_files';
+
+  if (storagePath && staticDelivery) {
+    if (!isSupportedStaticFile(mimeType, fileName)) {
+      return NextResponse.json(
+        {
+          error: `This file format has no verified Static buyer-derivative transformer. Current transformers: ${STATIC_FORMAT_SUMMARY}. Add and attack-test a transformer for this format, or change the product to Dynamic licensing.`,
+          retryable: false,
+        },
+        { status: 409 },
+      );
+    }
+    const secret = process.env.STATIC_DELIVERY_HMAC_SECRET?.trim()
+      || process.env.WEBHOOK_REPLAY_SECRET?.trim();
+    if (!secret) {
+      return serviceUnavailable('Downloads static delivery', {
+        message: 'Static delivery HMAC secret is unavailable',
+      });
+    }
+    const { data: master, error: masterError } = await supabase.storage
+      .from(storageBucket)
+      .download(storagePath);
+    if (masterError || !master) {
+      return serviceUnavailable('Downloads storage read', masterError ?? {
+        message: 'Static master was not returned by storage',
+      });
+    }
+    try {
+      const derivative = await createStaticDelivery({
+        bytes: new Uint8Array(await master.arrayBuffer()),
+        fileName,
+        mimeType,
+        productId,
+        entitlementId: deliveryEntitlement.id,
+        customerId,
+        secret,
+      });
+      const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const responseBody = new ArrayBuffer(derivative.bytes.byteLength);
+      new Uint8Array(responseBody).set(derivative.bytes);
+      return deliver(new NextResponse(responseBody, {
+        status: 200,
+        headers: {
+          'Cache-Control': 'private, no-store, max-age=0',
+          'Content-Disposition': `attachment; filename="${safeFileName}"`,
+          'Content-Type': derivative.mimeType,
+          'X-Content-Type-Options': 'nosniff',
+          'X-SomniBot-Watermark-Manifest': derivative.manifestBase64Url,
+          'X-SomniBot-Watermark-Signature': derivative.signature,
+        },
+      }));
+    } catch (error) {
+      return serviceUnavailable('Downloads static derivative', {
+        message: error instanceof Error ? error.message : 'Static derivative failed',
+      });
+    }
+  }
+
+  if (storagePath) {
     const { data: signedUrl, error: signedUrlError } = await supabase.storage
-      .from('product_files')
-      .createSignedUrl(file.file_path, 3600); // 1 hour
+      .from(storageBucket)
+      .createSignedUrl(storagePath, 3600); // 1 hour
 
     if (signedUrlError) {
       return serviceUnavailable('Downloads storage signing', signedUrlError);
