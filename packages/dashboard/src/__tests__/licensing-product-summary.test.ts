@@ -47,4 +47,32 @@ describe('licensing product summary', () => {
     expect(() => parseLicensingProducts({ success: true, data: [{ name: 'Missing identity' }] }))
       .toThrow('Store product readback is invalid');
   });
+
+  it('also accepts the array relationship shape used by older Supabase metadata', () => {
+    const [product] = parseLicensingProducts({
+      success: true,
+      data: [{
+        id: 'array-policy-product',
+        name: 'Array Policy Product',
+        type: 'subscription',
+        delivery_type: 'license_key',
+        active: true,
+        granted_role_ids: [],
+        granted_channel_ids: [],
+        plans: [],
+        product_files: [],
+        product_license_config: [{
+          max_devices: 3,
+          heartbeat_interval_seconds: 60,
+          offline_grace_period_seconds: 600,
+        }],
+      }],
+    });
+
+    expect(product).toEqual(expect.objectContaining({
+      maxInstallations: 3,
+      heartbeatSeconds: 60,
+      offlineGraceSeconds: 600,
+    }));
+  });
 });
