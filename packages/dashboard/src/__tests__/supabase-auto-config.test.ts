@@ -97,6 +97,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           EXTERNAL_DISCORD_ENABLED: true,
+          SITE_URL: 'http://localhost:3000',
           URI_ALLOW_LIST: 'http://localhost:3000/api/auth/callback',
         }),
       });
@@ -123,13 +124,14 @@ describe('Supabase Discord auth auto-config', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ external_discord_enabled: false, uri_allow_list: '' }),
+        json: async () => ({ external_discord_enabled: false, site_url: 'http://localhost:3000', uri_allow_list: '' }),
       })
       .mockResolvedValueOnce({ ok: true, text: async () => '' })
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
           external_discord_enabled: true,
+          site_url: 'http://localhost:3000',
           uri_allow_list: 'http://localhost:3000/api/auth/callback',
         }),
       });
@@ -158,6 +160,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           EXTERNAL_DISCORD_ENABLED: true,
+          SITE_URL: 'http://localhost:3000',
           URI_ALLOW_LIST: 'http://localhost:3000/api/auth/callback',
         }),
       });
@@ -185,6 +188,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           EXTERNAL_DISCORD_ENABLED: true,
+          SITE_URL: 'http://localhost:3000',
           URI_ALLOW_LIST: 'http://localhost:3000/api/auth/callback',
         }),
       });
@@ -220,6 +224,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           external_discord_enabled: true,
+          site_url: 'https://dashboard.example.com',
           uri_allow_list: 'https://existing.example.com/api/auth/callback',
         }),
       })
@@ -231,6 +236,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           external_discord_enabled: true,
+          site_url: 'https://dashboard.example.com',
           uri_allow_list: 'https://existing.example.com/api/auth/callback,https://dashboard.example.com/api/auth/callback',
         }),
       });
@@ -250,11 +256,48 @@ describe('Supabase Discord auth auto-config', () => {
 
     const body = JSON.parse(String(patchRequest[1]?.body));
     expect(body).toEqual({
+      site_url: 'https://dashboard.example.com',
       uri_allow_list: expect.stringContaining('https://dashboard.example.com/api/auth/callback'),
     });
     expect(body.uri_allow_list).toContain('https://existing.example.com/api/auth/callback');
     expect(body.external_discord_client_id).toBeUndefined();
     expect(body.external_discord_secret).toBeUndefined();
+  });
+
+  it('replaces a stale Supabase site URL without removing existing callback URLs', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_ACCESS_TOKEN = 'supabase-management-token';
+    process.env.NEXT_PUBLIC_APP_URL = 'https://dashboard.example.com/';
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          site_url: 'https://old-dashboard.example.com',
+          uri_allow_list: 'https://dashboard.example.com/api/auth/callback,https://old-dashboard.example.com/api/auth/callback',
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          site_url: 'https://dashboard.example.com',
+          uri_allow_list: 'https://dashboard.example.com/api/auth/callback,https://old-dashboard.example.com/api/auth/callback',
+        }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider();
+
+    expect(result).toEqual({ success: true, alreadyConfigured: false });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const patchBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(patchBody).toEqual({
+      site_url: 'https://dashboard.example.com',
+      uri_allow_list: 'https://dashboard.example.com/api/auth/callback,https://old-dashboard.example.com/api/auth/callback',
+    });
   });
 
   it('patches Supabase auth config with the configured dashboard callback URL', async () => {
@@ -271,6 +314,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           external_discord_enabled: false,
+          site_url: 'https://old-dashboard.example.com',
           uri_allow_list: 'https://existing.example.com/api/auth/callback',
         }),
       })
@@ -282,6 +326,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           external_discord_enabled: true,
+          site_url: 'https://dashboard.example.com',
           uri_allow_list: 'https://existing.example.com/api/auth/callback,https://dashboard.example.com/api/auth/callback,http://localhost:3000/api/auth/callback',
         }),
       });
@@ -304,6 +349,7 @@ describe('Supabase Discord auth auto-config', () => {
     expect(body.uri_allow_list).toContain('https://dashboard.example.com/api/auth/callback');
     expect(body.uri_allow_list).toContain('http://localhost:3000/api/auth/callback');
     expect(body.uri_allow_list).not.toContain('https://undefined');
+    expect(body.site_url).toBe('https://dashboard.example.com');
     expect(body.external_discord_enabled).toBe(true);
     expect(body.external_discord_client_id).toBe('123456789012345678');
     expect(body.external_discord_secret).toBe('discord-client-secret');
@@ -319,6 +365,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           external_discord_enabled: true,
+          site_url: 'https://dashboard.example.com',
           uri_allow_list: 'https://dashboard.example.com/api/auth/callback',
         }),
       })
@@ -330,6 +377,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           external_discord_enabled: true,
+          site_url: 'https://dashboard.example.com',
           uri_allow_list: 'https://dashboard.example.com/api/auth/callback',
         }),
       });

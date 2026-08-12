@@ -21,6 +21,7 @@ interface DiscordAuthProviderStatus {
   ready: boolean;
   providerEnabled: boolean;
   callbackAllowListReady: boolean;
+  siteUrlReady: boolean;
   missingCallbackUrls: string[];
   manualConfigured: boolean;
   error?: string;
@@ -199,6 +200,15 @@ function buildAllowList(
   return allowListEntries.join(',');
 }
 
+function getConfiguredSiteUrl(config: Record<string, unknown>): string | null {
+  const rawSiteUrl = config.site_url ?? config.SITE_URL;
+  return typeof rawSiteUrl === 'string' ? normalizeDashboardUrl(rawSiteUrl) : null;
+}
+
+function isSiteUrlReady(config: Record<string, unknown>, expectedSiteUrl = getDashboardBaseUrl()): boolean {
+  return getConfiguredSiteUrl(config) === normalizeDashboardUrl(expectedSiteUrl);
+}
+
 export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions): Promise<DiscordAuthProviderStatus> {
   const callbackUrls = getRequiredCallbackUrls(options);
   if (isManualDiscordAuthProviderConfigured()) {
@@ -206,6 +216,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       ready: true,
       providerEnabled: true,
       callbackAllowListReady: true,
+      siteUrlReady: true,
       missingCallbackUrls: [],
       manualConfigured: true,
     };
@@ -217,6 +228,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       ready: false,
       providerEnabled: false,
       callbackAllowListReady: false,
+      siteUrlReady: false,
       missingCallbackUrls: callbackUrls,
       manualConfigured: false,
       error: 'Could not extract Supabase project ref from URL',
@@ -229,6 +241,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       ready: false,
       providerEnabled: false,
       callbackAllowListReady: false,
+      siteUrlReady: false,
       missingCallbackUrls: callbackUrls,
       manualConfigured: false,
       error: 'SUPABASE_ACCESS_TOKEN not set',
@@ -242,6 +255,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
         ready: false,
         providerEnabled: false,
         callbackAllowListReady: false,
+        siteUrlReady: false,
         missingCallbackUrls: callbackUrls,
         manualConfigured: false,
         error: current.error,
@@ -252,11 +266,13 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       || current.config.EXTERNAL_DISCORD_ENABLED === true;
     const missingCallbackUrls = getMissingCallbackUrls(current.config, callbackUrls);
     const callbackAllowListReady = missingCallbackUrls.length === 0;
+    const siteUrlReady = isSiteUrlReady(current.config);
 
     return {
-      ready: providerEnabled && callbackAllowListReady,
+      ready: providerEnabled && callbackAllowListReady && siteUrlReady,
       providerEnabled,
       callbackAllowListReady,
+      siteUrlReady,
       missingCallbackUrls,
       manualConfigured: false,
     };
@@ -265,6 +281,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       ready: false,
       providerEnabled: false,
       callbackAllowListReady: false,
+      siteUrlReady: false,
       missingCallbackUrls: callbackUrls,
       manualConfigured: false,
       error: `Failed to check Discord auth provider: ${err}`,
@@ -334,6 +351,7 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
 
   try {
     const callbackUrls = getRequiredCallbackUrls(options);
+    const siteUrl = getDashboardBaseUrl();
     const current = await fetchAuthConfig(projectRef, accessToken, options);
     const currentConfig = current.ok ? current.config : {};
     const providerEnabled = current.ok && (
@@ -341,12 +359,14 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
       || currentConfig.EXTERNAL_DISCORD_ENABLED === true
     );
     const allowListReady = current.ok && getMissingCallbackUrls(currentConfig, callbackUrls).length === 0;
+    const siteUrlReady = current.ok && isSiteUrlReady(currentConfig, siteUrl);
 
-    if (providerEnabled && allowListReady) {
+    if (providerEnabled && allowListReady && siteUrlReady) {
       return { success: true, alreadyConfigured: true };
     }
 
     const patchBody: Record<string, string | boolean> = {
+      site_url: siteUrl,
       uri_allow_list: buildAllowList(currentConfig, callbackUrls),
     };
 
@@ -393,13 +413,17 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     const verifiedProviderEnabled = verified.config.external_discord_enabled === true
       || verified.config.EXTERNAL_DISCORD_ENABLED === true;
     const verifiedMissingCallbackUrls = getMissingCallbackUrls(verified.config, callbackUrls);
-    if (!verifiedProviderEnabled || verifiedMissingCallbackUrls.length > 0) {
+    const verifiedSiteUrlReady = isSiteUrlReady(verified.config, siteUrl);
+    if (!verifiedProviderEnabled || verifiedMissingCallbackUrls.length > 0 || !verifiedSiteUrlReady) {
       const missing = verifiedMissingCallbackUrls.length > 0
         ? ` Missing callback URLs: ${verifiedMissingCallbackUrls.join(', ')}.`
         : '';
+      const siteUrlMismatch = !verifiedSiteUrlReady
+        ? ` Supabase site URL does not match ${siteUrl}.`
+        : '';
       return {
         success: false,
-        error: `Supabase Management API accepted the auth config update, but verification did not prove Discord auth readiness.${missing}`,
+        error: `Supabase Management API accepted the auth config update, but verification did not prove Discord auth readiness.${missing}${siteUrlMismatch}`,
       };
     }
 

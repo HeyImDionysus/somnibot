@@ -37,9 +37,9 @@ export async function GET(req: NextRequest) {
   // Current circulation snapshot (V5 audit 4.2 — use RPC instead of fetching all rows)
   const { data: walletStats } = await admin.rpc('economy_wallet_stats', { p_guild_id: guildId });
 
-  const stats = walletStats?.[0] ?? { total_wallet: 0, total_bank: 0, active_wallets: 0 };
-  const totalWallet = stats.total_wallet ?? 0;
-  const totalBank = stats.total_bank ?? 0;
+  const stats = walletStats?.[0] ?? { total_wallets: 0, total_circulation: 0, total_banked: 0 };
+  const totalWallet = stats.total_circulation ?? 0;
+  const totalBank = stats.total_banked ?? 0;
 
   return NextResponse.json({
     success: true,
@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
       total_wallet: totalWallet,
       total_bank: totalBank,
       total: totalWallet + totalBank,
-      active_wallets: stats.active_wallets ?? 0,
+      active_wallets: stats.total_wallets ?? 0,
     },
     daily_totals: dailyTotals.data ?? [],
     tx_volume: txVolume.data ?? [],

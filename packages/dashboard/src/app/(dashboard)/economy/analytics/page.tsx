@@ -18,7 +18,7 @@ interface AnalyticsData {
   daily_totals: Array<{ day: string; total_circulation: number; active_users: number }>;
   tx_volume: Array<{ tx_type: string; tx_count: number; total_amount: number }>;
   market_activity: Array<{ day: string; listings_created: number; listings_sold: number; avg_price: number }>;
-  top_earners: Array<{ user_id: string; net_worth: number; total_earned: number; total_spent: number }>;
+  top_earners: Array<{ user_id: string; total_earned: number; total_spent: number }>;
   popular_items: Array<{ item_id: string; item_name: string; purchase_count: number; total_revenue: number }>;
   feature_participation: Array<{ feature: string; daily_active_users: number; total_sessions: number }>;
 }
@@ -139,7 +139,7 @@ export default function EconomyAnalyticsPage() {
               <div key={e.user_id} className="flex items-center gap-2 text-xs">
                 <span className="w-5 text-center text-discord-text-muted font-mono">{i + 1}</span>
                 <span className="flex-1 truncate text-discord-text-secondary">{e.user_id}</span>
-                <span className="text-discord-text-primary font-medium">{formatNum(e.net_worth)}</span>
+                <span className="text-discord-text-primary font-medium">{formatNum(e.total_earned)}</span>
               </div>
             ))}
             {data.top_earners.length === 0 && <p className="text-sm text-discord-text-muted">No data</p>}

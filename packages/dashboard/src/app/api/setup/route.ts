@@ -137,6 +137,7 @@ type DiscordAuthProviderStatusReason =
   | 'project-ref-missing'
   | 'provider-disabled'
   | 'callback-allow-list-missing'
+  | 'site-url-mismatch'
   | 'management-api-error'
   | 'unknown';
 
@@ -148,6 +149,7 @@ function getDiscordAuthProviderStatusReason(status: DiscordAuthProviderStatus): 
   if (status.error) return 'unknown';
   if (!status.providerEnabled) return 'provider-disabled';
   if (!status.callbackAllowListReady) return 'callback-allow-list-missing';
+  if (status.siteUrlReady === false) return 'site-url-mismatch';
   return 'unknown';
 }
 
@@ -170,6 +172,8 @@ function buildDiscordAuthProviderStatusDetail(
       return status.missingCallbackUrls.length > 0
         ? `Supabase auth callback allow-list is missing: ${status.missingCallbackUrls.join(', ')}.`
         : 'Supabase auth callback allow-list does not include the current dashboard callback URL.';
+    case 'site-url-mismatch':
+      return 'Supabase auth still points to an older dashboard address. Run Configure Auth again to update it to the current public dashboard URL.';
     case 'management-api-error':
       return 'Supabase Management API could not verify Discord auth provider readiness. Check the server logs or retry with a valid Management API token.';
     case 'unknown':
@@ -184,6 +188,7 @@ function toPublicDiscordAuthProviderStatus(status: DiscordAuthProviderStatus) {
     ready: status.ready,
     providerEnabled: status.providerEnabled,
     callbackAllowListReady: status.callbackAllowListReady,
+    siteUrlReady: status.siteUrlReady,
     missingCallbackUrls: status.missingCallbackUrls,
     manualConfigured: status.manualConfigured,
     statusReason,
