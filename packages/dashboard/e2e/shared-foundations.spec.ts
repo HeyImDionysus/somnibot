@@ -81,6 +81,96 @@ test.describe('Shared dashboard accessibility foundations', () => {
     await expect(page.locator('#dashboard-content')).toHaveCSS('padding-top', '56px');
   });
 
+  test('keeps compact dashboard status copy and music controls from collapsing', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.route('**/api/dashboard/stats', (route) => fulfillJson(route, {
+      botOnline: true,
+      memberCount: 2,
+      trackedMembers: 2,
+      activeTickets: 0,
+      openInfractions: 0,
+      revenueThisMonth: 0,
+      activeGiveaways: 0,
+      eventsToday: 0,
+      uptime: '1h',
+      uptimeSeconds: 3600,
+      wsPing: 42,
+      activeVoice: 0,
+      valkeyConnected: true,
+      memoryMb: 128,
+      lastSnapshot: '2026-08-12T00:00:00.000Z',
+      recentEvents: [],
+    }));
+    await page.route('**/api/diagnostics', (route) => fulfillJson(route, {
+      success: true,
+      data: {
+        bot: {
+          online: true,
+          onlineSourceAt: '2026-08-12T00:00:00.000Z',
+          onlineSourceAgeSecs: 1,
+          metricsAvailable: true,
+          metricsStale: false,
+          metricsSnapshotAt: '2026-08-12T00:00:00.000Z',
+          metricsAgeSecs: 1,
+        },
+      },
+    }));
+    await page.route('**/api/guild', (route) => fulfillJson(route, {
+      guild: {
+        id: 'guild-browser-proof',
+        name: 'Browser proof guild',
+        bot_joined_at: '2026-08-12T00:00:00.000Z',
+        setup_completed: false,
+        setup_confirmed_at: null,
+        bot_role_position: 2,
+      },
+      config: {},
+      totalRoles: 3,
+    }));
+
+    await page.goto('/dashboard');
+    const setupDescription = page.getByText('Run the setup wizard to deploy roles & channels', { exact: true });
+    const setupLink = page.getByRole('link', { name: 'Continue setup' });
+    await expect(setupDescription).toBeVisible();
+    await expect(setupLink).toBeVisible();
+    const descriptionBox = await setupDescription.boundingBox();
+    const linkBox = await setupLink.boundingBox();
+    expect(descriptionBox).not.toBeNull();
+    expect(linkBox).not.toBeNull();
+    expect(descriptionBox!.y + descriptionBox!.height).toBeLessThanOrEqual(linkBox!.y);
+
+    await page.route('**/api/music', (route) => fulfillJson(route, {
+      success: true,
+      data: {
+        music_enabled: true,
+        music_default_volume: 50,
+        dj_role_id: null,
+        music_auto_leave_minutes: 5,
+        music_auto_destroy_minutes: 30,
+        max_queue_length: 500,
+        allow_duplicates: true,
+        per_user_queue_cap: 50,
+        vote_skip_threshold_percent: 50,
+        self_skip_enabled: true,
+        requester_move_enabled: true,
+        priority_voting_enabled: true,
+      },
+    }));
+    await page.route('**/api/roles', (route) => fulfillJson(route, { success: true, data: [] }));
+    await page.route('**/api/music/now-playing', (route) => fulfillJson(route, {
+      success: true,
+      data: { enabled: true, nowPlaying: null, queue: { length: 0, duration: 0 }, listeners: 0, recentTracks: [] },
+    }));
+
+    await page.goto('/music');
+    const musicSwitch = page.getByRole('switch', { name: 'Enable Music System' });
+    await expect(musicSwitch).toBeVisible();
+    const switchBox = await musicSwitch.boundingBox();
+    expect(switchBox).not.toBeNull();
+    expect(switchBox!.width).toBeGreaterThanOrEqual(44);
+    expect(switchBox!.height).toBeGreaterThanOrEqual(44);
+  });
+
   test('provides an off-canvas mobile navigation and a skip route to main content', async ({ page }, testInfo) => {
     // Given: the dashboard at a narrow viewport.
     await page.setViewportSize({ width: 375, height: 812 });

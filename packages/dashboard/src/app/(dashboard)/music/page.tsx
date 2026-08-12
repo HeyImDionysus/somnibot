@@ -281,8 +281,8 @@ export default function MusicSettingsPage() {
 
       {/* Enable/Disable */}
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
-        <div className="flex items-center justify-between">
-          <div>
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
             <h2 className="text-lg font-semibold text-discord-text-primary">Music System</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
               Enable or disable the music system globally. When disabled, music commands won&apos;t be registered.
@@ -294,7 +294,7 @@ export default function MusicSettingsPage() {
             aria-label="Enable Music System"
             aria-checked={config.music_enabled}
             onClick={() => updateField('music_enabled', !config.music_enabled)}
-            className={`relative inline-flex h-11 w-11 items-center rounded-full transition-colors ${
+            className={`relative inline-flex h-11 w-11 shrink-0 items-center rounded-full transition-colors ${
               config.music_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
             }`}
           >

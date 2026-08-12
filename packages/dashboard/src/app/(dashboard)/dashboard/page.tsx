@@ -247,7 +247,7 @@ export default function DashboardPage() {
 
         {/* Setup Status */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex-col items-stretch gap-2">
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm font-medium">Setup</CardTitle>
               {guild?.setup_completed ? (
