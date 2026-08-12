@@ -71,7 +71,7 @@ export function LicensingProductOverview() {
           </div>
           <ul className="grid gap-3 lg:grid-cols-2">
             {products.map((product) => (
-              <li key={product.id} className="rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
+              <li key={product.id} className="min-w-0 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
                 <div className="flex items-start gap-3">
                   <span className="rounded-input bg-discord-bg-tertiary p-2 text-discord-accent">
                     {product.mode === 'dynamic' ? <KeyRound size={18} aria-hidden="true" /> : <FileArchive size={18} aria-hidden="true" />}
@@ -84,7 +84,7 @@ export function LicensingProductOverview() {
                     </div>
                     <p className="mt-1 text-xs text-discord-text-muted">{product.billing} · {product.planCount} active plan(s) · {product.discordBenefitCount} Discord benefit(s)</p>
                     {product.mode === 'dynamic' ? (
-                      <p className="mt-2 text-xs text-discord-text-secondary">{product.maxInstallations ?? 'Unverified'} installation limit · {product.heartbeatSeconds ?? 'Unverified'}s heartbeat · {product.offlineGraceSeconds ?? 'Unverified'}s offline grace</p>
+                      <p className="mt-2 break-words text-xs text-discord-text-secondary">{product.maxInstallations ?? 'Unverified'} installation limit · {product.heartbeatSeconds ?? 'Unverified'}s heartbeat · {product.offlineGraceSeconds ?? 'Unverified'}s offline grace</p>
                     ) : (
                       <p className="mt-2 text-xs text-discord-text-secondary">{product.fileCount} protected master file(s). Downloads require entitlement, buyer-specific derivation, and signed delivery evidence.</p>
                     )}

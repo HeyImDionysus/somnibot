@@ -222,7 +222,7 @@ export default function AutoModRulesPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Auto-Mod Rules</h1>
           <p className="mt-1 text-sm text-discord-text-muted">
@@ -271,9 +271,9 @@ export default function AutoModRulesPage() {
               rule.enabled ? 'border-discord-border-subtle' : 'border-discord-border-subtle/50 opacity-60'
             }`}
           >
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
                   <span>{ruleType?.icon ?? '🛡️'}</span>
                   <h3 className="font-medium text-discord-text-primary">{rule.name}</h3>
                   <span className="rounded-full bg-discord-bg-tertiary px-2 py-0.5 text-xs text-discord-text-muted">
@@ -295,7 +295,7 @@ export default function AutoModRulesPage() {
                 <ConfigSummary type={rule.type} config={rule.config} />
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                 <label className="relative inline-flex cursor-pointer items-center">
                   <input
                     type="checkbox"
