@@ -210,9 +210,9 @@ export default function CustomersPage() {
   }) ?? [];
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] gap-0">
+    <div className="flex min-h-[calc(100vh-4rem)] flex-col gap-0 lg:h-[calc(100vh-4rem)] lg:flex-row">
       {/* ── Left: Customer List ─────────────────────────── */}
-      <div className="w-80 border-r border-discord-border-subtle bg-discord-bg-secondary flex flex-col flex-shrink-0">
+      <div className="flex w-full flex-shrink-0 flex-col border-b border-discord-border-subtle bg-discord-bg-secondary lg:w-80 lg:border-b-0 lg:border-r">
         <div className="p-4 border-b border-discord-border-subtle">
           <h1 className="text-lg font-bold text-white mb-3">Customers</h1>
           <input
@@ -223,7 +223,7 @@ export default function CustomersPage() {
             className="w-full px-3 py-2 bg-discord-bg-tertiary text-sm text-white rounded border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
           />
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div className="max-h-80 flex-1 overflow-y-auto lg:max-h-none">
           {loading ? (
             <TableSkeleton rows={8} />
           ) : customers.length === 0 ? (
@@ -260,7 +260,7 @@ export default function CustomersPage() {
       </div>
 
       {/* ── Right: Customer 360 ────────────────────────── */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {!selectedId ? (
           <div className="flex-1 flex items-center justify-center text-discord-text-muted">
             <div className="text-center">
@@ -290,7 +290,7 @@ export default function CustomersPage() {
               </div>
 
               {/* Summary cards */}
-              <div className="grid grid-cols-6 gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
                 {[
                   { label: 'Total Spent', value: formatPrice(timeline.summary.totalSpent), color: 'text-green-400' },
                   { label: 'Orders', value: String(timeline.summary.totalOrders), color: 'text-blue-400' },
@@ -308,7 +308,7 @@ export default function CustomersPage() {
             </div>
 
             {/* Tabs */}
-            <div className="flex items-center gap-1 px-4 pt-3 border-b border-discord-border-subtle bg-discord-bg-primary">
+            <div className="flex items-center gap-1 overflow-x-auto border-b border-discord-border-subtle bg-discord-bg-primary px-4 pt-3">
               {([
                 { key: 'timeline', label: 'Timeline', icon: '📋' },
                 { key: 'commerce', label: 'Commerce', icon: '💰' },
@@ -319,7 +319,7 @@ export default function CustomersPage() {
                 <button
                   key={tab.key}
                   onClick={() => { setActiveTab(tab.key); setCategoryFilter(null); }}
-                  className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                  className={`whitespace-nowrap px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
                     activeTab === tab.key
                       ? 'bg-discord-bg-secondary text-white border-b-2 border-discord-accent'
                       : 'text-discord-text-muted hover:text-white'
