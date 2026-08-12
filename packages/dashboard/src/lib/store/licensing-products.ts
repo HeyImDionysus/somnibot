@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+const licenseConfigSchema = z.object({
+  max_devices: z.number().int().min(1),
+  heartbeat_interval_seconds: z.number().int().min(30),
+  offline_grace_period_seconds: z.number().int().min(0),
+}).passthrough();
+
 const productSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -13,11 +19,10 @@ const productSchema = z.object({
     active: z.boolean(),
   }).passthrough()).default([]),
   product_files: z.array(z.object({ id: z.string().min(1) }).passthrough()).default([]),
-  product_license_config: z.array(z.object({
-    max_devices: z.number().int().min(1),
-    heartbeat_interval_seconds: z.number().int().min(30),
-    offline_grace_period_seconds: z.number().int().min(0),
-  }).passthrough()).default([]),
+  product_license_config: z.union([
+    licenseConfigSchema,
+    z.array(licenseConfigSchema),
+  ]).nullable().default([]),
 }).passthrough();
 
 const responseSchema = z.object({
@@ -52,7 +57,9 @@ export function parseLicensingProducts(payload: unknown): LicensingProductSummar
   if (!parsed.success) throw new Error('Store product readback is invalid.');
 
   return parsed.data.data.map((product) => {
-    const dynamicPolicy = product.product_license_config[0] ?? null;
+    const dynamicPolicy = Array.isArray(product.product_license_config)
+      ? (product.product_license_config[0] ?? null)
+      : product.product_license_config;
     return {
       id: product.id,
       name: product.name,

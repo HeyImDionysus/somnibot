@@ -16,11 +16,11 @@ describe('licensing product summary', () => {
           granted_channel_ids: [],
           plans: [],
           product_files: [],
-          product_license_config: [{
+          product_license_config: {
             max_devices: 2,
             heartbeat_interval_seconds: 300,
             offline_grace_period_seconds: 3600,
-          }],
+          },
         },
         {
           id: 'static-product',
