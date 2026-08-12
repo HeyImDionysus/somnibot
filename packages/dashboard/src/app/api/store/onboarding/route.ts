@@ -10,7 +10,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 const webhookRowSchema = z.object({
   event_type: z.string().min(1),
   result: z.enum(['success', 'error', 'duplicate']).nullable(),
-  processed_at: z.string().datetime().nullable(),
+  processed_at: z.string().datetime({ offset: true }).nullable(),
 });
 
 function webhookUrlReady(value: string): boolean {

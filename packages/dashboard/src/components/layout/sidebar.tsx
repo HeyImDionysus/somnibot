@@ -374,7 +374,7 @@ export function Sidebar() {
     <>
       <header
         inert={mobileOpen ? true : undefined}
-        className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between border-b border-discord-border-subtle bg-discord-bg-secondary px-3 md:hidden"
+        className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between border-b border-discord-border-subtle bg-discord-bg-secondary px-3 lg:hidden"
       >
         <div className="flex items-center gap-2.5">
           <Image
@@ -404,7 +404,7 @@ export function Sidebar() {
           data-testid="dashboard-navigation-backdrop"
           aria-hidden="true"
           onClick={() => setMobileOpen(false)}
-          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px] md:hidden"
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px] lg:hidden"
         />
       ) : null}
 
@@ -416,8 +416,8 @@ export function Sidebar() {
         aria-modal={mobileOpen ? true : undefined}
         aria-label={mobileOpen ? 'Dashboard navigation' : undefined}
         className={cn(
-          'fixed inset-y-0 left-0 z-50 flex h-[100dvh] w-60 shrink-0 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary transition-transform md:static md:z-auto md:translate-x-0',
-          mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full md:visible',
+          'fixed inset-y-0 left-0 z-50 flex h-[100dvh] w-60 shrink-0 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary transition-transform lg:static lg:z-auto lg:translate-x-0',
+          mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full lg:visible',
         )}
       >
       {/* Brand */}
@@ -437,7 +437,7 @@ export function Sidebar() {
           type="button"
           aria-label="Close dashboard navigation"
           onClick={() => setMobileOpen(false)}
-          className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-muted transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary md:hidden"
+          className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-muted transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary lg:hidden"
         >
           <X size={20} aria-hidden="true" />
         </button>

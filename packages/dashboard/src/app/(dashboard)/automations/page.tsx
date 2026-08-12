@@ -445,12 +445,12 @@ export default function AutomationsPage() {
 
       {/* Tabs */}
       {!showEditor && (
-        <div className="mb-6 flex gap-1 rounded-lg bg-discord-bg-secondary p-1">
+        <div className="mb-6 grid grid-cols-2 gap-1 rounded-lg bg-discord-bg-secondary p-1 sm:flex">
           {(['automations', 'holds', 'templates', 'logs'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`flex-1 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+              className={`min-w-0 rounded-md px-3 py-2 text-sm font-medium transition-colors sm:flex-1 ${
                 activeTab === tab
                   ? 'bg-discord-bg-primary text-discord-text-primary'
                   : 'text-discord-text-muted hover:text-discord-text-secondary'

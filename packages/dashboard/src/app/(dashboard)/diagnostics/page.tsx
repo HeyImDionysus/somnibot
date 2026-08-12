@@ -558,10 +558,10 @@ export default function DiagnosticsPage() {
             return (
               <div
                 key={alert.id}
-                className={`flex items-start justify-between gap-4 rounded-lg border p-4 ${severityStyles[alert.severity]}`}
+                className={`flex flex-col items-stretch gap-4 rounded-lg border p-4 sm:flex-row sm:items-start sm:justify-between ${severityStyles[alert.severity]}`}
               >
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
                     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${severityBadge[alert.severity]}`}>
                       {alert.severity.toUpperCase()}
                     </span>
@@ -580,7 +580,7 @@ export default function DiagnosticsPage() {
                     Since {formatDate(alert.created_at)}
                   </p>
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex flex-wrap gap-2 sm:shrink-0">
                   {!alert.acknowledged && (
                     <button
                       onClick={() => setPendingAlertAction({ alert, action: 'acknowledge' })}

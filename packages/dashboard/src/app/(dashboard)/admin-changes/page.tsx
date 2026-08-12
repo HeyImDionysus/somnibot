@@ -129,7 +129,7 @@ export default function AdminChangesPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Admin Changes</h1>
           <p className="mt-1 text-sm text-discord-text-muted">Track and undo administrative changes across the dashboard</p>
@@ -197,10 +197,11 @@ export default function AdminChangesPage() {
                   <button
                     type="button"
                     onClick={() => setConfirmUndo(change)}
+                    aria-label={`Undo change: ${change.description}`}
                     disabled={undoing === change.id}
                     className="ml-3 shrink-0 rounded-md bg-orange-500/20 px-3 py-1 text-xs font-medium text-orange-400 hover:bg-orange-500/30 transition-colors disabled:opacity-50"
                   >
-                    {undoing === change.id ? 'Undoing…' : `Undo ${change.description}`}
+                    {undoing === change.id ? 'Undoing…' : 'Undo'}
                   </button>
                 )}
               </div>

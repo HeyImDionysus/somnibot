@@ -243,10 +243,10 @@ export default function StatsChannelsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-6">
+    <div className="mx-auto max-w-4xl space-y-6 p-0 sm:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start justify-between gap-3 sm:items-center sm:justify-start">
           <div>
             <h1 className="text-2xl font-bold text-discord-text-primary">Statistics Channels</h1>
             <p className="text-sm text-discord-text-muted">Voice channels that display live server stats</p>
@@ -268,7 +268,7 @@ export default function StatsChannelsPage() {
       </div>
 
       {/* Update Interval Setting */}
-      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 flex items-center justify-between gap-4">
+      <div className="flex flex-col items-stretch gap-4 rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <span className="text-sm font-medium text-discord-text-primary">Update Interval</span>
           <p className="text-xs text-discord-text-muted">

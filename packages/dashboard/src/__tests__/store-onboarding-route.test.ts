@@ -91,6 +91,27 @@ describe('GET /api/store/onboarding', () => {
     expect(JSON.stringify(body)).not.toContain('WH-CONFIGURED');
   });
 
+  it('accepts the offset timestamp shape returned by PostgreSQL for the latest webhook', async () => {
+    webhooks.maybeSingle.mockResolvedValue({
+      data: {
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        result: 'success',
+        processed_at: '2026-08-11T21:12:00.123456+00:00',
+      },
+      error: null,
+    });
+
+    const response = await GET(buildRequest('/api/store/onboarding'));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data.lastWebhook).toEqual({
+      result: 'success',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      processedAt: '2026-08-11T21:12:00.123456+00:00',
+    });
+  });
+
   it('fails closed when webhook evidence has an invalid boundary shape', async () => {
     webhooks.maybeSingle.mockResolvedValue({
       data: { event_type: '', result: 'made-up', processed_at: 'not-a-date' },

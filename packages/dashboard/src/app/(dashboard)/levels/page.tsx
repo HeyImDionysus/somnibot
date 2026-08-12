@@ -358,9 +358,9 @@ export default function LevelsPage() {
   const tabs = ['settings', 'rewards', 'multipliers', 'leaderboard'] as const;
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-6">
+    <div className="mx-auto max-w-4xl space-y-6 p-0 sm:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Levels & XP</h1>
           <p className="text-sm text-discord-text-muted">Configure the leveling system, role rewards, and XP multipliers</p>
@@ -388,12 +388,12 @@ export default function LevelsPage() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 rounded-card bg-discord-bg-tertiary p-1">
+      <div className="grid grid-cols-2 gap-1 rounded-card bg-discord-bg-tertiary p-1 sm:flex">
         {tabs.map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className={`flex-1 rounded-input px-3 py-1.5 text-sm font-medium capitalize transition-standard ${
+            className={`min-w-0 rounded-input px-3 py-1.5 text-sm font-medium capitalize transition-standard sm:flex-1 ${
               activeTab === tab
                 ? 'bg-discord-bg-secondary text-discord-text-primary'
                 : 'text-discord-text-muted hover:text-discord-text-secondary'

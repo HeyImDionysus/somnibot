@@ -314,10 +314,10 @@ export default function ScheduledMessagesPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-6">
+    <div className="mx-auto max-w-4xl space-y-6 p-0 sm:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start justify-between gap-3 sm:items-center sm:justify-start">
           <div>
             <h1 className="text-2xl font-bold text-discord-text-primary">Scheduled Messages</h1>
             <p className="text-sm text-discord-text-muted">Automatically send recurring messages on a schedule</p>
@@ -332,7 +332,7 @@ export default function ScheduledMessagesPage() {
         </div>
         <button
           onClick={() => openEditor()}
-          className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard"
+          className="self-start rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard sm:self-auto"
         >
           + New Schedule
         </button>

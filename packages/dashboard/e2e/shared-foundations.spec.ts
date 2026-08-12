@@ -71,6 +71,16 @@ test.describe('Shared dashboard accessibility foundations', () => {
     await installSharedFoundationRoutes(page);
   });
 
+  test('keeps compact tablet widths on the off-canvas navigation layout', async ({ page }) => {
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await page.goto('/settings/team');
+
+    const trigger = page.locator('button[aria-controls="dashboard-navigation"]');
+    await expect(trigger).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Dashboard navigation' })).not.toBeVisible();
+    await expect(page.locator('#dashboard-content')).toHaveCSS('padding-top', '56px');
+  });
+
   test('provides an off-canvas mobile navigation and a skip route to main content', async ({ page }, testInfo) => {
     // Given: the dashboard at a narrow viewport.
     await page.setViewportSize({ width: 375, height: 812 });

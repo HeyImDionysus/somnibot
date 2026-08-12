@@ -309,7 +309,7 @@ export default function ModerationPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-8 p-6">
+    <div className="mx-auto max-w-4xl space-y-8 p-0 sm:p-6">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-discord-text-primary">Moderation</h1>
@@ -319,7 +319,7 @@ export default function ModerationPage() {
       </div>
 
       {/* Quick Links */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Link
           href="/moderation/rules"
           className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-discord-accent/50 transition-colors"

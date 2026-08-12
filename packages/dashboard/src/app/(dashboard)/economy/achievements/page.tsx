@@ -150,12 +150,12 @@ export default function AchievementsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Achievements & Prestige</h1>
           <p className="text-discord-text-secondary">Configure milestone badges and prestige system.</p>
         </div>
-        <div className="flex gap-4">
+        <div className="flex flex-wrap gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={config.economy_achievements_enabled}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_achievements_enabled: e.target.checked })}
