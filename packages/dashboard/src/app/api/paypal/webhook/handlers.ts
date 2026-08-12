@@ -1844,7 +1844,7 @@ export async function handlePaymentCaptured(
     !isNonEmptyString(meta.guild_id) ||
     !isNonEmptyString(meta.product_id) ||
     !isNonEmptyString(meta.customer_id) ||
-    (!meta.gift_intent_id && !isNonEmptyString(meta.discord_id))
+    (!checkoutToken && !meta.gift_intent_id && !isNonEmptyString(meta.discord_id))
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -1870,10 +1870,14 @@ export async function handlePaymentCaptured(
     customerError,
     'Failed to validate captured payment customer',
   );
+  if (checkoutToken && customer && isNonEmptyString(customer.discord_id)) {
+    meta.discord_id = customer.discord_id;
+  }
   if (
     !customer
     || customer.id !== meta.customer_id
     || customer.guild_id !== meta.guild_id
+    || !isNonEmptyString(customer.discord_id)
     || (!meta.gift_intent_id && customer.discord_id !== meta.discord_id)
   ) {
     await recordProviderMoneyIncident(supabase, {
