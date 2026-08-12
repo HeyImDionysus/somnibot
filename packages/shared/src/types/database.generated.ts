@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 268 migration files in packages/supabase/migrations/
+ * Source: 269 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2419,6 +2419,39 @@ export interface DbEconomyWallets {
   suspended: boolean;
   suspended_at: string | null;
   suspended_reason: string | null;
+}
+
+export interface DbExternalWebhookDeliveries {
+  id: string;
+  relay_id: string;
+  guild_id: string;
+  idempotency_key: string | null;
+  request_hash: string;
+  event_label: string;
+  content_preview: string;
+  status: 'processing' | 'delivered' | 'failed' | 'duplicate' | 'retryable';
+  attempt_count: number;
+  discord_message_id: string | null;
+  error: string | null;
+  received_at: string;
+  delivered_at: string | null;
+}
+
+export interface DbExternalWebhookRelays {
+  id: string;
+  guild_id: string;
+  name: string;
+  source_label: string;
+  channel_id: string;
+  token_hash: string;
+  message_template: string;
+  active: boolean;
+  last_received_at: string | null;
+  last_delivery_status: 'processing' | 'delivered' | 'failed' | 'duplicate' | 'retryable' | null;
+  last_error: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DbFeatureEmbedOverrides {

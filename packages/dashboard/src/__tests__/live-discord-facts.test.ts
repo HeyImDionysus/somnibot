@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateAssignableDiscordTargets } from '@/lib/api/live-discord-facts';
+import {
+  validateAssignableDiscordTargets,
+  validateExternalWebhookChannel,
+} from '@/lib/api/live-discord-facts';
 
 function client(row: unknown, error: unknown = null) {
   const chain: Record<string, ReturnType<typeof vi.fn>> = {};
@@ -21,6 +24,7 @@ const valid = {
     {
       id: '20000000000000001',
       name: 'customer-lounge',
+      type: 0,
       manageableByBot: true,
       botPermissions: '3072',
     },
@@ -122,5 +126,29 @@ describe('live Discord benefit validation', () => {
     );
     expect(result.ok).toBe(true);
     expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  it('accepts a relay destination only when a fresh text channel proves view and send', async () => {
+    const result = await validateExternalWebhookChannel(
+      client(valid) as never,
+      'guild',
+      '20000000000000001',
+      now,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([
+    ['voice channel', { ...valid.channels[0], type: 2 }, 'text or announcement'],
+    ['missing Send Messages', { ...valid.channels[0], botPermissions: '1024' }, 'Send Messages'],
+  ])('rejects a relay %s', async (_label, channel, issue) => {
+    const result = await validateExternalWebhookChannel(
+      client({ ...valid, channels: [channel] }) as never,
+      'guild',
+      '20000000000000001',
+      now,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issues.join(' ')).toContain(issue);
   });
 });

@@ -28,6 +28,7 @@ const LABELS: Record<string, string> = {
   'stats-channels': 'Stats Channels',
   embeds: 'Embed Builder',
   automations: 'Automations',
+  'webhook-relays': 'Webhook Relays',
   commands: 'Custom Commands',
   analytics: 'Analytics',
   store: 'Store',

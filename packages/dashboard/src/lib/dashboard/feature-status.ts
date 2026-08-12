@@ -17,6 +17,7 @@ const FEATURE_STATUS: Array<[prefix: string, definition: FeatureStatusDefinition
   ['/onboarding', { label: 'Onboarding', configKey: 'onboarding_enabled' }],
   ['/moderation', { label: 'Moderation', configKey: null }],
   ['/automations', { label: 'Automations', configKey: null }],
+  ['/webhook-relays', { label: 'Webhook relays', configKey: null }],
   ['/giveaways', { label: 'Giveaways', configKey: 'giveaways_enabled', runtimeKey: 'giveaways' }],
   ['/customers', { label: 'Store and fulfillment', configKey: 'store_enabled', runtimeKey: 'commerce' }],
   ['/licenses', { label: 'Store and licensing', configKey: 'store_enabled', runtimeKey: 'commerce' }],
