@@ -1052,6 +1052,7 @@ jobs:
             "dead_letter_queue" "workflow_events"
             "action_queue_dlq" "bot_action_queue"
             "health_metrics"
+            "external_webhook_relays" "external_webhook_deliveries"
             # 20260711020000_economy_collect_role_income_atomic
             "economy_role_income_claims" "economy_role_income_requests"
             # 20260711030000_canonicalize_commerce_role_metadata

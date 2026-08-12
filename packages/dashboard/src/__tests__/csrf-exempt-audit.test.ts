@@ -51,6 +51,7 @@ const CSRF_EXEMPT_PREFIXES = [
   '/api/portal/',
   '/api/auth/',
   '/api/downloads/',
+  '/api/inbound-webhooks/',
   '/api/csrf',
 ] as const;
 

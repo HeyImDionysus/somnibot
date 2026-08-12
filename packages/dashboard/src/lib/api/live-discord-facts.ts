@@ -2,6 +2,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 const MAX_SNAPSHOT_AGE_MS = 10 * 60 * 1_000;
 const VIEW_CHANNEL = BigInt(1) << BigInt(10);
+const SEND_MESSAGES = BigInt(1) << BigInt(11);
+const RELAY_CHANNEL_TYPES = new Set([0, 5]);
 
 interface LiveRoleFact {
   id: string;
@@ -13,6 +15,7 @@ interface LiveRoleFact {
 interface LiveChannelFact {
   id: string;
   name: string;
+  type: number | null;
   manageableByBot: boolean;
   botPermissions: string | null;
 }
@@ -66,11 +69,70 @@ function parseChannels(value: unknown): LiveChannelFact[] | null {
     channels.push({
       id: item.id,
       name: item.name,
+      type: typeof item.type === 'number' && Number.isInteger(item.type) ? item.type : null,
       manageableByBot: item.manageableByBot,
       botPermissions: item.botPermissions,
     });
   }
   return channels;
+}
+
+export async function validateExternalWebhookChannel(
+  supabase: SupabaseClient,
+  guildId: string,
+  channelId: string,
+  nowMs = Date.now(),
+): Promise<DiscordTargetValidation> {
+  const { data, error } = await supabase
+    .from('guild_live_state')
+    .select('channels, snapshot_at, snapshot_version')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (error || !isRecord(data)) {
+    return { ok: false, kind: 'unavailable', issues: ['SomniBot has not published live Discord facts for this server.'] };
+  }
+
+  const snapshotAt = typeof data.snapshot_at === 'string' ? data.snapshot_at : null;
+  const snapshotMs = snapshotAt ? Date.parse(snapshotAt) : Number.NaN;
+  if (
+    data.snapshot_version !== 2
+    || !Number.isFinite(snapshotMs)
+    || nowMs - snapshotMs > MAX_SNAPSHOT_AGE_MS
+    || snapshotMs - nowMs > 60_000
+  ) {
+    return {
+      ok: false,
+      kind: 'unavailable',
+      issues: ['SomniBot live Discord facts are missing, legacy, or stale. Wait for a fresh bot snapshot and retry.'],
+    };
+  }
+
+  const channels = parseChannels(data.channels);
+  if (!channels) {
+    return { ok: false, kind: 'unavailable', issues: ['SomniBot live Discord facts are malformed. Wait for the bot to refresh them and retry.'] };
+  }
+  const channel = channels.find((candidate) => candidate.id === channelId);
+  if (!channel) {
+    return { ok: false, kind: 'conflict', issues: [`Discord channel ${channelId} was deleted or is not in this server.`] };
+  }
+  if (channel.type === null || !RELAY_CHANNEL_TYPES.has(channel.type)) {
+    return { ok: false, kind: 'conflict', issues: [`Choose a text or announcement channel instead of "#${channel.name}".`] };
+  }
+
+  let permissions: bigint | null = null;
+  try {
+    permissions = channel.botPermissions === null ? null : BigInt(channel.botPermissions);
+  } catch {
+    permissions = null;
+  }
+  if (permissions === null || (permissions & VIEW_CHANNEL) !== VIEW_CHANNEL) {
+    return { ok: false, kind: 'conflict', issues: [`Grant SomniBot View Channel in "#${channel.name}" before using this relay.`] };
+  }
+  if ((permissions & SEND_MESSAGES) !== SEND_MESSAGES) {
+    return { ok: false, kind: 'conflict', issues: [`Grant SomniBot Send Messages in "#${channel.name}" before using this relay.`] };
+  }
+  return { ok: true, snapshotAt };
 }
 
 /**

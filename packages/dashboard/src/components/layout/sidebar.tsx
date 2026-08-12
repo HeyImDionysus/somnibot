@@ -61,6 +61,7 @@ import {
   Pickaxe,
   BookOpen,
   Gavel,
+  Webhook,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -169,6 +170,7 @@ const navigation: NavGroup[] = [
     title: 'Automation',
     items: [
       { label: 'Automations', href: '/automations', icon: Zap, requires: 'discord' },
+      { label: 'Webhook Relays', href: '/webhook-relays', icon: Webhook, requires: 'discord' },
       { label: 'Custom Commands', href: '/commands', icon: Terminal, requires: 'discord' },
       { label: 'Failed Actions', href: '/action-queue', icon: AlertTriangle, requires: 'discord', badge: DlqBadge },
     ],

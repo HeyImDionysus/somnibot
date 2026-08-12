@@ -36,15 +36,15 @@ export interface ConfirmDialogProps {
 const VARIANT_STYLES = {
   danger: {
     icon: Trash2,
-    iconColor: 'text-red-400',
-    iconBg: 'bg-red-500/20',
+    iconColor: 'text-discord-danger',
+    iconBg: 'bg-discord-danger/20',
     btnColor: 'bg-discord-danger hover:bg-discord-danger/80',
   },
   warning: {
     icon: AlertTriangle,
-    iconColor: 'text-yellow-400',
-    iconBg: 'bg-yellow-500/20',
-    btnColor: 'bg-yellow-600 hover:bg-yellow-500',
+    iconColor: 'text-discord-warning',
+    iconBg: 'bg-discord-warning/20',
+    btnColor: 'bg-discord-warning text-discord-bg-tertiary hover:bg-discord-warning/80',
   },
   default: {
     icon: AlertTriangle,

@@ -495,7 +495,7 @@ export function ChannelPicker({
           }
         }}
         className={cn(
-          'flex w-full items-center gap-2 rounded-input border px-3 py-2 text-sm text-left transition-colors',
+          'flex w-full items-center gap-2 rounded-input border px-3 py-2 text-sm text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-discord-accent focus-visible:ring-offset-2 focus-visible:ring-offset-discord-bg-primary',
           'bg-discord-bg-tertiary',
           open
             ? 'border-discord-accent'

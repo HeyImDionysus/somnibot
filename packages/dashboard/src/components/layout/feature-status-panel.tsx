@@ -10,10 +10,10 @@ import {
 } from '@/lib/dashboard/feature-status';
 
 const STATE_STYLE: Record<FeatureReadiness['state'], string> = {
-  operational: 'border-green-500/30 bg-green-500/10 text-green-300',
+  operational: 'border-discord-success/30 bg-discord-success/10 text-discord-success',
   disabled: 'border-discord-border-subtle bg-discord-bg-secondary text-discord-text-secondary',
   blocked: 'border-discord-danger/40 bg-discord-danger/10 text-discord-danger',
-  unavailable: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-300',
+  unavailable: 'border-discord-warning/30 bg-discord-warning/10 text-discord-warning',
 };
 
 function StatusIcon({ state }: { state: FeatureReadiness['state'] }) {

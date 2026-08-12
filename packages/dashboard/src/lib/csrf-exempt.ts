@@ -24,5 +24,6 @@ export const CSRF_EXEMPT_PREFIXES: readonly string[] = [
   '/api/portal/',
   '/api/auth/',
   '/api/downloads/',
+  '/api/inbound-webhooks/',
   '/api/csrf',
 ] as const;

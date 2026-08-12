@@ -9,7 +9,7 @@ const TASKS = {
   ],
   'type-check': [
     ['--filter', '@somnibot/shared', 'build'],
-    ['--filter', '@somnibot/e2e', 'type-check'],
+    ['--filter', '@somnibot/e2e', 'build'],
     ['--filter', '@somnibot/testkit', 'type-check'],
     ['--filter', '@somnibot/bot', 'type-check'],
     ['--filter', '@somnibot/dashboard', 'type-check'],

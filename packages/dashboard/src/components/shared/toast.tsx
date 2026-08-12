@@ -116,17 +116,17 @@ const ICONS: Record<ToastVariant, React.ComponentType<{ size?: number; className
 };
 
 const COLORS: Record<ToastVariant, string> = {
-  success: 'border-green-500/40 bg-green-900/40',
-  error: 'border-red-500/40 bg-red-900/40',
-  warning: 'border-yellow-500/40 bg-yellow-900/40',
-  info: 'border-blue-500/40 bg-blue-900/40',
+  success: 'border-discord-success/40 bg-discord-success/15',
+  error: 'border-discord-danger/40 bg-discord-danger/15',
+  warning: 'border-discord-warning/40 bg-discord-warning/15',
+  info: 'border-discord-accent/40 bg-discord-accent/15',
 };
 
 const ICON_COLORS: Record<ToastVariant, string> = {
-  success: 'text-green-400',
-  error: 'text-red-400',
-  warning: 'text-yellow-400',
-  info: 'text-blue-400',
+  success: 'text-discord-success',
+  error: 'text-discord-danger',
+  warning: 'text-discord-warning',
+  info: 'text-discord-accent',
 };
 
 const TOAST_ROLES: Record<ToastVariant, 'alert' | 'status'> = {
