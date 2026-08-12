@@ -13,10 +13,16 @@ export interface ExternalWebhookEvent {
   content: string;
 }
 
+function truncateUtf16(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const sliced = value.slice(0, maxLength - 1);
+  const safePrefix = /[\uD800-\uDBFF]$/u.test(sliced) ? sliced.slice(0, -1) : sliced;
+  return `${safePrefix}…`;
+}
+
 function cleanText(value: string, maxLength: number): string {
   const cleaned = value.replace(CONTROL_CHARACTERS, '').trim();
-  if (cleaned.length <= maxLength) return cleaned;
-  return `${Array.from(cleaned).slice(0, maxLength - 1).join('')}…`;
+  return truncateUtf16(cleaned, maxLength);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -95,8 +101,7 @@ export function renderExternalWebhookMessage(input: {
   const rendered = input.template.replace(/\{([a-z_]+)\}/gu, (whole, variable: string) => (
     values[variable] ?? whole
   )).trim();
-  if (rendered.length <= DISCORD_MESSAGE_LIMIT) return rendered;
-  return `${Array.from(rendered).slice(0, DISCORD_MESSAGE_LIMIT - 1).join('')}…`;
+  return truncateUtf16(rendered, DISCORD_MESSAGE_LIMIT);
 }
 
 export function hashExternalWebhookValue(value: string): string {

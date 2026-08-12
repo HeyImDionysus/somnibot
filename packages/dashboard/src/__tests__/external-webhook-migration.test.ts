@@ -37,4 +37,18 @@ describe('external webhook relay migration', () => {
     expect(migration).toContain('REVOKE ALL ON FUNCTION public.claim_external_webhook_delivery');
     expect(migration).toContain('GRANT EXECUTE ON FUNCTION public.claim_external_webhook_delivery');
   });
+
+  it('finalizes delivery evidence atomically in receive order', () => {
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION public.finalize_external_webhook_delivery');
+    expect(migration).toContain('RETURNING delivery.received_at INTO v_received_at');
+    expect(migration).toContain('relay.last_received_at <= v_received_at');
+    expect(migration).toContain('REVOKE ALL ON FUNCTION public.finalize_external_webhook_delivery');
+  });
+
+  it('returns a bounded recent history for every relay', () => {
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION public.list_recent_external_webhook_deliveries');
+    expect(migration).toContain('PARTITION BY delivery.relay_id');
+    expect(migration).toContain('recent.relay_rank <= LEAST');
+    expect(migration).toContain('REVOKE ALL ON FUNCTION public.list_recent_external_webhook_deliveries');
+  });
 });

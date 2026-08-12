@@ -38,27 +38,12 @@ function claimRow(overrides: Record<string, unknown> = {}) {
 }
 
 function adminFor(row: Record<string, unknown>) {
-  const updates: Array<{ table: string; payload: unknown }> = [];
-  const eqCalls: Array<{ table: string; column: string; value: unknown }> = [];
-  const from = vi.fn((table: string) => {
-    const chain = {
-      update: vi.fn((payload: unknown) => {
-        updates.push({ table, payload });
-        return chain;
-      }),
-      eq: vi.fn((column: string, value: unknown) => {
-        eqCalls.push({ table, column, value });
-        return chain;
-      }),
-      then: (
-        resolve: (value: { data: null; error: null }) => unknown,
-        reject?: (reason: unknown) => void,
-      ) => Promise.resolve({ data: null, error: null }).then(resolve, reject),
-    };
-    return chain;
-  });
-  const rpc = vi.fn(async () => ({ data: [row], error: null }));
-  return { admin: { rpc, from }, rpc, updates, eqCalls };
+  const rpc = vi.fn(async (functionName: string) => (
+    functionName === 'claim_external_webhook_delivery'
+      ? { data: [row], error: null }
+      : { data: true, error: null }
+  ));
+  return { admin: { rpc }, rpc };
 }
 
 beforeEach(() => {
@@ -95,7 +80,7 @@ describe('POST /api/inbound-webhooks/[token]', () => {
       p_event_label: 'release.ready',
       p_content_preview: 'secret body value',
     });
-    expect(JSON.stringify(state.updates)).not.toContain(body);
+    expect(JSON.stringify(state.rpc.mock.calls)).not.toContain(body);
     expect(sendExternalWebhookDiscordMessage).toHaveBeenCalledWith({
       token: 'test-token',
       channelId: '444444444444444444',
@@ -126,7 +111,28 @@ describe('POST /api/inbound-webhooks/[token]', () => {
       message_id: '666666666666666666',
     });
     expect(sendExternalWebhookDiscordMessage).not.toHaveBeenCalled();
-    expect(state.updates).toHaveLength(0);
+    expect(state.rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['processing', 503, 'retryable'],
+    ['failed', 502, 'failed'],
+  ])('does not acknowledge a duplicate whose original status is %s', async (deliveryStatus, expectedStatus, responseStatus) => {
+    const body = 'server online';
+    const state = adminFor(claimRow({
+      claim_outcome: 'duplicate',
+      delivery_status: deliveryStatus,
+      existing_request_hash: hashExternalWebhookValue(body),
+    }));
+    createAdminSupabaseMock.mockReturnValue(state.admin);
+
+    const response = await POST(request(body, { 'idempotency-key': 'release-pending' }), {
+      params: Promise.resolve({ token }),
+    });
+
+    expect(response.status).toBe(expectedStatus);
+    await expect(response.json()).resolves.toMatchObject({ success: false, status: responseStatus });
+    expect(sendExternalWebhookDiscordMessage).not.toHaveBeenCalled();
   });
 
   it('rejects reuse of an idempotency key with a different body', async () => {

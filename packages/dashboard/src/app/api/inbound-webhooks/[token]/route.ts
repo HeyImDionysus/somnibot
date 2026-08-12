@@ -128,12 +128,24 @@ export async function POST(
       if (row.existingRequestHash !== requestHash) {
         return apiError('That idempotency key was already used for a different payload.', 409);
       }
-      return NextResponse.json({
-        success: true,
-        status: 'duplicate',
-        original_status: row.deliveryStatus,
-        message_id: row.discordMessageId,
-      });
+      if (row.deliveryStatus === 'delivered') {
+        return NextResponse.json({
+          success: true,
+          status: 'duplicate',
+          original_status: 'delivered',
+          message_id: row.discordMessageId,
+        });
+      }
+      if (row.deliveryStatus === 'failed') {
+        return NextResponse.json(
+          { success: false, status: 'failed', error: 'The original webhook delivery failed.' },
+          { status: 502 },
+        );
+      }
+      return NextResponse.json(
+        { success: false, status: 'retryable', error: 'The original webhook delivery is not complete.' },
+        { status: 503, headers: { 'Retry-After': '5' } },
+      );
     }
 
     const content = renderExternalWebhookMessage({
@@ -147,25 +159,21 @@ export async function POST(
       channelId: row.channelId,
       content,
     });
-    const now = new Date().toISOString();
     const messageId = result.status === 'delivered' ? result.messageId : null;
     const error = result.status === 'delivered' ? null : result.error;
-    const finalized = await admin.from('external_webhook_deliveries').update({
-      status: result.status,
-      discord_message_id: messageId,
-      error,
-      delivered_at: result.status === 'delivered' ? now : null,
-    }).eq('id', row.deliveryId).eq('relay_id', row.relayId).eq('status', 'processing');
+    const finalized = await admin.rpc('finalize_external_webhook_delivery', {
+      p_delivery_id: row.deliveryId,
+      p_relay_id: row.relayId,
+      p_guild_id: row.guildId,
+      p_status: result.status,
+      p_discord_message_id: messageId,
+      p_error: error,
+    });
     if (finalized.error) {
       return dbError(finalized.error, 'POST /api/inbound-webhooks finalize');
     }
-    const relayEvidence = await admin.from('external_webhook_relays').update({
-      last_received_at: now,
-      last_delivery_status: result.status,
-      last_error: error,
-    }).eq('id', row.relayId).eq('guild_id', row.guildId);
-    if (relayEvidence.error) {
-      console.warn('[external-webhook] Delivery finalized but relay summary could not be refreshed.');
+    if (finalized.data !== true) {
+      return apiError('The webhook delivery could not be finalized.', 503);
     }
 
     if (result.status === 'delivered') {

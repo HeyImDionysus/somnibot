@@ -60,6 +60,19 @@ describe('external webhook relay formatting', () => {
     expect(rendered.endsWith('…')).toBe(true);
   });
 
+  it('truncates astral Unicode using the sender length limit without splitting a surrogate pair', () => {
+    const rendered = renderExternalWebhookMessage({
+      template: '{content}',
+      source: 'Service',
+      event: 'Event',
+      content: '😀'.repeat(1_700),
+    });
+
+    expect(rendered.length).toBeLessThanOrEqual(2_000);
+    expect(rendered.endsWith('…')).toBe(true);
+    expect(rendered).not.toContain('\uFFFD');
+  });
+
   it('creates a one-time receiver token and stores only its SHA-256 hash', () => {
     const credential = createExternalWebhookToken();
 

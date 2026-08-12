@@ -160,6 +160,112 @@ REVOKE ALL ON FUNCTION public.claim_external_webhook_delivery(TEXT, TEXT, TEXT, 
 GRANT EXECUTE ON FUNCTION public.claim_external_webhook_delivery(TEXT, TEXT, TEXT, TEXT, TEXT)
   TO service_role;
 
+CREATE OR REPLACE FUNCTION public.finalize_external_webhook_delivery(
+  p_delivery_id UUID,
+  p_relay_id UUID,
+  p_guild_id TEXT,
+  p_status TEXT,
+  p_discord_message_id TEXT,
+  p_error TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_received_at TIMESTAMPTZ;
+BEGIN
+  IF p_status NOT IN ('delivered', 'failed', 'retryable') THEN
+    RAISE EXCEPTION 'invalid external webhook delivery status';
+  END IF;
+
+  UPDATE public.external_webhook_deliveries AS delivery
+     SET status = p_status,
+         discord_message_id = p_discord_message_id,
+         error = p_error,
+         delivered_at = CASE WHEN p_status = 'delivered' THEN now() ELSE NULL END
+   WHERE delivery.id = p_delivery_id
+     AND delivery.relay_id = p_relay_id
+     AND delivery.guild_id = p_guild_id
+     AND delivery.status = 'processing'
+  RETURNING delivery.received_at INTO v_received_at;
+
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  UPDATE public.external_webhook_relays AS relay
+     SET last_received_at = v_received_at,
+         last_delivery_status = p_status,
+         last_error = p_error
+   WHERE relay.id = p_relay_id
+     AND relay.guild_id = p_guild_id
+     AND (relay.last_received_at IS NULL OR relay.last_received_at <= v_received_at);
+
+  RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.finalize_external_webhook_delivery(UUID, UUID, TEXT, TEXT, TEXT, TEXT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.finalize_external_webhook_delivery(UUID, UUID, TEXT, TEXT, TEXT, TEXT)
+  TO service_role;
+
+CREATE OR REPLACE FUNCTION public.list_recent_external_webhook_deliveries(
+  p_guild_id TEXT,
+  p_per_relay INTEGER DEFAULT 3
+)
+RETURNS TABLE (
+  id UUID,
+  relay_id UUID,
+  event_label TEXT,
+  content_preview TEXT,
+  status TEXT,
+  attempt_count INTEGER,
+  discord_message_id TEXT,
+  error TEXT,
+  received_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT
+    recent.id,
+    recent.relay_id,
+    recent.event_label,
+    recent.content_preview,
+    recent.status,
+    recent.attempt_count,
+    recent.discord_message_id,
+    recent.error,
+    recent.received_at,
+    recent.delivered_at
+  FROM (
+    SELECT
+      delivery.*,
+      row_number() OVER (
+        PARTITION BY delivery.relay_id
+        ORDER BY delivery.received_at DESC, delivery.id DESC
+      ) AS relay_rank
+    FROM public.external_webhook_deliveries AS delivery
+    INNER JOIN public.external_webhook_relays AS relay
+      ON relay.id = delivery.relay_id
+     AND relay.guild_id = delivery.guild_id
+    WHERE relay.guild_id = p_guild_id
+  ) AS recent
+  WHERE recent.relay_rank <= LEAST(GREATEST(COALESCE(p_per_relay, 3), 1), 10)
+  ORDER BY recent.received_at DESC, recent.id DESC;
+$$;
+
+REVOKE ALL ON FUNCTION public.list_recent_external_webhook_deliveries(TEXT, INTEGER)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.list_recent_external_webhook_deliveries(TEXT, INTEGER)
+  TO service_role;
+
 COMMENT ON TABLE public.external_webhook_relays IS
   'Service-role-only inbound webhook destinations. token_hash authenticates machine callers.';
 COMMENT ON TABLE public.external_webhook_deliveries IS

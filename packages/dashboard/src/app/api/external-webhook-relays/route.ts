@@ -54,15 +54,12 @@ export async function GET() {
       .limit(100);
     if (error) return dbError(error, 'GET /api/external-webhook-relays');
 
-    const relayIds = (relays ?? []).map((relay) => relay.id);
     let deliveries: unknown[] = [];
-    if (relayIds.length > 0) {
-      const recent = await admin
-        .from('external_webhook_deliveries')
-        .select('id, relay_id, event_label, content_preview, status, attempt_count, discord_message_id, error, received_at, delivered_at')
-        .in('relay_id', relayIds)
-        .order('received_at', { ascending: false })
-        .limit(100);
+    if ((relays ?? []).length > 0) {
+      const recent = await admin.rpc('list_recent_external_webhook_deliveries', {
+        p_guild_id: auth.ctx.guildId,
+        p_per_relay: 3,
+      });
       if (recent.error) return dbError(recent.error, 'GET /api/external-webhook-relays deliveries');
       deliveries = recent.data ?? [];
     }

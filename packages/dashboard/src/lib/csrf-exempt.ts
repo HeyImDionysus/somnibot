@@ -9,6 +9,7 @@
  * - portal/*        → Portal session token auth
  * - auth/*          → OAuth provider callback (state param)
  * - downloads/*     → HMAC-signed URL + single-use nonce
+ * - inbound-webhooks/* → High-entropy receiver token + per-relay/IP rate limits
  * - csrf            → GET-only token issuance
  *
  * V6 Audit §1.1: /api/setup intentionally NOT exempt (uses parseBody + Supabase auth).

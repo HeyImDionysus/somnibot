@@ -157,6 +157,16 @@ describe('middleware health access', () => {
     expect(mockCreateServerClient).not.toHaveBeenCalled();
   });
 
+  it('allows token-authenticated external webhook receivers without public Supabase env or a session', async () => {
+    const res = await runWithoutPublicSupabaseEnv(`/api/inbound-webhooks/${'a'.repeat(43)}`, {
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
   it('lets an exact valid scheduler secret reach the reconcile handler without Supabase or CSRF', async () => {
     process.env.PAYPAL_RECONCILE_SECRET = 'scheduler-secret-value';
 
