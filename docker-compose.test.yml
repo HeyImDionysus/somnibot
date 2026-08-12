@@ -15,7 +15,10 @@ services:
     ports:
       - "54322:5432"
     environment:
-      POSTGRES_USER: postgres
+      # supabase/postgres provisions its migration/admin roles under
+      # supabase_admin. Overriding the image default with `postgres` makes the
+      # bundled migration script fail before the database becomes healthy.
+      POSTGRES_USER: supabase_admin
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
     volumes:
@@ -34,7 +37,7 @@ services:
     ports:
       - "54321:3000"
     environment:
-      PGRST_DB_URI: postgres://postgres:postgres@supabase-db:5432/postgres
+      PGRST_DB_URI: postgres://supabase_admin:postgres@supabase-db:5432/postgres
       PGRST_DB_SCHEMAS: public,storage
       PGRST_DB_ANON_ROLE: anon
       PGRST_JWT_SECRET: "super-secret-jwt-token-with-at-least-32-characters-long"

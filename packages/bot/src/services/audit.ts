@@ -7,6 +7,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import { randomUUID } from 'node:crypto';
 
 const log = createLogger('AuditSvc');
 
@@ -39,6 +40,51 @@ export interface AuditEntry {
   occurrenceKey?: string;
   success?: boolean;
   errorMessage?: string;
+}
+
+/**
+ * Durable, immediate audit context for proof-critical game/economy actions.
+ *
+ * The normal platform event rail is intentionally buffered for throughput. A
+ * command that changes a wallet, pet, catch, or crop must not depend on that
+ * eventual flush to leave its forensic row behind, so economy managers use
+ * this helper before emitting their normal event. The occurrence key makes a
+ * direct write and the later event-rail write converge on one immutable row.
+ */
+export interface EconomyAuditOptions {
+  guildId: string;
+  actorId: string;
+  action: string;
+  operationId?: string;
+  targetType?: string;
+  targetId?: string;
+  details?: Record<string, unknown>;
+  success?: boolean;
+  errorMessage?: string;
+  actorType?: AuditEntry['actorType'];
+}
+
+export async function writeEconomyAudit(
+  supabase: SupabaseClient,
+  options: EconomyAuditOptions,
+): Promise<{ correlationId: string; occurrenceKey: string }> {
+  const correlationId = options.operationId?.trim() || randomUUID();
+  const occurrenceKey = `${options.action}:${correlationId}`;
+  await writeAuditLog(supabase, {
+    guildId: options.guildId,
+    actorType: options.actorType ?? 'user',
+    actorId: options.actorId,
+    action: options.action,
+    category: 'economy',
+    targetType: options.targetType ?? 'member',
+    targetId: options.targetId ?? options.actorId,
+    details: options.details,
+    correlationId,
+    occurrenceKey,
+    success: options.success,
+    errorMessage: options.errorMessage,
+  });
+  return { correlationId, occurrenceKey };
 }
 
 /**

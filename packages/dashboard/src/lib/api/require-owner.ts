@@ -12,6 +12,7 @@
 import { NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { resolveLauncherLocalAuth } from '@/lib/api/launcher-local-auth';
 
 export interface OwnerContext {
   userId: string;       // Supabase auth user ID
@@ -34,6 +35,24 @@ type OwnerResult =
  * ```
  */
 export async function requireGuildOwner(): Promise<OwnerResult> {
+  const localAuth = await resolveLauncherLocalAuth();
+  if (localAuth.kind === 'authorized') {
+    return {
+      ok: true,
+      ctx: {
+        userId: localAuth.ctx.userId,
+        discordId: localAuth.ctx.discordId,
+        guildId: localAuth.ctx.guildId,
+      },
+    };
+  }
+  if (localAuth.kind === 'denied') {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: localAuth.message }, { status: localAuth.status }),
+    };
+  }
+
   // Step 1: Verify auth session
   const supabase = await createServerSupabase();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -128,9 +147,25 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
  * (e.g., license validation by a customer via session).
  */
 export async function requireAuth(): Promise<
-  | { ok: true; userId: string; discordId: string | null }
+  | { ok: true; userId: string; discordId: string | null; localGuildIds?: string[] }
   | { ok: false; response: NextResponse }
 > {
+  const localAuth = await resolveLauncherLocalAuth();
+  if (localAuth.kind === 'authorized') {
+    return {
+      ok: true,
+      userId: localAuth.ctx.userId,
+      discordId: localAuth.ctx.discordId,
+      localGuildIds: localAuth.ctx.configuredGuildIds,
+    };
+  }
+  if (localAuth.kind === 'denied') {
+    return {
+      ok: false,
+      response: NextResponse.json({ error: localAuth.message }, { status: localAuth.status }),
+    };
+  }
+
   const supabase = await createServerSupabase();
   const { data: { user }, error } = await supabase.auth.getUser();
 

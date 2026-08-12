@@ -22,6 +22,8 @@ import {
 } from './welcome-variables.js';
 import { getMemberNumber } from './member-service.js';
 import { createLogger } from '@somnibot/shared';
+import { eventBus } from '../../services/event-bus.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Welcome');
 
@@ -56,17 +58,17 @@ export async function executeWelcomeFlow(
 
   // 1. Welcome channel message (with optional card)
   if (config.welcome_enabled && config.welcome_channel_id) {
-    await sendWelcomeChannelMessage(member, config, variables);
+    await sendWelcomeChannelMessage(member, config, variables, supabase);
   }
 
   // 2. Welcome DM
   if (config.welcome_dm_enabled) {
-    await sendWelcomeDM(member, config, variables);
+    await sendWelcomeDM(member, config, variables, supabase);
   }
 
   // 3. Auto-roles
   if (config.welcome_auto_roles?.length > 0) {
-    await applyAutoRoles(member, config.welcome_auto_roles);
+    await applyAutoRoles(member, config.welcome_auto_roles, supabase);
   }
 }
 
@@ -77,11 +79,19 @@ async function sendWelcomeChannelMessage(
   member: GuildMember,
   config: DbGuildConfig,
   variables: WelcomeVariables,
+  supabase: SupabaseClient,
 ): Promise<void> {
   try {
     const channel = member.guild.channels.cache.get(config.welcome_channel_id!) as TextChannel | undefined;
     if (!channel?.isTextBased()) {
       log.warn('Welcome channel not found or not text-based:', config.welcome_channel_id);
+      eventBus.emit('welcome.channel_missing', member.guild.id, {
+        memberId: member.id,
+        channelId: config.welcome_channel_id!,
+        occurrenceId: `${member.id}:welcome:channel-missing`,
+        correlationId: `welcome:${member.id}`,
+      });
+      await raiseWelcomeAlert(supabase, member, 'channel', 'channel_missing');
       return;
     }
 
@@ -123,6 +133,7 @@ async function sendWelcomeChannelMessage(
     log.info(`Channel message sent for ${member.user.tag}`);
   } catch (err) {
     log.error('Failed to send channel message:', { error: String(err) });
+    await raiseWelcomeAlert(supabase, member, 'channel', 'send_failed');
   }
 }
 
@@ -133,6 +144,7 @@ async function sendWelcomeDM(
   member: GuildMember,
   config: DbGuildConfig,
   variables: WelcomeVariables,
+  supabase: SupabaseClient,
 ): Promise<void> {
   try {
     const messageText = interpolateMessage(
@@ -148,12 +160,27 @@ async function sendWelcomeDM(
       : undefined;
     if (code === 50007) {
       log.warn(`Could not DM ${member.user.tag} because Discord rejected the DM`);
+      eventBus.emit('welcome.dm_blocked_fallback', member.guild.id, {
+        memberId: member.id,
+        occurrenceId: `${member.id}:welcome:dm-blocked`,
+        correlationId: `welcome:${member.id}`,
+      });
+      const channel = config.welcome_channel_id
+        ? member.guild.channels.cache.get(config.welcome_channel_id) as TextChannel | undefined
+        : undefined;
+      if (channel?.isTextBased()) {
+        await channel.send({
+          content: `${member}, welcome! I couldn't send you a DM, so here's the welcome note instead.`,
+          allowedMentions: { parse: ['users'] },
+        }).catch(() => undefined);
+      }
     } else {
       log.error(`Failed to send welcome DM to ${member.user.tag}:`, {
         code,
         error: String(err),
       });
     }
+    if (code !== 50007) await raiseWelcomeAlert(supabase, member, 'dm', 'send_failed');
   }
 }
 
@@ -163,20 +190,66 @@ async function sendWelcomeDM(
 async function applyAutoRoles(
   member: GuildMember,
   roleIds: string[],
+  supabase: SupabaseClient,
 ): Promise<void> {
   for (const roleId of roleIds) {
     try {
       const role = member.guild.roles.cache.get(roleId);
       if (!role) {
         log.warn(`Auto-role ${roleId} not found, skipping`);
+        eventBus.emit('welcome.member_role_grant_failed', member.guild.id, {
+          memberId: member.id, roleId, attempt: 0,
+          occurrenceId: `${member.id}:welcome:role:${roleId}`,
+          correlationId: `welcome:${member.id}`,
+        });
+        await raiseWelcomeAlert(supabase, member, 'role', `role_missing:${roleId}`);
         continue;
       }
       if (member.roles.cache.has(roleId)) continue; // Already has it
 
-      await member.roles.add(role, 'SomniBot welcome auto-role');
-      log.info(`Auto-role "${role.name}" granted to ${member.user.tag}`);
+      let granted = false;
+      for (let attempt = 1; attempt <= 2 && !granted; attempt++) {
+        try {
+          await member.roles.add(role, 'SomniBot welcome auto-role');
+          granted = true;
+          log.info(`Auto-role "${role.name}" granted to ${member.user.tag}`);
+        } catch (err) {
+          if (attempt === 2) {
+            log.error(`Failed to grant auto-role ${roleId}:`, err);
+            eventBus.emit('welcome.member_role_grant_failed', member.guild.id, {
+              memberId: member.id, roleId, attempt,
+              occurrenceId: `${member.id}:welcome:role:${roleId}`,
+              correlationId: `welcome:${member.id}`,
+            });
+            await raiseWelcomeAlert(supabase, member, 'role', `grant_failed:${roleId}`);
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          }
+        }
+      }
     } catch (err) {
       log.error(`Failed to grant auto-role ${roleId}:`, err);
+      await raiseWelcomeAlert(supabase, member, 'role', `grant_failed:${roleId}`);
     }
+  }
+}
+
+async function raiseWelcomeAlert(
+  supabase: SupabaseClient,
+  member: GuildMember,
+  surface: 'channel' | 'dm' | 'role',
+  reason: string,
+): Promise<void> {
+  try {
+    await raiseOwnerAlert(supabase, member.guild.id, {
+      alertType: 'welcome_delivery_failed',
+      severity: 'warning',
+      title: 'Welcome delivery needs attention',
+      message: `Welcome ${surface} delivery for a member failed (${reason}).`,
+      metadata: { member_id: member.id, surface, reason },
+      guild: member.guild,
+    });
+  } catch (err) {
+    log.error('Failed to write welcome delivery alert:', { error: String(err) });
   }
 }

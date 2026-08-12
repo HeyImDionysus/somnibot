@@ -23,15 +23,28 @@ export const LEVEL_CONFIG = {
   MAX_LEVEL: 200,
 } as const;
 
+export interface LevelCurve { base: number; exponent: number }
+
+export const DEFAULT_LEVEL_CURVE: LevelCurve = { base: 100, exponent: 1.9 };
+
+function xpForCurveLevel(level: number, curve: LevelCurve): number {
+  // Preserve the shipped quadratic curve when the default curve is selected;
+  // custom curves use the owner-facing base/exponent progression.
+  if (curve.base === DEFAULT_LEVEL_CURVE.base && curve.exponent === DEFAULT_LEVEL_CURVE.exponent) {
+    return LEVEL_CONFIG.XP_FORMULA(level);
+  }
+  return curve.base * Math.pow(level + 1, curve.exponent);
+}
+
 /**
  * Calculate the level for a given total XP amount.
  */
-export function calculateLevel(totalXp: number): number {
+export function calculateLevel(totalXp: number, curve: LevelCurve = DEFAULT_LEVEL_CURVE): number {
   let level = 0;
   let xpNeeded = 0;
 
   while (level < LEVEL_CONFIG.MAX_LEVEL) {
-    xpNeeded += LEVEL_CONFIG.XP_FORMULA(level);
+    xpNeeded += xpForCurveLevel(level, curve);
     if (totalXp < xpNeeded) break;
     level++;
   }
@@ -42,10 +55,10 @@ export function calculateLevel(totalXp: number): number {
 /**
  * Calculate total XP needed to reach a specific level.
  */
-export function totalXpForLevel(targetLevel: number): number {
+export function totalXpForLevel(targetLevel: number, curve: LevelCurve = DEFAULT_LEVEL_CURVE): number {
   let total = 0;
   for (let i = 0; i < targetLevel; i++) {
-    total += LEVEL_CONFIG.XP_FORMULA(i);
+    total += xpForCurveLevel(i, curve);
   }
   return total;
 }
@@ -61,7 +74,7 @@ export function levelProgress(totalXp: number): {
 } {
   const level = calculateLevel(totalXp);
   const xpAtCurrentLevel = totalXpForLevel(level);
-  const xpForNextLevel = LEVEL_CONFIG.XP_FORMULA(level);
+  const xpForNextLevel = xpForCurveLevel(level, DEFAULT_LEVEL_CURVE);
   const currentLevelXp = totalXp - xpAtCurrentLevel;
   const progressPercent = Math.min((currentLevelXp / xpForNextLevel) * 100, 100);
 

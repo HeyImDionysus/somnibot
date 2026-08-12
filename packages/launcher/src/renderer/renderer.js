@@ -10,6 +10,7 @@
 /* ================================================================== */
 
 const $ = (id) => document.getElementById(id);
+const MASKED_SECRET = '••••••••';
 
 const fields = {
   discordToken: $('discordToken'),
@@ -31,7 +32,9 @@ const fields = {
 
 const runtimeFields = {
   publicCallbackBaseUrl: $('publicCallbackBaseUrl'),
+  vpsPublicAccessMode: $('vpsPublicAccessMode'),
   vpsDomain: $('vpsDomain'),
+  vpsTailscaleFunnelUrl: $('vpsTailscaleFunnelUrl'),
   vpsSshHost: $('vpsSshHost'),
   vpsSshUser: $('vpsSshUser'),
   vpsDeployPath: $('vpsDeployPath'),
@@ -45,11 +48,20 @@ const btnCloseLogs = $('btn-close-logs');
 const btnHelp = $('btn-help');
 const btnOpenDiscord = $('btn-open-discord');
 const btnOpenDiscordInvite = $('btn-open-discord-invite');
+const btnVerifyDiscord = $('btn-verify-discord');
 const btnOpenSupabase = $('btn-open-supabase');
+const btnDiscoverSupabase = $('btn-discover-supabase');
+const supabaseProjectPicker = $('supabase-project-picker');
+const supabaseProjectSelect = $('supabase-project-select');
+const btnSelectSupabaseProject = $('btn-select-supabase-project');
+const supabaseProjectStatus = $('supabase-project-status');
+const btnGenerateSupabaseDbPassword = $('btn-generate-supabase-db-password');
+const supabaseDbPasswordStatus = $('supabase-db-password-status');
 const btnSetupPayPalWebhook = $('btn-setup-paypal-webhook');
 const btnCheckUpdates = $('btn-check-updates');
 
 const btnRestoreCloud = $('btn-restore-cloud');
+const btnImportExistingEnv = $('btn-import-existing-env');
 const restoreBanner = $('restore-banner');
 
 const botDot = $('bot-dot');
@@ -67,6 +79,9 @@ const runtimeModeLabel = $('runtime-mode-label');
 const runtimeSection = $('runtime-section');
 const regularRuntimeFields = $('regular-runtime-fields');
 const vpsRuntimeFields = $('vps-runtime-fields');
+const vpsDomainField = $('vps-domain-field');
+const vpsTailscaleFunnelField = $('vps-tailscale-funnel-field');
+const vpsFunnelUrlPreview = $('vps-funnel-url-preview');
 const runtimeSteps = $('runtime-steps');
 const summaryDashboardLabel = $('summary-dashboard-label');
 const summaryPublicCallbackLabel = $('summary-public-callback-label');
@@ -118,6 +133,8 @@ let isPayPalWebhookRunning = false;
 let runtimeMode = 'regular-local';
 let setupStatus = null;
 let setupStatusSeq = 0;
+let setupStatusRetryTimer = null;
+let setupStatusRetryCount = 0;
 let latestProcessStatus = null;
 let tailscalePublicCallbackBaseUrl = '';
 let latestTailscaleReadiness = null;
@@ -130,12 +147,42 @@ let vpsPreflightResult = null;
 let vpsDeploymentResult = null;
 let vpsActionResultPlanKey = '';
 let isVpsDeploymentActionRunning = false;
+let isSupabaseDiscoveryRunning = false;
+let supabaseProjects = [];
 
 /* ================================================================== */
 /*  Init                                                               */
 /* ================================================================== */
 
+function applyConfigToForm(config) {
+  for (const [key, input] of Object.entries(fields)) {
+    if (!input) continue;
+    if (input.type === 'checkbox') {
+      input.checked = Boolean(config[key]);
+    } else if (config[key]) {
+      input.value = config[key];
+      if (config[key] === MASKED_SECRET) markSavedSecret(input);
+    }
+  }
+  for (const [key, input] of Object.entries(runtimeFields)) {
+    if (config[key]) input.value = config[key];
+  }
+  tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
+  setVpsPublicAccessMode(config.vpsPublicAccessMode, { refresh: false });
+  setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
+  updateDiscordInviteButton();
+  updatePayPalWebhookButton();
+  updateRestoreBanner();
+}
+
 async function init() {
+  // The window is created immediately so startup never looks hung, but its
+  // credential form remains inert until cloud/keychain/runtime reconciliation
+  // has completed. This prevents a stale form snapshot from overwriting a
+  // credential restored during startup.
+  document.body.inert = true;
+  setFieldsDisabled(true);
+
   // Show version
   try {
     const ver = await window.somnibot.getVersion();
@@ -146,27 +193,22 @@ async function init() {
 
   // Load saved config
   try {
+    await window.somnibot.waitForStartupReady();
     const config = await window.somnibot.getConfig();
-    for (const [key, input] of Object.entries(fields)) {
-      if (!input) continue;
-      if (input.type === 'checkbox') {
-        input.checked = Boolean(config[key]);
-      } else if (config[key]) {
-        input.value = config[key];
+    applyConfigToForm(config);
+    if (isCredentialFormComplete() && navigator.onLine) {
+      try {
+        latestProviderValidation = await window.somnibot.validateCredentials(collectCredentialConfig());
+      } catch (err) {
+        console.warn('Provider startup validation was unavailable:', err);
       }
     }
-    for (const [key, input] of Object.entries(runtimeFields)) {
-      if (config[key]) {
-        input.value = config[key];
-      }
-    }
-    tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
-    setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
-    updateDiscordInviteButton();
-    updatePayPalWebhookButton();
   } catch (err) {
     console.error('Failed to load config:', err);
+    return;
   }
+  setFieldsDisabled(false);
+  document.body.inert = false;
 
   // Check current status (in case app reconnected)
   await refreshProcessStatus();
@@ -177,6 +219,9 @@ async function init() {
     if (!input) continue;
     const eventName = input.type === 'checkbox' ? 'change' : 'input';
     input.addEventListener(eventName, () => {
+      if (input.dataset.savedSecret === 'true' && input.value !== MASKED_SECRET) {
+        clearSavedSecretState(input);
+      }
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(saveConfig, 500);
       input.classList.remove('error', 'valid');
@@ -185,6 +230,7 @@ async function init() {
       latestVpsHealthProof = null;
       updateRestoreBanner();
       updateDiscordInviteButton();
+      updateDiscordVerifyButton();
       updatePayPalWebhookButton();
       refreshSetupStatus();
     });
@@ -199,6 +245,10 @@ async function init() {
         tailscalePublicCallbackBaseUrl = input.value.trim();
         latestCallbackProbe = null;
       }
+      if (input === runtimeFields.vpsPublicAccessMode) {
+        setVpsPublicAccessMode(input.value, { refresh: false });
+      }
+      if (input === runtimeFields.vpsTailscaleFunnelUrl) updateVpsFunnelUrlPreview();
       latestPayPalWebhook = null;
       latestVpsHealthProof = null;
       updatePayPalWebhookButton();
@@ -214,6 +264,7 @@ async function init() {
 
   // Show restore banner if appropriate
   updateRestoreBanner();
+  updateDiscordVerifyButton();
   await refreshSetupStatus();
 
   // Phase 6: Network status
@@ -248,7 +299,9 @@ function collectCredentialConfig() {
   const config = {};
   for (const [key, input] of Object.entries(fields)) {
     if (!input) continue;
-    config[key] = input.type === 'checkbox' ? input.checked : input.value;
+    config[key] = input.type === 'checkbox'
+      ? input.checked
+      : input.dataset.savedSecret === 'true' ? MASKED_SECRET : input.value;
   }
   return config;
 }
@@ -257,9 +310,6 @@ function collectRuntimeConfig() {
   const config = { runtimeMode };
   for (const [key, input] of Object.entries(runtimeFields)) {
     config[key] = input.value;
-  }
-  if (runtimeMode === 'vps') {
-    config.publicCallbackBaseUrl = '';
   }
   return config;
 }
@@ -272,14 +322,18 @@ function collectConfig() {
 }
 
 function isCredentialFormComplete() {
-  return [
+  const discordReady = [
     'discordToken',
     'discordApplicationId',
     'discordClientSecret',
+  ].every((key) => fields[key].value.trim().length > 0);
+  const supabaseKeysReady = [
     'supabaseUrl',
     'supabaseSecretKey',
     'supabasePublishableKey',
   ].every((key) => fields[key].value.trim().length > 0);
+  const supabaseTokenReady = fields.supabaseAccessToken.value.trim().length > 0;
+  return discordReady && (supabaseKeysReady || supabaseTokenReady);
 }
 
 function isPayPalFormComplete() {
@@ -364,7 +418,29 @@ function setRuntimeMode(mode, options = {}) {
   }
 }
 
+function setVpsPublicAccessMode(mode, options = {}) {
+  const selected = mode === 'tailscale-funnel' ? 'tailscale-funnel' : 'domain';
+  runtimeFields.vpsPublicAccessMode.value = selected;
+  const usesFunnel = selected === 'tailscale-funnel';
+  vpsDomainField.classList.toggle('hidden', usesFunnel);
+  vpsTailscaleFunnelField.classList.toggle('hidden', !usesFunnel);
+  updateVpsFunnelUrlPreview();
+  if (options.refresh !== false) refreshSetupStatus();
+}
+
+function updateVpsFunnelUrlPreview() {
+  vpsFunnelUrlPreview.textContent = runtimeFields.vpsTailscaleFunnelUrl.value.trim() || 'Not set yet';
+}
+
 async function refreshSetupStatus(options = {}) {
+  if (setupStatusRetryTimer) {
+    clearTimeout(setupStatusRetryTimer);
+    setupStatusRetryTimer = null;
+  }
+  if (!options.runtimeHealthRetry) {
+    setupStatusRetryCount = 0;
+  }
+
   const seq = ++setupStatusSeq;
   const input = {
     ...collectRuntimeConfig(),
@@ -422,6 +498,7 @@ async function refreshSetupStatus(options = {}) {
     clearStaleVpsActionResults(status);
     renderSetupStatus(status);
     updatePayPalWebhookButton();
+    scheduleRuntimeHealthRetry(status);
     return status;
   } catch (err) {
     console.error('Failed to refresh setup status:', err);
@@ -569,7 +646,7 @@ function renderDeploymentPlan(plan, isVpsStatus) {
   if (plan.status === 'blocked') {
     const reasons = plan.blockedReasons.length > 0
       ? renderList(plan.blockedReasons)
-      : '<p>Finish the VPS readiness fields before reviewing the deployment plan.</p>';
+      : '<p>Finish the VPS readiness fields before the launcher checks or provisions the remote checkout.</p>';
     vpsDeploymentPlan.innerHTML = (
       '<div class="deployment-plan-header">' +
         '<div>' +
@@ -578,7 +655,9 @@ function renderDeploymentPlan(plan, isVpsStatus) {
         '</div>' +
         '<span class="deployment-plan-badge blocked">Blocked</span>' +
       '</div>' +
-      `<div class="deployment-plan-section"><h4>Blocked by</h4>${reasons}</div>`
+      `<div class="deployment-plan-section"><h4>Blocked by</h4>${reasons}</div>` +
+      renderDeploymentActions(plan, true) +
+      renderPreflightResult(vpsPreflightResult)
     );
     return;
   }
@@ -590,20 +669,22 @@ function renderDeploymentPlan(plan, isVpsStatus) {
   const warnings = plan.warnings.length > 0
     ? `<div class="deployment-plan-section warning"><h4>Warnings</h4>${renderList(plan.warnings)}</div>`
     : '';
+  const funnelMode = target.publicAccessMode === 'tailscale-funnel';
 
   vpsDeploymentPlan.innerHTML = (
     '<div class="deployment-plan-header">' +
       '<div>' +
         '<h3>VPS deployment plan</h3>' +
-        '<p>Review the plan, run a read-only SSH preflight, then use native approval before remote changes.</p>' +
+      `<p>${funnelMode ? 'The Funnel mapping is verified, but the deployment is not ready until public HTTPS health proof passes. ' : ''}Review the plan, run the read-only SSH/prerequisite preflight, then use explicit approval before runtime installation, checkout, credential, or container changes.</p>` +
       '</div>' +
-      '<span class="deployment-plan-badge ready">Ready</span>' +
+      `<span class="deployment-plan-badge ready">${funnelMode ? 'Plan reviewable' : 'Ready'}</span>` +
     '</div>' +
     renderDeploymentActions(plan) +
     renderPreflightResult(vpsPreflightResult) +
     renderDeploymentRunResult(vpsDeploymentResult) +
     warnings +
     '<div class="deployment-plan-grid">' +
+      `<div><span>Source</span><strong>${escapeHtml(target.repositoryUrl || '')} @ ${escapeHtml(target.repositoryRef || '')}</strong></div>` +
       `<div><span>SSH target</span><strong>${escapeHtml(target.sshTarget || '')}</strong></div>` +
       `<div><span>Deploy path</span><strong>${escapeHtml(target.deployPath || '')}</strong></div>` +
       `<div><span>Env file</span><strong>${escapeHtml(target.envFilePath || '')}</strong></div>` +
@@ -619,12 +700,12 @@ function renderDeploymentPlan(plan, isVpsStatus) {
       `${renderPlanRows(plan.serviceLayout.map(service => [service.name, `${service.role} (${service.exposure}; ${service.endpoint})`]))}` +
     '</div>' +
     '<div class="deployment-plan-section">' +
-      '<h4>Caddy/reverse proxy</h4>' +
+      (reverseProxy ? '<h4>Caddy/reverse proxy</h4>' : '<h4>Tailscale Funnel edge</h4>') +
       `${reverseProxy ? renderPlanRows([
         ['Caddyfile', reverseProxy.filePath],
         ['Public ports', reverseProxy.publicPorts.join(', ')],
         ['Upstream', reverseProxy.upstream],
-      ]) + renderList(reverseProxy.outline) : ''}` +
+      ]) + renderList(reverseProxy.outline) : '<p>Bundled Caddy is disabled. The dashboard is published only on 127.0.0.1:3456 for the host Tailscale Funnel.</p>'}` +
     '</div>' +
     '<div class="deployment-plan-section">' +
       '<h4>Service commands</h4>' +
@@ -739,18 +820,24 @@ function formatCompletionStatus(status) {
   return labels[status] || status;
 }
 
-function renderDeploymentActions(plan) {
-  const disabled = isVpsDeploymentActionRunning || !plan.canApprove;
-  const disabledAttr = disabled ? ' disabled' : '';
+function renderDeploymentActions(plan, preflightOnly = false) {
+  const deployDisabled = isVpsDeploymentActionRunning || !plan.canApprove;
+  const preflightDisabled = isVpsDeploymentActionRunning || !runtimeFields.vpsSshHost.value.trim()
+    || !runtimeFields.vpsSshUser.value.trim() || !runtimeFields.vpsDeployPath.value.trim();
+  const deployDisabledAttr = deployDisabled ? ' disabled' : '';
+  const preflightDisabledAttr = preflightDisabled ? ' disabled' : '';
   const preflightLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Run SSH Preflight';
   const dryRunLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Dry Run';
   const liveLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Run Deployment';
 
   return (
     '<div class="deployment-plan-actions">' +
-      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="preflight"${disabledAttr}>${escapeHtml(preflightLabel)}</button>` +
-      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="dry-run"${disabledAttr}>${escapeHtml(dryRunLabel)}</button>` +
-      `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="run-live"${disabledAttr}>${escapeHtml(liveLabel)}</button>` +
+      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="preflight"${preflightDisabledAttr}>${escapeHtml(preflightLabel)}</button>` +
+      (preflightOnly ? '' :
+        `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="dry-run"${deployDisabledAttr}>${escapeHtml(dryRunLabel)}</button>` +
+        `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="run-live"${deployDisabledAttr}>${escapeHtml(liveLabel)}</button>` +
+        '<label class="deployment-rollback-sha"><span>Last-good commit SHA</span><input type="text" data-vps-last-good-commit maxlength="40" pattern="[0-9a-fA-F]{40}" placeholder="40 hexadecimal characters" autocomplete="off"></label>' +
+        `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="rollback"${deployDisabledAttr}>Run approved rollback</button>`) +
     '</div>'
   );
 }
@@ -774,11 +861,15 @@ function renderDeploymentRunResult(result) {
   ]);
   const logLines = (result.logs || []).map(log => [log.message, log.detail || log.code]);
   const blockedLines = (result.manualBlockReasons || []).map(reason => ['Manual block', reason]);
+  const recoveryLines = result.recovery
+    ? [['Recovery action', `${result.recovery.action}: ${result.recovery.detail}`]]
+    : [];
 
   return renderRunResultPanel('Deployment run', result.state, [
     ...blockedLines,
     ...commandLines,
     ...logLines,
+    ...recoveryLines,
   ]);
 }
 
@@ -892,8 +983,16 @@ btnStart.addEventListener('click', async () => {
 
   const currentSetup = await refreshSetupStatus();
 
-  // Quick local check for required fields
-  const required = ['discordToken', 'discordApplicationId', 'discordClientSecret', 'supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey'];
+  // Quick local check for required fields. A Supabase Personal Access Token
+  // (`sbp_…`) is the single bootstrap input; project URL/API keys hydrate in
+  // the main process. Existing key fields remain a supported manual fallback.
+  const required = ['discordToken', 'discordApplicationId', 'discordClientSecret'];
+  const supabaseTokenReady = config.supabaseAccessToken?.trim();
+  const supabaseKeysReady = ['supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey']
+    .every((key) => config[key]);
+  if (!supabaseTokenReady && !supabaseKeysReady) {
+    required.push('supabaseAccessToken');
+  }
   const missing = required.filter((k) => !config[k]);
   if (!currentSetup?.primaryAction.enabled) {
     const blockedReason = currentSetup?.primaryAction.blockedReason || '';
@@ -1012,12 +1111,22 @@ vpsDeploymentPlan?.addEventListener('click', async (event) => {
     await saveConfig();
     const currentSetup = await refreshSetupStatus();
     const plan = currentSetup?.deploymentPlan;
-    if (!plan || plan.status !== 'ready') {
+    if (!plan || (plan.status !== 'ready' && action !== 'preflight')) {
       showMessage('error', 'Finish the VPS deployment plan before running preflight or deployment actions.');
       return;
     }
     const actionPlanKey = getVpsDeploymentPlanKey(plan);
     renderDeploymentPlan(plan, true);
+
+    if (action === 'rollback') {
+      const commitInput = vpsDeploymentPlan.querySelector('[data-vps-last-good-commit]');
+      const lastGoodCommit = commitInput?.value?.trim() || '';
+      vpsDeploymentResult = await window.somnibot.runVpsRollback({ lastGoodCommit });
+      vpsActionResultPlanKey = actionPlanKey;
+      const ok = vpsDeploymentResult.state === 'success';
+      showMessage(ok ? 'success' : 'error', ok ? 'VPS rollback completed.' : 'VPS rollback did not complete.');
+      return;
+    }
 
     if (action === 'preflight') {
       vpsPreflightResult = await window.somnibot.runVpsPreflight();
@@ -1025,8 +1134,8 @@ vpsDeploymentPlan?.addEventListener('click', async (event) => {
       showMessage(
         vpsPreflightResult.state === 'success' ? 'success' : 'error',
         vpsPreflightResult.state === 'success'
-          ? 'Read-only SSH preflight passed.'
-          : 'Read-only SSH preflight needs attention.',
+          ? 'Read-only SSH/prerequisite preflight passed.'
+          : 'Read-only SSH/prerequisite preflight needs attention.',
       );
       return;
     }
@@ -1111,6 +1220,39 @@ btnOpenDiscordInvite.addEventListener('click', () => {
   window.somnibot.openExternal(inviteState.url);
 });
 
+btnVerifyDiscord.addEventListener('click', async () => {
+  if (isValidating || isRunning) return;
+
+  if (!isCredentialFormComplete()) {
+    showMessage('error', 'Fill the required Discord and Supabase fields before verifying the saved connection.');
+    updateDiscordVerifyButton();
+    return;
+  }
+
+  isValidating = true;
+  btnVerifyDiscord.disabled = true;
+  btnVerifyDiscord.textContent = 'Verifying...';
+  hideMessage();
+
+  try {
+    const result = await window.somnibot.validateCredentials(collectCredentialConfig());
+    latestProviderValidation = result;
+    if (result.valid) {
+      showMessage('success', 'Saved Discord and Supabase connections verified.');
+    } else {
+      const detail = result.errors?.filter(Boolean).join(' ') || 'Provider verification failed.';
+      showMessage('error', detail);
+    }
+  } catch (err) {
+    showMessage('error', `Saved connection verification failed: ${err.message || err}`);
+  } finally {
+    isValidating = false;
+    btnVerifyDiscord.textContent = 'Verify Saved Connection';
+    updateDiscordVerifyButton();
+    await refreshSetupStatus();
+  }
+});
+
 runtimeSteps.addEventListener('click', (event) => {
   const button = event.target.closest('[data-setup-action]');
   if (!button || button.disabled) return;
@@ -1127,6 +1269,158 @@ runtimeSteps.addEventListener('click', (event) => {
 
 btnOpenSupabase.addEventListener('click', () => {
   window.somnibot.openExternal('https://supabase.com/dashboard');
+});
+
+function setSupabaseProjectStatus(text, type = '') {
+  supabaseProjectStatus.textContent = text;
+  supabaseProjectStatus.className = `field-help${type ? ` ${type}` : ''}`;
+}
+
+function renderSupabaseProjectOptions(projects) {
+  supabaseProjects = Array.isArray(projects) ? projects : [];
+  supabaseProjectSelect.replaceChildren();
+
+  for (const project of supabaseProjects) {
+    const option = document.createElement('option');
+    option.value = project.ref;
+    const details = [project.region, project.status].filter(Boolean).join(' · ');
+    option.textContent = details ? `${project.name} (${project.ref}) — ${details}` : `${project.name} (${project.ref})`;
+    supabaseProjectSelect.appendChild(option);
+  }
+
+  const currentRef = (() => {
+    try {
+      const hostname = new URL(fields.supabaseUrl.value.trim()).hostname;
+      return hostname.endsWith('.supabase.co') ? hostname.slice(0, -'.supabase.co'.length) : '';
+    } catch {
+      return '';
+    }
+  })();
+  if (currentRef && supabaseProjects.some((project) => project.ref === currentRef)) {
+    supabaseProjectSelect.value = currentRef;
+  }
+  supabaseProjectPicker.classList.toggle('hidden', supabaseProjects.length === 0);
+}
+
+btnDiscoverSupabase.addEventListener('click', async () => {
+  if (isSupabaseDiscoveryRunning) return;
+  isSupabaseDiscoveryRunning = true;
+  btnDiscoverSupabase.disabled = true;
+  btnDiscoverSupabase.textContent = 'Discovering...';
+  setSupabaseProjectStatus('Listing projects visible to the saved Management API token.');
+  hideMessage();
+
+  try {
+    // Persist and consume the currently entered PAT in one main-process
+    // operation so discovery can never race with autosave or use stale state.
+    const result = await window.somnibot.discoverSupabaseProjects(
+      fields.supabaseAccessToken.value,
+    );
+    if (!result.ok) {
+      supabaseProjectPicker.classList.add('hidden');
+      setSupabaseProjectStatus(result.error || 'Could not discover Supabase projects.', 'error');
+      showMessage('error', result.error || 'Could not discover Supabase projects.');
+      return;
+    }
+    renderSupabaseProjectOptions(result.projects || []);
+    if (!result.projects?.length) {
+      setSupabaseProjectStatus('No Supabase projects were returned for this token.', 'error');
+      showMessage('error', 'No Supabase projects were returned for this token.');
+      return;
+    }
+    setSupabaseProjectStatus(`${result.projects.length} project${result.projects.length === 1 ? '' : 's'} found. Select the project SomniBot should use.`);
+  } catch (err) {
+    supabaseProjectPicker.classList.add('hidden');
+    setSupabaseProjectStatus(`Project discovery failed: ${err.message || err}`, 'error');
+    showMessage('error', `Project discovery failed: ${err.message || err}`);
+  } finally {
+    isSupabaseDiscoveryRunning = false;
+    btnDiscoverSupabase.disabled = false;
+    btnDiscoverSupabase.textContent = 'Discover Supabase Projects';
+  }
+});
+
+btnSelectSupabaseProject.addEventListener('click', async () => {
+  const ref = supabaseProjectSelect.value.trim();
+  if (!ref) {
+    setSupabaseProjectStatus('Choose a Supabase project first.', 'error');
+    return;
+  }
+
+  btnSelectSupabaseProject.disabled = true;
+  btnSelectSupabaseProject.textContent = 'Loading...';
+  setSupabaseProjectStatus('Loading the selected project credentials into the launcher.');
+  hideMessage();
+
+  try {
+    const result = await window.somnibot.selectSupabaseProject(ref);
+    if (!result.ok || !result.project) {
+      setSupabaseProjectStatus(result.error || 'Could not select that Supabase project.', 'error');
+      showMessage('error', result.error || 'Could not select that Supabase project.');
+      return;
+    }
+
+    // The main process never returns key material. Refreshing the masked
+    // config keeps the existing safe renderer contract while the readiness
+    // flags let us clear stale values when a project lacks a key.
+    applyConfigToForm(await window.somnibot.getConfig());
+    fields.supabaseUrl.value = result.project.url;
+    if (!result.secretKeyReady) fields.supabaseSecretKey.value = '';
+    if (!result.publishableKeyReady) fields.supabasePublishableKey.value = '';
+    await saveConfig();
+    await refreshSetupStatus();
+
+    const readiness = [
+      result.secretKeyReady ? 'secret key loaded' : 'secret key not available',
+      result.publishableKeyReady ? 'publishable key loaded' : 'publishable key not available',
+      result.databasePasswordReady ? 'database password generated and saved' : 'database password still needed for VPS/direct migrations',
+    ].join('; ');
+    setSupabaseProjectStatus(`${result.project.name} selected (${result.project.ref}); ${readiness}.`);
+    showMessage(
+      result.databasePasswordGenerationError ? 'info' : 'success',
+      result.databasePasswordGenerationError
+        ? `Supabase project selected: ${result.project.name} (${result.project.ref}). The database password was not generated automatically: ${result.databasePasswordGenerationError}`
+        : `Supabase project selected: ${result.project.name} (${result.project.ref}).`,
+    );
+  } catch (err) {
+    setSupabaseProjectStatus(`Project selection failed: ${err.message || err}`, 'error');
+    showMessage('error', `Project selection failed: ${err.message || err}`);
+  } finally {
+    btnSelectSupabaseProject.disabled = false;
+    btnSelectSupabaseProject.textContent = 'Use Selected Project';
+  }
+});
+
+btnGenerateSupabaseDbPassword.addEventListener('click', async () => {
+  btnGenerateSupabaseDbPassword.disabled = true;
+  btnGenerateSupabaseDbPassword.textContent = 'Generating...';
+  supabaseDbPasswordStatus.textContent = 'Waiting for confirmation, then updating Supabase and saving the new password.';
+  hideMessage();
+
+  try {
+    const result = await window.somnibot.generateSupabaseDatabasePassword();
+    if (result.canceled) {
+      supabaseDbPasswordStatus.textContent = 'Password generation canceled.';
+      return;
+    }
+    if (!result.ok) {
+      supabaseDbPasswordStatus.textContent = result.error || 'Could not generate a Supabase database password.';
+      showMessage('error', result.error || 'Could not generate a Supabase database password.');
+      return;
+    }
+
+    applyConfigToForm(await window.somnibot.getConfig());
+    await refreshSetupStatus();
+    supabaseDbPasswordStatus.textContent = 'A new database password was generated and saved. Restart or redeploy any direct Postgres installation.';
+    setSupabaseProjectStatus('Selected project credentials are loaded; database password generated and saved for VPS/direct migrations.');
+    showMessage('success', 'Supabase database password generated and saved to SomniBot.');
+  } catch (err) {
+    supabaseDbPasswordStatus.textContent = `Password generation failed: ${err.message || err}`;
+    showMessage('error', `Password generation failed: ${err.message || err}`);
+  } finally {
+    btnGenerateSupabaseDbPassword.disabled = false;
+    btnGenerateSupabaseDbPassword.textContent = 'Generate database password';
+  }
 });
 
 btnSetupPayPalWebhook.addEventListener('click', async () => {
@@ -1180,15 +1474,83 @@ btnLavalinkHelp.addEventListener('click', () => {
 /* ================================================================== */
 
 document.querySelectorAll('.toggle-vis').forEach((btn) => {
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     const target = document.getElementById(btn.dataset.target);
-    if (target) {
+    if (target && target.dataset.savedSecret !== 'true') {
       const isPassword = target.type === 'password';
       target.type = isPassword ? 'text' : 'password';
       btn.textContent = isPassword ? '🔒' : '👁';
+      btn.setAttribute('aria-pressed', String(isPassword));
     }
   });
 });
+
+function visibilityButtonFor(input) {
+  return document.querySelector(`.toggle-vis[data-target="${input.id}"]`);
+}
+
+function markSavedSecret(input) {
+  input.dataset.savedSecret = 'true';
+  input.classList.add('has-saved-secret');
+  input.type = 'password';
+  const btn = visibilityButtonFor(input);
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('saved');
+    btn.textContent = 'Saved';
+    btn.title = 'Saved securely. Enter a replacement to change it.';
+    btn.setAttribute('aria-label', `${input.id} is saved securely`);
+    btn.setAttribute('aria-pressed', 'false');
+  }
+}
+
+function scheduleRuntimeHealthRetry(status) {
+  const runtimeHealth = status?.steps?.find((step) => step.id === 'start-local');
+  const shouldRetry = runtimeMode === 'regular-local'
+    && latestProcessStatus?.dashboard === 'online'
+    && runtimeHealth?.status === 'pending'
+    && setupStatusRetryCount < 12;
+
+  if (!shouldRetry) {
+    setupStatusRetryCount = 0;
+    return;
+  }
+
+  setupStatusRetryCount += 1;
+  setupStatusRetryTimer = setTimeout(() => {
+    setupStatusRetryTimer = null;
+    void refreshSetupStatus({ runtimeHealthRetry: true });
+  }, 5_000);
+}
+
+function clearSavedSecretState(input) {
+  delete input.dataset.savedSecret;
+  input.classList.remove('has-saved-secret');
+  const btn = visibilityButtonFor(input);
+  if (btn) {
+    btn.disabled = false;
+    btn.classList.remove('saved');
+    btn.textContent = '👁';
+    btn.title = 'Show/hide';
+    btn.setAttribute('aria-label', `Show or hide ${input.id}`);
+    btn.setAttribute('aria-pressed', 'false');
+  }
+}
+
+for (const input of Object.values(fields)) {
+  if (!input || input.type === 'checkbox') continue;
+  input.addEventListener('focus', () => {
+    if (input.dataset.savedSecret !== 'true') return;
+    input.value = '';
+    input.placeholder = 'Saved securely — type to replace';
+  });
+  input.addEventListener('blur', () => {
+    if (input.dataset.savedSecret !== 'true' || input.value) return;
+    input.value = MASKED_SECRET;
+  });
+}
 
 /* ================================================================== */
 /*  Log panel                                                          */
@@ -1352,7 +1714,11 @@ async function initOnboarding() {
 function dismissOnboarding() {
   onboardingOverlay.classList.add('hidden');
   window.somnibot.completeFirstRun();
-  const firstSetupField = runtimeMode === 'vps' ? runtimeFields.vpsDomain : fields.discordToken;
+  const firstSetupField = runtimeMode === 'vps'
+    ? runtimeFields.vpsPublicAccessMode.value === 'tailscale-funnel'
+      ? runtimeFields.vpsTailscaleFunnelUrl
+      : runtimeFields.vpsDomain
+    : fields.discordToken;
   firstSetupField.focus();
 }
 
@@ -1362,14 +1728,14 @@ function renderOnboardingRuntimeStep() {
   const isVps = runtimeMode === 'vps';
   onboardingRuntimeTitle.textContent = isVps ? 'Prepare VPS Readiness' : 'Prepare Local Access';
   onboardingRuntimeDesc.textContent = isVps
-    ? 'VPS mode needs a domain, SSH target, and guided deployment readiness before credentials can be validated.'
+    ? 'VPS mode needs a conventional domain or verified Tailscale Funnel, plus an SSH target and guided deployment readiness.'
     : 'Regular local mode checks Tailscale, prepares Funnel, and fills the public callback URL for you.';
 
   const items = isVps
     ? [
-      ['Domain', 'Use the HTTPS domain that will serve the dashboard and receive provider callbacks.'],
+      ['Public access', 'Choose a conventional HTTPS domain with Caddy or an HTTPS *.ts.net Funnel URL verified through SSH preflight.'],
       ['SSH target', 'Enter host, user, and deploy path on the setup screen. Do not enter private keys or passwords.'],
-      ['Guided deploy', 'The launcher can run read-only SSH preflight, dry-run deployment, and approval-gated deployment with redacted output.'],
+      ['Guided deploy', 'The launcher can check a fresh target, install the supported runtime, provision or update the GitHub checkout, show the dry-run, and execute the approved deployment with redacted output.'],
     ]
     : [
       ['Tailscale check', 'The launcher detects whether Tailscale is installed, signed in, and allowed to use Funnel.'],
@@ -1538,6 +1904,7 @@ function tailscaleDotClass(state) {
       return 'waiting';
     case 'not-installed':
     case 'not-logged-in':
+    case 'needs-permission':
     case 'needs-policy':
     case 'unsupported-platform':
       return 'blocked';
@@ -1556,6 +1923,8 @@ function tailscaleReadinessNote(readiness) {
       return 'Install Tailscale, sign in, then check again.';
     case 'not-logged-in':
       return 'Add a Tailscale auth key, then enable Funnel again.';
+    case 'needs-permission':
+      return readiness.detail || 'Restart SomniBot with the Windows permission required to read Tailscale, then check again.';
     case 'needs-policy':
       return 'Tailnet policy must allow Funnel before SomniBot can automate this step.';
     case 'unsupported-platform':
@@ -1732,6 +2101,7 @@ function setFieldsDisabled(disabled) {
     btn.disabled = disabled;
   });
   setTailscaleActionsDisabled(disabled);
+  updateDiscordVerifyButton();
   updatePayPalWebhookButton();
 }
 
@@ -1799,6 +2169,15 @@ function updateDiscordInviteButton() {
     : inviteState.error || 'Enter a valid Discord Application ID first';
 }
 
+function updateDiscordVerifyButton() {
+  if (!btnVerifyDiscord) return;
+  const ready = isCredentialFormComplete();
+  btnVerifyDiscord.disabled = !ready || isValidating || isRunning;
+  btnVerifyDiscord.title = ready
+    ? 'Revalidate the saved Discord and Supabase connections without starting services'
+    : 'Fill the required Discord and Supabase fields first';
+}
+
 function fieldLabel(key) {
   const labels = {
     discordToken: 'Bot Token',
@@ -1829,10 +2208,39 @@ function escapeHtml(str) {
 /*  Cloud Restore                                                      */
 /* ================================================================== */
 
+btnImportExistingEnv.addEventListener('click', async () => {
+  btnImportExistingEnv.disabled = true;
+  btnImportExistingEnv.textContent = 'Importing...';
+  hideMessage();
+  try {
+    const result = await window.somnibot.importExistingEnv();
+    if (result.canceled) return;
+    if (!result.ok) {
+      showMessage('error', result.error || 'SomniBot could not import the selected setup.');
+      return;
+    }
+    applyConfigToForm(await window.somnibot.getConfig());
+    await refreshSetupStatus();
+    const importedCount = Array.isArray(result.importedFields) ? result.importedFields.length : 0;
+    showMessage(
+      'success',
+      importedCount > 0
+        ? `Recovered ${importedCount} missing setup field${importedCount === 1 ? '' : 's'} from the existing SomniBot installation.`
+        : 'The launcher already has every connection value found in that SomniBot installation.',
+    );
+  } catch (err) {
+    showMessage('error', `Import failed: ${err.message || err}`);
+  } finally {
+    btnImportExistingEnv.disabled = false;
+    btnImportExistingEnv.textContent = 'Import Existing Setup';
+  }
+});
+
 function updateRestoreBanner() {
   const hasSupabase = fields.supabaseUrl.value.trim() && fields.supabaseSecretKey.value.trim();
-  const missingDiscord = !fields.discordToken.value.trim();
-  restoreBanner.classList.toggle('hidden', !(hasSupabase && missingDiscord));
+  // Keep recovery available even when Discord is already present: an older or
+  // partial local cache may still be missing the DB password or PayPal values.
+  restoreBanner.classList.toggle('hidden', !hasSupabase);
 }
 
 btnRestoreCloud.addEventListener('click', async () => {
@@ -1860,9 +2268,9 @@ btnRestoreCloud.addEventListener('click', async () => {
     const creds = result.credentials;
     if (creds) {
       for (const [key, value] of Object.entries(creds)) {
-        if (fields[key] && value) {
-          fields[key].value = value;
-        }
+        if (!fields[key] || value === '' || value === undefined || value === null) continue;
+        if (fields[key].type === 'checkbox') fields[key].checked = Boolean(value);
+        else fields[key].value = String(value);
       }
       updateDiscordInviteButton();
       updateRestoreBanner();

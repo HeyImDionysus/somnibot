@@ -4,9 +4,13 @@
  * Each validator returns { ok: true } or { ok: false, error: string }.
  */
 
+import { normalizeDiscordToken } from './credential-normalization.js';
+
 export interface ValidationResult {
   ok: boolean;
   error?: string;
+  /** Machine-readable failure class for safe startup reconciliation. */
+  code?: 'invalid' | 'unavailable' | 'mismatch';
   /** Extra data returned on success (e.g. bot username, guild name). */
   meta?: Record<string, string>;
 }
@@ -33,19 +37,30 @@ export interface ProviderValidationCheck {
 /* ------------------------------------------------------------------ */
 
 export async function validateDiscordToken(token: string): Promise<ValidationResult> {
-  if (!token.trim()) return { ok: false, error: 'Discord token is required.' };
+  const normalized = normalizeDiscordToken(token);
+  if (!normalized) return { ok: false, code: 'invalid', error: 'Discord token is required.' };
+  if (![...normalized].every((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint >= 0x21 && codePoint <= 0x7e;
+  })) {
+    return {
+      ok: false,
+      code: 'invalid',
+      error: 'Discord bot token contains unsupported characters. Re-copy only the token from Discord Developer Portal → Bot → Token.',
+    };
+  }
 
   try {
     const res = await fetch('https://discord.com/api/v10/users/@me', {
-      headers: { Authorization: `Bot ${token.trim()}` },
+      headers: { Authorization: `Bot ${normalized}` },
       signal: AbortSignal.timeout(10_000),
     });
 
     if (res.status === 401) {
-      return { ok: false, error: 'Invalid bot token. Make sure you copied the full token from Discord Developer Portal → Bot → Token.' };
+      return { ok: false, code: 'invalid', error: 'Invalid bot token. Make sure you copied the full token from Discord Developer Portal → Bot → Token.' };
     }
     if (!res.ok) {
-      return { ok: false, error: `Discord API returned HTTP ${res.status}. Try again in a moment.` };
+      return { ok: false, code: 'unavailable', error: `Discord API returned HTTP ${res.status}. Try again in a moment.` };
     }
 
     const data = await res.json() as { username: string; id: string };
@@ -54,7 +69,7 @@ export async function validateDiscordToken(token: string): Promise<ValidationRes
       meta: { botUsername: data.username, botId: data.id },
     };
   } catch (err) {
-    return { ok: false, error: `Could not reach Discord API. Check your internet connection.\n${String(err)}` };
+    return { ok: false, code: 'unavailable', error: `Could not reach Discord API. Check your internet connection.\n${String(err)}` };
   }
 }
 
@@ -70,7 +85,7 @@ export async function validateDiscordAppId(
 
   try {
     const res = await fetch('https://discord.com/api/v10/applications/@me', {
-      headers: { Authorization: `Bot ${token.trim()}` },
+      headers: { Authorization: `Bot ${normalizeDiscordToken(token)}` },
       signal: AbortSignal.timeout(10_000),
     });
 
@@ -115,7 +130,7 @@ export async function validateGuildId(
   for (const id of guildIds) {
     try {
       const res = await fetch(`https://discord.com/api/v10/guilds/${id}`, {
-        headers: { Authorization: `Bot ${token.trim()}` },
+        headers: { Authorization: `Bot ${normalizeDiscordToken(token)}` },
         signal: AbortSignal.timeout(10_000),
       });
 
@@ -143,6 +158,27 @@ export async function validateGuildId(
 /*  Supabase                                                           */
 /* ------------------------------------------------------------------ */
 
+export function validateSupabaseUrl(url: string): ValidationResult {
+  if (!url.trim()) return { ok: false, error: 'Supabase URL is required.' };
+  try {
+    const parsed = new URL(url.trim());
+    const isLocalDev = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !isLocalDev) {
+      return { ok: false, error: 'Supabase URL must use HTTPS.' };
+    }
+    const isSupabaseDomain = parsed.hostname.endsWith('.supabase.co') || parsed.hostname.endsWith('.supabase.com');
+    if (!isSupabaseDomain && !isLocalDev) {
+      return {
+        ok: false,
+        error: 'Supabase URL must be a *.supabase.co domain or localhost. Got: ' + parsed.hostname,
+      };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Invalid Supabase URL. Expected something like "https://your-project.supabase.co".' };
+  }
+}
+
 export async function validateSupabase(
   url: string,
   secretKey: string,
@@ -152,27 +188,8 @@ export async function validateSupabase(
   if (!secretKey.trim()) return { ok: false, error: 'Supabase Secret Key is required.' };
   if (!publishableKey.trim()) return { ok: false, error: 'Supabase Publishable Key is required.' };
 
-  // Validate URL format — V6 Audit §10.3: enforce HTTPS + valid domain
-  try {
-    const parsed = new URL(url.trim());
-
-    // Must use HTTPS (except localhost for local development)
-    const isLocalDev = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(parsed.hostname);
-    if (parsed.protocol !== 'https:' && !isLocalDev) {
-      return { ok: false, error: 'Supabase URL must use HTTPS.' };
-    }
-
-    // Must be a Supabase domain or localhost
-    const isSupabaseDomain = parsed.hostname.endsWith('.supabase.co') || parsed.hostname.endsWith('.supabase.com');
-    if (!isSupabaseDomain && !isLocalDev) {
-      return {
-        ok: false,
-        error: 'Supabase URL must be a *.supabase.co domain or localhost. Got: ' + parsed.hostname,
-      };
-    }
-  } catch {
-    return { ok: false, error: 'Invalid Supabase URL. Expected something like "https://your-project.supabase.co".' };
-  }
+  const urlValidation = validateSupabaseUrl(url);
+  if (!urlValidation.ok) return urlValidation;
 
   // Verify secret key by calling the health endpoint with auth
   try {

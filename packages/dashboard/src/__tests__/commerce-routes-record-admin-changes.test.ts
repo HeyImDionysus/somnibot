@@ -405,7 +405,7 @@ describe('/api/store/products/[id]/files', () => {
   it('POST names the product whose buyers gained a download', async () => {
     const client = mockClient(['products', 'product_files']);
     client.chains.products.maybeSingle.mockResolvedValue({
-      data: { id: PRODUCT_ID, name: 'Pro License' },
+      data: { id: PRODUCT_ID, name: 'Pro License', delivery_type: 'license_key' },
       error: null,
     });
     client.chains.product_files.single.mockResolvedValue({
@@ -437,7 +437,7 @@ describe('/api/store/products/[id]/files', () => {
   it('POST records nothing when the insert fails', async () => {
     const client = mockClient(['products', 'product_files']);
     client.chains.products.maybeSingle.mockResolvedValue({
-      data: { id: PRODUCT_ID, name: 'Pro License' },
+      data: { id: PRODUCT_ID, name: 'Pro License', delivery_type: 'license_key' },
       error: null,
     });
     client.chains.product_files.single.mockResolvedValue({
@@ -454,6 +454,27 @@ describe('/api/store/products/[id]/files', () => {
     );
 
     expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(recordAdminChange).not.toHaveBeenCalled();
+  });
+
+  it('POST refuses a manual static file row that could bypass buyer derivation', async () => {
+    const client = mockClient(['products', 'product_files']);
+    client.chains.products.maybeSingle.mockResolvedValue({
+      data: { id: PRODUCT_ID, name: 'Static Handbook', delivery_type: 'file' },
+      error: null,
+    });
+    const { POST } = await import('@/app/api/store/products/[id]/files/route');
+
+    const res = await POST(
+      jsonRequest(`http://x/api/store/products/${PRODUCT_ID}/files`, 'POST', {
+        name: 'manual.pdf',
+        external_url: 'https://files.example.test/manual.pdf',
+      }),
+      { params },
+    );
+
+    expect(res.status).toBe(409);
+    expect(client.chains.product_files.insert).not.toHaveBeenCalled();
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 
@@ -492,10 +513,10 @@ describe('/api/store/products/[id]/files', () => {
 /* ------------------------------------------------------------------ */
 
 describe('/api/store/files', () => {
-  function uploadRequest() {
+  function uploadRequest(fileName = 'build.zip', mimeType = 'application/zip') {
     const form = new FormData();
-    form.set('file', new File([new Uint8Array([1, 2, 3])], 'build.zip', {
-      type: 'application/zip',
+    form.set('file', new File([new Uint8Array([1, 2, 3])], fileName, {
+      type: mimeType,
     }));
     form.set('product_id', PRODUCT_ID);
     form.set('display_name', 'Build 1.2.0');
@@ -506,7 +527,7 @@ describe('/api/store/files', () => {
   it('POST records the upload against the product that now delivers it', async () => {
     const client = mockClient(['products', 'product_files']);
     client.chains.products.single.mockResolvedValue({
-      data: { id: PRODUCT_ID, name: 'Pro License' },
+      data: { id: PRODUCT_ID, name: 'Pro License', delivery_type: 'license_key' },
       error: null,
     });
     client.chains.product_files.single.mockResolvedValue({
@@ -533,7 +554,7 @@ describe('/api/store/files', () => {
   it('POST records nothing when the row insert fails after upload', async () => {
     const client = mockClient(['products', 'product_files']);
     client.chains.products.single.mockResolvedValue({
-      data: { id: PRODUCT_ID, name: 'Pro License' },
+      data: { id: PRODUCT_ID, name: 'Pro License', delivery_type: 'license_key' },
       error: null,
     });
     client.chains.product_files.single.mockResolvedValue({
@@ -545,6 +566,48 @@ describe('/api/store/files', () => {
     const res = await POST(uploadRequest());
 
     expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(recordAdminChange).not.toHaveBeenCalled();
+  });
+
+  it('POST accepts a supported static master for buyer-specific delivery', async () => {
+    const client = mockClient(['products', 'product_files']);
+    client.chains.products.single.mockResolvedValue({
+      data: { id: PRODUCT_ID, name: 'Licensed Handbook', delivery_type: 'file' },
+      error: null,
+    });
+    client.chains.product_files.single.mockResolvedValue({
+      data: { id: FILE_ID, display_name: 'Build 1.2.0' },
+      error: null,
+    });
+    const { POST } = await import('@/app/api/store/files/route');
+
+    const res = await POST(uploadRequest('handbook.html', 'text/html'));
+
+    expect(res.status).toBe(200);
+    expect(client.storage.from).toHaveBeenCalledWith('product-files');
+    expect(client.chains.product_files.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        file_name: 'handbook.html',
+        mime_type: 'text/html',
+      }),
+    );
+    expect(onlyChange().description).toContain('Licensed Handbook');
+  });
+
+  it('POST rejects an unsupported static master before storage mutation', async () => {
+    const client = mockClient(['products', 'product_files']);
+    client.chains.products.single.mockResolvedValue({
+      data: { id: PRODUCT_ID, name: 'Static Archive', delivery_type: 'file' },
+      error: null,
+    });
+    const { POST } = await import('@/app/api/store/files/route');
+
+    const res = await POST(uploadRequest());
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ success: false });
+    expect(client.storage.from).not.toHaveBeenCalled();
+    expect(client.chains.product_files.insert).not.toHaveBeenCalled();
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 

@@ -60,19 +60,20 @@ const stagedRotationResultSchema = z.object({
  * generates exactly the support burden this feature exists to remove.
  */
 const KEY_ALPHABET = 'ACDEFGHJKMNPQRTVWXY34679';
-const KEY_PREFIX = 'SMNI';
+const DEFAULT_KEY_PREFIX = 'SMNI';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-/** `SMNI-XXXX-XXXX-XXXX-XXXX`, matching the format minted at purchase. */
-function generateLicenseKey(): { plaintext: string; suffix: string } {
+/** `PREFIX-XXXX-XXXX-XXXX-XXXX`, matching the product's purchase format. */
+function generateLicenseKey(prefix: string): { plaintext: string; suffix: string } {
+  if (!/^[A-Z]{2,8}$/.test(prefix)) throw new Error('Invalid license key prefix');
   const group = () =>
     Array.from({ length: 4 }, () => KEY_ALPHABET[randomInt(KEY_ALPHABET.length)]).join('');
   const groups = [group(), group(), group(), group()];
   return {
-    plaintext: [KEY_PREFIX, ...groups].join('-'),
+    plaintext: [prefix, ...groups].join('-'),
     suffix: groups[3]!,
   };
 }
@@ -119,7 +120,7 @@ export async function POST(
   // anything else, so a customer cannot probe for other customers' key ids.
   const { data: key, error: lookupError } = await admin
     .from('license_keys')
-    .select('id, status, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency), products(name)')
+    .select('id, status, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency), products(name, product_license_config(rotation_policy, key_prefix))')
     .eq('id', licenseKeyId)
     .eq('customer_id', portalSession.customer_id)
     .eq('guild_id', portalSession.guild_id)
@@ -128,6 +129,11 @@ export async function POST(
   if (lookupError) return dbError(lookupError, 'portal/licenses/rotate');
   if (!key) {
     return NextResponse.json({ error: 'Licence not found' }, { status: 404 });
+  }
+
+  const productConfig = (key.products as { product_license_config?: Array<{ rotation_policy?: string; key_prefix?: string }> } | null)?.product_license_config?.[0];
+  if (productConfig?.rotation_policy === 'disabled') {
+    return NextResponse.json({ error: 'Key rotation is disabled for this product.' }, { status: 403 });
   }
 
   // Do not short-circuit revoked rows here. A committed rotation revokes its
@@ -151,7 +157,8 @@ export async function POST(
     );
   }
 
-  const { plaintext, suffix } = generateLicenseKey();
+  const configuredPrefix = productConfig?.key_prefix ?? DEFAULT_KEY_PREFIX;
+  const { plaintext, suffix } = generateLicenseKey(configuredPrefix);
 
   const rotationArgs = {
     p_license_key_id: licenseKeyId,
@@ -161,7 +168,7 @@ export async function POST(
     p_order_id: key.order_id,
     p_discord_id: key.bound_discord_id,
     p_new_key_plaintext: plaintext,
-    p_new_key_prefix: KEY_PREFIX,
+    p_new_key_prefix: configuredPrefix,
     p_new_key_suffix: suffix,
     p_actor_discord_id: key.bound_discord_id,
   };

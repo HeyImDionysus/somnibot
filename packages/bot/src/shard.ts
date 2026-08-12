@@ -11,7 +11,7 @@
  * Each shard spawns a separate process running index.js (the normal bot).
  * State is shared via Supabase + Valkey — no in-memory state to coordinate.
  *
- * See docs/SCALING.md for full deployment guidance.
+ * See DEPLOYMENT.md for full deployment guidance.
  */
 import { ShardingManager } from 'discord.js';
 import path from 'node:path';

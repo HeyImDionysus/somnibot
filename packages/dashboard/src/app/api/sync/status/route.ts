@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
         sync_enabled: true,
         sync_interval_minutes: 15,
         sync_auto_repair: false,
-        sync_auto_repair_everyone: true,
+        sync_auto_repair_everyone: false,
       },
       lastSyncAt: driftResult.data?.last_sync_at ?? null,
       driftDetected: driftResult.data?.drift_detected ?? false,

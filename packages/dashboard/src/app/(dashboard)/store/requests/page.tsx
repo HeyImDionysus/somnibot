@@ -155,7 +155,7 @@ export default function StoreRequestsPage() {
             onClick={() => setStatusFilter(value as '' | PortalRequest['status'])}
             className={`rounded-md px-3 py-1.5 text-sm ${
               statusFilter === value
-                ? 'bg-discord-blurple text-white'
+                ? 'bg-discord-accent text-white'
                 : 'bg-discord-bg-secondary text-discord-text-secondary'
             }`}
           >

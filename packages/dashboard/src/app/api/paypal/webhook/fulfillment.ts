@@ -8,9 +8,11 @@ import { createHash, randomBytes } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
 /**
- * Generate a SMNI-XXXX-XXXX-XXXX-XXXX license key with its SHA-256 hash.
+ * Generate a PREFIX-XXXX-XXXX-XXXX-XXXX license key with its SHA-256 hash.
+ * Prefixes are supplied by the owning product config; the default preserves
+ * existing products and the shipped public format.
  */
-export function generateLicenseKey(): {
+export function generateLicenseKey(prefix = 'SMNI'): {
   plaintext: string;
   hash: string;
   prefix: string;
@@ -26,9 +28,12 @@ export function generateLicenseKey(): {
     }
     groups.push(group);
   }
-  const plaintext = `SMNI-${groups.join('-')}`;
+  if (!/^[A-Z]{2,8}$/.test(prefix)) {
+    throw new Error('Invalid license key prefix');
+  }
+  const plaintext = `${prefix}-${groups.join('-')}`;
   const hash = createHash('sha256').update(plaintext).digest('hex');
-  return { plaintext, hash, prefix: 'SMNI', suffix: groups[3]! };
+  return { plaintext, hash, prefix, suffix: groups[3]! };
 }
 
 /**

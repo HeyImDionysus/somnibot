@@ -642,7 +642,7 @@ function makeNonCommerceRelinkSupa(
 
 function makeGuild() {
   const mockRole = {
-    id: 'role-1', name: 'TestRole', managed: false, position: 1,
+    id: 'role-1', name: 'TestRole', managed: false, editable: true, position: 1,
     edit: vi.fn().mockResolvedValue({}),
     setPosition: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),
@@ -695,6 +695,113 @@ function makeGuild() {
 }
 
 describe('revoke_roles shared-ownership safety', () => {
+  it('revokes frozen channel overwrites on a paid terminal carrier', async () => {
+    const channelId = '12345678901234567';
+    const { supabase } = makeOwnershipSupa(
+      [{ data: [], error: null }],
+      undefined,
+      [],
+      {
+        data: {
+          ...liveOwner(),
+          id: 'ent-terminal',
+          order_id: 'order-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          status: 'expired',
+          source: 'purchase',
+          granted_channel_ids: [channelId],
+        },
+        error: null,
+      },
+      {
+        data: {
+          id: 'order-1',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          status: 'completed',
+          granted_channel_ids_snapshot: [channelId],
+          temporary_role_grants_snapshot: [],
+          grant_snapshot_frozen_at: '2026-07-12T00:00:00.000Z',
+        },
+        error: null,
+      },
+      undefined,
+      [{ data: 'none', error: null }],
+    );
+    const harness = makeRevokeGuild([[]]);
+    const deleteOverwrite = vi.fn().mockResolvedValue(undefined);
+    harness.guild.members.me = { permissions: { has: vi.fn(() => true) } };
+    harness.guild.channels = {
+      cache: new Map([[channelId, {
+        permissionOverwrites: { delete: deleteOverwrite },
+      }]]),
+    };
+
+    const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { revokedChannelIds: [channelId] },
+    });
+    expect(deleteOverwrite).toHaveBeenCalledWith(
+      'user-1',
+      expect.stringContaining('commerce channel access revoked'),
+    );
+  });
+
+  it('returns a retryable result when channel overwrite revocation fails', async () => {
+    const channelId = '12345678901234567';
+    const { supabase } = makeOwnershipSupa(
+      [{ data: [], error: null }],
+      undefined,
+      [],
+      {
+        data: {
+          ...liveOwner(),
+          id: 'ent-terminal',
+          order_id: 'order-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          status: 'expired',
+          source: 'purchase',
+          granted_channel_ids: [channelId],
+        },
+        error: null,
+      },
+      {
+        data: {
+          id: 'order-1',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          status: 'completed',
+          granted_channel_ids_snapshot: [channelId],
+          temporary_role_grants_snapshot: [],
+          grant_snapshot_frozen_at: '2026-07-12T00:00:00.000Z',
+        },
+        error: null,
+      },
+      undefined,
+      [{ data: 'none', error: null }],
+    );
+    const harness = makeRevokeGuild([[]]);
+    harness.guild.members.me = { permissions: { has: vi.fn(() => true) } };
+    harness.guild.channels = {
+      cache: new Map([[channelId, {
+        permissionOverwrites: {
+          delete: vi.fn().mockRejectedValue(new Error('discord unavailable')),
+        },
+      }]]),
+    };
+
+    const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
+
+    expect(result).toMatchObject({ success: false, retryable: true });
+    expect(result.error).toContain('commerce channel cleanup');
+  });
+
   it('retains a role owned by any other live entitlement for the exact guild and customer', async () => {
     const { supabase, rpc } = makeOwnershipSupa([
       { data: [liveOwner()], error: null },
@@ -1536,7 +1643,10 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-    expect(guild.roles.create).toHaveBeenCalled();
+    expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
+      colors: { primaryColor: 0xff0000 },
+    }));
+    expect(guild.roles.create.mock.calls[0][0]).not.toHaveProperty('color');
   });
 
   it('startActionQueueListener processes pending update_role action', async () => {

@@ -168,6 +168,10 @@ export default function StatsChannelsPage() {
       setError('Stat type and name format are required');
       return;
     }
+    if (!form.category_id) {
+      setError('Select a category where the bot should create this stats channel');
+      return;
+    }
 
     const stat_config: Record<string, unknown> = {};
     if (form.category_id) stat_config.category_id = form.category_id;
@@ -239,10 +243,10 @@ export default function StatsChannelsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-6">
+    <div className="mx-auto max-w-4xl space-y-6 p-0 sm:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start justify-between gap-3 sm:items-center sm:justify-start">
           <div>
             <h1 className="text-2xl font-bold text-discord-text-primary">Statistics Channels</h1>
             <p className="text-sm text-discord-text-muted">Voice channels that display live server stats</p>
@@ -264,7 +268,7 @@ export default function StatsChannelsPage() {
       </div>
 
       {/* Update Interval Setting */}
-      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 flex items-center justify-between gap-4">
+      <div className="flex flex-col items-stretch gap-4 rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <span className="text-sm font-medium text-discord-text-primary">Update Interval</span>
           <p className="text-xs text-discord-text-muted">
@@ -322,12 +326,11 @@ export default function StatsChannelsPage() {
               </div>
               <div>
                 <ChannelPicker
-                  label="Category (optional)"
+                  label="Stats Category *"
                   value={form.category_id || null}
                   onChange={(v) => setForm({ ...form, category_id: (v as string) ?? '' })}
-                  placeholder="Place channel in this category"
+                  placeholder="Select where the bot should create it"
                   channelTypes={['category']}
-                  allowNone
                 />
               </div>
               {form.stat_type === 'custom_counter' && (

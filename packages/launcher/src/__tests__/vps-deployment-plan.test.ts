@@ -2,7 +2,17 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildVpsDeploymentPlan, VPS_DEPLOYMENT_BUILD_TIMEOUT_MS } from '../main/vps-deployment-plan';
+import {
+  buildFailedVpsQuiesceCommand,
+  buildVpsDeploymentPlan,
+  buildVpsRollbackPlan,
+  buildVpsRuntimeStartCommand,
+  buildVpsMaintenanceExitCommand,
+  buildVpsStateConsumersStopCommand,
+  buildVpsValkeyExportCommand,
+  VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
+} from '../main/vps-deployment-plan';
+import { SOMNIBOT_REPOSITORY_REF, SOMNIBOT_REPOSITORY_URL } from '../main/vps-bootstrap';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
@@ -27,6 +37,8 @@ describe('VPS deployment plan generator', () => {
     expect(plan.target).toMatchObject({
       domain: 'somnibot.example.com',
       publicBaseUrl: 'https://somnibot.example.com',
+      repositoryUrl: SOMNIBOT_REPOSITORY_URL,
+      repositoryRef: SOMNIBOT_REPOSITORY_REF,
       sshTarget: 'deploy@somnibot.example.com',
       envFilePath: '/opt/somnibot/.env',
       envFilePermissions: '0600',
@@ -79,6 +91,7 @@ describe('VPS deployment plan generator', () => {
       upstream: 'dashboard:3000',
     });
     expect(plan.approvalGates.map(gate => gate.id)).toEqual([
+      'ssh-host-key',
       'dns-domain',
       'env-file',
       'auth-provider',
@@ -89,8 +102,49 @@ describe('VPS deployment plan generator', () => {
 
   it('includes service commands and rollback commands as review-only plans', () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const lastGoodCommit = 'a'.repeat(40);
+    const rollbackPlan = buildVpsRollbackPlan({ ...completeVpsInput, lastGoodCommit });
 
     expect(plan.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'ensure-vps-runtime',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '-s',
+          '--',
+          'deploy',
+        ]),
+        changesRemote: true,
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
+        id: 'prepare-vps-checkout',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '-s',
+          '--',
+          '/opt/somnibot',
+          SOMNIBOT_REPOSITORY_URL,
+          SOMNIBOT_REPOSITORY_REF,
+        ]),
+        changesRemote: true,
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
+        id: 'write-env-file',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '/opt/somnibot/scripts/write-production-env.sh',
+          '/opt/somnibot/.env',
+        ]),
+        approvalRequired: true,
+      }),
       expect.objectContaining({
         id: 'start-stack',
         executable: 'ssh',
@@ -100,11 +154,15 @@ describe('VPS deployment plan generator', () => {
           '-o',
           'ConnectTimeout=10',
           '-o',
-          'StrictHostKeyChecking=accept-new',
+          'StrictHostKeyChecking=yes',
           '--',
           'deploy@somnibot.example.com',
           'docker',
           'compose',
+          '--project-name',
+          'somnibot-prod',
+          '--project-directory',
+          '/opt/somnibot',
           '-f',
           '/opt/somnibot/docker-compose.prod.yml',
           'up',
@@ -114,6 +172,20 @@ describe('VPS deployment plan generator', () => {
         changesRemote: true,
         approvalRequired: true,
         executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
+      }),
+      expect.objectContaining({
+        id: 'install-health-recovery',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sudo',
+          '-n',
+          'sh',
+          '/opt/somnibot/scripts/install-production-health-recovery.sh',
+          '/opt/somnibot',
+        ]),
+        changesRemote: true,
+        approvalRequired: true,
       }),
       expect.objectContaining({
         id: 'check-dashboard',
@@ -138,11 +210,47 @@ describe('VPS deployment plan generator', () => {
         approvalRequired: false,
       }),
     ]));
-    expect(plan.rollback?.commands).toEqual(expect.arrayContaining([
+    const commandIds = plan.commands.map((command) => command.id);
+    expect(commandIds).toEqual(expect.arrayContaining([
+      'stage-local-valkey-state',
+      'quiesce-vps-state-consumers',
+      'start-vps-valkey',
+      'restore-transferred-valkey',
+      'end-vps-maintenance',
+    ]));
+    expect(commandIds.indexOf('stage-local-valkey-state')).toBeLessThan(commandIds.indexOf('quiesce-vps-state-consumers'));
+    expect(commandIds.indexOf('quiesce-vps-state-consumers')).toBeLessThan(commandIds.indexOf('start-vps-valkey'));
+    expect(commandIds.indexOf('start-vps-valkey')).toBeLessThan(commandIds.indexOf('restore-transferred-valkey'));
+    expect(commandIds.indexOf('restore-transferred-valkey')).toBeLessThan(commandIds.indexOf('start-stack'));
+    expect(commandIds.indexOf('check-lavalink')).toBeLessThan(commandIds.indexOf('end-vps-maintenance'));
+    expect(plan.commands.find((command) => command.id === 'stage-local-valkey-state')).toMatchObject({
+      executable: 'ssh',
+      approvalRequired: true,
+    });
+    expect(plan.commands.find((command) => command.id === 'stage-local-valkey-state')?.sensitiveStdinFile).toBeUndefined();
+    expect(plan.commands.find((command) => command.id === 'restore-transferred-valkey')?.args)
+      .toEqual(expect.arrayContaining(['sudo', '-n', 'sh', '/opt/somnibot/scripts/restore-handoff-valkey.sh']));
+    expect(plan.rollback?.commands).toEqual([]);
+    expect(rollbackPlan.commands).toEqual([
+      expect.objectContaining({
+        id: 'rollback-fetch',
+        approvalRequired: false,
+      }),
+      expect.objectContaining({
+        id: 'rollback-restore-env',
+        executable: 'ssh',
+        args: expect.arrayContaining([
+          'deploy@somnibot.example.com',
+          'sh',
+          '/opt/somnibot/scripts/restore-production-env.sh',
+          '/opt/somnibot/.env',
+        ]),
+        approvalRequired: true,
+      }),
       expect.objectContaining({
         id: 'rollback-checkout',
         executable: 'ssh',
-        args: expect.arrayContaining(['deploy@somnibot.example.com', 'git', '-C', '/opt/somnibot', 'checkout', '<last-good-commit>']),
+        args: expect.arrayContaining(['deploy@somnibot.example.com', 'git', '-C', '/opt/somnibot', 'checkout', lastGoodCommit]),
         approvalRequired: true,
       }),
       expect.objectContaining({
@@ -159,7 +267,24 @@ describe('VPS deployment plan generator', () => {
         approvalRequired: false,
         expectedHealthStatus: 'healthy',
       }),
-    ]));
+    ]);
+    expect(rollbackPlan.commands.map(command => command.id)).toEqual([
+      'rollback-fetch',
+      'rollback-restore-env',
+      'rollback-checkout',
+      'rollback-rebuild',
+      'rollback-health',
+    ]);
+    expect(JSON.stringify(plan)).not.toContain('<last-good-commit>');
+  });
+
+  it('blocks rollback plans unless the last-good commit is an exact SHA and never emits a placeholder', () => {
+    const plan = buildVpsRollbackPlan({ ...completeVpsInput, lastGoodCommit: '<last-good-commit>' });
+
+    expect(plan.status).toBe('blocked');
+    expect(plan.commands).toEqual([]);
+    expect(JSON.stringify(plan)).not.toContain('<last-good-commit>');
+    expect(plan.blockedReasons).toContain('Rollback requires an exact 40-character hexadecimal last-good commit SHA.');
   });
 
   it('uses restrictive file permissions for env file steps', () => {
@@ -180,7 +305,7 @@ describe('VPS deployment plan generator', () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
     const remoteCommands = [
       ...plan.commands.filter(command => !['check-dashboard', 'check-health'].includes(command.id)),
-      ...(plan.rollback?.commands.filter(command => command.id !== 'rollback-health') ?? []),
+      ...buildVpsRollbackPlan({ ...completeVpsInput, lastGoodCommit: 'b'.repeat(40) }).commands.filter(command => command.id !== 'rollback-health'),
     ];
 
     expect(remoteCommands).not.toHaveLength(0);
@@ -281,5 +406,72 @@ describe('VPS deployment plan generator', () => {
     expect(source).not.toContain('node:child_process');
     expect(source).not.toContain('execFile');
     expect(source).not.toContain('spawn(');
+  });
+
+  it('builds a strict-host-key cleanup command for a partially started VPS stack', () => {
+    const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const command = buildFailedVpsQuiesceCommand(plan);
+    expect(command.id).toBe('quiesce-failed-stack');
+    expect(command.args).toContain('StrictHostKeyChecking=yes');
+    expect(command.args.slice(-6)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/enter-runtime-maintenance.sh', '/opt/somnibot', 'all',
+    ]);
+    expect(command.commandCategory).toBe('rollback');
+
+    const restart = buildVpsRuntimeStartCommand(plan);
+    expect(restart.id).toBe('restore-vps-stack');
+    expect(restart.args).toContain('StrictHostKeyChecking=yes');
+    expect(restart.args.slice(restart.args.indexOf('docker'))).toEqual([
+      'docker',
+      'compose',
+      '--project-name',
+      'somnibot-prod',
+      '--project-directory',
+      '/opt/somnibot',
+      '-f',
+      '/opt/somnibot/docker-compose.prod.yml',
+      'start',
+    ]);
+    expect(restart.commandCategory).toBe('rollback');
+
+    const funnelPlan = buildVpsDeploymentPlan({
+      ...completeVpsInput,
+      vpsPublicAccessMode: 'tailscale-funnel',
+      vpsDomain: '',
+      vpsTailscaleFunnelUrl: 'https://somnibot-vps.tailbd9d28.ts.net',
+      vpsTailscaleFunnelVerifiedUrl: 'https://somnibot-vps.tailbd9d28.ts.net',
+    });
+    const funnelRestart = buildVpsRuntimeStartCommand(funnelPlan);
+    expect(funnelRestart.args.slice(funnelRestart.args.indexOf('docker'))).toEqual([
+      'docker',
+      'compose',
+      '--project-name',
+      'somnibot-prod',
+      '--project-directory',
+      '/opt/somnibot',
+      '-f',
+      '/opt/somnibot/docker-compose.prod.yml',
+      '-f',
+      '/opt/somnibot/.somnibot/launcher-tailscale-funnel.compose.yml',
+      'start',
+    ]);
+
+    const endMaintenance = buildVpsMaintenanceExitCommand(plan);
+    expect(endMaintenance.args.slice(-5)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/exit-runtime-maintenance.sh', '/opt/somnibot',
+    ]);
+
+    const stopConsumers = buildVpsStateConsumersStopCommand(plan);
+    expect(stopConsumers.args.slice(-6)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/enter-runtime-maintenance.sh', '/opt/somnibot', 'consumers',
+    ]);
+
+    const exportPath = 'C:\\private\\incoming.rdb';
+    const exportState = buildVpsValkeyExportCommand(plan, exportPath);
+    expect(exportState.args.slice(-5)).toEqual([
+      'sudo', '-n', 'sh', '/opt/somnibot/scripts/export-handoff-valkey.sh', '/opt/somnibot',
+    ]);
+    expect(exportState.sensitiveStdoutFile).toBe(exportPath);
+    expect(exportState.redactedDisplay).not.toContain(exportPath);
   });
 });

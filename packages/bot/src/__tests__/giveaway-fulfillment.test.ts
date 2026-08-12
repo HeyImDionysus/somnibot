@@ -153,9 +153,10 @@ type GiveawayEventData = {
 function makeService(options: Parameters<typeof makeSupabase>[0] = {}) {
   const db = makeSupabase(options);
   const discord = makeGuild();
-  const eventBus = { on: vi.fn(), off: vi.fn() } as never;
+  const eventBus = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
   return {
-    service: new GiveawayFulfillmentService(discord.guild, db.supabase, eventBus),
+    service: new GiveawayFulfillmentService(discord.guild, db.supabase, eventBus as never),
+    eventBus,
     ...db,
     ...discord,
   };
@@ -531,6 +532,32 @@ describe('durable giveaway winner notifications', () => {
     });
     expect(from).not.toHaveBeenCalledWith('entitlements');
     expect(sentDescription(sends.get(WINNER_ID)!)).toMatch(/staff member will reach out/i);
+  });
+
+  it('falls back to the durable channel announcement when winner DMs are blocked', async () => {
+    const { service, eventBus } = makeService({
+      giveawayResponses: [{
+        data: { ...GIVEAWAY, prize_product_id: null, prize: 'Custom Art' },
+        error: null,
+      }],
+    });
+    vi.spyOn(service as any, 'sendWinnerNotification').mockRejectedValue({ code: 50007 });
+
+    const result = await service.notifyQueuedWinner({
+      source: 'giveaway_atomic_end',
+      giveawayId: GIVEAWAY_ID,
+      winnerId: WINNER_ID,
+      productId: null,
+      deliveryKind: 'manual',
+      prizeSnapshot: 'Custom Art',
+    });
+
+    expect(result.messageId).toBe('channel-fallback');
+    expect(eventBus.emit).toHaveBeenCalledWith('giveaway.winner_dm_fallback', GUILD_ID, expect.objectContaining({
+      giveawayId: GIVEAWAY_ID,
+      winnerId: WINNER_ID,
+      occurrenceId: `${GIVEAWAY_ID}:winner-dm-fallback:${WINNER_ID}`,
+    }));
   });
 });
 

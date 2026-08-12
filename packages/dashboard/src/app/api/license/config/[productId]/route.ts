@@ -24,13 +24,17 @@ import {
  */
 const LICENSE_CONFIG_COLUMNS = [
   'license_mode',
+  'key_prefix',
   'max_devices',
   'heartbeat_interval_seconds',
+  'sdk_cache_ttl_ms',
   'offline_grace_period_seconds',
   'feature_flags',
   'tier',
   'watermark_config',
   'require_discord_guild_membership',
+  'rotation_policy',
+  'self_service_device_removal',
 ] as const;
 
 /** Structural equality good enough for scalars, string arrays and small JSON. */
@@ -114,18 +118,37 @@ export async function GET(
       data: {
         product_id: productId,
         license_mode: 'portal_only',
+        key_prefix: 'SMNI',
         max_devices: 3,
         heartbeat_interval_seconds: 300,
+        heartbeat_interval_ms: 300000,
+        sdk_cache_ttl_ms: 60000,
         offline_grace_period_seconds: 86400,
         feature_flags: [],
         tier: null,
         watermark_config: null,
         require_discord_guild_membership: true,
+        // Hash-only storage is a security invariant, never an editable flag.
+        store_keys_hashed: true,
+        rotation_policy: 'rotate-and-invalidate',
+        self_service_device_removal: true,
       },
     });
   }
 
-  return NextResponse.json({ success: true, data });
+  return NextResponse.json({
+    success: true,
+    data: {
+      ...data,
+      heartbeat_interval_ms:
+        typeof data.heartbeat_interval_seconds === 'number'
+          ? data.heartbeat_interval_seconds * 1000
+          : null,
+      // This is deliberately read-only: no plaintext key column exists and
+      // all issuance/rotation paths hash before persistence.
+      store_keys_hashed: true,
+    },
+  });
 }
 
 export async function PUT(
@@ -147,42 +170,72 @@ export async function PUT(
 
   const {
     license_mode,
+    key_prefix,
     max_devices,
     heartbeat_interval_seconds,
+    heartbeat_interval_ms,
+    sdk_cache_ttl_ms,
     offline_grace_period_seconds,
     feature_flags,
     tier,
     watermark_config,
     require_discord_guild_membership,
+    rotation_policy,
+    self_service_device_removal,
   } = body;
 
-  const written: Record<string, unknown> = {
-    license_mode: license_mode ?? 'portal_only',
-    max_devices: max_devices ?? 3,
-    heartbeat_interval_seconds: heartbeat_interval_seconds ?? 300,
-    offline_grace_period_seconds: offline_grace_period_seconds ?? 86400,
-    feature_flags: feature_flags ?? [],
-    tier: tier ?? null,
-    watermark_config: watermark_config ?? null,
-    require_discord_guild_membership: require_discord_guild_membership ?? true,
-  };
-
-  // Tenancy gate, BEFORE the write. Resolving the product here used to serve
-  // only to name it in the change description; the upsert then ran whether or
-  // not it resolved, so a caller could overwrite another guild's licence
-  // settings — changing how many devices a stranger's paying customers may use,
-  // or how long their installs survive offline. Refuse first, write second.
+  // Tenancy gate, BEFORE reading or writing the product config. The service
+  // role bypasses RLS, so ownership must be established explicitly.
   const product = await findOwnedProduct(supabase, productId, guildId);
   if (!product) {
     return productNotFound();
   }
 
-  // Prior values, read before the upsert: this is what an undo restores.
+  // Read the current row before constructing defaults. A partial owner save
+  // must not silently reset another policy (especially a custom key prefix).
   const before = await readRowBefore(
     supabase,
     'product_license_config',
     { product_id: productId },
   );
+
+  const priorFeatureFlags = before?.feature_flags;
+  const normalizedPriorFeatureFlags = Array.isArray(priorFeatureFlags)
+    ? priorFeatureFlags
+    : priorFeatureFlags && typeof priorFeatureFlags === 'object'
+      ? Object.entries(priorFeatureFlags as Record<string, unknown>)
+          .filter(([, enabled]) => enabled !== false && enabled !== null)
+          .map(([flag]) => flag)
+      : [];
+
+  const normalizedFeatureFlags = feature_flags === undefined
+    ? normalizedPriorFeatureFlags
+    : Array.isArray(feature_flags)
+      ? feature_flags
+      : feature_flags && typeof feature_flags === 'object'
+        ? Object.entries(feature_flags)
+          .filter(([, enabled]) => enabled !== false && enabled !== null)
+          .map(([flag]) => flag)
+        : [];
+
+  const written: Record<string, unknown> = {
+    license_mode: license_mode ?? before?.license_mode ?? 'portal_only',
+    key_prefix: key_prefix ?? before?.key_prefix ?? 'SMNI',
+    max_devices: max_devices ?? before?.max_devices ?? 3,
+    heartbeat_interval_seconds:
+      heartbeat_interval_seconds
+      ?? (heartbeat_interval_ms !== undefined
+        ? heartbeat_interval_ms / 1000
+        : before?.heartbeat_interval_seconds ?? 300),
+    sdk_cache_ttl_ms: sdk_cache_ttl_ms ?? before?.sdk_cache_ttl_ms ?? 60000,
+    offline_grace_period_seconds: offline_grace_period_seconds ?? before?.offline_grace_period_seconds ?? 86400,
+    feature_flags: normalizedFeatureFlags,
+    tier: tier ?? before?.tier ?? null,
+    watermark_config: watermark_config ?? before?.watermark_config ?? null,
+    require_discord_guild_membership: require_discord_guild_membership ?? before?.require_discord_guild_membership ?? true,
+    rotation_policy: rotation_policy ?? before?.rotation_policy ?? 'rotate-and-invalidate',
+    self_service_device_removal: self_service_device_removal ?? before?.self_service_device_removal ?? true,
+  };
 
   const { data, error } = await supabase
     .from('product_license_config')
@@ -201,10 +254,21 @@ export async function PUT(
     return dbError(error, 'license/config');
   }
 
-  // The upsert always writes all eight columns, so listing them all would
+  // The upsert always writes all configured columns, so listing them all would
   // describe every save as changing everything. Report only what really moved.
   const changed = before
-    ? LICENSE_CONFIG_COLUMNS.filter((column) => !sameValue(before[column], written[column]))
+    ? LICENSE_CONFIG_COLUMNS.filter((column) => {
+        // Rows created before the owner-controls migration legitimately lack
+        // the new columns. Treat those absent values as their shipped
+        // defaults, and normalize the historical object-shaped feature_flags
+        // payload, so a no-op save does not emit a false audit event.
+        const priorValue = column === 'feature_flags' && before[column] && typeof before[column] === 'object' && !Array.isArray(before[column])
+          ? Object.entries(before[column] as Record<string, unknown>)
+              .filter(([, enabled]) => enabled !== false && enabled !== null)
+              .map(([flag]) => flag)
+          : before[column] ?? written[column];
+        return !sameValue(priorValue, written[column]);
+      })
     : [...LICENSE_CONFIG_COLUMNS];
 
   if (changed.length > 0) {

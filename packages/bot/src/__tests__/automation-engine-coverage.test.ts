@@ -32,12 +32,14 @@ const mockLoad = vi.fn().mockResolvedValue(undefined);
 const mockSubscribe = vi.fn();
 const mockUnsubscribe = vi.fn();
 const mockGetForTrigger = vi.fn().mockReturnValue([]);
+const mockIsPreviewCurrent = vi.fn().mockReturnValue(true);
 vi.mock('../features/automations/automation-loader.js', () => ({
   AutomationLoader: class {
     load = mockLoad;
     subscribe = mockSubscribe;
     unsubscribe = mockUnsubscribe;
     getForTrigger = mockGetForTrigger;
+    isPreviewCurrent = mockIsPreviewCurrent;
   },
 }));
 
@@ -188,6 +190,7 @@ describe('AutomationEngine', () => {
     vi.resetAllMocks();
     mockLoad.mockResolvedValue(undefined);
     mockGetForTrigger.mockReturnValue([]);
+    mockIsPreviewCurrent.mockReturnValue(true);
     mockEvaluateConditions.mockResolvedValue(true);
     mockExecuteActions.mockResolvedValue({ executed: 1, failed: 0, errors: [] });
     mockAllowFire.mockResolvedValue(true);

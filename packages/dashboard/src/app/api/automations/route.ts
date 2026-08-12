@@ -15,6 +15,22 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+import { automationPreviewHash } from '@/lib/automation-preview';
+
+async function previewRequired(supabase: ReturnType<typeof createAdminSupabase>, guildId: string): Promise<boolean> {
+  try {
+    const { data } = await supabase
+      .from('guild_config')
+      .select('automation_preview_required')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    // A deployed guild_config row has the migration default true. Missing
+    // config is retained as legacy mode for setup/test databases.
+    return data?.automation_preview_required === true;
+  } catch {
+    return false;
+  }
+}
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -61,12 +77,33 @@ export async function POST(req: NextRequest) {
     target_channel_ids,
     exclude_user_ids,
     exclude_channel_ids,
+    preview_hash,
   } = body;
 
   if (!name || !trigger_type) {
     return NextResponse.json(
       { success: false, error: 'Missing required fields: name, trigger_type' },
       { status: 400 },
+    );
+  }
+
+  const requiresPreview = await previewRequired(supabase, guildId);
+  const expectedPreviewHash = automationPreviewHash({
+    name,
+    description,
+    trigger_type,
+    trigger_config,
+    conditions,
+    actions,
+    target_user_ids,
+    target_channel_ids,
+    exclude_user_ids,
+    exclude_channel_ids,
+  });
+  if (requiresPreview && preview_hash !== expectedPreviewHash) {
+    return NextResponse.json(
+      { success: false, error: 'Preview required: review the dry-run preview before enabling this automation.' },
+      { status: 409 },
     );
   }
 
@@ -93,11 +130,13 @@ export async function POST(req: NextRequest) {
       trigger_config: trigger_config ?? {},
       conditions: conditions ?? [],
       actions: actions ?? [],
-      enabled: true,
+      enabled: !requiresPreview || Boolean(preview_hash),
       target_user_ids: target_user_ids ?? [],
       target_channel_ids: target_channel_ids ?? [],
       exclude_user_ids: exclude_user_ids ?? [],
       exclude_channel_ids: exclude_channel_ids ?? [],
+      preview_hash: preview_hash ?? null,
+      previewed_at: preview_hash ? new Date().toISOString() : null,
     })
     .select()
     .single();
@@ -106,7 +145,7 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'automations');
   }
 
-  await notifyBot('automations', undefined, 'dashboard', {
+  await notifyBot(guildId, 'automations', undefined, 'dashboard', {
     type: 'automation.created',
     data: {
       automationId: data.id,
@@ -151,11 +190,54 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing automation id' }, { status: 400 });
   }
 
-  const updates = typedPick(body, ['name', 'description', 'trigger_type', 'trigger_config', 'conditions', 'actions', 'enabled', 'target_user_ids', 'target_channel_ids', 'exclude_user_ids', 'exclude_channel_ids']);
+  const updates = typedPick(body, ['name', 'description', 'trigger_type', 'trigger_config', 'conditions', 'actions', 'enabled', 'target_user_ids', 'target_channel_ids', 'exclude_user_ids', 'exclude_channel_ids', 'preview_hash']);
 
   updates.updated_at = new Date().toISOString();
 
   const before = await readRowBefore(supabase, 'automations', { id: body.id, guild_id: auth.ctx.guildId });
+
+  if (!before) {
+    return NextResponse.json({ success: false, error: 'Automation not found' }, { status: 404 });
+  }
+  const requiresPreview = await previewRequired(supabase, guildId);
+  const definitionKeys = ['name', 'description', 'trigger_type', 'trigger_config', 'conditions', 'actions', 'target_user_ids', 'target_channel_ids', 'exclude_user_ids', 'exclude_channel_ids'] as const;
+  const definitionChanged = definitionKeys.some((key) => Object.prototype.hasOwnProperty.call(updates, key));
+  const candidate = { ...before, ...updates } as Record<string, unknown>;
+  const expectedPreviewHash = automationPreviewHash({
+    name: String(candidate.name ?? ''),
+    description: candidate.description as string | null | undefined,
+    trigger_type: String(candidate.trigger_type ?? ''),
+    trigger_config: (candidate.trigger_config ?? {}) as Record<string, unknown>,
+    conditions: (candidate.conditions ?? []) as Record<string, unknown>[],
+    actions: (candidate.actions ?? []) as Record<string, unknown>[],
+    target_user_ids: (candidate.target_user_ids ?? []) as string[],
+    target_channel_ids: (candidate.target_channel_ids ?? []) as string[],
+    exclude_user_ids: (candidate.exclude_user_ids ?? []) as string[],
+    exclude_channel_ids: (candidate.exclude_channel_ids ?? []) as string[],
+  });
+  if (requiresPreview && definitionChanged) {
+    if (body.preview_hash !== expectedPreviewHash) {
+      if (body.enabled === true) {
+        return NextResponse.json(
+          { success: false, error: 'Preview required: review the dry-run preview before enabling this automation.' },
+          { status: 409 },
+        );
+      }
+      updates.enabled = false;
+      updates.preview_hash = null;
+      updates.previewed_at = null;
+    } else {
+      updates.previewed_at = new Date().toISOString();
+    }
+  }
+  if (requiresPreview && body.enabled === true && !definitionChanged) {
+    if (before.preview_hash !== expectedPreviewHash) {
+      return NextResponse.json(
+        { success: false, error: 'Preview required: review the dry-run preview before enabling this automation.' },
+        { status: 409 },
+      );
+    }
+  }
 
   const { data, error } = await supabase
     .from('automations')
@@ -169,7 +251,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'automations');
   }
 
-  await notifyBot('automations', undefined, 'dashboard', {
+  await notifyBot(guildId, 'automations', undefined, 'dashboard', {
     type: 'automation.updated',
     data: {
       automationId: data.id,
@@ -234,7 +316,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'automations');
   }
 
-  await notifyBot('automations', undefined, 'dashboard', {
+  await notifyBot(guildId, 'automations', undefined, 'dashboard', {
     type: 'automation.deleted',
     data: {
       automationId: id,

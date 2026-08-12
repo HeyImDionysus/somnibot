@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   supabase: { from: vi.fn() },
   run: vi.fn(),
+  sweepRecovery: vi.fn(),
   recordFailure: vi.fn(),
   resolveFailure: vi.fn(),
 }));
@@ -18,6 +19,10 @@ vi.mock('@/lib/paypal-reconciliation', () => ({
   recordScheduledReconciliationFailure: mocks.recordFailure,
 }));
 
+vi.mock('@/app/api/paypal/webhook/handlers', () => ({
+  sweepProviderMoneyRecovery: mocks.sweepRecovery,
+}));
+
 import {
   resetPayPalReconcileSchedulerForTests,
   runScheduledPayPalReconciliationOnce,
@@ -30,6 +35,7 @@ describe('PayPal reconciliation scheduler failure visibility', () => {
     resetPayPalReconcileSchedulerForTests();
     mocks.recordFailure.mockResolvedValue(true);
     mocks.resolveFailure.mockResolvedValue(true);
+    mocks.sweepRecovery.mockResolvedValue([]);
   });
 
   afterEach(() => {

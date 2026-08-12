@@ -216,8 +216,10 @@ describe('POST /api/paypal/webhook reachability probe', () => {
 
     expect(res.status).toBe(200);
     expect(logSpy).toHaveBeenCalledWith('[Webhook] Unhandled event: BILLING.SUBSCRIPTION.UNKNOWN_EVENT');
-    // Real events still record their result in webhook_events.
-    expect(mockFrom).not.toHaveBeenCalled();
+    // Unknown subscription-shaped events still perform the tenant lookup used
+    // to select bounded policy values; replay processing itself remains RPC
+    // only and does not claim or mutate webhook_events.
+    expect(mockFrom.mock.calls.map(([table]) => table)).toEqual(['orders']);
     expect(mockRpc).toHaveBeenCalledWith('webhooks_finish_replay_claim', expect.objectContaining({
       p_event_id: 'EVT-3',
       p_claim_token: replayClaimToken,

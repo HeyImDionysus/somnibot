@@ -30,6 +30,7 @@ import type {
   ScenarioContext,
   ScenarioEvidence,
 } from './types.js';
+import { deterministicSnowflake } from './snowflake.js';
 
 /** guild_id-scoped tables always swept in addition to a domain's own list. */
 const ALWAYS_SWEPT_GUILD_TABLES = ['guild_config'] as const;
@@ -75,6 +76,12 @@ export class ScenarioContextImpl implements ScenarioContext {
 
   userId(label: string): string {
     return `${this.runPrefix}u-${label.toLowerCase()}`;
+  }
+
+  snowflake(label: string): string {
+    return deterministicSnowflake(
+      `${this.runPrefix}${this.scenarioClass.toLowerCase()}:${label.toLowerCase()}`,
+    );
   }
 
   async bootGuild(options: BootGuildOptions = {}): Promise<LiveClientHandle> {
@@ -243,9 +250,9 @@ export class ScenarioContextImpl implements ScenarioContext {
       }
       const status = forClass.some((r) => r.status === 'FAIL')
         ? ('FAIL' as const)
-        : forClass.some((r) => r.status === 'PASS')
-          ? ('PASS' as const)
-          : ('GATED' as const);
+        : forClass.some((r) => r.status === 'GATED')
+          ? ('GATED' as const)
+          : ('PASS' as const);
       return { assertionClass, status, records: forClass };
     });
 
@@ -265,6 +272,51 @@ export class ScenarioContextImpl implements ScenarioContext {
    * (The CLEANUP scenario additionally proves this inside its own script.)
    */
   async teardown(): Promise<void> {
+    // First ask the production privacy boundary to remove each scenario guild.
+    // Commerce rails intentionally reject ordinary service-role deletion of paid
+    // orders, protected receipts, and unresolved role delivery state; repeatedly
+    // issuing raw table DELETEs both leaves residue and burns the domain timeout.
+    // Keep services alive briefly while purge_guild_data converges so the real
+    // action-queue listener can settle any role-cleanup work the RPC schedules.
+    const purgedGuildIds = new Set<string>();
+    const purgeHandles = [...this.handles].reverse();
+    const attemptedGuildIds = new Set<string>();
+    for (const handle of purgeHandles) {
+      if (attemptedGuildIds.has(handle.guildId)) continue;
+      attemptedGuildIds.add(handle.guildId);
+
+      // The privacy RPC removes the guild row. Quiesce every background
+      // producer and drain audit first, otherwise an already-buffered write
+      // can land after the RPC and correctly fail a guild foreign key.
+      // Do not dispose the handle here: the real action-queue listener must
+      // remain running until purge_guild_data has settled its queued work.
+      try {
+        await handle.quiesceForDataPurge();
+      } catch {
+        // Normal handle.cleanup() retries the complete production teardown.
+        // Leave the purge/sweep fallback available if a bounded audit drain
+        // cannot complete here.
+      }
+
+      for (let attempt = 1; attempt <= 6; attempt += 1) {
+        try {
+          const { data, error } = await handle.supabase.rpc('purge_guild_data', {
+            p_guild_id: handle.guildId,
+          });
+          const status = (data as { purge_status?: unknown } | null)?.purge_status;
+          if (!error && status === 'completed') {
+            purgedGuildIds.add(handle.guildId);
+            break;
+          }
+        } catch {
+          // Network-level failure: the surgical sweep below remains the fallback.
+        }
+        if (attempt < 6) {
+          await new Promise((resolve) => { setTimeout(resolve, 400); });
+        }
+      }
+    }
+
     for (const handle of this.handles) {
       // Stop the guild's services BEFORE sweeping.
       //
@@ -282,6 +334,27 @@ export class ScenarioContextImpl implements ScenarioContext {
         await handle.cleanup();
       } catch {
         /* best-effort dispose */
+      }
+
+      // A completed privacy purge already removed all operational rows, scrubbed
+      // retained audit identity, and deleted the guild. Verify it below without
+      // issuing redundant table deletes through less-privileged PostgREST paths.
+      if (purgedGuildIds.has(handle.guildId)) {
+        const leftovers = await countGuildRows(handle, [...this.guildScopedTables]);
+        if (leftovers !== null) {
+          this.expect(leftovers === 0, {
+            assertionClass: 'cleanup',
+            channel: 'db-observable',
+            promise:
+              'Every run-prefixed resource this scenario created is removed by the production guild-purge boundary; a final sweep finds zero leftovers.',
+            observation:
+              `Post-purge verification of ${this.scenarioClass} guild(s) left ${leftovers} run-prefixed row(s) ` +
+              `across [${this.guildScopedTables.join(', ')}].`,
+            impact:
+              'Run-prefixed rows survived the production guild purge — the suite leaves residue in the disposable database.',
+          });
+        }
+        continue;
       }
 
       // Sweep until the guild stays empty, not just until one delete has run.

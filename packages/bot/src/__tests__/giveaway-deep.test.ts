@@ -112,18 +112,25 @@ describe('GiveawayManager deep', () => {
     expect(btn).toBeDefined();
   });
 
-  it('endGiveaway picks winners', async () => {
+  it('treats a legacy null winners array as an empty durable draw', async () => {
     const supa = makeSupa({
       giveaways: {
         id: 'ga-1', guild_id: 'guild-1', prize: 'Prize',
         entries: ['user-1', 'user-2', 'user-3'], status: 'active',
         winner_count: 1, host_id: 'user-2', channel_id: 'ch-1', message_id: 'msg-1',
+        ends_at: new Date(Date.now() + 60000).toISOString(),
+        winners: null,
       },
     });
+    supa.rpc.mockResolvedValue({ data: [{ id: 'ga-1' }], error: null });
     const mgr = new GiveawayManager(makeGuild(), supa, makeValkey(), makeEventBus());
     const result = await mgr.endGiveaway('ga-1');
-    // Should return an array (winners list) or handle gracefully
-    expect(supa.from).toHaveBeenCalled();
+    expect(result).toHaveLength(1);
+    expect(result?.[0]).toMatch(/^user-[123]$/);
+    expect(supa.rpc).toHaveBeenCalledWith('giveaway_atomic_end', expect.objectContaining({
+      p_giveaway_id: 'ga-1',
+      p_winners: result,
+    }));
   });
 
   it('start begins expiration check timer', async () => {

@@ -49,6 +49,7 @@ const CANDIDATE_BINARIES = [
 export type TailscaleState =
   | 'not-installed'   // no binary anywhere we looked
   | 'logged-out'      // installed, but the node is not signed in
+  | 'needs-permission' // installed, but Windows denied service access
   | 'ready'           // signed in, no funnel yet
   | 'funnel-active';  // signed in with a funnel already serving
 
@@ -66,11 +67,28 @@ async function run(bin: string, args: string[], timeoutMs = 15_000) {
   return execFileAsync(bin, args, { timeout: timeoutMs, windowsHide: true });
 }
 
+export type TailscaleSetupRunner = typeof run;
+
+export function isTailscaleSetupPermissionError(error: unknown): boolean {
+  const candidate = error as { code?: string; message?: string; stdout?: string; stderr?: string };
+  const text = [candidate?.message, candidate?.stdout, candidate?.stderr, String(error)]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+
+  return candidate?.code === 'EACCES'
+    || candidate?.code === 'EPERM'
+    || text.includes('access is denied')
+    || text.includes('permission denied')
+    || text.includes('protectedprefix\\administrators\\tailscale')
+    || text.includes('protectedprefix/administrators/tailscale');
+}
+
 /** First Tailscale binary that responds to `version`. */
-async function findBinary(): Promise<string | null> {
+async function findBinary(runner: TailscaleSetupRunner = run): Promise<string | null> {
   for (const bin of CANDIDATE_BINARIES) {
     try {
-      await run(bin, ['version'], 8_000);
+      await runner(bin, ['version'], 8_000);
       return bin;
     } catch {
       // try the next candidate
@@ -80,8 +98,8 @@ async function findBinary(): Promise<string | null> {
 }
 
 /** Inspect Tailscale without changing anything. */
-export async function detectTailscale(): Promise<TailscaleInfo> {
-  const bin = await findBinary();
+export async function detectTailscale(runner: TailscaleSetupRunner = run): Promise<TailscaleInfo> {
+  const bin = await findBinary(runner);
   if (!bin) {
     return {
       state: 'not-installed',
@@ -91,7 +109,7 @@ export async function detectTailscale(): Promise<TailscaleInfo> {
 
   let dnsName: string | undefined;
   try {
-    const { stdout } = await run(bin, ['status', '--json']);
+    const { stdout } = await runner(bin, ['status', '--json']);
     const status = JSON.parse(stdout) as {
       BackendState?: string;
       Self?: { DNSName?: string; Online?: boolean };
@@ -105,6 +123,12 @@ export async function detectTailscale(): Promise<TailscaleInfo> {
       };
     }
   } catch (err) {
+    if (isTailscaleSetupPermissionError(err)) {
+      return {
+        state: 'needs-permission',
+        detail: 'Tailscale is installed, but Windows denied SomniBot access to its service. Restart SomniBot with the required permission, then try again.',
+      };
+    }
     return {
       state: 'logged-out',
       detail: `Could not read Tailscale status: ${String(err).slice(0, 150)}`,
@@ -113,7 +137,7 @@ export async function detectTailscale(): Promise<TailscaleInfo> {
 
   // Already serving? Then we already have the public URL.
   try {
-    const { stdout } = await run(bin, ['funnel', 'status']);
+    const { stdout } = await runner(bin, ['funnel', 'status']);
     if (!/no serve config/i.test(stdout) && /https:\/\//i.test(stdout)) {
       const match = /https:\/\/[^\s]+/i.exec(stdout);
       return {
@@ -122,7 +146,14 @@ export async function detectTailscale(): Promise<TailscaleInfo> {
         publicUrl: match ? match[0].replace(/\/$/, '') : `https://${dnsName}`,
       };
     }
-  } catch {
+  } catch (err) {
+    if (isTailscaleSetupPermissionError(err)) {
+      return {
+        state: 'needs-permission',
+        dnsName,
+        detail: 'Tailscale is signed in, but Windows denied SomniBot access to Funnel status. Restart SomniBot with the required permission, then try again.',
+      };
+    }
     // Older clients may not support `funnel status`; fall through to 'ready'.
   }
 
@@ -135,9 +166,10 @@ export async function detectTailscale(): Promise<TailscaleInfo> {
  */
 export async function enableFunnel(
   target = dashboardTarget(),
+  runner: TailscaleSetupRunner = run,
 ): Promise<TailscaleInfo> {
-  const info = await detectTailscale();
-  if (info.state === 'not-installed' || info.state === 'logged-out') return info;
+  const info = await detectTailscale(runner);
+  if (info.state === 'not-installed' || info.state === 'logged-out' || info.state === 'needs-permission') return info;
 
   // Deliberately NOT short-circuiting on an already-active funnel.
   //
@@ -148,13 +180,20 @@ export async function enableFunnel(
   // reported success while the dashboard was not exposed at all. Re-running the
   // command is idempotent, so just assert the target we actually want.
 
-  const bin = await findBinary();
+  const bin = await findBinary(runner);
   if (!bin) return { state: 'not-installed' };
 
   try {
     // Mirrors the launcher's invocation: background, standard HTTPS port, no prompt.
-    await run(bin, ['funnel', '--bg', '--https=443', '--yes', target], 30_000);
+    await runner(bin, ['funnel', '--bg', '--https=443', '--yes', target], 30_000);
   } catch (err) {
+    if (isTailscaleSetupPermissionError(err)) {
+      return {
+        state: 'needs-permission',
+        dnsName: info.dnsName,
+        detail: 'Tailscale is installed, but Windows denied SomniBot access to its service. Restart SomniBot with the required permission, then try again.',
+      };
+    }
     const message = String((err as { stderr?: string })?.stderr || err).slice(0, 250);
     log.warn('tailscale funnel failed', { error: message });
     return {
@@ -164,7 +203,7 @@ export async function enableFunnel(
     };
   }
 
-  const after = await detectTailscale();
+  const after = await detectTailscale(runner);
   if (after.publicUrl) return after;
   // Funnel command succeeded but status has not caught up — derive the URL.
   return after.dnsName

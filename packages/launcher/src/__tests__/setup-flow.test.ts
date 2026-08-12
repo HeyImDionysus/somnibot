@@ -20,8 +20,7 @@ describe('setup flow status', () => {
     const callbackStep = status.steps.find(step => step.id === 'regular-callback');
     expect(callbackStep?.status).toBe('pending');
     expect(callbackStep?.detail).toContain('enable or detect Tailscale Funnel during setup');
-    expect(status.summary.localDashboardUrl).toBe('http://localhost');
-    expect(status.summary.localDashboardUrl).not.toContain(':3456');
+    expect(status.summary.localDashboardUrl).toBe('http://localhost:3456');
     expect(status.summary.publicCallbackUrl).toBe('Not set yet');
     expect(status.summary.diagnostics.operatorDashboardUrl).toBe('http://localhost:3456');
   });
@@ -54,6 +53,20 @@ describe('setup flow status', () => {
     expect(callbackStep?.detail).toContain('Sign in to Tailscale');
     expect(status.firstBlockingStepId).toBe('regular-callback');
     expect(status.primaryAction.enabled).toBe(false);
+  });
+
+  it('reports Windows service permission separately from Tailscale sign-in', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      tailscaleReadinessState: 'needs-permission',
+      ...completeCredentials,
+    });
+
+    const callbackStep = status.steps.find(step => step.id === 'regular-callback');
+    expect(callbackStep?.status).toBe('blocked');
+    expect(callbackStep?.summary).toContain('Windows permission');
+    expect(callbackStep?.detail).not.toContain('not signed in');
+    expect(callbackStep?.manualAction).toBe(true);
   });
 
   it('lets regular local setup sign in to Tailscale when an auth key is saved', () => {

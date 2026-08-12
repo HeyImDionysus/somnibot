@@ -108,6 +108,8 @@ export interface VerifyWebhookSignatureOptions {
   maxAttempts?: number;
   /** Pause before retry N (0-indexed by retry number; last entry repeats). */
   backoffMs?: readonly number[];
+  /** Tenant-selected PayPal environment (defaults to the runtime setting). */
+  environment?: 'sandbox' | 'live';
 }
 
 /**
@@ -151,7 +153,16 @@ export async function verifyWebhookSignature(
     return { outcome: 'invalid' };
   }
 
-  const paypalConfig = await getPayPalRuntimeConfig();
+  const runtimeConfig = await getPayPalRuntimeConfig();
+  const paypalConfig = options.environment
+    ? {
+        ...runtimeConfig,
+        sandbox: options.environment === 'sandbox',
+        apiBase: options.environment === 'sandbox'
+          ? 'https://api-m.sandbox.paypal.com'
+          : 'https://api-m.paypal.com',
+      }
+    : runtimeConfig;
   if (!paypalConfig.webhookId) {
     console.error('[Webhook] PAYPAL_WEBHOOK_ID is not configured — refusing to process');
     return { outcome: 'invalid' };

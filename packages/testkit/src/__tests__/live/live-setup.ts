@@ -31,22 +31,22 @@
  * the live test); it keys off SOMNIBOT_LOOPBACK_E2E_DISCORD_READBACK + a live
  * gateway, NOT this placeholder.
  */
-import { LOOPBACK_E2E_CONFIRMATION } from '../../guard.js';
+import {
+  LOOPBACK_E2E_CONFIRMATION,
+  assertSupabaseUrlIsLocal,
+  assertValkeyUrlIsLocal,
+} from '../../guard.js';
+import { resolveLocalSupabaseCredentials } from '../../local-supabase.js';
 
-/** Well-known Supabase CLI local-dev service_role JWT (issuer `supabase-demo`).
- *  Valid ONLY against a local `supabase start` instance — not a secret. */
-const LOCAL_DEMO_SERVICE_ROLE_KEY =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
-
-/** Well-known Supabase CLI local-dev anon JWT (issuer `supabase-demo`). Valid
- *  ONLY against a local instance — not a secret. Exported so the RLS anon-denial
- *  sub-probe actually runs (an anon key that reads zero wallet rows is the real
- *  RLS proof); without it the database-RLS anon check would only GATE. */
-const LOCAL_DEMO_ANON_KEY =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
-
-/** Local Supabase REST endpoint — the only host the guard accepts. */
-const LOCAL_SUPABASE_URL = 'http://127.0.0.1:54321';
+/**
+ * Isolated local service endpoints. The explicit E2E variables are the ONLY
+ * supported override: ambient production/developer variables are ignored.
+ */
+const localSupabase = resolveLocalSupabaseCredentials();
+const LOCAL_SUPABASE_URL = localSupabase.url;
+const LOCAL_VALKEY_URL = process.env.SOMNIBOT_E2E_VALKEY_URL ?? 'redis://127.0.0.1:6379';
+assertSupabaseUrlIsLocal(LOCAL_SUPABASE_URL, 'SOMNIBOT_E2E_SUPABASE_URL');
+assertValkeyUrlIsLocal(LOCAL_VALKEY_URL, 'SOMNIBOT_E2E_VALKEY_URL');
 
 /** Stable disposable guild id for the local rig. TEXT everywhere it lands
  *  (guild.id, economy_wallets.guild_id), so a readable non-snowflake is fine. */
@@ -64,10 +64,19 @@ function force(key: string, value: string): void {
   process.env[key] = value;
 }
 
+// Remove every ambient Supabase variable before installing the resolved local
+// values. This includes unrelated names such as SUPABASE_DB_URL and
+// SUPABASE_ACCESS_TOKEN, which must never cross into a disposable child.
+for (const key of Object.keys(process.env)) {
+  if (/^SUPABASE_/i.test(key)) delete process.env[key];
+}
+
 // ── SAFETY-CRITICAL: force to safe local values regardless of ambient env ──
 // A real token / remote URL / live guild id exported in the operator's shell
 // must NOT be able to aim this real-effect runner at production.
 force('SUPABASE_URL', LOCAL_SUPABASE_URL);
+force('VALKEY_URL', LOCAL_VALKEY_URL);
+force('VALKEY_PASSWORD', '');
 force('DISCORD_GUILD_ID', DISPOSABLE_GUILD_ID);
 force('SOMNIBOT_E2E_DISPOSABLE_GUILD_ID', DISPOSABLE_GUILD_ID);
 force('DISCORD_TOKEN', 'e2e-live-no-login-dummy-token');
@@ -75,12 +84,12 @@ force('DISCORD_TOKEN', 'e2e-live-no-login-dummy-token');
 // ── System ──
 def('NODE_ENV', 'test');
 
-// ── Supabase keys (LOCAL demo key by default; operator may swap for another
-//    LOCAL key — the URL above is already pinned local) ──
-def('SUPABASE_SECRET_KEY', LOCAL_DEMO_SERVICE_ROLE_KEY);
-def('SUPABASE_SERVICE_ROLE_KEY', LOCAL_DEMO_SERVICE_ROLE_KEY);
-// Anon key for the RLS anon-denial sub-probe (local demo key; operator-tunable).
-def('SUPABASE_ANON_KEY', LOCAL_DEMO_ANON_KEY);
+// ── Supabase keys ──
+// Resolved from an explicitly isolated E2E shard or this repository's local
+// `supabase status -o json`; ambient customer/production names are ignored.
+force('SUPABASE_SECRET_KEY', localSupabase.serviceRoleKey);
+force('SUPABASE_SERVICE_ROLE_KEY', localSupabase.serviceRoleKey);
+force('SUPABASE_ANON_KEY', localSupabase.anonKey);
 
 // ── Explicit operator confirmation (guard Gate B) ──
 def('SOMNIBOT_LOOPBACK_E2E_CONFIRMATION', LOOPBACK_E2E_CONFIRMATION);

@@ -4,8 +4,9 @@
  *
  * Binds this domain's 12 declarative catalog scenarios to concrete real-stack
  * proofs driven through the REAL production dispatcher against LOCAL Supabase.
- * This domain is MOSTLY GATED, and that is the correct, honest boundary — for two
- * structural reasons the bot-only, gateway-less harness cannot paper over:
+ * Discord moderation effects remain gated where a real gateway is required, but
+ * the appeal lifecycle is driven end-to-end through the production dispatcher and
+ * real Supabase state.
  *
  *   1. Every mutating moderation command (`/warn`, `/mute`, `/kick`, `/ban`) is
  *      Discord-side: the real handlers in packages/bot/src/features/moderation/
@@ -14,12 +15,10 @@
  *      no `members.fetch` and no gateway, so those handlers throw before writing
  *      any infraction — they CANNOT be driven here. The action/escalation/DM/
  *      mod-log effects are therefore GATED behind DISCORD_TOKEN + a live guild.
- *   2. Appeals are UNIMPLEMENTED in the bot: there is no appeal command, handler,
- *      table, or `guild_config` column anywhere in packages/bot or packages/
- *      dashboard (a repo-wide search for "appeal" finds only this catalog). The
- *      appeal round-trip (file → review-channel post → decision DM), the appeal
- *      cooldown, and the appeal-review-channel routing cannot be driven — they are
- *      GATED with that exact reason and surfaced as likely owner findings.
+ *   2. Appeal submit/status, pending-row dedupe, atomic decisions, restart
+ *      persistence, cross-guild isolation, and lifecycle audit rows are all
+ *      DB-observable without a gateway. Only the final member DM/readback remains
+ *      credential-gated.
  *
  * What DOES run now, against real state:
  *   - The ONE pure-Supabase command this domain exposes, `/infractions`, is driven
@@ -62,6 +61,18 @@ interface InfractionRow {
   active: boolean;
   pardoned: boolean;
   expires_at: string | null;
+  created_at: string;
+}
+
+interface AppealRow {
+  id: string;
+  guild_id: string;
+  infraction_id: string;
+  appellant_discord_id: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'denied' | 'expired';
+  reviewer_id: string | null;
+  decision_notified: boolean;
   created_at: string;
 }
 
@@ -153,6 +164,42 @@ async function guildInfractionCount(handle: LiveClientHandle): Promise<number> {
     .select('*', { count: 'exact', head: true })
     .eq('guild_id', handle.guildId);
   return count ?? 0;
+}
+
+async function readAppeals(handle: LiveClientHandle, appellantId?: string): Promise<AppealRow[]> {
+  let query = handle.supabase
+    .from('appeals')
+    .select('id, guild_id, infraction_id, appellant_discord_id, reason, status, reviewer_id, decision_notified, created_at')
+    .eq('guild_id', handle.guildId);
+  if (appellantId) query = query.eq('appellant_discord_id', appellantId);
+  const { data } = await query.order('created_at', { ascending: true });
+  return (data as AppealRow[] | null) ?? [];
+}
+
+async function readAppealAudits(handle: LiveClientHandle): Promise<Array<{ action: string; occurrence_key: string | null }>> {
+  const { data } = await handle.supabase
+    .from('audit_logs')
+    .select('action, occurrence_key')
+    .eq('guild_id', handle.guildId)
+    .like('action', 'appeal.%');
+  return (data as Array<{ action: string; occurrence_key: string | null }> | null) ?? [];
+}
+
+async function submitAppeal(
+  ctx: ScenarioContext,
+  handle: LiveClientHandle,
+  userId: string,
+  infractionId: string,
+  reason: string,
+  interactionId?: string,
+): Promise<CapturedResponse> {
+  return ctx.runSlash(handle, {
+    commandName: 'appeal',
+    subcommand: 'submit',
+    interactionId,
+    userId,
+    options: { infraction_id: infractionId, reason },
+  });
 }
 
 /**
@@ -373,19 +420,6 @@ function gateLiveGuildReadback(ctx: ScenarioContext, promise: string, reason: st
   ctx.gate('Discord', 'discord-readback', promise, reason);
 }
 
-function gateAppealsUnimplemented(
-  ctx: ScenarioContext,
-  assertionClass: 'Discord' | 'audit' | 'replay-safety' | 'branding',
-  promise: string,
-): void {
-  ctx.gate(
-    assertionClass,
-    'discord-readback',
-    promise,
-    'appeals are UNIMPLEMENTED in the bot — no appeal command, handler, table, or guild_config column exists (repo-wide "appeal" search finds only the catalog); the appeal round-trip cannot be driven and is surfaced as a likely owner finding',
-  );
-}
-
 function gateReplayDeferredTo(ctx: ScenarioContext, where: string): void {
   ctx.gate(
     'replay-safety',
@@ -554,7 +588,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }
 
-/** SET-B — appeals routing (dedicated review channel + 48h cooldown). UNIMPLEMENTED. */
+/** SET-B — appeal submit/status, pending dedupe, audit, and review queue state. */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a' });
   const userA = ctx.userId('a');
@@ -562,7 +596,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
 
   // Seed an escalated infraction so the member has something to appeal, and so the
   // RLS positive control + a real /infractions readback are non-vacuous.
-  await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'mute', reason: `${ctx.runPrefix}escalated`, durationMinutes: 60, expiryDays: 30 });
+  const infractionId = await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'mute', reason: `${ctx.runPrefix}escalated`, durationMinutes: 60, expiryDays: 30 });
   const cap = await runInfractions(ctx, handle, modId, userA, 'run-member-a', false);
   const rows = await readInfractions(handle, userA);
   ctx.expect(rows.length === 1 && rows[0]!.type === 'mute' && Boolean(replyEmbedData(cap)), {
@@ -573,21 +607,51 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     impact: 'The infraction backing the appeal scenario is missing or not visible.',
   });
 
-  // The ENTIRE appeal surface is unimplemented: no appeal command/table, and
-  // guild_config carries no appeal-review-channel-id / appeal-cooldown-hours /
-  // appeals-enabled columns to route or throttle by. GATE every appeal facet.
-  gateAppealsUnimplemented(
-    ctx,
-    'Discord',
-    'A filed appeal appears exactly once in the run-prefixed appeal review channel (identical for the Discord and portal entry points) and a premature second appeal within the 48h cooldown gets a respectful refusal.',
+  const submitted = infractionId
+    ? await submitAppeal(ctx, handle, userA, infractionId, `${ctx.runPrefix}please-review`)
+    : null;
+  const replayed = infractionId
+    ? await submitAppeal(ctx, handle, userA, infractionId, `${ctx.runPrefix}duplicate`)
+    : null;
+  const appeals = await readAppeals(handle, userA);
+  const audits = await readAppealAudits(handle);
+  const submitAudits = audits.filter((row) => row.action === 'appeal.submitted');
+  ctx.expect(
+    Boolean(infractionId) &&
+      replyContent(submitted!).includes('pending') &&
+      replyContent(replayed!).includes('already have a pending appeal') &&
+      appeals.length === 1 &&
+      appeals[0]?.infraction_id === infractionId &&
+      appeals[0]?.status === 'pending',
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'A member files one pending appeal through /appeal submit and an immediate duplicate receives a respectful refusal without a second row.',
+      observation:
+        `submit reply="${truncate(submitted ? replyContent(submitted) : '(not run)')}"; ` +
+        `replay reply="${truncate(replayed ? replyContent(replayed) : '(not run)')}"; appeal rows=${appeals.length}.`,
+      impact: 'Appeal submission or pending-row dedupe is broken — the member cannot file reliably or duplicate rows can enter the review queue.',
+    },
   );
-  gateAppealsUnimplemented(ctx, 'audit', 'The appeal filing and the cooldown-refused retry each land exactly one append-only audit row.');
-  gateAppealsUnimplemented(ctx, 'branding', 'The appeal confirmation and portal appeal view carry the owner brand kit + voice preset.');
+  ctx.expect(submitAudits.length === 1 && Boolean(submitAudits[0]?.occurrence_key), {
+    assertionClass: 'audit',
+    channel: 'audit-row',
+    promise: 'The successful appeal filing lands exactly one append-only appeal.submitted audit row with a stable occurrence key.',
+    observation: `appeal.submitted audit rows=${submitAudits.length}; occurrence_key=${submitAudits[0]?.occurrence_key ?? '(none)'}.`,
+    impact: 'The appeal entered the queue without its exactly-once lifecycle audit record.',
+  });
+  ctx.expect(appeals.length === 1, {
+    assertionClass: 'replay-safety',
+    channel: 'db-observable',
+    promise: 'Re-filing the same pending appeal yields no duplicate appeal row (one pending appeal per infraction).',
+    observation: `appeal rows for the appellant after the replay=${appeals.length} (expected 1).`,
+    impact: 'A replay created duplicate pending appeals for one infraction.',
+  });
   ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'Re-filing the same appeal yields no duplicate appeal row (one appeal per infraction).',
-    'appeals are unimplemented — there is no appeal row/idempotency key to re-file against',
+    'branding',
+    'discord-readback',
+    'The appeal confirmation, dashboard review queue, and decision DM match the owner brand kit and voice preset.',
+    'functional submit/dedupe/audit state is proven above; visual brand-kit comparison remains part of the aesthetic owner walkthrough',
   );
 
   await proveRlsIsolation(ctx, handle, userA);
@@ -740,7 +804,12 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     'run-member-b’s /warn attempt yields only an ephemeral denial with no infraction created (the denied-attempt audit row is now proven above via /infractions).',
     'driving /warn end-to-end needs guild.members.fetch + a live gateway (the shared deny+audit path is proven via /infractions in this scenario)',
   );
-  gateAppealsUnimplemented(ctx, 'audit', 'A member portal session receives a permission error when attempting to resolve their own appeal, and the denial is audited.');
+  ctx.gate(
+    'audit',
+    'discord-readback',
+    'A member dashboard session receives a permission error when attempting to resolve their own appeal, and the denial is audited.',
+    'the appeal decision route is protected by requireGuildOwner, but exercising the denied HTTP session and its audit surface requires the authenticated dashboard-session lane',
+  );
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
@@ -932,7 +1001,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   const modId = ctx.userId('mod');
 
   // Seed one infraction so RLS + a real readback are non-vacuous.
-  await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}replay`, expiryDays: 30 });
+  const infractionId = await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}replay`, expiryDays: 30 });
   const cap = await runInfractions(ctx, handle, modId, userA, 'run-member-a', true);
   ctx.expect(Boolean(replyEmbedData(cap)) && (await activeWarnCount(handle, userA)) === 1, {
     assertionClass: 'Discord',
@@ -942,18 +1011,29 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     impact: 'The single-infraction baseline for the replay scenario is wrong.',
   });
 
-  // The actual replay proof — re-delivering the /warn interaction id and the appeal
-  // submission with no duplicate infraction/timeout/DM/appeal — is NOT drivable:
-  // /warn needs the gateway (guild.members.fetch), and appeals are unimplemented.
-  // Critically, createInfraction has NO persisted idempotency key on the interaction
-  // id, so a genuine /warn replay WOULD create a second row — a likely owner finding.
+  const replayInteractionId = ctx.snowflake('appeal-replay');
+  if (infractionId) {
+    await submitAppeal(ctx, handle, userA, infractionId, `${ctx.runPrefix}replay-appeal`, replayInteractionId);
+    await submitAppeal(ctx, handle, userA, infractionId, `${ctx.runPrefix}replay-appeal`, replayInteractionId);
+  }
+  const appeals = await readAppeals(handle, userA);
+  const submitAudits = (await readAppealAudits(handle)).filter((row) => row.action === 'appeal.submitted');
+  ctx.expect(Boolean(infractionId) && appeals.length === 1 && submitAudits.length === 1, {
+    assertionClass: 'replay-safety',
+    channel: 'db-observable',
+    promise: 'Re-delivering the same appeal submission leaves one pending appeal and one occurrence-keyed appeal.submitted audit record.',
+    observation: `appeal rows=${appeals.length}; appeal.submitted audit rows=${submitAudits.length} (expected 1 and 1).`,
+    impact: 'The replay duplicated an appeal row or its lifecycle audit record.',
+  });
+
+  // /warn still needs the gateway. Keep that distinct from the appeal replay,
+  // which is fully proven above.
   ctx.gate(
     'replay-safety',
     'db-observable',
-    'Re-delivering the /warn interaction and the appeal submission yields no duplicate infraction, timeout, DM, or appeal; persisted idempotency keys show one effect per logical action.',
-    'the mutating /warn path needs DISCORD_TOKEN + a live guild (guild.members.fetch) and appeals are unimplemented; moreover createInfraction persists NO idempotency key keyed on the interaction id, so exactly-once cannot be proven here and a replay would in fact duplicate — surfaced as a likely finding',
+    'Re-delivering the /warn interaction yields no duplicate infraction, timeout, or DM.',
+    'the mutating /warn path needs DISCORD_TOKEN + a live guild (guild.members.fetch); appeal replay is proven separately above',
   );
-  gateAppealsUnimplemented(ctx, 'audit', 'Idempotency keys on the warn interaction and the appeal submission each show one applied effect; replays are recorded as deduplicated no-ops.');
   gateLiveGuildReadback(
     ctx,
     'After replaying the recorded interaction events the timeout state and DM count are byte-identical to the pre-replay snapshot.',
@@ -973,10 +1053,14 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
 
   // Boot #1: record a history (two warns + one escalated mute), snapshot, shut down.
   const first = await ctx.bootGuild({ guildId, label: 'a' });
-  await seedInfraction(first, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}r1`, expiryDays: 30 });
+  const appealInfractionId = await seedInfraction(first, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}r1`, expiryDays: 30 });
   await seedInfraction(first, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}r2`, expiryDays: 30 });
   await seedInfraction(first, { memberId: userA, moderatorId: modId, type: 'mute', reason: `${ctx.runPrefix}r3`, durationMinutes: 60, expiryDays: 30 });
+  if (appealInfractionId) {
+    await submitAppeal(ctx, first, userA, appealInfractionId, `${ctx.runPrefix}restart-appeal`);
+  }
   const snapshot = await readInfractions(first, userA);
+  const appealSnapshot = await readAppeals(first, userA);
   const snapWarns = await activeWarnCount(first, userA);
   await first.cleanup(); // simulate shutdown (rows persist in Supabase; sweep is separate)
 
@@ -1009,12 +1093,41 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     impact: 'The escalation-relevant active-warning count changed across the restart.',
   });
 
-  // The live-timeout continuation to its original end time, the expiry-sweep resume,
-  // and the pending-appeal decidability are Discord/scheduler/appeal facets.
+  const appealsAfterRestart = await readAppeals(second, userA);
+  const pendingAppeal = appealsAfterRestart[0];
+  const { data: decided } = pendingAppeal
+    ? await second.supabase
+        .from('appeals')
+        .update({ status: 'approved', reviewer_id: modId, decided_at: new Date().toISOString() })
+        .eq('id', pendingAppeal.id)
+        .eq('guild_id', second.guildId)
+        .eq('status', 'pending')
+        .select('id, status')
+        .maybeSingle()
+    : { data: null };
+  const decisionAudits = (await readAppealAudits(second)).filter((row) => row.action === 'appeal.approved');
+  ctx.expect(
+    appealSnapshot.length === 1 &&
+      appealsAfterRestart.length === 1 &&
+      (decided as { status?: string } | null)?.status === 'approved' &&
+      decisionAudits.length === 1,
+    {
+      assertionClass: 'replay-safety',
+      channel: 'db-observable',
+      promise: 'A pending appeal survives the full stack restart and remains atomically decidable exactly once with its lifecycle audit row.',
+      observation:
+        `appeals before restart=${appealSnapshot.length}, after restart=${appealsAfterRestart.length}; ` +
+        `decision status=${(decided as { status?: string } | null)?.status ?? '(none)'}; appeal.approved audits=${decisionAudits.length}.`,
+      impact: 'The restart lost the pending appeal or left it undecidable/unaudited.',
+    },
+  );
+
+  // The persisted appeal and decision are proven above. Only the live Discord
+  // timeout and scheduler timing remain gateway/scheduler surfaces.
   gateLiveGuildReadback(
     ctx,
-    'The live timeout continues to its original end time, the expiry sweep resumes on schedule, and the pending appeal is still reviewable and decidable after restart.',
-    'the running Discord timeout state needs the live gateway, the expiry sweep is a scheduler tick (not a dispatcher command), and appeals are unimplemented',
+    'The live timeout continues to its original end time and the expiry sweep resumes on schedule after restart.',
+    'the running Discord timeout state needs the live gateway and the expiry sweep is a scheduler tick (not a dispatcher command)',
   );
 
   await proveRlsIsolation(ctx, second, userA);
@@ -1032,7 +1145,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   // Record three warnings, then read /infractions CONCURRENTLY: both deliveries must
   // return the SAME consistent history under concurrency (a real read-consistency
   // check against live DB — the write-race itself is gated below).
-  await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}rc1`, expiryDays: 30 });
+  const appealInfractionId = await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}rc1`, expiryDays: 30 });
   await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}rc2`, expiryDays: 30 });
   await seedInfraction(handle, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}rc3`, expiryDays: 30 });
   const [c1, c2] = await Promise.all([
@@ -1050,14 +1163,44 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'Concurrent reads returned an inconsistent infraction history.',
   });
 
+  if (appealInfractionId) {
+    await submitAppeal(ctx, handle, userA, appealInfractionId, `${ctx.runPrefix}race-appeal`);
+  }
+  const pending = (await readAppeals(handle, userA))[0];
+  const decide = (status: 'approved' | 'denied', reviewerId: string) =>
+    handle.supabase
+      .from('appeals')
+      .update({ status, reviewer_id: reviewerId, decided_at: new Date().toISOString() })
+      .eq('id', pending?.id ?? '00000000-0000-0000-0000-000000000000')
+      .eq('guild_id', handle.guildId)
+      .eq('status', 'pending')
+      .select('id, status')
+      .maybeSingle();
+  const [approved, denied] = await Promise.all([
+    decide('approved', ctx.userId('owner-a')),
+    decide('denied', ctx.userId('owner-b')),
+  ]);
+  const winners = [approved.data, denied.data].filter(Boolean) as Array<{ status: string }>;
+  const terminalAudits = (await readAppealAudits(handle)).filter((row) =>
+    row.action === 'appeal.approved' || row.action === 'appeal.denied');
+  ctx.expect(Boolean(pending) && winners.length === 1 && terminalAudits.length === 1, {
+    assertionClass: 'replay-safety',
+    channel: 'db-observable',
+    promise: 'Two simultaneous appeal decisions produce exactly one terminal state and one occurrence-keyed decision audit row.',
+    observation:
+      `decision winners=${winners.length} (${winners.map((row) => row.status).join(',') || 'none'}); ` +
+      `terminal appeal audit rows=${terminalAudits.length}.`,
+    impact: 'The decision race applied twice, applied neither, or produced duplicate/missing lifecycle audit evidence.',
+  });
+
   // The catalog RACE promise — two moderators warning simultaneously record both
   // warnings but the threshold escalation executes EXACTLY ONCE, and a racing pardon
-  // + appeal decision resolve to one final state — needs the gateway write path and
-  // the (unimplemented) appeal path.
+  // + appeal decision resolve to one final state. The appeal race is proven above;
+  // only the gateway-backed warn escalation remains gated.
   gateLiveGuildReadback(
     ctx,
-    'Two simultaneous /warn invocations at the threshold apply exactly one 60-minute timeout (escalation fires once), and a racing pardon + appeal decision resolve the infraction exactly once with a single member notification.',
-    'concurrent /warn (guild.members.fetch + member.timeout) needs DISCORD_TOKEN + a live guild, and the racing appeal decision is an unimplemented feature — the write-race is not drivable in the bot-only harness',
+    'Two simultaneous /warn invocations at the threshold apply exactly one 60-minute timeout (escalation fires once).',
+    'concurrent /warn (guild.members.fetch + member.timeout) needs DISCORD_TOKEN + a live guild; the appeal decision race is proven DB-observably above',
   );
   ctx.gate(
     'audit',
@@ -1065,12 +1208,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     'The threshold escalation writes exactly one escalation infraction row despite the concurrent warnings.',
     'the escalation write is only reachable through the live /warn path (gateway) — not drivable here',
   );
-  ctx.gate(
-    'replay-safety',
-    'db-observable',
-    'The racing pardon and appeal decision converge to one final state with one notification.',
-    'the pardon mod-log path needs the gateway and the appeal decision is unimplemented',
-  );
+  ctx.gate('Discord', 'discord-readback', 'The winning appeal decision produces exactly one member DM.', 'the terminal state and exactly-once audit are proven above; DM delivery readback requires a live Discord user/gateway');
 
   await proveRlsIsolation(ctx, handle, userA);
   await proveNoOwnerAlert(ctx, handle);
@@ -1087,7 +1225,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   const handleB = await ctx.bootGuild({ guildId: guildB, label: 'b' });
 
   // Warn the SAME member three times in guild A; guild B stays clean.
-  await seedInfraction(handleA, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}xg1`, expiryDays: 30 });
+  const appealInfractionId = await seedInfraction(handleA, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}xg1`, expiryDays: 30 });
   await seedInfraction(handleA, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}xg2`, expiryDays: 30 });
   await seedInfraction(handleA, { memberId: userA, moderatorId: modId, type: 'warn', reason: `${ctx.runPrefix}xg3`, expiryDays: 30 });
 
@@ -1136,8 +1274,37 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
   });
   await proveRlsIsolation(ctx, handleA, userA);
 
-  // The appeal filed in guild A being invisible to guild B is an appeal facet.
-  gateAppealsUnimplemented(ctx, 'audit', 'An appeal filed in guild A is invisible and undecidable in guild B’s review surfaces.');
+  if (appealInfractionId) {
+    await submitAppeal(ctx, handleA, userA, appealInfractionId, `${ctx.runPrefix}xguild-appeal`);
+  }
+  const appealA = (await readAppeals(handleA, userA))[0];
+  const { data: visibleInB } = await handleB.supabase
+    .from('appeals')
+    .select('id')
+    .eq('id', appealA?.id ?? '00000000-0000-0000-0000-000000000000')
+    .eq('guild_id', guildB)
+    .maybeSingle();
+  const { data: decidedInB } = await handleB.supabase
+    .from('appeals')
+    .update({ status: 'denied', reviewer_id: modId, decided_at: new Date().toISOString() })
+    .eq('id', appealA?.id ?? '00000000-0000-0000-0000-000000000000')
+    .eq('guild_id', guildB)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+  const stillPendingA = (await readAppeals(handleA, userA))[0];
+  ctx.expect(
+    Boolean(appealA) && visibleInB === null && decidedInB === null && stillPendingA?.status === 'pending',
+    {
+      assertionClass: 'audit',
+      channel: 'db-observable',
+      promise: 'An appeal filed in guild A is invisible and undecidable through guild B’s scoped review query; guild A remains pending.',
+      observation:
+        `appeal A exists=${Boolean(appealA)}; visible in B=${Boolean(visibleInB)}; ` +
+        `decision through B=${Boolean(decidedInB)}; guild-A status=${stillPendingA?.status ?? '(none)'}.`,
+      impact: 'A guild-B scoped review could see or decide guild A’s appeal — cross-guild moderation isolation is broken.',
+    },
+  );
   await proveNoOwnerAlert(ctx, handleA);
   gateBranding(ctx, capA);
   gateReplayDeferredTo(ctx, 'REPLAY');

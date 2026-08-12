@@ -1,4 +1,4 @@
-export type StoreProductType = 'one_time' | 'subscription';
+export type StoreProductType = 'one_time' | 'subscription' | 'free';
 export type StoreDeliveryType = 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed';
 
 export interface OperatorLicensingGuide {

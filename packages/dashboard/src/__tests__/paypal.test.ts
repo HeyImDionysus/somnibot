@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { encryptCloudCredential } from '@/lib/cloud-credential-crypto';
 
 const mockFetch = vi.fn();
 const originalEnv = { ...process.env };
@@ -32,6 +33,8 @@ beforeEach(() => {
   process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com';
   process.env.PAYPAL_CLIENT_ID = 'test-client-id';
   process.env.PAYPAL_CLIENT_SECRET = '<<mock>>';
+  process.env.SUPABASE_URL = 'https://project.supabase.co';
+  process.env.SUPABASE_SECRET_KEY = 'service-role-test-key';
   mockSavedPayPalSettings([]);
 });
 
@@ -67,9 +70,13 @@ describe('getPayPalToken', () => {
     delete process.env.PAYPAL_CLIENT_ID;
     delete process.env.PAYPAL_CLIENT_SECRET;
     delete process.env.PAYPAL_SANDBOX;
+    const savedSecret = encryptCloudCredential(
+      'saved-client-secret', 'paypal_client_secret',
+      process.env.SUPABASE_SECRET_KEY!, new URL(process.env.SUPABASE_URL!).origin,
+    );
     mockSavedPayPalSettings([
       { key: 'paypal_client_id', value: 'saved-client-id' },
-      { key: 'paypal_client_secret', value: 'saved-client-secret' },
+      savedSecret,
       { key: 'paypal_sandbox', value: 'false' },
     ]);
     mockFetch.mockResolvedValueOnce({
@@ -227,9 +234,10 @@ describe('PAYPAL_API_BASE', () => {
 describe('getPayPalWebhookId', () => {
   it('loads the webhook ID from saved settings when env is absent', async () => {
     delete process.env.PAYPAL_WEBHOOK_ID;
-    mockSavedPayPalSettings([
-      { key: 'paypal_webhook_id', value: 'WH-SAVED' },
-    ]);
+    mockSavedPayPalSettings([encryptCloudCredential(
+      'WH-SAVED', 'paypal_webhook_id',
+      process.env.SUPABASE_SECRET_KEY!, new URL(process.env.SUPABASE_URL!).origin,
+    )]);
 
     const { getPayPalWebhookId } = await import('@/lib/paypal');
     await expect(getPayPalWebhookId()).resolves.toBe('WH-SAVED');

@@ -22,6 +22,13 @@ function tokenResponse(): Response {
   return jsonResponse({ access_token: 'paypal-access-token' });
 }
 
+function webhookUrlConflictResponse(): Response {
+  return jsonResponse({
+    name: 'WEBHOOK_URL_ALREADY_EXISTS',
+    message: 'Webhook URL already exists.',
+  }, 400);
+}
+
 function webhook(id: string, url: string, events = PAYPAL_WEBHOOK_EVENT_TYPES) {
   return {
     id,
@@ -142,6 +149,35 @@ describe('PayPal webhook service', () => {
     );
   });
 
+  it('recovers a URL conflict when a normalized application match needs an account fallback', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        webhooks: [webhook('WH-APP', `${baseInput.webhookUrl}/`, ['CHECKOUT.ORDER.APPROVED'])],
+      }))
+      .mockResolvedValueOnce(webhookUrlConflictResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        webhooks: [webhook('WH-ACCOUNT-MATCH', baseInput.webhookUrl, ['CHECKOUT.ORDER.APPROVED'])],
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const result = await ensurePayPalWebhook(baseInput, { fetch: fetchImpl as unknown as typeof fetch });
+
+    expect(result).toMatchObject({ ok: true, status: 'updated', webhookId: 'WH-ACCOUNT-MATCH' });
+    const calls = fetchImpl.mock.calls;
+    expect(calls.filter(([url, init]) => String(url).endsWith('/v1/notifications/webhooks')
+      && (init as RequestInit | undefined)?.method === 'POST')).toHaveLength(0);
+    expect(calls.some(([url]) => String(url).includes('anchor_type=ACCOUNT'))).toBe(true);
+    expect(calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toBe(false);
+    expect((calls.at(-1)?.[1] as RequestInit).body).toBe(JSON.stringify([
+      {
+        op: 'replace',
+        path: '/event_types',
+        value: PAYPAL_WEBHOOK_EVENT_TYPES.map(name => ({ name })),
+      },
+    ]));
+  });
+
   it('updates an existing webhook ID when URL or event subscriptions drift', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(tokenResponse())
@@ -172,6 +208,86 @@ describe('PayPal webhook service', () => {
         ]),
       }),
     );
+  });
+
+  it('recovers a stale saved webhook id by matching the existing callback URL', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({ name: 'INVALID_RESOURCE_ID' }, 400))
+      .mockResolvedValueOnce(jsonResponse({
+        webhooks: [webhook('WH-RECOVERED', baseInput.webhookUrl, ['CHECKOUT.ORDER.APPROVED'])],
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const result = await ensurePayPalWebhook({
+      ...baseInput,
+      webhookId: 'WH-STALE',
+    }, { fetch: fetchImpl as unknown as typeof fetch });
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe('updated');
+    expect(result.webhookId).toBe('WH-RECOVERED');
+    expect(fetchImpl).toHaveBeenLastCalledWith(
+      `${PAYPAL_SANDBOX_API_BASE}/v1/notifications/webhooks/WH-RECOVERED`,
+      expect.objectContaining({ method: 'PATCH' }),
+    );
+  });
+
+  it('recovers a URL conflict from the account anchor without deleting or recreating', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse(webhook('WH-OLD', 'https://old.example.com/api/paypal/webhook', [
+        'CHECKOUT.ORDER.APPROVED',
+      ])))
+      .mockResolvedValueOnce(webhookUrlConflictResponse())
+      .mockResolvedValueOnce(jsonResponse({ webhooks: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        webhooks: [webhook('WH-ACCOUNT', baseInput.webhookUrl, ['CHECKOUT.ORDER.APPROVED'])],
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const result = await ensurePayPalWebhook({
+      ...baseInput,
+      webhookId: 'WH-OLD',
+    }, { fetch: fetchImpl as unknown as typeof fetch });
+
+    expect(result).toMatchObject({ ok: true, status: 'updated', webhookId: 'WH-ACCOUNT' });
+    const calls = fetchImpl.mock.calls;
+    expect(calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toHaveLength(0);
+    expect(calls.filter(([url, init]) => String(url).endsWith('/v1/notifications/webhooks')
+      && (init as RequestInit | undefined)?.method === 'POST')).toHaveLength(0);
+    expect(calls.some(([url]) => String(url).endsWith('/v1/notifications/webhooks?anchor_type=ACCOUNT'))).toBe(true);
+    expect(calls.at(-1)?.[0]).toBe(`${PAYPAL_SANDBOX_API_BASE}/v1/notifications/webhooks/WH-ACCOUNT`);
+    expect((calls.at(-1)?.[1] as RequestInit).body).toBe(JSON.stringify([
+      {
+        op: 'replace',
+        path: '/event_types',
+        value: PAYPAL_WEBHOOK_EVENT_TYPES.map(name => ({ name })),
+      },
+    ]));
+  });
+
+  it('recovers a create race by rediscovering the existing account webhook without a second POST', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({ webhooks: [] }))
+      .mockResolvedValueOnce(webhookUrlConflictResponse())
+      .mockResolvedValueOnce(jsonResponse({ webhooks: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        webhooks: [webhook('WH-RACE', baseInput.webhookUrl, ['CHECKOUT.ORDER.APPROVED'])],
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const result = await ensurePayPalWebhook(baseInput, { fetch: fetchImpl as unknown as typeof fetch });
+
+    expect(result).toMatchObject({ ok: true, status: 'updated', webhookId: 'WH-RACE' });
+    const postWebhookCalls = fetchImpl.mock.calls.filter(([url, init]) => (
+      String(url).endsWith('/v1/notifications/webhooks')
+      && (init as RequestInit | undefined)?.method === 'POST'
+    ));
+    expect(postWebhookCalls).toHaveLength(1);
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).endsWith('/v1/notifications/webhooks?anchor_type=ACCOUNT'))).toBe(true);
+    expect(fetchImpl.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')).toBe(false);
   });
 
   it('reuses an already-correct webhook without patching it', async () => {

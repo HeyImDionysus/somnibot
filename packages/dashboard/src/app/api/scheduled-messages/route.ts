@@ -74,7 +74,8 @@ export async function GET() {
     return dbError(error, 'scheduled-messages');
   }
 
-  return NextResponse.json({ success: true, data: data ?? [] });
+  const { data: config } = await supabase.from('guild_config').select('max_schedules_per_guild, default_timezone, missed_run_policy, allow_embeds, variables_enabled').eq('guild_id', guildId).maybeSingle();
+  return NextResponse.json({ success: true, data: data ?? [], config: config ?? {} });
 }
 
 export async function POST(req: NextRequest) {
@@ -89,6 +90,7 @@ export async function POST(req: NextRequest) {
   const parsed = await parseBody(req, schemas.scheduledMessage.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
+  const { data: guildConfig } = await supabase.from('guild_config').select('max_schedules_per_guild, default_timezone, missed_run_policy, allow_embeds').eq('guild_id', guildId).maybeSingle();
 
   const {
     name,
@@ -110,13 +112,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Max 50 scheduled messages per guild
+  if (embed_config_id && guildConfig?.allow_embeds === false) {
+    return NextResponse.json({ success: false, error: 'Embeds are disabled for this guild.' }, { status: 400 });
+  }
+  // Configurable active schedule cap.
   const { count } = await supabase
     .from('scheduled_messages')
     .select('id', { count: 'exact', head: true })
     .eq('guild_id', guildId);
 
-  if ((count ?? 0) >= 50) {
+  if ((count ?? 0) >= (guildConfig?.max_schedules_per_guild ?? 25)) {
     return NextResponse.json(
       { success: false, error: 'Maximum scheduled message limit reached (50)' },
       { status: 400 },
@@ -132,11 +137,11 @@ export async function POST(req: NextRequest) {
       message: message ?? null,
       embed_config_id: embed_config_id ?? null,
       cron_expression,
-      timezone: timezone ?? 'UTC',
+      timezone: timezone ?? guildConfig?.default_timezone ?? 'UTC',
       start_date: start_date ?? null,
       end_date: end_date ?? null,
       max_sends: max_sends ?? null,
-      missed_run_policy: missed_run_policy ?? 'skip-missed',
+      missed_run_policy: missed_run_policy ?? guildConfig?.missed_run_policy ?? 'skip-missed',
       current_sends: 0,
       active: true,
     })
@@ -156,7 +161,7 @@ export async function POST(req: NextRequest) {
     afterState: typedPick(data, ['name', 'channel_id', 'message', 'embed_config_id', 'cron_expression', 'timezone', 'start_date', 'end_date', 'max_sends', 'missed_run_policy', 'active']),
   });
 
-  await notifyBot('scheduled-messages');
+  await notifyBot(guildId, 'scheduled-messages');
 
   await recordCrudChange({
     guildId,
@@ -237,7 +242,7 @@ export async function PUT(req: NextRequest) {
     });
   }
 
-  await notifyBot('scheduled-messages');
+  await notifyBot(guildId, 'scheduled-messages');
 
   // Same no-op guard as the audit row above: a PUT that changed no
   // owner-visible field must not appear as a change on the page.
@@ -299,7 +304,7 @@ export async function DELETE(req: NextRequest) {
     });
   }
 
-  await notifyBot('scheduled-messages');
+  await notifyBot(guildId, 'scheduled-messages');
 
   await recordCrudChange({
     guildId,

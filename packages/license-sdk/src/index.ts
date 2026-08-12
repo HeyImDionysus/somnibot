@@ -167,6 +167,11 @@ export interface ValidationResponse {
   grace_period_ends_at?: string | null;
   session_id?: string | null;
   heartbeat_interval_seconds?: number;
+  /** Product policy delivered by the validation server. */
+  sdk_cache_ttl_ms?: number;
+  offline_grace_period_seconds?: number;
+  require_discord_guild_membership?: boolean;
+  license_mode?: string;
   error?: string;
 }
 
@@ -493,6 +498,17 @@ export class SomniLicense {
         this.latestLiveSessionRevision = operation.revision;
         this.cachedResult = data;
         this.sessionId = data.session_id ?? null;
+
+        // Product policy is authoritative for the SDK cache/offline windows.
+        // Clamp server values defensively so a malformed response cannot turn
+        // into an unbounded cache or grace bypass; local constructor values
+        // remain the fallback when a legacy server omits these fields.
+        if (Number.isInteger(data.sdk_cache_ttl_ms)) {
+          this.config.cacheTtlMs = Math.max(1_000, Math.min(3_600_000, data.sdk_cache_ttl_ms!));
+        }
+        if (Number.isInteger(data.offline_grace_period_seconds)) {
+          this.config.offlineGraceMs = Math.max(0, Math.min(604_800_000, data.offline_grace_period_seconds! * 1_000));
+        }
 
         // V7 Audit §3.P3a — anchor server time on successful validation.
         // (Anchored before the cache-expiry math below, which uses the

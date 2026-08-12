@@ -7,6 +7,7 @@
  * Also tests startSyncScheduler lifecycle.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { DriftItem } from '@somnibot/shared';
 
 // ── Mocks ────────────────────────────────────────────────
 const mockComputeStateDiff = vi.fn((): any => ({ everyoneDrift: false, diffs: [] }));
@@ -47,11 +48,11 @@ class MockCollection extends Map {
 function supaChain(data: any = null, error: any = null) {
   const c: any = {};
   const methods = ['select','insert','update','upsert','delete','eq','neq','gte','lt',
-    'lte','limit','order','in','filter','maybeSingle','single','match','then'];
+    'lte','limit','range','order','in','filter','maybeSingle','single','match','then'];
   for (const m of methods) c[m] = vi.fn((..._: any[]) => c);
   c.maybeSingle = vi.fn(async () => ({ data, error }));
   c.single = vi.fn(async () => ({ data, error }));
-  c.then = (resolve: any) => resolve({ data: data ? [data] : [], error });
+  c.then = (resolve: any) => resolve({ data, error });
   return c;
 }
 
@@ -92,6 +93,29 @@ function makeConfig(overrides: Partial<SyncConfig> = {}): SyncConfig {
   };
 }
 
+function extraChannelDrift(entityName: string, entityDiscordId: string): DriftItem {
+  return {
+    type: 'EXTRA_RESOURCE',
+    severity: 'info',
+    entityType: 'channel',
+    entityName,
+    entityDiscordId,
+    description: 'Unexpected channel',
+    suggestedAction: 'accept',
+  };
+}
+
+function everyoneDrift(): DriftItem {
+  return {
+    type: 'EVERYONE_DRIFT',
+    severity: 'critical',
+    entityType: 'everyone',
+    entityName: '@everyone',
+    description: '@everyone permissions changed.',
+    suggestedAction: 'repair',
+  };
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
 });
@@ -103,7 +127,7 @@ describe('runSyncCycle', () => {
       from: vi.fn(() => supaChain(null)),
     } as any;
     const bus = makeEventBus();
-    const config = makeConfig();
+    const config = makeConfig({ autoRepair: true });
 
     const result = await runSyncCycle(guild as any, supabase, bus as any, config);
 
@@ -156,13 +180,14 @@ describe('runSyncCycle', () => {
     } as any;
 
     mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: true, diffs: [] });
-    mockClassifyDrift.mockReturnValueOnce([]);
+    mockClassifyDrift.mockReturnValueOnce([everyoneDrift()]);
 
     const bus = makeEventBus();
     const config = makeConfig({ autoRepair: true, autoRepairEveryone: true });
 
     await runSyncCycle(guild as any, supabase, bus as any, config);
 
+    expect(guild.roles.everyone.setPermissions).toHaveBeenCalledTimes(1);
     expect(guild.roles.everyone.setPermissions).toHaveBeenCalledWith(
       0n,
       expect.stringContaining('auto-repair'),
@@ -184,7 +209,7 @@ describe('runSyncCycle', () => {
     } as any;
 
     mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: true, diffs: [] });
-    mockClassifyDrift.mockReturnValueOnce([]);
+    mockClassifyDrift.mockReturnValueOnce([everyoneDrift()]);
 
     const bus = makeEventBus();
     const config = makeConfig({ autoRepair: false, autoRepairEveryone: true });
@@ -233,7 +258,7 @@ describe('runSyncCycle', () => {
     } as any;
 
     mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: true, diffs: [] });
-    mockClassifyDrift.mockReturnValueOnce([]);
+    mockClassifyDrift.mockReturnValueOnce([everyoneDrift()]);
 
     const bus = makeEventBus();
     const config = makeConfig({ autoRepair: true, autoRepairEveryone: false });
@@ -243,7 +268,7 @@ describe('runSyncCycle', () => {
     expect(guild.roles.everyone.setPermissions).not.toHaveBeenCalled();
   });
 
-  it('filters out community-required channels', async () => {
+  it('does not exempt a user-created moderator-only channel by name', async () => {
     const channels = new MockCollection();
     const rulesChannel = { id: 'rules1', name: 'rules' };
     const updatesChannel = { id: 'updates1', name: 'public-updates' };
@@ -267,25 +292,27 @@ describe('runSyncCycle', () => {
     } as any;
 
     mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: false, diffs: [] });
-    // Return drift items for community channels
     mockClassifyDrift.mockReturnValueOnce([
-      { type: 'EXTRA_RESOURCE', entityType: 'channel', entityName: 'rules', severity: 'low' } as any,
-      { type: 'EXTRA_RESOURCE', entityType: 'channel', entityName: 'moderator-only', severity: 'low' } as any,
-      { type: 'EXTRA_RESOURCE', entityType: 'channel', entityName: 'public-updates', severity: 'low' } as any,
-      { type: 'EXTRA_RESOURCE', entityType: 'channel', entityName: 'real-channel', severity: 'medium' } as any,
+      extraChannelDrift('rules', 'rules1'),
+      extraChannelDrift('moderator-only', 'user-mod-only'),
+      extraChannelDrift('public-updates', 'updates1'),
+      extraChannelDrift('real-channel', 'real-channel'),
     ]);
 
     const bus = makeEventBus();
-    const config = makeConfig();
+    const config = makeConfig({ autoRepair: true });
 
     const result = await runSyncCycle(guild as any, supabase, bus as any, config);
 
-    // Community channels should be filtered
-    expect(result.driftItems).toHaveLength(1);
-    expect(result.driftItems[0].entityName).toBe('real-channel');
+    expect(result.driftItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityDiscordId: 'user-mod-only' }),
+      expect.objectContaining({ entityDiscordId: 'real-channel' }),
+    ]));
+    expect(result.driftItems).toHaveLength(2);
+    expect(result.repaired).toBe(0);
   });
 
-  it('filters out ticket channels', async () => {
+  it('does not exempt an unmapped ticket-looking channel by name', async () => {
     const guild = makeGuild();
     const desiredData = { roles: [], channels: [] };
     const supabase = {
@@ -299,17 +326,56 @@ describe('runSyncCycle', () => {
 
     mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: false, diffs: [] });
     mockClassifyDrift.mockReturnValueOnce([
-      { type: 'EXTRA_RESOURCE', entityType: 'channel', entityName: 'ticket-1234-user', severity: 'low' } as any,
-      { type: 'EXTRA_RESOURCE', entityType: 'channel', entityName: 'general-chat', severity: 'low' } as any,
+      extraChannelDrift('ticket-1234-user', 'user-ticket-looking'),
+      extraChannelDrift('general-chat', 'general-chat'),
     ]);
 
     const bus = makeEventBus();
-    const config = makeConfig();
+    const config = makeConfig({ autoRepair: true });
 
     const result = await runSyncCycle(guild as any, supabase, bus as any, config);
 
-    expect(result.driftItems).toHaveLength(1);
-    expect(result.driftItems[0].entityName).toBe('general-chat');
+    expect(result.driftItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityDiscordId: 'user-ticket-looking' }),
+      expect.objectContaining({ entityDiscordId: 'general-chat' }),
+    ]));
+    expect(result.driftItems).toHaveLength(2);
+    expect(result.repaired).toBe(0);
+  });
+
+  it('exempts only canonical system, mapped, and registered ticket channel IDs', async () => {
+    const guild = makeGuild({ safetyAlertsChannelId: 'system-moderator-only' });
+    const desiredData = { roles: [], channels: [] };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_desired_state') return supaChain(desiredData);
+        if (table === 'discord_id_map') return supaChain([
+          { entity_type: 'channel', template_key: 'channel:moderator-only', discord_id: 'mapped-moderator-only' },
+        ]);
+        if (table === 'tickets') return supaChain([{ channel_id: 'registered-ticket-channel' }]);
+        if (table === 'audit_logs') return supaChain();
+        return supaChain();
+      }),
+    };
+
+    mockComputeStateDiff.mockReturnValueOnce({ everyoneDrift: false, diffs: [] });
+    mockClassifyDrift.mockReturnValueOnce([
+      extraChannelDrift('not-the-name', 'system-moderator-only'),
+      extraChannelDrift('not-the-name', 'mapped-moderator-only'),
+      extraChannelDrift('not-ticket-shaped', 'registered-ticket-channel'),
+      extraChannelDrift('ticket-42-user', 'user-ticket-looking'),
+    ]);
+
+    const result = await runSyncCycle(
+      guild as unknown as Parameters<typeof runSyncCycle>[0],
+      supabase as unknown as Parameters<typeof runSyncCycle>[1],
+      makeEventBus() as unknown as Parameters<typeof runSyncCycle>[2],
+      makeConfig(),
+    );
+
+    expect(result.driftItems).toEqual([
+      expect.objectContaining({ entityDiscordId: 'user-ticket-looking' }),
+    ]);
   });
 
   it('emits drift.detected event when drift found', async () => {

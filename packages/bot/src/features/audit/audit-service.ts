@@ -732,6 +732,8 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ achievementId: d.achievementId, name: d.name, rewardCurrency: d.rewardCurrency }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'achievement.unlock_failed': {
     action: 'achievement.unlock_failed',
@@ -741,6 +743,19 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     targetId: (d) => d.achievementId as string,
     details: (d) => ({ userId: d.userId, name: d.name, stage: d.stage }),
     success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'achievements.backend_unavailable': {
+    action: 'achievements.backend_unavailable',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ operation: d.operation }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'prestige.performed': {
     action: 'prestige.performed',
@@ -749,6 +764,8 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ newLevel: d.newLevel, newMultiplier: d.newMultiplier }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'adventure.started': {
     action: 'adventure.started',
@@ -824,15 +841,52 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ cropCount: d.cropCount, earnings: d.earnings }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'farm.payout_failed': {
-    action: 'farm.payout_failed',
+    action: 'farming.harvest_payout_reverted',
     category: 'economy',
     targetType: 'member',
     actorType: 'system',
     targetId: (d) => d.userId as string,
     details: (d) => ({ amount: d.amount, cropCount: d.cropCount }),
     success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'farming.harvest_payout_reverted': {
+    action: 'farming.harvest_payout_reverted',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'system',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ amount: d.amount, cropCount: d.cropCount }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'farming.seed_return_failed': {
+    action: 'farming.seed_return_failed',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'system',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ itemId: d.itemId, quantity: d.quantity }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'farming.dependency_degraded': {
+    action: 'farming.dependency_degraded',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'system',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ operation: d.operation }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'gather.completed': {
     action: 'gather.completed',
@@ -858,15 +912,52 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ species: d.species, rarity: d.rarity, price: d.price, paid: d.paid }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'fishing.payout_failed': {
-    action: 'fishing.payout_failed',
+    action: 'fishing.catch_payout_failed',
     category: 'economy',
     targetType: 'member',
     actorType: 'system',
     targetId: (d) => d.userId as string,
     details: (d) => ({ species: d.species, amount: d.amount }),
     success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'fishing.catch_payout_failed': {
+    action: 'fishing.catch_payout_failed',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'system',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ species: d.species, amount: d.amount }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'fishing.collection_reward_retried': {
+    action: 'fishing.collection_reward_retried',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'system',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ amount: d.amount }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'fishing.backend_unavailable_retried': {
+    action: 'fishing.backend_unavailable_retried',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'system',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ operation: d.operation }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'heist.started': {
     action: 'heist.started',
@@ -936,6 +1027,61 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ petType: d.petType, price: d.price }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pet.purchase_refunded': {
+    action: 'pets.purchase_refunded',
+    category: 'economy',
+    targetType: 'member',
+    actorType: 'system',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ petType: d.petType, price: d.price, refunded: d.refunded }),
+    success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pet.fed': {
+    action: 'pets.fed', category: 'economy', targetType: 'member', actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ cost: d.cost, oldHunger: d.oldHunger, newHunger: d.newHunger }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pet.feed_failed': {
+    action: 'pets.feed_failed', category: 'economy', targetType: 'member', actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ cost: d.cost, reason: d.reason }), success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pet.played': {
+    action: 'pets.played', category: 'economy', targetType: 'member', actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ oldHappiness: d.oldHappiness, newHappiness: d.newHappiness }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pet.play_failed': {
+    action: 'pets.play_failed', category: 'economy', targetType: 'member', actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ reason: d.reason }), success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pet.trained': {
+    action: 'pets.trained', category: 'economy', targetType: 'member', actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ cost: d.cost, xpGain: d.xpGain, newLevel: d.newLevel }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pet.train_failed': {
+    action: 'pets.train_failed', category: 'economy', targetType: 'member', actorType: 'user',
+    targetId: (d) => d.userId as string,
+    details: (d) => ({ cost: d.cost, reason: d.reason }), success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'pet.battle_resolved': {
     action: 'pet.battle_resolved',
@@ -944,15 +1090,19 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.winnerId as string,
     details: (d) => ({ challengerId: d.challengerId, defenderId: d.defenderId, winnerId: d.winnerId, reward: d.reward, payoutFailed: d.payoutFailed }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'pet.battle_payout_failed': {
-    action: 'pet.battle_payout_failed',
+    action: 'pets.battle_payout_failed',
     category: 'economy',
     targetType: 'member',
     actorType: 'system',
     targetId: (d) => d.winnerId as string,
     details: (d) => ({ reward: d.reward }),
     success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'pet.prestiged': {
     action: 'pet.prestiged',
@@ -961,6 +1111,15 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     actorType: 'user',
     targetId: (d) => d.userId as string,
     details: (d) => ({ newPrestige: d.newPrestige }),
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+  },
+  'pets.decay_cycle_retried': {
+    action: 'pets.decay_cycle_retried', category: 'economy', targetType: 'guild', actorType: 'system',
+    targetId: (d) => d.guildId as string,
+    details: (d) => ({ operation: d.operation }), success: false,
+    correlationId: (d) => d.correlationId as string | undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
   },
   'trivia.completed': {
     action: 'trivia.completed',
@@ -1083,50 +1242,100 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     category: 'giveaways',
     targetType: 'giveaway',
     actorType: 'user',
+    actorId: (d) => d.creatorId as string,
     targetId: (d) => d.giveawayId as string,
     details: (d) => ({ prize: d.prize, winnerCount: d.winnerCount, channelId: d.channelId, endsAt: d.endsAt }),
     occurrenceId: (d) => d.giveawayId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
   },
   'giveaway.entered': {
     action: 'giveaway.entered',
     category: 'giveaways',
     targetType: 'giveaway',
     actorType: 'user',
+    actorId: (d) => d.userId as string,
     targetId: (d) => d.giveawayId as string,
     details: (d) => ({ userId: d.userId, withdrawn: d.withdrawn, entryCount: d.entryCount }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}:entry:${d.userId as string}`,
   },
   'giveaway.paused': {
     action: 'giveaway.paused',
     category: 'giveaways',
     targetType: 'giveaway',
     actorType: 'user',
+    actorId: (d) => d.actorId as string | undefined,
     targetId: (d) => d.giveawayId as string,
     details: (d) => ({ prize: d.prize }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
   },
   'giveaway.resumed': {
     action: 'giveaway.resumed',
     category: 'giveaways',
     targetType: 'giveaway',
     actorType: 'user',
+    actorId: (d) => d.actorId as string | undefined,
     targetId: (d) => d.giveawayId as string,
     details: (d) => ({ prize: d.prize, endsAt: d.endsAt }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
   },
   'giveaway.rerolled': {
     action: 'giveaway.rerolled',
     category: 'giveaways',
     targetType: 'giveaway',
     actorType: 'user',
+    actorId: (d) => d.actorId as string | undefined,
     targetId: (d) => d.giveawayId as string,
     details: (d) => ({ prize: d.prize, winnerIds: d.winnerIds, winnerCount: (d.winnerIds as string[]).length }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
   },
   'giveaway.failed': {
     action: 'giveaway.failed',
     category: 'giveaways',
     targetType: 'giveaway',
-    actorType: 'system',
+    actorType: (d) => (d.actorId ? 'user' : 'system'),
+    actorId: (d) => (d.actorId as string | undefined) ?? 'giveaway-worker',
     targetId: (d) => d.giveawayId as string | undefined,
     details: (d) => ({ stage: d.stage, error: d.error }),
     success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${(d.giveawayId as string | null) ?? 'unknown'}:${d.stage as string}`,
+  },
+  'giveaway.draw_resumed': {
+    action: 'giveaways.draw_resumed',
+    category: 'giveaways',
+    targetType: 'giveaway',
+    actorType: 'system',
+    actorId: () => 'giveaway-worker',
+    targetId: (d) => d.giveawayId as string,
+    details: (d) => ({ winnerIds: d.winnerIds }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
+  },
+  'giveaway.embed_update_retried': {
+    action: 'giveaways.embed_update_retried',
+    category: 'giveaways',
+    targetType: 'giveaway',
+    actorType: 'system',
+    actorId: () => 'giveaway-worker',
+    targetId: (d) => d.giveawayId as string,
+    details: (d) => ({ channelId: d.channelId, messageId: d.messageId, attempt: d.attempt }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
+  },
+  'giveaway.winner_dm_fallback': {
+    action: 'giveaways.winner_dm_fallback',
+    category: 'giveaways',
+    targetType: 'member',
+    actorType: 'system',
+    actorId: () => 'giveaway-worker',
+    targetId: (d) => d.winnerId as string,
+    details: (d) => ({ giveawayId: d.giveawayId }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
   },
   'giveaway.entry_denied': {
     action: 'giveaway.entry_denied',
@@ -1141,6 +1350,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     // Repeat clicks collapse to ONE row per member/giveaway/reason — denials
     // are hot button spam with no per-occurrence identity beyond this triple.
     occurrenceId: (d) => `${d.giveawayId}:${d.userId}:${d.reason}`,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `giveaway:${d.giveawayId as string}`,
     success: false,
   },
   'xp.admin_adjusted': {
@@ -1169,58 +1379,90 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     category: 'stats_channels',
     targetType: 'channel',
     actorType: 'system',
+    actorId: () => 'stats-worker',
     targetId: (d) => d.channelId as string,
     details: (d) => ({ statChannelId: d.statChannelId, statType: d.statType, value: d.value, created: d.created }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `stats:${d.statChannelId as string}`,
   },
   'stats_channel.update_failed': {
     action: 'stats_channel.update_failed',
     category: 'stats_channels',
     targetType: 'channel',
     actorType: 'system',
+    actorId: () => 'stats-worker',
     targetId: (d) => (d.channelId ?? d.statChannelId) as string,
     details: (d) => ({ statChannelId: d.statChannelId, statType: d.statType, error: d.error }),
     success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `stats:${d.statChannelId as string}`,
   },
   'temp_channel.created': {
     action: 'temp_channel.created',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: 'user',
+    actorId: (d) => d.ownerId as string,
     targetId: (d) => d.channelId as string,
     details: (d) => ({ textChannelId: d.textChannelId, hubId: d.hubId, hubChannelId: d.hubChannelId, ownerId: d.ownerId }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
   },
   'temp_channel.claimed': {
     action: 'temp_channel.claimed',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: 'user',
+    actorId: (d) => d.newOwnerId as string,
     targetId: (d) => d.channelId as string,
     details: (d) => ({ previousOwnerId: d.previousOwnerId, newOwnerId: d.newOwnerId }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
   },
   'temp_channel.deleted': {
     action: 'temp_channel.deleted',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: 'system',
+    actorId: (d) => (d.actorId as string | undefined) ?? 'temp-channel-worker',
     targetId: (d) => d.channelId as string,
     details: (d) => ({ ownerId: d.ownerId, reason: d.reason }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
   },
   'temp_channel.creation_failed': {
     action: 'temp_channel.creation_failed',
     category: 'temp_channels',
     targetType: 'channel',
-    actorType: 'system',
+    actorType: (d) => (d.memberId ? 'user' : 'system'),
+    actorId: (d) => (d.memberId as string | undefined) ?? 'temp-channel-worker',
     targetId: (d) => d.hubChannelId as string,
     details: (d) => ({ hubId: d.hubId, memberId: d.memberId, error: d.error }),
     success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:hub:${d.hubId as string}`,
+  },
+  'temp_channel.creation_retried': {
+    action: 'temp_channels.creation_retried',
+    category: 'temp_channels',
+    targetType: 'channel',
+    actorType: 'user',
+    actorId: (d) => d.memberId as string,
+    targetId: (d) => d.hubChannelId as string,
+    details: (d) => ({ hubId: d.hubId, hubChannelId: d.hubChannelId, attempt: d.attempt, backoffMs: d.backoffMs }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:hub:${d.hubId as string}`,
   },
   'temp_channel.orphan_reconciled': {
     action: 'temp_channel.orphan_reconciled',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: 'system',
+    actorId: () => 'temp-channel-worker',
     targetId: (d) => d.channelId as string,
     details: (d) => ({ ownerId: d.ownerId }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
   },
   'temp_channel.settings_changed': {
     action: 'temp_channel.settings_changed',
@@ -1236,65 +1478,189 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ op: d.op, value: d.value, channelId: d.channelId }),
     beforeState: (d) => (d.before as Record<string, unknown>) ?? undefined,
     afterState: (d) => (d.after as Record<string, unknown>) ?? undefined,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
+  },
+  'temp_channel.control_denied': {
+    action: 'temp_channel.control_denied',
+    category: 'temp_channels',
+    targetType: 'channel',
+    actorType: 'user',
+    actorId: (d) => d.actorId as string,
+    targetId: (d) => d.channelId as string,
+    details: (d) => ({ op: d.op, reason: d.reason, channelId: d.channelId }),
+    success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
   },
   'scheduled_message.sent': {
     action: 'scheduled_message.sent',
     category: 'scheduled_messages',
     targetType: 'scheduled_message',
     actorType: 'system',
+    actorId: () => 'scheduled-worker',
     targetId: (d) => d.scheduleId as string,
     details: (d) => ({ name: d.name, channelId: d.channelId, currentSends: d.currentSends }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `schedule:${d.scheduleId as string}`,
   },
   'scheduled_message.delivery_failed': {
     action: 'scheduled_message.delivery_failed',
     category: 'scheduled_messages',
     targetType: 'scheduled_message',
     actorType: 'system',
+    actorId: () => 'scheduled-worker',
     targetId: (d) => d.scheduleId as string,
     details: (d) => ({ name: d.name, channelId: d.channelId, reason: d.reason }),
     success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `schedule:${d.scheduleId as string}`,
+  },
+  'scheduled_message.channel_missing': {
+    action: 'scheduled_messages.channel_missing',
+    category: 'scheduled_messages',
+    targetType: 'scheduled_message',
+    actorType: 'system',
+    actorId: () => 'scheduled-worker',
+    targetId: (d) => d.scheduleId as string,
+    details: (d) => ({ name: d.name, channelId: d.channelId }),
+    success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `schedule:${d.scheduleId as string}`,
+  },
+  'scheduled_message.send_retried': {
+    action: 'scheduled_messages.send_retried',
+    category: 'scheduled_messages',
+    targetType: 'scheduled_message',
+    actorType: 'system',
+    actorId: () => 'scheduled-worker',
+    targetId: (d) => d.scheduleId as string,
+    details: (d) => ({ name: d.name, channelId: d.channelId, attempt: d.attempt, backoffMs: d.backoffMs }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `schedule:${d.scheduleId as string}`,
+  },
+  'scheduled_message.missed': {
+    action: 'scheduled_messages.occurrences_missed',
+    category: 'scheduled_messages',
+    targetType: 'scheduled_message',
+    actorType: 'system',
+    actorId: () => 'scheduled-worker',
+    targetId: (d) => d.scheduleId as string,
+    details: (d) => ({ name: d.name, channelId: d.channelId, missedCount: d.missedCount, lastOccurrenceAt: d.lastOccurrenceAt }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `schedule:${d.scheduleId as string}`,
   },
   'poll.created': {
     action: 'poll.created',
     category: 'polls',
     targetType: 'poll',
     actorType: 'user',
+    actorId: (d) => d.creatorId as string,
     targetId: (d) => d.pollId as string,
     details: (d) => ({ title: d.title, optionCount: d.optionCount, allowMultiple: d.allowMultiple, channelId: d.channelId }),
     occurrenceId: (d) => d.pollId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `poll:${d.pollId as string}`,
   },
   'poll.closed': {
     action: 'poll.closed',
     category: 'polls',
     targetType: 'poll',
     actorType: 'user',
+    actorId: (d) => d.actorId as string,
     targetId: (d) => d.pollId as string,
     details: (d) => ({ title: d.title }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `poll:${d.pollId as string}`,
+  },
+  'poll.late_interaction_rejected': {
+    action: 'polls.late_interaction_rejected',
+    category: 'polls', targetType: 'poll', actorType: 'user',
+    actorId: (d) => d.actorId as string, targetId: (d) => d.pollId as string,
+    details: (d) => ({ action: d.action, reason: d.reason }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `poll:${d.pollId as string}`,
   },
   'prediction.created': {
     action: 'prediction.created',
     category: 'predictions',
     targetType: 'prediction',
     actorType: 'user',
+    actorId: (d) => d.creatorId as string,
     targetId: (d) => d.predictionId as string,
     details: (d) => ({ title: d.title, optionCount: d.optionCount, channelId: d.channelId }),
     occurrenceId: (d) => d.predictionId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `prediction:${d.predictionId as string}`,
   },
   'prediction.bet_placed': {
     action: 'prediction.bet_placed',
     category: 'predictions',
     targetType: 'prediction',
     actorType: 'user',
+    actorId: (d) => d.userId as string,
     targetId: (d) => d.predictionId as string,
     details: (d) => ({ userId: d.userId, optionId: d.optionId, amount: d.amount, newPool: d.newPool }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `prediction:${d.predictionId as string}`,
   },
   'prediction.resolved': {
     action: 'prediction.resolved',
     category: 'predictions',
     targetType: 'prediction',
     actorType: 'user',
+    actorId: (d) => d.actorId as string,
     targetId: (d) => d.predictionId as string,
     details: (d) => ({ title: d.title, winningOptionId: d.winningOptionId, totalPool: d.totalPool, payoutCount: d.payoutCount, refundedCount: d.refundedCount, redrive: d.redrive }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `prediction:${d.predictionId as string}`,
+  },
+  'prediction.resolve_rejected': {
+    action: 'polls.resolve_rejected', category: 'polls', targetType: 'prediction', actorType: 'user',
+    actorId: (d) => d.actorId as string, targetId: (d) => d.predictionId as string,
+    details: (d) => ({ reason: d.reason }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `prediction:${d.predictionId as string}`,
+  },
+  'prediction.late_interaction_rejected': {
+    action: 'polls.late_interaction_rejected', category: 'polls', targetType: 'prediction', actorType: 'user',
+    actorId: (d) => d.actorId as string, targetId: (d) => d.predictionId as string,
+    details: (d) => ({ action: d.action, reason: d.reason }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `prediction:${d.predictionId as string}`,
+  },
+  'prediction.settlement_payout_retried': {
+    action: 'polls.settlement_payout_retried', category: 'polls', targetType: 'prediction', actorType: 'system',
+    actorId: () => 'prediction-worker', targetId: (d) => d.predictionId as string,
+    details: (d) => ({ betId: d.betId, winnerId: d.winnerId, settlementType: d.settlementType }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `prediction:${d.predictionId as string}`,
+  },
+  'welcome.delivery_failed': {
+    action: 'welcome.delivery_failed', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: (d) => ({ surface: d.surface, reason: d.reason }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.dm_blocked_fallback': {
+    action: 'welcome.dm_blocked_fallback', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: () => ({ fallback: 'channel' }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.member_role_grant_failed': {
+    action: 'welcome.member_role_grant_failed', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: (d) => ({ roleId: d.roleId, attempt: d.attempt }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.channel_missing': {
+    action: 'welcome.channel_missing', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: (d) => ({ channelId: d.channelId }), success: false,
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
   },
 };
 
@@ -1376,6 +1742,8 @@ export class AuditService {
   private activeGapWindows = new Map<AuditGapKind, MutableAuditGapWindow>();
   private pendingGapWindows = new Map<AuditGapKind, FrozenAuditGapWindow>();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushIntervalMs = 5_000;
+  private flushIntervalRefresh: Promise<void> | null = null;
   private flushInProgress: Promise<boolean> | null = null;
   private stopInProgress: Promise<void> | null = null;
   private acceptingEntries = true;
@@ -1475,14 +1843,59 @@ export class AuditService {
     };
     this.eventBus.onAny(this.eventHandler, { backpressureExempt: true });
 
-    // Flush queue every 5 seconds to batch inserts
+    // Start with the safe default immediately, then replace the timer once
+    // the guild-scoped control has been read. Replacing the timer through one
+    // helper keeps hot reloads/restarts from accumulating duplicate timers.
+    this.scheduleFlushTimer(this.flushIntervalMs);
+    void this.refreshFlushInterval();
+
+    log.info('Started — listening to all platform events (with before/after diffs)');
+  }
+
+  /**
+   * Reload the guild-scoped audit cadence. Invalid/stale values fail closed
+   * to the near-real-time default and never create a second active timer.
+   */
+  async refreshFlushInterval(): Promise<void> {
+    if (this.flushIntervalRefresh) return this.flushIntervalRefresh;
+    this.flushIntervalRefresh = (async () => {
+      try {
+        const { data, error } = await this.supabase
+          .from('guild_config')
+          .select('audit_flush_interval_ms')
+          .eq('guild_id', this.guildId)
+          .maybeSingle();
+        if (error) throw new Error(error.message);
+        const candidate = Number(data?.audit_flush_interval_ms);
+        const interval = Number.isInteger(candidate) && candidate >= 1_000 && candidate <= 60_000
+          ? candidate
+          : 5_000;
+        this.flushIntervalMs = interval;
+        if (this.eventHandler) this.scheduleFlushTimer(interval);
+      } catch (error) {
+        log.warn('Using default audit flush interval:', error);
+        this.flushIntervalMs = 5_000;
+        if (this.eventHandler) this.scheduleFlushTimer(this.flushIntervalMs);
+      } finally {
+        this.flushIntervalRefresh = null;
+      }
+    })();
+    return this.flushIntervalRefresh;
+  }
+
+  /** Exposed for focused runtime tests and diagnostics. */
+  getFlushIntervalMs(): number {
+    return this.flushIntervalMs;
+  }
+
+  private scheduleFlushTimer(intervalMs: number): void {
+    if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = setInterval(() => {
       void this.flush().catch((err: unknown) => {
         log.error('Unexpected audit flush failure:', err);
       });
-    }, 5000);
-
-    log.info('Started — listening to all platform events (with before/after diffs)');
+    }, intervalMs);
+    this.flushTimer.unref?.();
   }
 
   private trackPendingEnqueue(
@@ -1758,7 +2171,9 @@ export class AuditService {
       details: mapping.details?.(data) ?? {},
       before_state: beforeState,
       after_state: mapping.afterState?.(data) ?? null,
-      correlation_id: mapping.correlationId?.(data) ?? null,
+      correlation_id:
+        mapping.correlationId?.(data) ??
+        (typeof data.correlationId === 'string' && data.correlationId !== '' ? data.correlationId : null),
       occurrence_key: occurrence
         ? `${action}:${occurrence}`
         : `audit.delivery:${randomUUID()}`,

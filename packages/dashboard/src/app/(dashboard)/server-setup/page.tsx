@@ -4,15 +4,15 @@ import { useState, useEffect, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/shared/button';
+import { Input, Select, Toggle } from '@/components/shared/input';
 import { Badge } from '@/components/shared/badge';
 import { cn } from '@/lib/utils/cn';
 import {
   CheckCircle2, Circle, ChevronRight, Shield, Hash,
   Rocket, Eye, Settings, Zap, AlertTriangle,
   Loader2, Plus, Trash2, Crown, Sparkles, Users,
-  X,
+  X, Volume2, Megaphone, FolderOpen, Pencil, Save,
 } from 'lucide-react';
-import { deployApi } from '@/lib/api/client';
 import { useToast } from '@/components/shared/toast';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
@@ -219,6 +219,60 @@ const DEFAULT_CATEGORIES: WizardCategory[] = [
   { key: 'cat-staff', name: 'Staff', position: 5 },
 ];
 
+const WIZARD_CHANNEL_TYPE_OPTIONS = [
+  { value: '0', label: 'Text Channel' },
+  { value: '2', label: 'Voice Channel' },
+  { value: '5', label: 'Announcement' },
+];
+
+const WIZARD_SLOWMODE_OPTIONS = [
+  { value: '0', label: 'Off' },
+  { value: '5', label: '5 seconds' },
+  { value: '10', label: '10 seconds' },
+  { value: '30', label: '30 seconds' },
+  { value: '60', label: '1 minute' },
+  { value: '300', label: '5 minutes' },
+  { value: '900', label: '15 minutes' },
+  { value: '3600', label: '1 hour' },
+  { value: '21600', label: '6 hours' },
+];
+
+function normalizeWizardChannelName(name: string, type: number): string {
+  return type === 2 ? name.trim() : name.trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+type DeploymentPlan = {
+  roles: readonly WizardRole[];
+  channels: readonly WizardChannel[];
+  categories: readonly WizardCategory[];
+};
+
+function hasAppliedCurrentPlan(
+  statusData: DeployData,
+  plan: DeploymentPlan,
+  previousAppliedAt: string | null,
+): boolean {
+  if (statusData.isDeploying || !statusData.desiredState) return false;
+
+  const desired = statusData.desiredState;
+  const appliedAt = desired.applied_at;
+  if (typeof appliedAt !== 'string' || appliedAt.length === 0) return false;
+  if (appliedAt === previousAppliedAt) return false;
+  if (!Array.isArray(desired.roles)
+    || !Array.isArray(desired.channels)
+    || !Array.isArray(desired.categories)) return false;
+
+  return JSON.stringify(desired.roles) === JSON.stringify(plan.roles)
+    && JSON.stringify(desired.channels) === JSON.stringify(plan.channels)
+    && JSON.stringify(desired.categories) === JSON.stringify(plan.categories);
+}
+
+function wizardChannelDefaults(type: number): Pick<WizardChannel, 'templateId' | 'overrides'> {
+  return type === 2
+    ? { templateId: 'voice', overrides: voiceOverrides() }
+    : { templateId: 'open', overrides: viewUseOverrides() };
+}
+
 // ============================================================
 // Step Configurations
 // ============================================================
@@ -226,7 +280,7 @@ const DEFAULT_CATEGORIES: WizardCategory[] = [
 const STEPS: StepConfig[] = [
   { number: 1, title: 'Bot Status', description: 'Verify bot connection & permissions', icon: Settings },
   { number: 2, title: 'Roles', description: 'Design your role hierarchy by tier', icon: Shield },
-  { number: 3, title: 'Channels', description: 'Configure channel structure', icon: Hash },
+  { number: 3, title: 'Channels', description: 'Design categories and channels', icon: Hash },
   { number: 4, title: 'Review', description: 'Preview all changes before deploying', icon: Eye },
   { number: 5, title: 'Deploy', description: 'Execute server configuration', icon: Rocket },
   { number: 6, title: 'Verification', description: 'Confirm deployment success', icon: CheckCircle2 },
@@ -241,9 +295,9 @@ export default function SetupPage() {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
   const { toast } = useToast();
   const [completedSteps, setCompletedSteps] = useState<Set<WizardStep>>(new Set());
-  const [deploying, setDeploying] = useState(false);
   const [setupData, setSetupData] = useState<SetupData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [destructiveDeploymentConfirmed, setDestructiveDeploymentConfirmed] = useState(false);
 
   // Wizard state — roles & channels the user configures
   const [wizardRoles, setWizardRoles] = useState<WizardRole[]>([]);
@@ -258,12 +312,43 @@ export default function SetupPage() {
           const data: SetupData = await res.json();
           setSetupData(data);
 
+          const savedRoles = data.desiredState?.roles;
+          const savedChannels = data.desiredState?.channels;
+          const savedCategories = data.desiredState?.categories;
+          if (Array.isArray(savedRoles) && savedRoles.length > 0) {
+            setWizardRoles(savedRoles as WizardRole[]);
+          }
+          if (Array.isArray(savedChannels) && savedChannels.length > 0) {
+            const channels = savedChannels as WizardChannel[];
+            setWizardChannels(channels);
+            if (Array.isArray(savedCategories) && savedCategories.length > 0) {
+              setWizardCategories(savedCategories as WizardCategory[]);
+            } else {
+              const categoryKeys = [...new Set(channels.map((channel) => channel.categoryKey).filter(Boolean))];
+              setWizardCategories(categoryKeys.map((key, position) => ({
+                key,
+                name: key
+                  .replace(/^cat-/, '')
+                  .replace(/-/g, ' ')
+                  .replace(/\b\w/g, (letter) => letter.toUpperCase()),
+                position,
+              })));
+            }
+          }
+
           if (data.guild?.setupCompleted) {
             setCompletedSteps(new Set([1, 2, 3, 4, 5, 6, 7] as WizardStep[]));
             setCurrentStep(7);
           } else if (data.isDeployed) {
             setCompletedSteps(new Set([1, 2, 3, 4, 5] as WizardStep[]));
             setCurrentStep(6);
+          }
+
+          const requestedStep = Number(new URLSearchParams(window.location.search).get('step'));
+          if (requestedStep === 3 || requestedStep === 4) {
+            const completed = requestedStep === 3 ? [1, 2] : [1, 2, 3];
+            setCompletedSteps(new Set(completed as WizardStep[]));
+            setCurrentStep(requestedStep);
           }
         }
       } catch (e) {
@@ -277,6 +362,38 @@ export default function SetupPage() {
   const markComplete = (step: WizardStep) => {
     setCompletedSteps((prev) => new Set([...prev, step]));
   };
+
+  const resetDeployCycle = useCallback(() => {
+    setDestructiveDeploymentConfirmed(false);
+    setCompletedSteps((previous) => {
+      const next = new Set(previous);
+      for (const step of [4, 5, 6, 7] as WizardStep[]) next.delete(step);
+      return next;
+    });
+  }, []);
+
+  const markRolesDirty = useCallback(() => {
+    resetDeployCycle();
+    setCompletedSteps((previous) => {
+      const next = new Set(previous);
+      next.delete(2);
+      return next;
+    });
+  }, [resetDeployCycle]);
+
+  const markChannelsDirty = useCallback(() => {
+    resetDeployCycle();
+    setCompletedSteps((previous) => {
+      const next = new Set(previous);
+      next.delete(3);
+      return next;
+    });
+  }, [resetDeployCycle]);
+
+  const navigateToStep = useCallback((step: WizardStep) => {
+    if (step === 4 && currentStep !== 4) resetDeployCycle();
+    setCurrentStep(step);
+  }, [currentStep, resetDeployCycle]);
 
   const canAdvance = completedSteps.has(currentStep);
 
@@ -308,7 +425,7 @@ export default function SetupPage() {
               return (
                 <button
                   key={step.number}
-                  onClick={() => setCurrentStep(step.number)}
+                  onClick={() => navigateToStep(step.number)}
                   className={cn(
                     'flex w-full items-center gap-2 rounded-input px-3 py-2 text-left transition-standard',
                     isCurrent && 'bg-discord-accent/15 ring-1 ring-discord-accent/40',
@@ -353,6 +470,7 @@ export default function SetupPage() {
               isComplete={completedSteps.has(2)}
               roles={wizardRoles}
               onRolesChange={setWizardRoles}
+              onDirty={markRolesDirty}
             />
           )}
           {currentStep === 3 && (
@@ -363,6 +481,7 @@ export default function SetupPage() {
               categories={wizardCategories}
               onChannelsChange={setWizardChannels}
               onCategoriesChange={setWizardCategories}
+              onDirty={markChannelsDirty}
             />
           )}
           {currentStep === 4 && (
@@ -372,17 +491,19 @@ export default function SetupPage() {
               roles={wizardRoles}
               channels={wizardChannels}
               categories={wizardCategories}
+              destructiveConfirmed={destructiveDeploymentConfirmed}
+              onDestructiveConfirmation={() => setDestructiveDeploymentConfirmed(true)}
+              onDestructiveCancellation={() => setDestructiveDeploymentConfirmed(false)}
             />
           )}
           {currentStep === 5 && (
             <Step5Deploy
               onComplete={() => markComplete(5)}
               isComplete={completedSteps.has(5)}
-              deploying={deploying}
-              onDeploy={() => setDeploying(true)}
               roles={wizardRoles}
               channels={wizardChannels}
               categories={wizardCategories}
+              destructiveConfirmed={destructiveDeploymentConfirmed}
             />
           )}
           {currentStep === 6 && (
@@ -407,14 +528,14 @@ export default function SetupPage() {
               variant="ghost"
               size="sm"
               disabled={currentStep === 1}
-              onClick={() => setCurrentStep((s) => Math.max(1, s - 1) as WizardStep)}
+              onClick={() => navigateToStep(Math.max(1, currentStep - 1) as WizardStep)}
             >
               Back
             </Button>
             <Button
               size="sm"
               disabled={!canAdvance || currentStep === 7}
-              onClick={() => setCurrentStep((s) => Math.min(7, s + 1) as WizardStep)}
+              onClick={() => navigateToStep(Math.min(7, currentStep + 1) as WizardStep)}
             >
               Next
               <ChevronRight size={14} />
@@ -452,10 +573,22 @@ function Step1BotStatus({
       const res = await fetch('/api/guild');
       if (res.ok) {
         const data = await res.json();
+        const guild = data.guild;
+        const rolePosition = guild?.bot_role_position;
+        if (!guild?.id || typeof guild.name !== 'string' || typeof rolePosition !== 'number' || rolePosition < 1) {
+          setStatus({
+            connected: false,
+            rolePosition: -1,
+            guildName: '',
+            memberCount: 0,
+            error: 'Bot is connected, but its role is not high enough to deploy server roles',
+          });
+          return;
+        }
         setStatus({
           connected: true,
-          rolePosition: data.botRolePosition ?? -1,
-          guildName: data.name ?? 'Unknown',
+          rolePosition,
+          guildName: guild.name,
           memberCount: data.memberCount ?? 0,
         });
         onComplete();
@@ -529,11 +662,13 @@ function Step2Roles({
   isComplete,
   roles,
   onRolesChange,
+  onDirty,
 }: {
   onComplete: () => void;
   isComplete: boolean;
   roles: WizardRole[];
   onRolesChange: (roles: WizardRole[]) => void;
+  onDirty: () => void;
 }) {
   const [addingTier, setAddingTier] = useState<TierKey | null>(null);
   const [newName, setNewName] = useState('');
@@ -562,6 +697,7 @@ function Step2Roles({
     };
 
     onRolesChange([...roles, role]);
+    onDirty();
     setNewName('');
     setNewColor('#99AAB5');
     setNewHoist(false);
@@ -570,6 +706,7 @@ function Step2Roles({
 
   const removeRole = (key: string) => {
     onRolesChange(roles.filter((r) => r.key !== key));
+    onDirty();
   };
 
   const hasRoles = roles.length > 0;
@@ -743,10 +880,6 @@ function Step2Roles({
   );
 }
 
-// ============================================================
-// Step 3: Channel Structure
-// ============================================================
-
 function Step3Channels({
   onComplete,
   isComplete,
@@ -754,6 +887,7 @@ function Step3Channels({
   categories,
   onChannelsChange,
   onCategoriesChange,
+  onDirty,
 }: {
   onComplete: () => void;
   isComplete: boolean;
@@ -761,11 +895,141 @@ function Step3Channels({
   categories: WizardCategory[];
   onChannelsChange: (ch: WizardChannel[]) => void;
   onCategoriesChange: (cat: WizardCategory[]) => void;
+  onDirty: () => void;
 }) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [editingChannel, setEditingChannel] = useState<WizardChannel | null>(null);
+  const [showNewChannel, setShowNewChannel] = useState(false);
+  const [showNewCategory, setShowNewCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<{ type: 'channel' | 'category'; key: string; name: string } | null>(null);
+  const [newChannel, setNewChannel] = useState({
+    name: '',
+    type: 0,
+    categoryKey: categories[0]?.key ?? '',
+    topic: '',
+    slowmode: 0,
+    nsfw: false,
+  });
+
   const grouped = categories.map((cat) => ({
     ...cat,
     channels: channels.filter((ch) => ch.categoryKey === cat.key),
   }));
+  const uncategorized = channels.filter((channel) => !channel.categoryKey);
+
+  const updateChannels = (next: WizardChannel[]) => {
+    onChannelsChange(next);
+    onDirty();
+  };
+
+  const updateCategories = (next: WizardCategory[]) => {
+    onCategoriesChange(next);
+    onDirty();
+  };
+
+  const selectChannel = (channel: WizardChannel) => {
+    setSelectedKey(channel.key);
+    setEditingChannel({ ...channel });
+    setShowNewChannel(false);
+    setShowNewCategory(false);
+  };
+
+  const createCategory = () => {
+    const name = newCategoryName.trim();
+    if (!name) return;
+    const baseKey = `cat-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'category'}`;
+    let key = baseKey;
+    let suffix = 2;
+    while (categories.some((category) => category.key === key)) {
+      key = `${baseKey}-${suffix}`;
+      suffix += 1;
+    }
+    updateCategories([...categories, { key, name, position: categories.length }]);
+    setNewChannel((current) => ({ ...current, categoryKey: key }));
+    setNewCategoryName('');
+    setShowNewCategory(false);
+  };
+
+  const createChannel = () => {
+    const name = normalizeWizardChannelName(newChannel.name, newChannel.type);
+    if (!name) return;
+    const baseKey = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'channel';
+    let key = baseKey;
+    let suffix = 2;
+    while (channels.some((channel) => channel.key === key)) {
+      key = `${baseKey}-${suffix}`;
+      suffix += 1;
+    }
+    const defaults = wizardChannelDefaults(newChannel.type);
+    updateChannels([...channels, {
+      key,
+      name,
+      type: newChannel.type,
+      categoryKey: newChannel.categoryKey,
+      position: channels.filter((channel) => channel.categoryKey === newChannel.categoryKey).length,
+      topic: newChannel.type === 2 ? null : newChannel.topic.trim() || null,
+      slowmode: newChannel.type === 2 ? 0 : newChannel.slowmode,
+      nsfw: newChannel.nsfw,
+      ...defaults,
+    }]);
+    setNewChannel({ name: '', type: 0, categoryKey: categories[0]?.key ?? '', topic: '', slowmode: 0, nsfw: false });
+    setShowNewChannel(false);
+  };
+
+  const saveChannel = () => {
+    if (!editingChannel) return;
+    const name = normalizeWizardChannelName(editingChannel.name, editingChannel.type);
+    if (!name) return;
+    updateChannels(channels.map((channel) => channel.key === editingChannel.key
+      ? {
+          ...editingChannel,
+          name,
+          topic: editingChannel.type === 2 ? null : editingChannel.topic,
+          slowmode: editingChannel.type === 2 ? 0 : editingChannel.slowmode,
+        }
+      : channel));
+    setEditingChannel(null);
+    setSelectedKey(null);
+  };
+
+  const channelIcon = (type: number) => type === 2 ? Volume2 : type === 5 ? Megaphone : Hash;
+
+  const ChannelRow = ({ channel }: { channel: WizardChannel }) => {
+    const Icon = channelIcon(channel.type);
+    return (
+      <div
+        onClick={() => selectChannel(channel)}
+        className={cn(
+          'group flex cursor-pointer items-center gap-2 rounded-input px-3 py-1.5 transition-standard',
+          selectedKey === channel.key
+            ? 'bg-discord-accent/15 ring-1 ring-discord-accent/40'
+            : 'hover:bg-discord-bg-primary/50',
+        )}
+      >
+        <Icon size={14} className="shrink-0 text-discord-text-muted" />
+        <span className="flex-1 truncate text-sm text-discord-text-primary">{channel.name}</span>
+        {channel.nsfw && <Badge variant="danger">NSFW</Badge>}
+        <button
+          aria-label={`Edit ${channel.name}`}
+          onClick={(event) => { event.stopPropagation(); selectChannel(channel); }}
+          className="rounded p-1 text-discord-text-muted hover:bg-discord-bg-tertiary hover:text-discord-text-primary"
+        >
+          <Pencil size={12} />
+        </button>
+        <button
+          aria-label={`Delete ${channel.name}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            setDeleteTarget({ type: 'channel', key: channel.key, name: channel.name });
+          }}
+          className="rounded p-1 text-discord-text-muted hover:bg-discord-danger/20 hover:text-discord-danger"
+        >
+          <Trash2 size={12} />
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -780,32 +1044,272 @@ function Step3Channels({
       </CardHeader>
 
       <CardDescription>
-        Your server will be set up with {channels.length} channels in {categories.length} categories.
-        You can add, remove, or rename channels after setup from the Channels page.
+        Design the categories and channels SomniBot will create. Nothing is applied to Discord until the Deploy step.
       </CardDescription>
 
-      <div className="space-y-3 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
-        {grouped.map((g) => (
-          <div key={g.key}>
-            <p className="text-[10px] font-bold uppercase tracking-wider text-discord-text-muted">
-              {g.name}
-            </p>
-            <div className="ml-2 space-y-0.5">
-              {g.channels.map((ch) => (
-                <p key={ch.key} className="text-discord-text-secondary">
-                  {ch.type === 2 ? '🔊' : ch.type === 5 ? '📢' : '#'} {ch.name}
-                  {ch.topic && <span className="ml-1 text-discord-text-muted">— {ch.topic}</span>}
-                </p>
-              ))}
-            </div>
-          </div>
-        ))}
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            setShowNewCategory(true);
+            setShowNewChannel(false);
+            setEditingChannel(null);
+            setSelectedKey(null);
+          }}
+        >
+          <FolderOpen size={14} />
+          Add Category
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => {
+            setShowNewChannel(true);
+            setShowNewCategory(false);
+            setEditingChannel(null);
+            setSelectedKey(null);
+          }}
+        >
+          <Plus size={14} />
+          Add Channel
+        </Button>
       </div>
 
-      <Button size="sm" onClick={onComplete}>
-        <CheckCircle2 size={14} />
-        Confirm Channels
-      </Button>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[300px_1fr]">
+        <Card>
+          <div className="space-y-1">
+            {uncategorized.length > 0 && (
+              <div className="space-y-0.5 pb-2">
+                <p className="px-1 text-xs font-semibold uppercase tracking-wide text-discord-text-muted">Uncategorized</p>
+                {uncategorized.map((channel) => <ChannelRow key={channel.key} channel={channel} />)}
+              </div>
+            )}
+            {grouped.map((group) => (
+              <div key={group.key}>
+                <div className="group flex items-center gap-1 px-1 py-1">
+                  <span className="flex-1 text-xs font-semibold uppercase tracking-wide text-discord-text-muted">
+                    {group.name}
+                  </span>
+                  <span className="text-[10px] text-discord-text-muted">{group.channels.length}</span>
+                  <button
+                    aria-label={`Add channel to ${group.name}`}
+                    onClick={() => {
+                      setNewChannel((current) => ({ ...current, categoryKey: group.key }));
+                      setShowNewChannel(true);
+                      setShowNewCategory(false);
+                      setEditingChannel(null);
+                    }}
+                    className="rounded p-0.5 text-discord-text-muted hover:text-discord-text-primary"
+                  >
+                    <Plus size={12} />
+                  </button>
+                  <button
+                    aria-label={`Delete ${group.name}`}
+                    onClick={() => setDeleteTarget({ type: 'category', key: group.key, name: group.name })}
+                    className="rounded p-0.5 text-discord-text-muted hover:text-discord-danger"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+                <div className="ml-3 space-y-0.5 border-l border-discord-border-subtle pl-2">
+                  {group.channels.length > 0
+                    ? group.channels.map((channel) => <ChannelRow key={channel.key} channel={channel} />)
+                    : <p className="py-1 pl-2 text-xs italic text-discord-text-muted/50">Empty category</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          {showNewCategory ? (
+            <div className="space-y-4">
+              <CardHeader>
+                <CardTitle>New Category</CardTitle>
+                <div className="flex gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => setShowNewCategory(false)}>Cancel</Button>
+                  <Button size="sm" onClick={createCategory} disabled={!newCategoryName.trim()}>
+                    <Plus size={12} />
+                    Create
+                  </Button>
+                </div>
+              </CardHeader>
+              <Input
+                label="Category Name"
+                id="wizard-new-category"
+                value={newCategoryName}
+                onChange={(event) => setNewCategoryName(event.target.value)}
+                placeholder="e.g. Community"
+              />
+            </div>
+          ) : showNewChannel ? (
+            <div className="space-y-4">
+              <CardHeader>
+                <CardTitle>New Channel</CardTitle>
+                <div className="flex gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => setShowNewChannel(false)}>Cancel</Button>
+                  <Button size="sm" onClick={createChannel} disabled={!newChannel.name.trim()}>
+                    <Plus size={12} />
+                    Create
+                  </Button>
+                </div>
+              </CardHeader>
+              <Input
+                label="Channel Name"
+                id="wizard-new-channel"
+                value={newChannel.name}
+                onChange={(event) => setNewChannel({ ...newChannel, name: event.target.value })}
+                placeholder="e.g. general"
+              />
+              <Select
+                label="Channel Type"
+                id="wizard-new-channel-type"
+                options={WIZARD_CHANNEL_TYPE_OPTIONS}
+                value={String(newChannel.type)}
+                onChange={(event) => setNewChannel({ ...newChannel, type: Number(event.target.value) })}
+              />
+              <Select
+                label="Category"
+                id="wizard-new-channel-category"
+                options={[
+                  { value: '', label: '— No category —' },
+                  ...categories.map((category) => ({ value: category.key, label: category.name })),
+                ]}
+                value={newChannel.categoryKey}
+                onChange={(event) => setNewChannel({ ...newChannel, categoryKey: event.target.value })}
+              />
+              {newChannel.type !== 2 && (
+                <>
+                  <Input
+                    label="Topic"
+                    id="wizard-new-channel-topic"
+                    value={newChannel.topic}
+                    onChange={(event) => setNewChannel({ ...newChannel, topic: event.target.value })}
+                    placeholder="Channel topic description..."
+                  />
+                  <Select
+                    label="Slowmode"
+                    id="wizard-new-channel-slowmode"
+                    options={WIZARD_SLOWMODE_OPTIONS}
+                    value={String(newChannel.slowmode)}
+                    onChange={(event) => setNewChannel({ ...newChannel, slowmode: Number(event.target.value) })}
+                  />
+                </>
+              )}
+              <Toggle
+                label="NSFW Channel"
+                description="Members must confirm they are 18+ to view"
+                checked={newChannel.nsfw}
+                onChange={(nsfw) => setNewChannel({ ...newChannel, nsfw })}
+              />
+            </div>
+          ) : editingChannel ? (
+            <div className="space-y-4">
+              <CardHeader>
+                <CardTitle>Edit: {editingChannel.name}</CardTitle>
+                <div className="flex gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => { setEditingChannel(null); setSelectedKey(null); }}>Cancel</Button>
+                  <Button size="sm" onClick={saveChannel} disabled={!editingChannel.name.trim()}>
+                    <Save size={12} />
+                    Save
+                  </Button>
+                </div>
+              </CardHeader>
+              <Input
+                label="Channel Name"
+                id="wizard-edit-channel"
+                value={editingChannel.name}
+                onChange={(event) => setEditingChannel({ ...editingChannel, name: event.target.value })}
+              />
+              <div className="rounded-input bg-discord-bg-primary p-3 text-xs text-discord-text-muted">
+                Type: <span className="font-medium text-discord-text-primary">
+                  {editingChannel.type === 2 ? 'Voice' : editingChannel.type === 5 ? 'Announcement' : 'Text'}
+                </span> (cannot be changed after creation)
+              </div>
+              <Select
+                label="Category"
+                id="wizard-edit-channel-category"
+                options={[
+                  { value: '', label: '— No category —' },
+                  ...categories.map((category) => ({ value: category.key, label: category.name })),
+                ]}
+                value={editingChannel.categoryKey}
+                onChange={(event) => setEditingChannel({ ...editingChannel, categoryKey: event.target.value })}
+              />
+              {editingChannel.type !== 2 && (
+                <>
+                  <Input
+                    label="Topic"
+                    id="wizard-edit-channel-topic"
+                    value={editingChannel.topic ?? ''}
+                    onChange={(event) => setEditingChannel({ ...editingChannel, topic: event.target.value })}
+                    placeholder="Channel topic description..."
+                  />
+                  <Select
+                    label="Slowmode"
+                    id="wizard-edit-channel-slowmode"
+                    options={WIZARD_SLOWMODE_OPTIONS}
+                    value={String(editingChannel.slowmode)}
+                    onChange={(event) => setEditingChannel({ ...editingChannel, slowmode: Number(event.target.value) })}
+                  />
+                </>
+              )}
+              <Toggle
+                label="NSFW Channel"
+                description="Members must confirm they are 18+ to view"
+                checked={editingChannel.nsfw}
+                onChange={(nsfw) => setEditingChannel({ ...editingChannel, nsfw })}
+              />
+            </div>
+          ) : (
+            <div className="flex h-64 flex-col items-center justify-center text-center">
+              <Hash size={32} className="mb-2 text-discord-text-muted/30" />
+              <p className="text-sm text-discord-text-muted">Select a channel to edit, or create a channel or category.</p>
+              <CardDescription>{channels.length} channels across {categories.length} categories</CardDescription>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="info">{categories.length} categories</Badge>
+          <Badge variant="success">{channels.filter((channel) => channel.type !== 2).length} text</Badge>
+          <Badge variant="cyan">{channels.filter((channel) => channel.type === 2).length} voice</Badge>
+          <Badge variant="default">{channels.length} total</Badge>
+        </div>
+        <Button size="sm" onClick={onComplete} disabled={channels.length === 0}>
+          <CheckCircle2 size={14} />
+          Confirm Channel Structure
+        </Button>
+      </div>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={deleteTarget?.type === 'channel' ? 'Delete Channel' : 'Delete Category'}
+        description={deleteTarget?.type === 'channel'
+          ? `Remove #${deleteTarget?.name} from this deployment?`
+          : `Remove ${deleteTarget?.name}? Its channels will become uncategorized.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={() => {
+          if (!deleteTarget) return;
+          if (deleteTarget.type === 'channel') {
+            updateChannels(channels.filter((channel) => channel.key !== deleteTarget.key));
+            if (selectedKey === deleteTarget.key) {
+              setSelectedKey(null);
+              setEditingChannel(null);
+            }
+          } else {
+            updateChannels(channels.map((channel) => channel.categoryKey === deleteTarget.key
+              ? { ...channel, categoryKey: '' }
+              : channel));
+            updateCategories(categories.filter((category) => category.key !== deleteTarget.key));
+          }
+          setDeleteTarget(null);
+        }}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }
@@ -820,13 +1324,20 @@ function Step4Review({
   roles,
   channels,
   categories,
+  destructiveConfirmed,
+  onDestructiveConfirmation,
+  onDestructiveCancellation,
 }: {
   onComplete: () => void;
   isComplete: boolean;
   roles: WizardRole[];
   channels: WizardChannel[];
   categories: WizardCategory[];
+  destructiveConfirmed: boolean;
+  onDestructiveConfirmation: () => void;
+  onDestructiveCancellation: () => void;
 }) {
+  const [showDestructiveConfirmation, setShowDestructiveConfirmation] = useState(false);
   const rolesByTier = TIER_ORDER.map((tier) => ({
     tier,
     label: TIER_META[tier].label,
@@ -846,19 +1357,34 @@ function Step4Review({
       </CardHeader>
 
       <CardDescription>
-        Review what the bot will create in your Discord server.
+        Review what the bot will apply to your Discord server. Nothing changes until the next step.
       </CardDescription>
 
-      <Card variant="warning">
+      <Card variant={destructiveConfirmed ? 'danger' : 'warning'}>
         <div className="flex items-start gap-2">
-          <AlertTriangle size={16} className="mt-0.5 text-discord-warning" />
+          <AlertTriangle
+            size={16}
+            className={cn(
+              'mt-0.5',
+              destructiveConfirmed ? 'text-discord-danger' : 'text-discord-warning',
+            )}
+          />
           <div>
             <p className="text-sm font-medium text-discord-text-primary">
-              Destructive Action Warning
+              {destructiveConfirmed ? 'Destructive replacement confirmed' : 'Safe deployment selected'}
             </p>
             <p className="text-xs text-discord-text-muted">
-              The bot will <strong>delete all existing channels and non-managed roles</strong> in your Discord server,
-              then recreate everything from your configuration. This cannot be undone.
+              {destructiveConfirmed ? (
+                <>
+                  This deployment will <strong>delete all existing channels and non-managed roles</strong>, then
+                  create this plan. Deleted messages and assignments cannot be restored.
+                </>
+              ) : (
+                <>
+                  The bot reconciles only SomniBot-managed objects. Existing user-created roles, categories,
+                  channels, messages, and assignments are preserved unless you explicitly request replacement below.
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -867,9 +1393,17 @@ function Step4Review({
       <div className="space-y-3 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
         <p className="font-medium text-discord-text-primary">Deploy plan:</p>
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>1. Set @everyone permissions to zero (lockout model)</li>
-          <li>2. Delete existing non-managed roles and channels</li>
-          <li>3. Create {roles.length} roles:</li>
+          <li>
+            1. {destructiveConfirmed
+              ? 'Set @everyone permissions to zero (lockout model)'
+              : 'Preserve existing user-created roles, channels, and permission overrides'}
+          </li>
+          <li>
+            2. {destructiveConfirmed
+              ? 'Replace existing non-managed roles and channels'
+              : 'Reconcile only SomniBot-managed roles, categories, and channels'}
+          </li>
+          <li>3. Apply {roles.length} roles:</li>
         </ul>
 
         {/* Role hierarchy preview */}
@@ -896,20 +1430,45 @@ function Step4Review({
           ))}
           <div className="flex items-center gap-2 text-xs text-discord-text-muted">
             <span className="font-medium">@everyone</span>
-            <span className="text-[10px]">(zero permissions)</span>
+            <span className="text-[10px]">
+              {destructiveConfirmed ? '(zero permissions)' : '(existing permissions preserved)'}
+            </span>
           </div>
         </div>
 
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>4. Create {categories.length} categories</li>
-          <li>5. Create {channels.length} channels with permission overrides</li>
+          <li>4. {destructiveConfirmed ? 'Apply' : 'Reconcile'} {categories.length} categories</li>
+          <li>5. {destructiveConfirmed ? 'Apply' : 'Reconcile'} {channels.length} channels with permission overrides</li>
           <li>6. Store ID mappings for drift detection</li>
         </ul>
       </div>
 
+      {destructiveConfirmed ? (
+        <Button variant="secondary" size="sm" onClick={onDestructiveCancellation}>
+          Keep Existing Server Content
+        </Button>
+      ) : (
+        <Button variant="danger" size="sm" onClick={() => setShowDestructiveConfirmation(true)}>
+          Replace All Existing Roles and Channels
+        </Button>
+      )}
+
       <Button size="sm" onClick={onComplete}>
         I Understand — Ready to Deploy
       </Button>
+
+      <ConfirmDialog
+        open={showDestructiveConfirmation}
+        title="Replace all existing roles and channels?"
+        description="This permanently deletes existing channels, messages, non-managed roles, and member assignments before creating this plan. Choose Replace to explicitly authorize it."
+        confirmLabel="Replace Everything"
+        variant="danger"
+        onConfirm={() => {
+          onDestructiveConfirmation();
+          setShowDestructiveConfirmation(false);
+        }}
+        onCancel={() => setShowDestructiveConfirmation(false)}
+      />
     </div>
   );
 }
@@ -921,39 +1480,49 @@ function Step4Review({
 function Step5Deploy({
   onComplete,
   isComplete,
-  deploying,
-  onDeploy,
   roles,
   channels,
   categories,
+  destructiveConfirmed,
 }: {
   onComplete: () => void;
   isComplete: boolean;
-  deploying: boolean;
-  onDeploy: () => void;
   roles: WizardRole[];
   channels: WizardChannel[];
   categories: WizardCategory[];
+  destructiveConfirmed: boolean;
 }) {
+  const [deploying, setDeploying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusText, setStatusText] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const handleDeploy = async () => {
-    onDeploy();
+    setDeploying(true);
     setError(null);
     setStatusText('Sending deploy request to bot...');
     setProgress(5);
 
     try {
+      const beforeResponse = await fetch('/api/deploy');
+      const beforeData: DeployData | null = beforeResponse.ok
+        ? await beforeResponse.json() as DeployData
+        : null;
+      const previousAppliedAt = typeof beforeData?.desiredState?.applied_at === 'string'
+        ? beforeData.desiredState.applied_at
+        : null;
+      const requestedAt = Date.now();
+
       const res = await fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'deploy',
           roles,
           channels,
           categories,
-          cleanExisting: true,
+          deployMode: destructiveConfirmed ? 'destructive' : 'safe',
+          confirmDestructive: destructiveConfirmed ? true : undefined,
         }),
       });
 
@@ -977,25 +1546,30 @@ function Step5Deploy({
           if (statusRes.ok) {
             const statusData: DeployData = await statusRes.json();
 
-            if (!statusData.isDeploying && statusData.desiredState) {
-              const appliedAt = (statusData.desiredState as Record<string, unknown>).applied_at;
-              if (appliedAt) {
-                setProgress(100);
-                setStatusText('Deployment complete!');
-                onComplete();
-                return;
-              }
+            if (hasAppliedCurrentPlan(
+              statusData,
+              { roles, channels, categories },
+              previousAppliedAt,
+            )) {
+              setProgress(100);
+              setStatusText('Deployment complete!');
+              setDeploying(false);
+              onComplete();
+              return;
             }
 
             if (statusData.recentActions?.length > 0) {
               const latest = statusData.recentActions[0];
-              if (latest.action === 'deploy.completed') {
-                setProgress(100);
-                setStatusText('Deployment complete!');
-                onComplete();
+              const latestAt = typeof latest.timestamp === 'string'
+                ? Date.parse(latest.timestamp)
+                : Number.NaN;
+              if (latest.action === 'deploy.failed'
+                && Number.isFinite(latestAt)
+                && latestAt >= requestedAt - 1_000) {
+                setError('Deployment failed — check the audit log');
+                setStatusText('Deployment failed.');
+                setDeploying(false);
                 return;
-              } else if (latest.action === 'deploy.failed') {
-                throw new Error('Deployment failed — check the audit log');
               }
             }
           }
@@ -1007,13 +1581,15 @@ function Step5Deploy({
         setStatusText(`Bot is deploying... (${attempts * 2}s elapsed)`);
       }
 
-      setStatusText('Deploy request sent. The bot may still be processing — check Discord to verify.');
-      setProgress(100);
-      onComplete();
+      setError('Deployment was not confirmed within 2 minutes. Check the bot connection and try again.');
+      setStatusText('Deployment confirmation timed out.');
+      setProgress(90);
+      setDeploying(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       setError(msg);
       setStatusText(`Error: ${msg}`);
+      setDeploying(false);
     }
   };
 
@@ -1042,6 +1618,15 @@ function Step5Deploy({
         </>
       )}
 
+      {error && !deploying && (
+        <Card variant="danger">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-discord-danger" />
+            <p className="text-sm text-discord-text-primary">{error}</p>
+          </div>
+        </Card>
+      )}
+
       {(deploying || isComplete) && (
         <div className="space-y-3">
           <div className="h-3 overflow-hidden rounded-full bg-discord-bg-tertiary">
@@ -1054,15 +1639,6 @@ function Step5Deploy({
             />
           </div>
           <p className="text-sm text-discord-text-secondary">{statusText}</p>
-
-          {error && (
-            <Card variant="danger">
-              <div className="flex items-center gap-2">
-                <AlertTriangle size={16} className="text-discord-danger" />
-                <p className="text-sm text-discord-text-primary">{error}</p>
-              </div>
-            </Card>
-          )}
 
           {isComplete && !error && (
             <Card variant="success">
@@ -1228,7 +1804,7 @@ function Step7GoLive({
         <h4 className="text-sm font-medium text-discord-text-primary">What&apos;s Next</h4>
         <div className="mt-2 space-y-1 text-xs text-discord-text-secondary">
           <p>• <strong>Roles:</strong> Fine-tune permissions per role from the Roles page</p>
-          <p>• <strong>Channels:</strong> Add or reorganize channels from the Channels page</p>
+          <p>• <strong>Channels:</strong> Rerun the Channels step to review and deploy changes</p>
           <p>• <strong>Onboarding:</strong> Configure Discord native onboarding &amp; welcome messages</p>
           <p>• <strong>Moderation:</strong> Set up auto-mod rules &amp; escalation chains</p>
           <p>• <strong>Music:</strong> Configure the music player &amp; DJ permissions</p>

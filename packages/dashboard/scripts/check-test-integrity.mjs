@@ -24,8 +24,16 @@ const resetMockMethods = new Set(['mockReset', 'mockRestore']);
 function collectTestFiles(directory, files = []) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     if (entry.isDirectory()) {
-      if (!ignoredDirectories.has(entry.name)) {
-        collectTestFiles(path.join(directory, entry.name), files);
+      const child = path.join(directory, entry.name);
+      const relativeChild = path.relative(packagesRoot, child);
+      // The launcher build stages a self-contained bot runtime under
+      // packages/launcher/.resources. Its vendored dependencies contain test-
+      // named files, but they are generated artifacts rather than repository
+      // tests. Keep the exclusion path-specific so a first-party .resources
+      // directory in another package is still audited.
+      const isGeneratedResource = relativeChild.split(path.sep).includes('.resources');
+      if (!ignoredDirectories.has(entry.name) && !isGeneratedResource) {
+        collectTestFiles(child, files);
       }
       continue;
     }
@@ -2939,6 +2947,16 @@ function auditText(file, text) {
     }
     function mappedHookText(expression, environment, seen = new Set()) {
       const node = unwrap(expression);
+      if (
+        ts.isCallExpression(node)
+        && ts.isPropertyAccessExpression(node.expression)
+        && ts.isIdentifier(node.expression.expression)
+        && node.expression.expression.text === 'vi'
+        && node.expression.name.text === 'mocked'
+        && node.arguments[0]
+      ) {
+        return mappedHookText(node.arguments[0], environment, seen);
+      }
       if (ts.isIdentifier(node)) {
         const parameter = parameterDeclarationFor(node);
         const argument = parameter ? environment.get(parameter) : null;

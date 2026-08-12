@@ -4,6 +4,8 @@ import {
   normalizeBaseUrl,
   normalizeRuntimeMode,
   normalizeVpsDomain,
+  normalizeVpsPublicAccessMode,
+  normalizeVpsTailscaleFunnelUrl,
   validateRuntimeNetworkingConfig,
   type RuntimeMode,
   type RuntimeNetworkingConfig,
@@ -72,6 +74,7 @@ export interface SetupFlowInput extends RuntimeNetworkingConfig, Partial<Pick<
   tailscaleReadinessState?: 'ready'
     | 'not-installed'
     | 'not-logged-in'
+    | 'needs-permission'
     | 'not-configured'
     | 'needs-dashboard'
     | 'needs-policy'
@@ -236,7 +239,9 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
 function buildPayPalStep(input: SetupFlowInput): SetupStep {
   const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
   const publicBaseReady = runtimeMode === 'vps'
-    ? Boolean(normalizeVpsDomain(input.vpsDomain))
+    ? Boolean(normalizeVpsPublicAccessMode(input.vpsPublicAccessMode) === 'tailscale-funnel'
+      ? normalizeVpsTailscaleFunnelUrl(input.vpsTailscaleFunnelUrl)
+      : normalizeVpsDomain(input.vpsDomain))
     : Boolean(normalizeBaseUrl(input.publicCallbackBaseUrl));
 
   if (input.paypalReady) {
@@ -479,7 +484,9 @@ function buildDiscordServerStep(input: SetupFlowInput): SetupStep {
 
 function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSummary {
   const regularPublicBase = normalizeBaseUrl(input.publicCallbackBaseUrl);
-  const vpsPublicBase = normalizeVpsDomain(input.vpsDomain);
+  const vpsPublicBase = normalizeVpsPublicAccessMode(input.vpsPublicAccessMode) === 'tailscale-funnel'
+    ? normalizeVpsTailscaleFunnelUrl(input.vpsTailscaleFunnelUrl)
+    : normalizeVpsDomain(input.vpsDomain);
   const publicCallbackBaseUrl = runtimeMode === 'vps' ? vpsPublicBase : regularPublicBase;
   const callbacks = getProviderCallbackUrls(publicCallbackBaseUrl);
   const operatorDashboardUrl = runtimeMode === 'vps'
@@ -489,7 +496,12 @@ function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSum
   return {
     runtimeMode,
     runtimeLabel: runtimeMode === 'vps' ? 'VPS' : 'Regular local',
-    localDashboardUrl: displayUrlWithoutPort(operatorDashboardUrl),
+    // The regular-local dashboard listens on a non-default port, so stripping
+    // it produces an unusable operator URL. VPS summaries still hide their
+    // internal service port behind the public HTTPS origin.
+    localDashboardUrl: runtimeMode === 'vps'
+      ? displayUrlWithoutPort(operatorDashboardUrl)
+      : operatorDashboardUrl,
     publicCallbackUrl: displayUrlWithoutPort(publicCallbackBaseUrl),
     authCallbackUrl: displayUrlWithoutPort(callbacks.authCallbackUrl),
     paypalWebhookUrl: displayUrlWithoutPort(callbacks.paypalWebhookUrl),
@@ -561,6 +573,17 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
             actionLabel: 'Sign in or add auth key',
             manualAction: true,
           };
+        break;
+      case 'needs-permission':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'blocked',
+          summary: 'Tailscale status needs Windows permission.',
+          detail: 'Tailscale is installed, but Windows blocked the launcher from reading its service. Restart SomniBot with the required permission, then check Tailscale again.',
+          actionLabel: 'Restart with permission',
+          manualAction: true,
+        };
         break;
       case 'needs-policy':
         callbackStep = {
@@ -708,39 +731,50 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
 }
 
 function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan): SetupStep[] {
-  const domainRaw = input.vpsDomain?.trim() ?? '';
-  const domainErrors = domainRaw
+  const publicAccessMode = normalizeVpsPublicAccessMode(input.vpsPublicAccessMode);
+  const publicAccessStepId = publicAccessMode === 'tailscale-funnel' ? 'vps-public-access' : 'vps-domain';
+  const publicAccessRaw = publicAccessMode === 'tailscale-funnel'
+    ? input.vpsTailscaleFunnelUrl?.trim() ?? ''
+    : input.vpsDomain?.trim() ?? '';
+  const publicAccessErrors = publicAccessRaw
     ? validateRuntimeNetworkingConfig({
       runtimeMode: 'vps',
+      vpsPublicAccessMode: publicAccessMode,
       vpsDomain: input.vpsDomain,
+      vpsTailscaleFunnelUrl: input.vpsTailscaleFunnelUrl,
+      vpsTailscaleFunnelVerifiedUrl: input.vpsTailscaleFunnelVerifiedUrl,
     })
     : [];
 
-  const domainStep: SetupStep = !domainRaw
+  const publicAccessStep: SetupStep = !publicAccessRaw
     ? {
-      id: 'vps-domain',
-      label: 'Domain',
+      id: publicAccessStepId,
+      label: 'Public access',
       status: 'blocked',
-      summary: 'Waiting for the VPS public domain.',
-      detail: 'Enter the HTTPS domain that will serve the dashboard and receive provider callbacks.',
-      actionLabel: 'Enter VPS domain',
+      summary: publicAccessMode === 'tailscale-funnel' ? 'Waiting for the Tailscale Funnel URL.' : 'Waiting for the VPS public domain.',
+      detail: publicAccessMode === 'tailscale-funnel'
+        ? 'Enter the HTTPS *.ts.net Funnel URL, then run SSH preflight to verify the remote mapping to 127.0.0.1:3456.'
+        : 'Enter the HTTPS domain that will serve the dashboard and receive provider callbacks.',
+      actionLabel: publicAccessMode === 'tailscale-funnel' ? 'Enter Funnel URL' : 'Enter VPS domain',
       manualAction: true,
     }
-    : domainErrors.length > 0
+    : publicAccessErrors.length > 0
       ? {
-        id: 'vps-domain',
-        label: 'Domain',
+        id: publicAccessStepId,
+        label: 'Public access',
         status: 'recoverable-error',
-        summary: 'The VPS public domain needs attention.',
-        detail: domainErrors.join('\n'),
-        actionLabel: 'Fix VPS domain',
+        summary: publicAccessMode === 'tailscale-funnel' ? 'Tailscale Funnel needs verification.' : 'The VPS public domain needs attention.',
+        detail: publicAccessErrors.join('\n'),
+        actionLabel: publicAccessMode === 'tailscale-funnel' ? 'Run SSH preflight' : 'Fix VPS domain',
       }
       : {
-        id: 'vps-domain',
-        label: 'Domain',
+        id: publicAccessStepId,
+        label: 'Public access',
         status: 'success',
-        summary: 'VPS public callback domain is ready.',
-        detail: 'The dashboard URL and provider callback URL will use this HTTPS domain.',
+        summary: publicAccessMode === 'tailscale-funnel' ? 'Remote Tailscale Funnel mapping is verified.' : 'VPS public callback domain is ready.',
+        detail: publicAccessMode === 'tailscale-funnel'
+          ? 'The exact *.ts.net URL is bound to the remote Funnel status; public HTTPS health still must pass after deployment.'
+          : 'The dashboard URL and provider callback URL will use this HTTPS domain.',
       };
 
   const sshStep: SetupStep = hasVpsSshTarget(input)
@@ -773,11 +807,11 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
       label: 'Deploy',
       status: 'blocked',
       summary: 'Review-only VPS deployment plan is ready.',
-      detail: 'Review the redacted env shape, service layout, Caddy outline, approval gates, and rollback commands before any remote change.',
+      detail: `Review the redacted env shape, service layout, ${publicAccessMode === 'domain' ? 'Caddy outline' : 'loopback-only Funnel edge'}, approval gates, and rollback commands before any remote change. This is not runtime readiness; public HTTPS health proof is still required.`,
       actionLabel: 'Review dry-run plan',
       manualAction: true,
     }
-    : domainStep.status === 'success' && sshStep.status === 'success'
+    : publicAccessStep.status === 'success' && sshStep.status === 'success'
       ? {
         id: 'vps-deploy',
         label: 'Deploy',
@@ -791,7 +825,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
       label: 'Deploy',
       status: 'pending',
       summary: 'Waiting for VPS readiness.',
-      detail: 'Finish the domain and SSH/deploy steps before the manual deployment workflow.',
+      detail: 'Finish public access and SSH/deploy readiness before the deployment workflow.',
       };
 
   return [
@@ -800,9 +834,11 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
       label: 'Runtime',
       status: 'success',
       summary: 'VPS selected.',
-      detail: 'The bot and dashboard will run on a VPS with a public HTTPS domain.',
+      detail: publicAccessMode === 'domain'
+        ? 'The bot and dashboard will run on a VPS behind the configured public HTTPS domain.'
+        : 'The bot and dashboard will run on a VPS with the dashboard published only through the verified Tailscale Funnel edge.',
     },
-    domainStep,
+    publicAccessStep,
     sshStep,
     credentialStep,
     discordServerStep,
@@ -1018,8 +1054,11 @@ function buildVpsCompletion(
   healthVerification: VpsHealthVerification | undefined,
   summary: SetupSummary,
 ): SetupCompletionStatus {
+  const publicAccessStepId = normalizeVpsPublicAccessMode(input.vpsPublicAccessMode) === 'tailscale-funnel'
+    ? 'vps-public-access'
+    : 'vps-domain';
   const requiredStepIds = [
-    'vps-domain',
+    publicAccessStepId,
     'vps-ssh',
     'credentials',
     'discord-server',
@@ -1047,7 +1086,7 @@ function buildVpsCompletion(
     requiredStepIds,
     missingSteps,
     'VPS owner setup is complete.',
-    'Domain, SSH target, provider credentials, Discord server readiness, Supabase auth, PayPal webhook readiness, and post-deploy VPS health verification are all proven.',
+    'Public HTTPS edge, SSH target, provider credentials, Discord server readiness, Supabase auth, PayPal webhook readiness, and post-deploy VPS health verification are all proven.',
   );
 }
 

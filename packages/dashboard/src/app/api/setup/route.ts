@@ -12,6 +12,7 @@
  * - GET remains public so the setup page can detect state.
  */
 import { NextResponse, type NextRequest } from 'next/server';
+import { encryptCloudCredential } from '@/lib/cloud-credential-crypto';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/supabase/auto-config';
 import { requireGuildOwner } from '@/lib/api/require-owner';
@@ -52,12 +53,91 @@ interface OwnerRuntimeReadiness {
 
 type SetupSettingMap = Map<string, string>;
 
+// Secrets are supplied to the dashboard through the launcher's encrypted
+// runtime environment.  Keep only a configured marker in Supabase so setup
+// cannot turn instance_settings into a plaintext credential store.
+const SECRET_SETUP_SETTING_KEYS = new Set([
+  'discord_token',
+  'discord_bot_token',
+  'discord_client_secret',
+  'paypal_client_secret',
+  'paypal_webhook_id',
+  'paypal_webhook_proof_key',
+  'lavalink_password',
+  'valkey_url',
+  'supabase_secret_key',
+  'supabase_access_token',
+  'supabase_db_url',
+  'supabase_db_password',
+  'tailscale_auth_key',
+  'vps_csrf_secret',
+  'vps_nextauth_secret',
+  'vps_webhook_replay_secret',
+  'vps_valkey_password',
+  'vps_lavalink_password',
+]);
+
+function configuredSetupSettingKey(key: string): string {
+  return SECRET_SETUP_SETTING_KEYS.has(key) ? `${key}_configured` : key;
+}
+
+function configuredSetupSettingValue(key: string, value: string): string {
+  return SECRET_SETUP_SETTING_KEYS.has(key) ? 'true' : value;
+}
+
+async function persistSetupSetting(
+  supabase: SupabaseClient,
+  key: string,
+  value: string,
+  section: string,
+): Promise<void> {
+  if (SECRET_SETUP_SETTING_KEYS.has(key)) {
+    const bootstrapSecret = key === 'supabase_secret_key'
+      ? value
+      : process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    if (bootstrapSecret && supabaseUrl) {
+      const encrypted = encryptCloudCredential(value, key, bootstrapSecret, new URL(supabaseUrl).origin);
+      await supabase
+        .from('instance_settings')
+        .upsert(
+          { ...encrypted, section, updated_at: new Date().toISOString() },
+          { onConflict: 'key' },
+        );
+    }
+  }
+  await supabase
+    .from('instance_settings')
+    .upsert(
+      {
+        key: configuredSetupSettingKey(key),
+        value: configuredSetupSettingValue(key, value),
+        section,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' },
+    );
+}
+
+function hasConfiguredSetupSecret(settings: SetupSettingMap, key: string): boolean {
+  return settings.has(configuredSetupSettingKey(key)) || settings.has(key);
+}
+
+function redactAuthProviderError(error: string | undefined): string | undefined {
+  if (!error) return error;
+  if (error.startsWith('Supabase Management API error') || error.startsWith('Failed to configure Discord auth:')) {
+    return 'Discord auth provider could not be configured. Check server logs or retry with a valid Management API token.';
+  }
+  return error;
+}
+
 type DiscordAuthProviderStatusReason =
   | 'ready'
   | 'management-token-missing'
   | 'project-ref-missing'
   | 'provider-disabled'
   | 'callback-allow-list-missing'
+  | 'site-url-mismatch'
   | 'management-api-error'
   | 'unknown';
 
@@ -69,6 +149,7 @@ function getDiscordAuthProviderStatusReason(status: DiscordAuthProviderStatus): 
   if (status.error) return 'unknown';
   if (!status.providerEnabled) return 'provider-disabled';
   if (!status.callbackAllowListReady) return 'callback-allow-list-missing';
+  if (status.siteUrlReady === false) return 'site-url-mismatch';
   return 'unknown';
 }
 
@@ -91,6 +172,8 @@ function buildDiscordAuthProviderStatusDetail(
       return status.missingCallbackUrls.length > 0
         ? `Supabase auth callback allow-list is missing: ${status.missingCallbackUrls.join(', ')}.`
         : 'Supabase auth callback allow-list does not include the current dashboard callback URL.';
+    case 'site-url-mismatch':
+      return 'Supabase auth still points to an older dashboard address. Run Configure Auth again to update it to the current public dashboard URL.';
     case 'management-api-error':
       return 'Supabase Management API could not verify Discord auth provider readiness. Check the server logs or retry with a valid Management API token.';
     case 'unknown':
@@ -105,6 +188,7 @@ function toPublicDiscordAuthProviderStatus(status: DiscordAuthProviderStatus) {
     ready: status.ready,
     providerEnabled: status.providerEnabled,
     callbackAllowListReady: status.callbackAllowListReady,
+    siteUrlReady: status.siteUrlReady,
     missingCallbackUrls: status.missingCallbackUrls,
     manualConfigured: status.manualConfigured,
     statusReason,
@@ -269,6 +353,14 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
   };
 }
 
+function getRuntimeAuthCallbackUrls(runtimeCallbacks: RuntimeCallbackConfig): string[] {
+  return [...new Set(
+    [runtimeCallbacks.publicCallbackBaseUrl, runtimeCallbacks.operatorDashboardUrl]
+      .filter((base): base is string => Boolean(base))
+      .map((base) => `${base}/api/auth/callback`),
+  )];
+}
+
 function resolveSetupPayPalWebhookStatus(
   runtimeCallbacks: RuntimeCallbackConfig,
   env: NodeJS.ProcessEnv = process.env,
@@ -276,8 +368,10 @@ function resolveSetupPayPalWebhookStatus(
 ): { url: string | null; urlReady: boolean; ready: boolean; error: string | null } {
   const derivedWebhookUrl = normalizeSetupPayPalWebhookUrl(runtimeCallbacks.paypalWebhookUrl);
   const paypalClientId = env['PAYPAL_CLIENT_ID']?.trim() || savedSettings.get('paypal_client_id');
-  const paypalClientSecret = env['PAYPAL_CLIENT_SECRET']?.trim() || savedSettings.get('paypal_client_secret');
-  const paypalWebhookId = env['PAYPAL_WEBHOOK_ID']?.trim() || savedSettings.get('paypal_webhook_id');
+  // Persisted markers are display-only. They must never substitute for the
+  // runtime secret or webhook identifier required to make PayPal calls.
+  const paypalClientSecret = env['PAYPAL_CLIENT_SECRET']?.trim();
+  const paypalWebhookId = env['PAYPAL_WEBHOOK_ID']?.trim();
   const paypalCredentialsConfigured = Boolean(paypalClientId && paypalClientSecret);
   const paypalWebhookIdConfigured = Boolean(paypalWebhookId);
 
@@ -354,11 +448,9 @@ function getRequiredPayPalReadinessError(
     || process.env['PAYPAL_CLIENT_ID']?.trim()
     || savedSettings.get('paypal_client_id');
   const paypalClientSecret = credentials.paypal_client_secret?.trim()
-    || process.env['PAYPAL_CLIENT_SECRET']?.trim()
-    || savedSettings.get('paypal_client_secret');
+    || process.env['PAYPAL_CLIENT_SECRET']?.trim();
   const paypalWebhookId = credentials.paypal_webhook_id?.trim()
-    || process.env['PAYPAL_WEBHOOK_ID']?.trim()
-    || savedSettings.get('paypal_webhook_id');
+    || process.env['PAYPAL_WEBHOOK_ID']?.trim();
   const paypalWebhookUrl = credentials.paypal_webhook_url?.trim()
     || process.env['PAYPAL_WEBHOOK_URL']?.trim()
     || savedSettings.get('paypal_webhook_url');
@@ -629,11 +721,11 @@ export async function GET(req: NextRequest) {
 
     const savedSettings = await readSetupInstanceSettings(supabase, [
       'discord_application_id',
-      'discord_client_secret',
+      'discord_client_secret_configured',
       'discord_guild_id',
       'paypal_client_id',
-      'paypal_client_secret',
-      'paypal_webhook_id',
+      'paypal_client_secret_configured',
+      'paypal_webhook_id_configured',
       'paypal_webhook_url',
     ]);
 
@@ -653,15 +745,13 @@ export async function GET(req: NextRequest) {
     status.paypalWebhookError = savedPayPalStatus.error;
     status.paypalCredentialsConfigured = Boolean(
       (process.env['PAYPAL_CLIENT_ID']?.trim() || savedSettings.get('paypal_client_id'))
-      && (process.env['PAYPAL_CLIENT_SECRET']?.trim() || savedSettings.get('paypal_client_secret')),
+      && process.env['PAYPAL_CLIENT_SECRET']?.trim(),
     );
-    status.paypalWebhookIdConfigured = Boolean(
-      process.env['PAYPAL_WEBHOOK_ID']?.trim() || savedSettings.get('paypal_webhook_id'),
-    );
+    status.paypalWebhookIdConfigured = Boolean(process.env['PAYPAL_WEBHOOK_ID']?.trim());
 
     // Check if Discord creds exist in instance_settings (for display purposes)
     if (!status.discordCredentialsPresent) {
-      if (savedSettings.has('discord_application_id') && savedSettings.has('discord_client_secret')) {
+      if (savedSettings.has('discord_application_id') && hasConfiguredSetupSecret(savedSettings, 'discord_client_secret')) {
         status.discordCredentialsPresent = true;
         status.discordClientId ||= savedSettings.get('discord_application_id') ?? null;
       }
@@ -670,6 +760,7 @@ export async function GET(req: NextRequest) {
 
   const authProviderStatus = await getDiscordAuthProviderStatus({
     timeoutMs: SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS,
+    callbackUrls: getRuntimeAuthCallbackUrls(runtimeCallbacks),
   });
   status.discordAuthProviderReady = authProviderStatus.ready;
   status.discordAuthConfigured = authProviderStatus.ready;
@@ -777,18 +868,18 @@ export async function POST(request: NextRequest) {
         };
 
         for (const [key, { value, section }] of Object.entries(creds)) {
-          await supabase
-            .from('instance_settings')
-            .upsert(
-              { key, value, section, updated_at: new Date().toISOString() },
-              { onConflict: 'key' },
-            );
+          await persistSetupSetting(supabase, key, value, section);
         }
+        await persistSetupSetting(supabase, 'setup_started_at', new Date().toISOString(), 'system');
         credentialsSaved = true;
         console.log('[Setup] ✅ Discord credentials saved to instance_settings');
 
         // Auto-configure Discord OAuth in Supabase if we have the access token
-        const authResult = await ensureDiscordAuthProvider();
+        const authResult = await ensureDiscordAuthProvider({
+          callbackUrls: getRuntimeAuthCallbackUrls(authProviderRuntimeCallbacks ?? resolveRuntimeCallbackConfig()),
+          discordClientId: clientId,
+          discordClientSecret: clientSecret.trim(),
+        });
         if (authResult.success) {
           console.log(
             authResult.alreadyConfigured
@@ -796,7 +887,7 @@ export async function POST(request: NextRequest) {
               : '[Setup] ✅ Discord auth provider auto-configured in Supabase',
           );
         } else {
-          console.warn('[Setup] ⚠️  Could not auto-configure Discord auth:', authResult.error);
+          console.warn('[Setup] Could not auto-configure Discord auth provider.');
         }
       }
 
@@ -852,12 +943,7 @@ export async function POST(request: NextRequest) {
           creds.supabase_anon_key = { value: trimmedPublishableKey, section: 'supabase' };
 
           for (const [key, { value, section }] of Object.entries(creds)) {
-            await supabase
-              .from('instance_settings')
-              .upsert(
-                { key, value, section, updated_at: new Date().toISOString() },
-                { onConflict: 'key' },
-              );
+            await persistSetupSetting(supabase, key, value, section);
           }
           console.log('[Setup] ✅ Supabase credentials saved to instance_settings');
         }
@@ -893,7 +979,11 @@ export async function POST(request: NextRequest) {
 
   // Step 4: Configure Discord OAuth in Supabase (can be called independently)
   if (action === 'configure-auth') {
-    const result = await ensureDiscordAuthProvider();
+    const result = await ensureDiscordAuthProvider({
+      callbackUrls: getRuntimeAuthCallbackUrls(authProviderRuntimeCallbacks ?? resolveRuntimeCallbackConfig()),
+      ...(typeof body.clientId === 'string' ? { discordClientId: body.clientId } : {}),
+      ...(typeof body.clientSecret === 'string' ? { discordClientSecret: body.clientSecret } : {}),
+    });
     return NextResponse.json(result);
   }
 
@@ -927,6 +1017,7 @@ export async function POST(request: NextRequest) {
       'supabase_secret_key',
       'supabase_access_token',
       'supabase_db_url',
+      'supabase_db_password',
       'dashboard_url',
     ]);
 
@@ -975,8 +1066,8 @@ export async function POST(request: NextRequest) {
       'supabase_anon_key',
       'supabase_publishable_key',
       'paypal_client_id',
-      'paypal_client_secret',
-      'paypal_webhook_id',
+      'paypal_client_secret_configured',
+      'paypal_webhook_id_configured',
       'paypal_webhook_url',
     ]);
     const payPalReadinessError = getRequiredPayPalReadinessError(credentials, savedSetupSettings);
@@ -1033,12 +1124,7 @@ export async function POST(request: NextRequest) {
           ([prefix]) => key.startsWith(prefix),
         )?.[1] ?? 'general';
 
-        await supabase
-          .from('instance_settings')
-          .upsert(
-            { key, value: trimmedValue, section, updated_at: new Date().toISOString() },
-            { onConflict: 'key' },
-          );
+        await persistSetupSetting(supabase, key, trimmedValue, section);
       }
 
       applyRuntimeSupabaseEnv(submittedRuntimeConfig);
@@ -1060,16 +1146,20 @@ export async function POST(request: NextRequest) {
     // Ensure Discord auth provider is configured
     const authResult = await ensureDiscordAuthProvider({
       accessToken: submittedSupabaseAccessToken,
+      callbackUrls: getRuntimeAuthCallbackUrls(runtimeCallbacks),
+      ...(credentials.discord_application_id ? { discordClientId: credentials.discord_application_id } : {}),
+      ...(credentials.discord_client_secret ? { discordClientSecret: credentials.discord_client_secret } : {}),
     });
     if (!authResult.success) {
-      console.warn('[Setup] Could not finalize setup because Discord auth is not configured:', authResult.error);
+      const publicAuthError = redactAuthProviderError(authResult.error);
+      console.warn('[Setup] Could not finalize setup because Discord auth is not configured.');
       return NextResponse.json(
         {
           ok: false,
-          error: authResult.error
+          error: publicAuthError
             || 'Discord auth provider could not be configured. Set SUPABASE_ACCESS_TOKEN, or configure Discord auth manually and set SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true before finalizing setup.',
           authConfigured: false,
-          authError: authResult.error || null,
+          authError: publicAuthError || null,
           setupLocked: false,
         },
         { status: 400 },

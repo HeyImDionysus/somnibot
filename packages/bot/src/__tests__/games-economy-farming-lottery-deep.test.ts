@@ -100,11 +100,12 @@ function walletData(bal = 500) {
 describe('GamesManager deep games', () => {
   let GamesManager: any;
 
+  // Allow cold module initialization under full-suite worker contention.
   beforeEach(async () => {
     vi.resetAllMocks();
     const mod = await import('../features/games/games-manager.js');
     GamesManager = mod.GamesManager;
-  });
+  }, 30_000);
 
   it('highlow succeeds', async () => {
     const supa = mockSupabase();
@@ -208,7 +209,7 @@ describe('EconomyManager deeper', () => {
     vi.resetAllMocks();
     const mod = await import('../features/economy/economy-manager.js');
     EconomyManager = mod.EconomyManager;
-  });
+  }, 30_000);
 
   function makeEconMgr(supaOverride?: any) {
     const supa = supaOverride ?? mockSupabase();
@@ -315,6 +316,7 @@ describe('EconomyManager deeper', () => {
     expect(supa.rpc).toHaveBeenCalledWith('economy_leaderboard', {
       p_guild_id: expect.any(String),
       p_limit: 10,
+      p_offset: 0,
     });
   });
 

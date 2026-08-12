@@ -1,5 +1,5 @@
 /**
- * POST /api/deploy — Store desired state and trigger bot deployment.
+ * POST /api/deploy — Store a reviewed plan and trigger an explicit deployment.
  * GET /api/deploy — Get deployment status and recent actions.
  *
  * The dashboard stores the desired state in Supabase's `guild_desired_state` table.
@@ -11,7 +11,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
-import { recordAdminChange, readRowBefore } from '@/lib/admin-changes';
+import { recordAdminChange } from '@/lib/admin-changes';
 
 
 export async function POST(request: NextRequest) {
@@ -27,7 +27,6 @@ export async function POST(request: NextRequest) {
   const body = parsed.data;
   const admin = createAdminSupabase();
 
-  // Validate required fields
   if (!body.roles || !body.channels) {
     return NextResponse.json(
       { error: 'Missing roles or channels' },
@@ -39,27 +38,32 @@ export async function POST(request: NextRequest) {
   // the shape is kept (how many roles/channels, and whether the previous plan
   // had finished applying) — the full role/channel plan can be thousands of
   // lines of JSON and the change log is not a backup of it.
-  const priorState = await readRowBefore(
-    admin,
-    'guild_desired_state',
-    { guild_id: guildId },
-    'guild_id, roles, channels, applied_at',
-  );
+  const { data: priorState, error: priorStateError } = await admin
+    .from('guild_desired_state')
+    .select('guild_id, roles, channels, categories, applied_at, deploy_mode')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  if (priorStateError) return dbError(priorStateError, 'deploy');
   const priorRoles = Array.isArray(priorState?.roles) ? priorState.roles.length : null;
   const priorChannels = Array.isArray(priorState?.channels) ? priorState.channels.length : null;
+  const categories = body.categories
+    ?? (Array.isArray(priorState?.categories) ? priorState.categories : []);
 
-  // Store desired state — setting applied_at = null triggers the bot
-  const { error } = await admin.from('guild_desired_state').upsert(
-    {
-      guild_id: guildId,
-      roles: body.roles,
-      channels: body.channels,
-      permission_map: body.permissionMap ?? {},
-      applied_at: null, // This signals "needs deployment" to the bot
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'guild_id' },
-  );
+  const deployMode = body.deployMode;
+  const desiredState: Record<string, unknown> = {
+    guild_id: guildId,
+    roles: body.roles,
+    channels: body.channels,
+    categories,
+    permission_map: body.permissionMap ?? {},
+    deploy_mode: deployMode,
+    applied_at: null,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await admin
+    .from('guild_desired_state')
+    .upsert(desiredState, { onConflict: 'guild_id' });
 
   if (error)
     return dbError(error, 'deploy');
@@ -75,7 +79,8 @@ export async function POST(request: NextRequest) {
     details: {
       roleCount: body.roles.length,
       channelCount: body.channels.length,
-      cleanExisting: body.cleanExisting ?? true,
+      categoryCount: categories.length,
+      deployMode,
     },
     success: true,
   });
@@ -96,9 +101,9 @@ export async function POST(request: NextRequest) {
     description:
       `Started a server deployment of ${body.roles.length} roles and `
       + `${body.channels.length} channels`
-      + ((body.cleanExisting ?? true)
-        ? ', replacing anything already there'
-        : ', keeping what is already there'),
+      + (deployMode === 'destructive'
+        ? ', replacing existing non-managed roles and channels'
+        : ', reconciling only SomniBot-managed roles and channels'),
     before: priorRoles === null && priorChannels === null
       ? undefined
       : {
@@ -109,7 +114,8 @@ export async function POST(request: NextRequest) {
     after: {
       role_count: body.roles.length,
       channel_count: body.channels.length,
-      clean_existing: body.cleanExisting ?? true,
+      category_count: categories.length,
+      deploy_mode: deployMode,
     },
     blastRadius: 'critical',
     undoReason:
@@ -119,6 +125,7 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({
     success: true,
     message: 'Deploy request stored — bot will pick it up via Realtime',
+    deployMode,
   });
 }
 
@@ -156,7 +163,7 @@ export async function GET() {
     desiredState,
     setupCompleted: guild?.setup_completed ?? false,
     setupConfirmedAt: guild?.setup_confirmed_at ?? null,
-    isDeploying: desiredState?.applied_at === null && desiredState?.roles?.length > 0,
+    isDeploying: desiredState !== null && desiredState?.applied_at === null,
     recentActions: recentActions ?? [],
   });
 }

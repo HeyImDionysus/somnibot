@@ -6,3 +6,7 @@ packages/shared/src/types/database.generated.ts text eol=lf
 # The canonical E2E catalog is byte-exact-compared by catalog-data tests;
 # keep it LF on every platform so Windows autocrlf cannot break the check.
 /packages/e2e/catalog/v1.json text eol=lf
+
+# Production shell scripts execute on Linux/WSL and must never acquire CRLF
+# shebangs or command terminators from a Windows checkout.
+*.sh text eol=lf

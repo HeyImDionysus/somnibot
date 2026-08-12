@@ -35,6 +35,28 @@ export default function PortalLicenses() {
   const [keys, setKeys] = useState<LicenseKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+
+  const removeDevice = async (sessionId: string) => {
+    const token = localStorage.getItem('portal_token');
+    if (!token) return;
+    setRemoving(sessionId);
+    try {
+      const response = await fetch(`/api/portal/licenses/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: { 'x-portal-token': token },
+      });
+      if (response.ok) {
+        setKeys((current) => current.map((key) => ({
+          ...key,
+          license_sessions: key.license_sessions.map((session) =>
+            session.id === sessionId ? { ...session, active: false } : session),
+        })));
+      }
+    } finally {
+      setRemoving(null);
+    }
+  };
 
   useEffect(() => {
     async function load() {
@@ -136,9 +158,19 @@ export default function PortalLicenses() {
                                 <span className="ml-2 text-[10px] text-discord-text-muted">{session.ip_address}</span>
                               )}
                             </div>
-                            <span className="text-[10px] text-discord-text-muted">
-                              Last seen: {formatDate(session.last_seen_at)}
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-discord-text-muted">
+                                Last seen: {formatDate(session.last_seen_at)}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={removing === session.id}
+                                onClick={() => void removeDevice(session.id)}
+                                className="rounded-md bg-discord-danger/20 px-2 py-1 text-[10px] text-discord-danger disabled:opacity-50"
+                              >
+                                {removing === session.id ? 'Removing…' : 'Remove'}
+                              </button>
+                            </div>
                           </div>
                         ))}
                       </div>

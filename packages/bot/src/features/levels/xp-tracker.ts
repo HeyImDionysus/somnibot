@@ -6,7 +6,7 @@
 import type { Message, Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
-import { calculateLevel, randomXp, LEVEL_CONFIG , createLogger } from '@somnibot/shared';
+import { calculateLevel, randomXp, LEVEL_CONFIG, DEFAULT_LEVEL_CURVE, createLogger, type LevelCurve } from '@somnibot/shared';
 
 const log = createLogger('XPTracker');
 
@@ -24,6 +24,7 @@ export interface LevelConfig {
   level_up_channel_id: string | null;
   level_up_message: string | null;
   no_xp_role_id: string | null;
+  level_curve: LevelCurve;
 }
 
 interface XpMultiplier {
@@ -80,6 +81,7 @@ function disabledLevelConfig(): LevelConfig {
     level_up_channel_id: null,
     level_up_message: null,
     no_xp_role_id: null,
+    level_curve: DEFAULT_LEVEL_CURVE,
   };
 }
 const _multiplierCache = new Map<string, CacheEntry<XpMultiplier[]>>();
@@ -109,7 +111,7 @@ export async function loadLevelConfig(
   const { data, error } = await supabase
     .from('guild_config')
     .select(
-      'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, no_xp_role_id',
+      'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, no_xp_role_id, level_curve',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -143,6 +145,7 @@ export async function loadLevelConfig(
     level_up_channel_id: data?.level_up_channel_id ?? null,
     level_up_message: data?.level_up_message ?? null,
     no_xp_role_id: data?.no_xp_role_id ?? null,
+    level_curve: (data?.level_curve && typeof data.level_curve === 'object' ? data.level_curve : DEFAULT_LEVEL_CURVE) as LevelCurve,
   };
   _levelConfigCache.set(guildId, { data: config, time: now });
   evictOldest(_levelConfigCache);

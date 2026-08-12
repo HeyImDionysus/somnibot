@@ -26,6 +26,17 @@ describe('generateLicenseKey', () => {
     }
   });
 
+  it('accepts a configured uppercase product prefix without weakening hashing', () => {
+    const key = generateLicenseKey('ACME');
+    expect(key.prefix).toBe('ACME');
+    expect(key.plaintext).toMatch(/^ACME-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    expect(key.hash).toBe(createHash('sha256').update(key.plaintext).digest('hex'));
+  });
+
+  it('rejects malformed configured prefixes', () => {
+    expect(() => generateLicenseKey('bad-prefix')).toThrow('Invalid license key prefix');
+  });
+
   it('suffix matches last group of plaintext', () => {
     const key = generateLicenseKey();
     const lastGroup = key.plaintext.split('-').at(-1);

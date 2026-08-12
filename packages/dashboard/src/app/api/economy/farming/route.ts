@@ -86,7 +86,7 @@ export async function POST(request: NextRequest) {
         'A crop with that name already exists (names are case-insensitive).');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -133,7 +133,7 @@ export async function PUT(request: NextRequest) {
         'A crop with that name already exists (names are case-insensitive).');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -182,7 +182,7 @@ export async function DELETE(request: NextRequest) {
       return dbError(error, 'economy/farming');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,

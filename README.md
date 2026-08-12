@@ -273,7 +273,8 @@ Plain English version:
 - `DASHBOARD_URL` is where you open the dashboard as the operator.
 - `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL` is where outside services can reach the
   dashboard. For regular local production, this is usually the Tailscale Funnel
-  HTTPS URL. For VPS, it is the domain.
+  HTTPS URL. For VPS, it is either the conventional domain or the verified
+  Tailscale Funnel HTTPS URL selected in the launcher.
 - `NEXT_PUBLIC_APP_URL` is the public URL baked into the dashboard build. The
   launcher sets it to the same public callback base.
 - If you manually turned on the Supabase Discord provider, setup still needs
@@ -311,6 +312,25 @@ SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=<public-callback-base>
 NEXT_PUBLIC_APP_URL=<public-callback-base>
 PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
 ```
+
+### VPS Public Access
+
+The launcher offers two VPS public-edge modes:
+
+- **Conventional domain + Caddy** requires an HTTPS domain whose DNS points to
+  the VPS. SomniBot's bundled Caddy owns ports 80 and 443.
+- **Tailscale Funnel** accepts only an HTTPS `*.ts.net` base URL. SSH preflight
+  verifies that remote Tailscale is installed, logged in, policy-allowed, and
+  maps that exact URL to `http://127.0.0.1:3456`. Login is a manual `sudo
+  tailscale up` and browser-resume step; do not paste a Tailscale auth key into
+  VPS commands.
+
+In Funnel mode the launcher generates a Compose override that publishes the
+dashboard only on `127.0.0.1:3456`, keeps bundled Caddy stopped, and uses the
+isolated Compose project name `somnibot-prod`. Dashboard, Discord
+auth callback, and PayPal webhook URLs are all derived from the verified Funnel
+base. The launcher does not mark VPS setup complete until the remote public
+HTTPS dashboard and `/api/health` checks pass.
 
 Provider callback settings:
 
@@ -440,10 +460,21 @@ PayPal return links must use the public HTTPS URL.
 Use this when SomniBot should run 24/7 on a hosted Linux machine.
 
 The launcher/setup GUI is the primary VPS setup surface. It records the
-non-secret domain and SSH target details, builds a redacted deployment plan, and
-offers read-only preflight, dry-run deployment, and approval-gated deployment
-actions. Manual Docker commands remain a fallback path for operators who choose
-to run them directly.
+non-secret domain and SSH target details, checks a fresh or existing target,
+provisions or updates the SomniBot checkout from the authoritative GitHub
+repository, builds a redacted deployment plan, and offers read-only preflight,
+dry-run deployment, and approval-gated deployment actions. Manual Docker
+commands remain a fallback path for operators who choose to run them directly.
+
+For a first-time VPS, the SSH user must be able to create the selected deploy
+path. The approved plan can install the fixed Ubuntu/Debian distro packages
+`docker.io` and `docker-compose-v2`, enable Docker through systemd, and grant
+the SSH user Docker-group access when the host is missing Docker. Unsupported
+operating systems, missing root/passwordless-sudo access, and unavailable apt
+repositories are reported as blocked prerequisites. The launcher never
+overwrites a non-empty unrelated directory. Existing SomniBot checkouts must
+point at `https://github.com/HeyImDionysus/somnibot.git` and have no local
+changes.
 
 | Piece | VPS value |
 |---|---|
@@ -527,9 +558,9 @@ somnibot/
 ### Dashboard Required
 | Variable | Description |
 |---|---|
-| `DASHBOARD_URL` | Local/operator dashboard URL shown by the bot; launcher local commonly uses `http://localhost:3456`, script fallback uses `http://localhost:3000`, and VPS uses the public domain |
-| `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL` | Runtime public callback base used by setup, Supabase redirect allow-listing, and PayPal webhook URLs; regular-local production usually uses the Tailscale Funnel HTTPS URL |
-| `NEXT_PUBLIC_APP_URL` | Public dashboard/callback base; use the stable HTTPS Funnel URL for regular-local public callbacks, the VPS domain for VPS, or `http://localhost:3000` only for script-fallback private setup before provider callbacks are configured |
+| `DASHBOARD_URL` | Local/operator dashboard URL shown by the bot; launcher local commonly uses `http://localhost:3456`, script fallback uses `http://localhost:3000`, and VPS uses its selected public HTTPS base |
+| `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL` | Runtime public callback base used by setup, Supabase redirect allow-listing, and PayPal webhook URLs; regular-local and VPS Funnel modes use the verified Tailscale HTTPS URL |
+| `NEXT_PUBLIC_APP_URL` | Public dashboard/callback base; use the selected stable HTTPS Funnel URL or VPS domain, or `http://localhost:3000` only for script-fallback private setup before provider callbacks are configured |
 | `NEXT_PUBLIC_SUPABASE_URL` | Same as `SUPABASE_URL` |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon/public** key |
 | `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key |
@@ -586,8 +617,10 @@ Slash commands can take up to an hour to register with Discord the first time. I
 
 ### "Login redirects back to login"
 The Supabase Discord auth provider needs to match the URLs SomniBot is actually
-using. Run the setup wizard at `/setup`; it can configure Supabase automatically
-when `SUPABASE_ACCESS_TOKEN` is set. If you turned the provider on manually,
+using. For a first install or a local/VPS runtime change, use the Electron
+launcher/setup GUI first. If the bot is already running, the owner-only `/setup`
+Discord flow remains available for recovery and credential reconfiguration; it
+can configure Supabase automatically when `SUPABASE_ACCESS_TOKEN` is set. If you turned the provider on manually,
 also set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` and make sure the
 Supabase redirect allow-list includes:
 
@@ -636,7 +669,6 @@ finished. If the runner reports an error, apply migrations manually through
 Supabase and fix the runner before calling first-run setup complete.
 
 ### Further Documentation
-- **[Architecture](somnibot_architecture_v53.md)** — Full system design, 56 sections, every feature documented
 - **[Contributing](CONTRIBUTING.md)** — Coding standards, patterns, testing, migration rules
 - **[Deployment](DEPLOYMENT.md)** — Production deployment checklist with env vars and troubleshooting
 

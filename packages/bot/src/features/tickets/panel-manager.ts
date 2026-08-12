@@ -18,7 +18,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
-import { resolveBrandKit, type BrandKit } from '../branding/brand-kit.js';
+import { applyBrand, resolveBrandKit, type BrandKit } from '../branding/index.js';
 
 const log = createLogger('TicketPanels');
 
@@ -47,9 +47,11 @@ function buildPanelEmbed(panel: DbTicketPanel, brandKit: BrandKit): EmbedBuilder
   // powered-by attribution (unless the owner turned it off).
   if (msg.footer) {
     embed.setFooter({ text: msg.footer as string });
-  } else if (brandKit.poweredByAttribution) {
-    embed.setFooter({ text: brandKit.poweredByAttribution });
   }
+  // Preserve owner-supplied footer text while appending the subtle attribution
+  // when enabled. This keeps panel posts consistent with ticket embeds and
+  // transcript exports.
+  applyBrand(embed, brandKit, { intent: 'primary' });
 
   if (msg.thumbnail) {
     embed.setThumbnail(msg.thumbnail as string);

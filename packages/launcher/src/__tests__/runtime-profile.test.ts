@@ -3,6 +3,7 @@ import {
   buildRuntimeEnvVars,
   getLauncherLocalStartBlocker,
   getProviderCallbackUrls,
+  getRuntimeHolderId,
   normalizeBaseUrl,
   normalizeRuntimeMode,
   normalizeVpsDomain,
@@ -11,6 +12,17 @@ import {
 } from '../main/runtime-profile';
 
 describe('runtime profile model', () => {
+  it('derives stable but mode-distinct runtime owners without exposing the portable secret', () => {
+    const secret = 'portable-replay-secret';
+    const local = getRuntimeHolderId('regular-local', secret);
+    const vps = getRuntimeHolderId('vps', secret);
+    expect(local).toHaveLength(64);
+    expect(vps).toHaveLength(64);
+    expect(local).not.toBe(vps);
+    expect(local).not.toContain(secret);
+    expect(getRuntimeHolderId('regular-local', secret)).toBe(local);
+  });
+
   it('defaults unknown and missing runtime modes to regular local', () => {
     expect(normalizeRuntimeMode(undefined)).toBe('regular-local');
     expect(normalizeRuntimeMode('regular-local')).toBe('regular-local');
@@ -43,6 +55,7 @@ describe('runtime profile model', () => {
     expect(env.SOMNIBOT_RUNTIME_MODE).toBe('regular-local');
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED).toBe('true');
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('http://localhost:3456');
+    expect(env.HEALTH_PORT).toBe('3001');
   });
 
   it('emits the launcher public callback contract for regular-local setup finalization', () => {
@@ -72,6 +85,7 @@ describe('runtime profile model', () => {
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED).toBe('true');
     expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('https://somnibot.example.com');
     expect(env.PORT).toBe('3000');
+    expect(env.HEALTH_PORT).toBe('3001');
     expect(env.HOSTNAME).toBe('0.0.0.0');
     expect(env.VALKEY_URL).toBe('redis://valkey:6379');
     expect(env.LAVALINK_HOST).toBe('lavalink');

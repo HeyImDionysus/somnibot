@@ -57,7 +57,7 @@ const rbacRoleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
   description: z.string().max(500).optional().nullable(),
   permissions: z.array(z.string().max(128)).max(100).default([]),
-  priority: z.number().int().min(0).max(999).default(10),
+  priority: z.number().int().min(0).max(999).optional(),
 });
 
 const rbacRoleUpdate = z.object({
@@ -102,6 +102,21 @@ export async function POST(request: NextRequest) {
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
     const admin = createAdminSupabase();
+    const { data: config } = await admin
+      .from('guild_config')
+      .select('rbac_custom_role_priority_default, rbac_max_permissions_per_role, rbac_priority_escalation_guard')
+      .eq('guild_id', ctx.guildId)
+      .maybeSingle();
+    const configuredMax = Number(config?.rbac_max_permissions_per_role);
+    const maxPermissions = Number.isInteger(configuredMax) ? Math.min(500, Math.max(1, configuredMax)) : 100;
+    const configuredDefault = Number(config?.rbac_custom_role_priority_default);
+    const defaultPriority = Number.isInteger(configuredDefault) ? Math.min(999, Math.max(0, configuredDefault)) : 10;
+    if (body.permissions && body.permissions.length > maxPermissions) {
+      return NextResponse.json({ error: `A role may contain at most ${maxPermissions} permissions` }, { status: 400 });
+    }
+    if (config?.rbac_priority_escalation_guard !== false && !ctx.isOwner && body.priority !== undefined && body.priority > defaultPriority) {
+      return NextResponse.json({ error: 'Role priority escalation is restricted to the owner' }, { status: 403 });
+    }
 
     const { data, error } = await admin
       .from('dashboard_roles')
@@ -111,7 +126,7 @@ export async function POST(request: NextRequest) {
         description: body.description || null,
         permissions: body.permissions || [],
         is_system: false,
-        priority: body.priority || 10,
+        priority: body.priority ?? defaultPriority,
       })
       .select()
       .single();
@@ -123,7 +138,7 @@ export async function POST(request: NextRequest) {
       actorId: ctx.discordId,
       action: 'rbac.role_created',
       targetId: (data as { id?: string })?.id ?? null,
-      details: { name: body.name, permissions: body.permissions || [], priority: body.priority || 10 },
+      details: { name: body.name, permissions: body.permissions || [], priority: body.priority ?? defaultPriority },
     });
 
     // A new role is a permission-model change, so the owner sees it on the
@@ -141,7 +156,7 @@ export async function POST(request: NextRequest) {
         name: body.name,
         description: body.description || null,
         permissions: body.permissions || [],
-        priority: body.priority || 10,
+        priority: body.priority ?? defaultPriority,
       }),
       blastRadius: 'high',
       undoReason:
@@ -165,6 +180,21 @@ export async function PATCH(request: NextRequest) {
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
     const admin = createAdminSupabase();
+    const { data: config } = await admin
+      .from('guild_config')
+      .select('rbac_max_permissions_per_role, rbac_custom_role_priority_default, rbac_priority_escalation_guard')
+      .eq('guild_id', ctx.guildId)
+      .maybeSingle();
+    const configuredMax = Number(config?.rbac_max_permissions_per_role);
+    const maxPermissions = Number.isInteger(configuredMax) ? Math.min(500, Math.max(1, configuredMax)) : 100;
+    if (body.permissions && body.permissions.length > maxPermissions) {
+      return NextResponse.json({ error: `A role may contain at most ${maxPermissions} permissions` }, { status: 400 });
+    }
+    const configuredDefault = Number(config?.rbac_custom_role_priority_default);
+    const defaultPriority = Number.isInteger(configuredDefault) ? Math.min(999, Math.max(0, configuredDefault)) : 10;
+    if (config?.rbac_priority_escalation_guard !== false && !ctx.isOwner && body.priority !== undefined && body.priority > defaultPriority) {
+      return NextResponse.json({ error: 'Role priority escalation is restricted to the owner' }, { status: 403 });
+    }
 
     // V5 Audit §1.6: Block modification of ALL system roles, not just owner.
     // System roles (owner, admin, moderator) define the baseline permission

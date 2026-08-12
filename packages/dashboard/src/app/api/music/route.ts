@@ -21,7 +21,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from('guild_config')
-    .select('music_enabled, music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes, vote_skip_threshold_percent, self_skip_enabled, requester_move_enabled, priority_voting_enabled')
+    .select('music_enabled, music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes, max_queue_length, allow_duplicates, per_user_queue_cap, vote_skip_threshold_percent, self_skip_enabled, requester_move_enabled, priority_voting_enabled')
     .eq('guild_id', guildId)
     .maybeSingle();
 
@@ -36,6 +36,9 @@ export async function GET() {
     dj_role_id: data?.dj_role_id ?? null,
     music_auto_leave_minutes: data?.music_auto_leave_minutes ?? 5,
     music_auto_destroy_minutes: data?.music_auto_destroy_minutes ?? 30,
+    max_queue_length: data?.max_queue_length ?? 5000,
+    allow_duplicates: data?.allow_duplicates ?? true,
+    per_user_queue_cap: data?.per_user_queue_cap ?? 50,
     vote_skip_threshold_percent: data?.vote_skip_threshold_percent ?? 50,
     self_skip_enabled: data?.self_skip_enabled ?? true,
     requester_move_enabled: data?.requester_move_enabled ?? true,
@@ -64,6 +67,9 @@ export async function PUT(req: NextRequest) {
     dj_role_id,
     music_auto_leave_minutes,
     music_auto_destroy_minutes,
+    max_queue_length,
+    allow_duplicates,
+    per_user_queue_cap,
     vote_skip_threshold_percent,
     self_skip_enabled,
     requester_move_enabled,
@@ -82,6 +88,13 @@ export async function PUT(req: NextRequest) {
   }
   if (typeof music_auto_destroy_minutes === 'number') {
     updates.music_auto_destroy_minutes = Math.max(1, Math.min(120, music_auto_destroy_minutes));
+  }
+  if (typeof max_queue_length === 'number') {
+    updates.max_queue_length = Math.max(1, Math.min(5_000, max_queue_length));
+  }
+  if (typeof allow_duplicates === 'boolean') updates.allow_duplicates = allow_duplicates;
+  if (typeof per_user_queue_cap === 'number') {
+    updates.per_user_queue_cap = Math.max(1, Math.min(500, per_user_queue_cap));
   }
   if (typeof vote_skip_threshold_percent === 'number') {
     updates.vote_skip_threshold_percent = Math.max(1, Math.min(100, Math.round(vote_skip_threshold_percent)));
@@ -136,7 +149,7 @@ export async function PUT(req: NextRequest) {
     success: true,
   });
 
-  await notifyBot('music');
+  await notifyBot(guildId, 'music');
 
   await recordGuildConfigChange({
     guildId,

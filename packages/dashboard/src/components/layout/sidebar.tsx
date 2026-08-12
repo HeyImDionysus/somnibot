@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useState, useCallback, type ComponentType } from 'react';
+import { useEffect, useRef, useState, useCallback, type ComponentType } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { GuildSelector } from '@/components/guild-selector';
 import {
@@ -46,6 +46,8 @@ import {
   History,
   UserCog,
   ChevronDown,
+  Menu,
+  X,
   Coins,
   Store,
   Hammer,
@@ -93,7 +95,7 @@ const navigation: NavGroup[] = [
     title: 'Server',
     items: [
       { label: 'Roles & Permissions', href: '/roles', icon: Shield, requires: 'discord' },
-      { label: 'Channels', href: '/channels', icon: MessageSquare, requires: 'discord' },
+      { label: 'Channels', href: '/server-setup?step=3', icon: MessageSquare, requires: 'discord' },
       { label: 'Onboarding', href: '/onboarding', icon: Users, requires: 'discord' },
       { label: 'Welcome & Goodbye', href: '/welcome', icon: Sparkles, requires: 'discord' },
       { label: 'Branding', href: '/branding', icon: Palette, requires: 'discord' },
@@ -179,9 +181,10 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Analytics', href: '/analytics', icon: TrendingUp },
       { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
+      { label: 'Prompt Generator', href: '/project-licensing', icon: FileCode2 },
       { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal', badge: PendingOrdersBadge },
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
-      { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
+      { label: 'Licensing', href: '/licenses', icon: Key, requires: 'paypal' },
       { label: 'Requests', href: '/store/requests', icon: MessageSquareWarning, requires: 'paypal', badge: PendingRequestsBadge },
       // Promotions (/store/promotions) is deliberately NOT linked: nothing in
       // checkout redeems a coupon, so the nav must not advertise a discount
@@ -204,6 +207,14 @@ const navigation: NavGroup[] = [
 ];
 
 const STORAGE_KEY = 'somnibot-sidebar-collapsed';
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
 
 function loadCollapsed(): Record<string, boolean> {
   if (typeof window === 'undefined') return {};
@@ -258,10 +269,63 @@ export function Sidebar() {
   const pathname = usePathname();
   const [user, setUser] = useState<UserInfo | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileTriggerRef = useRef<HTMLButtonElement>(null);
+  const mobileCloseRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     setCollapsed(loadCollapsed());
   }, []);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const dashboardContent = document.getElementById('dashboard-content');
+    const mobileTrigger = mobileTriggerRef.current;
+    const contentWasInert = dashboardContent?.inert ?? false;
+    document.body.style.overflow = 'hidden';
+    if (dashboardContent) dashboardContent.inert = true;
+    const focusFrame = requestAnimationFrame(() => mobileCloseRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setMobileOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const focusable = Array.from(
+        sidebarRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [],
+      ).filter((element) => !element.closest('[inert]'));
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        sidebarRef.current?.focus();
+        return;
+      }
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (dashboardContent) dashboardContent.inert = contentWasInert;
+      mobileTrigger?.focus();
+    };
+  }, [mobileOpen]);
 
   useEffect(() => {
     (async () => {
@@ -274,6 +338,14 @@ export function Sidebar() {
             name: meta?.full_name || meta?.name || meta?.custom_claims?.global_name || 'User',
             avatarUrl: meta?.avatar_url || null,
           });
+        } else {
+          const localResponse = await fetch('/api/guilds');
+          if (localResponse.ok) {
+            const localData = await localResponse.json() as { success?: boolean };
+            if (localData.success) {
+              setUser({ name: 'Local Operator', avatarUrl: null });
+            }
+          }
         }
       } catch {
         // Ignore — sidebar still renders
@@ -299,7 +371,55 @@ export function Sidebar() {
   );
 
   return (
-    <aside className="flex h-screen w-60 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary">
+    <>
+      <header
+        inert={mobileOpen ? true : undefined}
+        className="fixed inset-x-0 top-0 z-40 flex h-14 items-center justify-between border-b border-discord-border-subtle bg-discord-bg-secondary px-3 lg:hidden"
+      >
+        <div className="flex items-center gap-2.5">
+          <Image
+            src="/somnibot-logo.png"
+            alt=""
+            width={36}
+            height={36}
+            className="h-9 w-9 rounded-input object-cover ring-1 ring-white/10"
+          />
+          <span className="text-base font-medium text-discord-text-primary">SomniBot</span>
+        </div>
+        <button
+          ref={mobileTriggerRef}
+          type="button"
+          aria-label={mobileOpen ? 'Close dashboard navigation' : 'Open dashboard navigation'}
+          aria-expanded={mobileOpen}
+          aria-controls="dashboard-navigation"
+          onClick={() => setMobileOpen((open) => !open)}
+          className="inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-secondary transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary"
+        >
+          {mobileOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
+        </button>
+      </header>
+
+      {mobileOpen ? (
+        <div
+          data-testid="dashboard-navigation-backdrop"
+          aria-hidden="true"
+          onClick={() => setMobileOpen(false)}
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px] lg:hidden"
+        />
+      ) : null}
+
+      <aside
+        ref={sidebarRef}
+        id="dashboard-navigation"
+        tabIndex={-1}
+        role={mobileOpen ? 'dialog' : undefined}
+        aria-modal={mobileOpen ? true : undefined}
+        aria-label={mobileOpen ? 'Dashboard navigation' : undefined}
+        className={cn(
+          'fixed inset-y-0 left-0 z-50 flex h-[100dvh] w-60 shrink-0 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary transition-transform lg:static lg:z-auto lg:translate-x-0',
+          mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full lg:visible',
+        )}
+      >
       {/* Brand */}
       <div className="flex h-14 items-center gap-2.5 border-b border-discord-border-subtle px-3">
         <div className="h-9 w-9 shrink-0 overflow-hidden rounded-xl ring-1 ring-white/10">
@@ -312,6 +432,15 @@ export function Sidebar() {
           />
         </div>
         <span className="text-base font-medium text-discord-text-primary">SomniBot</span>
+        <button
+          ref={mobileCloseRef}
+          type="button"
+          aria-label="Close dashboard navigation"
+          onClick={() => setMobileOpen(false)}
+          className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-muted transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary lg:hidden"
+        >
+          <X size={20} aria-hidden="true" />
+        </button>
       </div>
 
       {/* Guild Selector (multi-guild — V53 Phase 4) */}
@@ -319,7 +448,7 @@ export function Sidebar() {
 
       {/* Navigation */}
       <SidebarBadgesProvider>
-      <nav className="flex-1 overflow-y-auto px-2 py-3">
+      <nav aria-label="Dashboard navigation" className="flex-1 overflow-y-auto px-2 py-3">
         {navigation.map((group) => {
           const isCollapsed = collapsed[group.id] && !group.alwaysOpen && !groupHasActive(group);
 
@@ -332,12 +461,16 @@ export function Sidebar() {
                 </h3>
               ) : (
                 <button
+                  type="button"
                   onClick={() => toggleGroup(group.id)}
+                  aria-expanded={!isCollapsed}
+                  aria-controls={`${group.id}-navigation-group`}
                   className="mb-1.5 flex w-full items-center justify-between px-2.5 text-[11px] font-medium uppercase tracking-wide text-discord-text-muted hover:text-discord-text-secondary transition-colors"
                 >
                   <span>{group.title}</span>
                   <ChevronDown
                     size={12}
+                    aria-hidden="true"
                     className={cn(
                       'transition-transform duration-200',
                       isCollapsed && '-rotate-90',
@@ -348,6 +481,8 @@ export function Sidebar() {
 
               {/* Items — animate collapse */}
               <div
+                id={`${group.id}-navigation-group`}
+                inert={isCollapsed ? true : undefined}
                 className={cn(
                   'overflow-hidden transition-all duration-200',
                   // The max-height is only an animation device for the collapse
@@ -370,8 +505,13 @@ export function Sidebar() {
                       key={item.href}
                       href={isLocked ? '#' : item.href}
                       className={navRowClass(isActive, isLocked)}
-                      onClick={isLocked ? (e) => e.preventDefault() : undefined}
+                      onClick={(event) => {
+                        if (isLocked) {
+                          event.preventDefault();
+                        }
+                      }}
                       aria-disabled={isLocked}
+                      aria-current={isActive && !isLocked ? 'page' : undefined}
                     >
                       <Icon
                         size={18}
@@ -445,6 +585,7 @@ export function Sidebar() {
           </div>
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

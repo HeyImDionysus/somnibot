@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
 
     if (error) return dbConflictOr500(error, 'economy/fishing', 'uq_economy_fish_species_guild_lname',
         'A fish species with that name already exists (names are case-insensitive).');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -130,7 +130,7 @@ export async function PUT(request: NextRequest) {
 
     if (error) return dbConflictOr500(error, 'economy/fishing', 'uq_economy_fish_species_guild_lname',
         'A fish species with that name already exists (names are case-insensitive).');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -172,7 +172,7 @@ export async function DELETE(request: NextRequest) {
       .eq('guild_id', ctx.guildId);
 
     if (error) return dbError(error, 'economy/fishing');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,

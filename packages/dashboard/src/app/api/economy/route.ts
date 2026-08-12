@@ -191,7 +191,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     // Notify bot to reload economy config
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordGuildConfigChange({
       guildId: ctx.guildId,

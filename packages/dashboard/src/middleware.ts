@@ -2,6 +2,7 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { checkCsrf, shouldRotateCsrf, csrfRotationSeed, stripCsrfTimestamp, csrfCookieSessionId, deriveRotatedCsrf, deriveRebindCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
 import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
+import { getTrustedRedirectUrl } from '@/lib/public-redirect-origin';
 
 /* ------------------------------------------------------------------ */
 /*  CSP Nonce — generated per request for strict script-src            */
@@ -16,10 +17,11 @@ function generateNonce(): string {
 
 function buildCspHeader(nonce: string): string {
   const inlineCompat = process.env.SOMNIBOT_CSP_INLINE_COMPAT === '1';
+  const developmentMode = process.env.NODE_ENV === 'development';
   const scriptSrc = inlineCompat
-    ? "script-src 'self' 'unsafe-inline'"
-    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`;
-  const styleSrc = inlineCompat
+    ? `script-src 'self' 'unsafe-inline'${developmentMode ? " 'unsafe-eval'" : ''}`
+    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${developmentMode ? " 'unsafe-eval'" : ''}`;
+  const styleSrc = inlineCompat || developmentMode
     ? "style-src 'self' 'unsafe-inline'"
     : `style-src 'self' 'nonce-${nonce}'`;
 
@@ -143,10 +145,11 @@ function handleLocalAuth(request: NextRequest, nonce: string): NextResponse | nu
     return nextWithNonce(request, nonce);
   }
 
-  // First visit or mismatched token — set the cookie and continue
-  // The launcher sets SESSION_TOKEN and only serves on localhost,
-  // so anyone who can reach the server IS the operator.
-  const response = nextWithNonce(request, nonce);
+  // First visit or mismatched token — bind the browser, then repeat the same
+  // protected request. Continuing immediately would render the server layout
+  // before the response cookie exists; the layout would see no local session
+  // and redirect to /login, creating a login/dashboard loop.
+  const response = NextResponse.redirect(request.nextUrl.clone());
   response.cookies.set(COOKIE_NAME, LOCAL_SESSION_TOKEN!, {
     httpOnly: true,
     sameSite: 'lax',
@@ -167,6 +170,10 @@ function isSessionlessPublicRoute(pathname: string): boolean {
     pathname === '/setup' ||
     pathname.startsWith('/api/setup') ||
     pathname.startsWith('/api/paypal/webhook') ||
+    // Cron/operator recovery authenticates with the dedicated
+    // x-paypal-reconcile-secret header in the route itself. Keep it out of
+    // Supabase session auth so machine callers can reach that gate.
+    pathname === '/api/paypal/recovery' ||
     pathname.startsWith('/api/license/validate') ||
     pathname.startsWith('/api/license/heartbeat') ||
     pathname.startsWith('/api/license/deactivate') ||
@@ -219,23 +226,25 @@ export async function middleware(request: NextRequest) {
   // Generate per-request CSP nonce
   const nonce = generateNonce();
 
-  // ── Local mode: bypass Supabase entirely ──
-  const localResponse = handleLocalAuth(request, nonce);
-  if (localResponse) {
-    applyCspHeaders(localResponse, nonce);
-    return localResponse;
-  }
-
-  // Health checks must not depend on Supabase auth/session refresh. If this
-  // route touches remote auth before the health handler runs, a production
-  // auth outage can turn the monitor endpoint into a platform 500.
+  // Health probes are machine-to-machine requests and do not retain the
+  // launcher-local session cookie. They must bypass local auth before it can
+  // redirect a first request back to the identical URL to set that cookie.
+  // Otherwise Node's fetch follows the self-redirect until its redirect limit
+  // is exhausted and the launcher can never prove an otherwise healthy stack.
   if (
-    request.nextUrl.pathname === '/api/health' &&
+    ['/api/health', '/api/health/live'].includes(request.nextUrl.pathname) &&
     (request.method === 'GET' || request.method === 'HEAD')
   ) {
     const healthResponse = nextWithNonce(request, nonce);
     applyCspHeaders(healthResponse, nonce);
     return healthResponse;
+  }
+
+  // ── Local mode: bypass Supabase entirely ──
+  const localResponse = handleLocalAuth(request, nonce);
+  if (localResponse) {
+    applyCspHeaders(localResponse, nonce);
+    return localResponse;
   }
 
   if (hasValidReconcileSchedulerSecret(request)) {
@@ -292,7 +301,7 @@ export async function middleware(request: NextRequest) {
     isSessionlessPublicRoute(request.nextUrl.pathname);
 
   if (!user && !isPublicRoute) {
-    const url = request.nextUrl.clone();
+    const url = getTrustedRedirectUrl(request);
     url.pathname = '/login';
     const redirect = NextResponse.redirect(url);
     applyCspHeaders(redirect, nonce);
@@ -301,7 +310,7 @@ export async function middleware(request: NextRequest) {
 
   // Redirect authenticated users away from login
   if (user && request.nextUrl.pathname === '/login') {
-    const url = request.nextUrl.clone();
+    const url = getTrustedRedirectUrl(request);
     url.pathname = '/dashboard';
     const redirect = NextResponse.redirect(url);
     applyCspHeaders(redirect, nonce);

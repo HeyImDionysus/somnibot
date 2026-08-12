@@ -3,11 +3,13 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Swords, CheckCircle, XCircle, Clock, Minus } from 'lucide-react';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface HeistConfig {
   economy_heist_enabled: boolean;
@@ -59,6 +61,7 @@ export default function HeistPage() {
   const [config, setConfig] = useState<HeistConfig>(DEFAULT_CONFIG);
   const [heists, setHeists] = useState<HeistRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -85,18 +88,28 @@ export default function HeistPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<HeistConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_heist_enabled: readConfirmedBoolean(result.config, 'economy_heist_enabled'),
+        economy_heist_min_participants: readConfirmedNumber(result.config, 'economy_heist_min_participants'),
+        economy_heist_max_participants: readConfirmedNumber(result.config, 'economy_heist_max_participants'),
+        economy_heist_join_window_secs: readConfirmedNumber(result.config, 'economy_heist_join_window_secs'),
+        economy_heist_cooldown_seconds: readConfirmedNumber(result.config, 'economy_heist_cooldown_seconds'),
+        economy_heist_base_payout: readConfirmedNumber(result.config, 'economy_heist_base_payout'),
+        economy_heist_success_base_pct: readConfirmedNumber(result.config, 'economy_heist_success_base_pct'),
+        economy_heist_entry_fee: readConfirmedNumber(result.config, 'economy_heist_entry_fee'),
       });
-      if (!res.ok) throw new Error();
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Heist settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -122,51 +135,16 @@ export default function HeistPage() {
       ) : (
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-discord-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Entry Fee (coins)</label>
-              <input type="number" min={0} value={config.economy_heist_entry_fee}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_entry_fee: parseInt(e.target.value) || 0 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Base Payout (coins)</label>
-              <input type="number" min={100} value={config.economy_heist_base_payout}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_base_payout: parseInt(e.target.value) || 500 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Base Success %</label>
-              <input type="number" min={5} max={95} value={config.economy_heist_success_base_pct}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_success_base_pct: parseInt(e.target.value) || 40 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Cooldown (seconds)</label>
-              <input type="number" min={60} value={config.economy_heist_cooldown_seconds}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_cooldown_seconds: parseInt(e.target.value) || 300 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Entry Fee (coins)" help="Coins charged to join a heist; 0 makes entry free." value={config.economy_heist_entry_fee} onCommit={(value) => saveConfig({ economy_heist_entry_fee: value })} min={0} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Base Payout (coins)" help="Starting coin reward before heist modifiers." value={config.economy_heist_base_payout} onCommit={(value) => saveConfig({ economy_heist_base_payout: value })} min={100} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Base Success Chance (%)" help="Success chance before participant and target modifiers." value={config.economy_heist_success_base_pct} onCommit={(value) => saveConfig({ economy_heist_success_base_pct: value })} min={5} max={95} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Heist Cooldown (seconds)" help="Wait time before a member can start another heist." value={config.economy_heist_cooldown_seconds} onCommit={(value) => saveConfig({ economy_heist_cooldown_seconds: value })} min={60} /></div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-discord-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Min Participants</label>
-              <input type="number" min={2} max={10} value={config.economy_heist_min_participants}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_min_participants: parseInt(e.target.value) || 2 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Max Participants</label>
-              <input type="number" min={2} max={20} value={config.economy_heist_max_participants}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_max_participants: parseInt(e.target.value) || 8 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div className="bg-discord-secondary rounded-lg p-4">
-              <label className="text-sm text-discord-text-secondary">Join Window (seconds)</label>
-              <input type="number" min={15} max={300} value={config.economy_heist_join_window_secs}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_heist_join_window_secs: parseInt(e.target.value) || 60 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Minimum Participants" help="Fewest members required before a heist can start." value={config.economy_heist_min_participants} onCommit={(value) => saveConfig({ economy_heist_min_participants: value })} min={2} max={10} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Maximum Participants" help="Largest heist group allowed." value={config.economy_heist_max_participants} onCommit={(value) => saveConfig({ economy_heist_max_participants: value })} min={2} max={20} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Join Window (seconds)" help="Time members have to join after a heist starts." value={config.economy_heist_join_window_secs} onCommit={(value) => saveConfig({ economy_heist_join_window_secs: value })} min={15} max={300} /></div>
           </div>
 
           <div>
@@ -176,7 +154,7 @@ export default function HeistPage() {
             ) : (
               <div className="space-y-2">
                 {heists.map((h) => (
-                  <div key={h.id} className="bg-discord-secondary rounded-lg p-3 flex items-center justify-between">
+                  <div key={h.id} className="bg-discord-bg-secondary rounded-lg p-3 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       {STATUS_ICONS[h.status] ?? null}
                       <div>

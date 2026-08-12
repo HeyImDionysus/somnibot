@@ -45,12 +45,14 @@ const WALKTHROUGH_COMMANDS = [
 ];
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+let gatewayConnected = false;
 const timeout = setTimeout(() => {
-  client.destroy();
+  if (gatewayConnected) client.destroy();
 }, 20_000);
 
 try {
   await client.login(process.env.DISCORD_TOKEN);
+  gatewayConnected = true;
   const guild = await client.guilds.fetch(process.env.DISCORD_GUILD_ID);
   const [channels, commands, member] = await Promise.all([
     guild.channels.fetch(),
@@ -114,7 +116,20 @@ try {
   ) {
     process.exitCode = 1;
   }
+} catch (error) {
+  const failure = error?.code === 'TokenInvalid'
+    ? 'discord_token_rejected'
+    : 'discord_gateway_unavailable';
+  console.log(JSON.stringify({
+    gatewayReady: false,
+    credentialAccepted: false,
+    failure,
+  }));
+  process.exitCode = 1;
 } finally {
   clearTimeout(timeout);
-  client.destroy();
+  // discord.js can leave a partially initialized native async handle after a
+  // pre-ready 401. Destroy only a connected gateway; an unconnected client has
+  // no live session to close and exits cleanly on its own.
+  if (gatewayConnected) client.destroy();
 }

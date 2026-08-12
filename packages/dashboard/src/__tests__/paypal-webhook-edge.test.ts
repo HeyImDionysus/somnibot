@@ -5,15 +5,18 @@
  * subscription lifecycle, and unhandled event types.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHmac } from 'node:crypto';
 
 afterEach(() => vi.restoreAllMocks());
 
-const { replaySecret } = vi.hoisted(() => {
+const { replaySecret, paypalClientSecret } = vi.hoisted(() => {
   const secret = 'test-edge-webhook-replay-secret';
+  const clientSecret = 'test-paypal-client-secret';
   process.env.NEXTAUTH_SECRET = 'test-secret-edge';
   process.env.WEBHOOK_REPLAY_SECRET = secret;
   process.env.PAYPAL_WEBHOOK_ID = 'test-webhook-id';
-  return { replaySecret: secret };
+  process.env.PAYPAL_CLIENT_SECRET = clientSecret;
+  return { replaySecret: secret, paypalClientSecret: clientSecret };
 });
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
@@ -514,6 +517,7 @@ function createCaptureRecoveryHarness(options: {
   failCustomerReadAttempts?: number;
   failClaimAttempts?: number;
   failAlertInsertAttempts?: number;
+  signedCheckout?: boolean;
 } = {}) {
   const state: any = {
     order: {
@@ -568,6 +572,17 @@ function createCaptureRecoveryHarness(options: {
     inserts: [] as Array<{ table: string; payload: any }>,
     updates: [] as Array<{ table: string; payload: any }>,
   };
+  state.checkoutIntent = options.signedCheckout ? {
+    token: '01234567-89ab-4cde-8fab-0123456789ab',
+    guild_id: state.order.guild_id,
+    customer_id: state.order.customer_id,
+    product_id: state.order.product_id,
+    gift_checkout_token: null,
+    provider_id: state.order.paypal_order_id,
+    expires_at: '2099-01-01T00:00:00.000Z',
+    approval_exposed_at: '2026-08-11T00:00:00.000Z',
+    status: 'bound',
+  } : null;
   state.orders = [state.order];
 
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
@@ -1042,6 +1057,9 @@ function createCaptureRecoveryHarness(options: {
       if (table === 'plans') return state.plan ? [state.plan] : [];
       if (table === 'product_license_config') {
         return options.withLicense ? [{ product_id: state.order.product_id }] : [];
+      }
+      if (table === 'commerce_checkout_intents') {
+        return state.checkoutIntent ? [state.checkoutIntent] : [];
       }
       if (table === 'bot_action_queue') return state.queue ? [state.queue] : [];
       if (table === 'license_keys') return state.licenseKey ? [state.licenseKey] : [];
@@ -2244,6 +2262,26 @@ describe('PayPal webhook — edge cases', () => {
         related_ids: { order_id: 'PAYPAL-ORDER-RECOVERY-1' },
       },
     };
+
+    it('fulfills a signed one-time checkout using the customer Discord identity', async () => {
+      const { supabase, state } = createCaptureRecoveryHarness({
+        withLicense: true,
+        signedCheckout: true,
+      });
+      const signature = createHmac('sha256', paypalClientSecret)
+        .update(`somnibot-checkout:v1:${state.checkoutIntent.token}`)
+        .digest('hex');
+
+      await handlePaymentCaptured(supabase, {
+        ...captureResource,
+        custom_id: `v1:${state.checkoutIntent.token}.${signature}`,
+      });
+
+      expect(state.order.status).toBe('completed');
+      expect(state.queue.payload.discord_id).toBe(state.customer.discord_id);
+      expect(state.licenseKey.bound_discord_id).toBe(state.customer.discord_id);
+      expect(state.providerIncidents).toEqual([]);
+    });
 
     it('binds simultaneous same-product checkouts to the exact PayPal order id', async () => {
       const { supabase, state } = createCaptureRecoveryHarness();

@@ -29,6 +29,8 @@ export function EmptyState({
 }: EmptyStateProps) {
   return (
     <div
+      role="status"
+      aria-live="polite"
       className={cn(
         'flex flex-col items-center justify-center text-center',
         compact ? 'py-6' : 'py-16',
@@ -42,6 +44,7 @@ export function EmptyState({
         )}
       >
         <Icon
+          aria-hidden="true"
           size={compact ? 20 : 28}
           className="text-discord-text-muted/60"
         />
@@ -66,6 +69,7 @@ export function EmptyState({
       )}
       {action && (
         <button
+          type="button"
           onClick={action.onClick}
           className={cn(
             'mt-4 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-discord-accent/80',

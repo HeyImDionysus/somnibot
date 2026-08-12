@@ -13,6 +13,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import { decryptCloudCredential, encryptedCredentialSettingKey } from './cloud-credential-crypto.js';
 
 const log = createLogger('ConfigLoader');
 
@@ -55,6 +56,7 @@ const SECRET_KEYS = new Set([
   'discord_bot_token',
   'discord_client_secret',
   'paypal_client_secret',
+  'paypal_webhook_id',
   'lavalink_password',
   'supabase_access_token',
   'supabase_db_url',
@@ -88,8 +90,11 @@ export async function loadConfigFromDatabase(): Promise<number> {
     // Determine which env vars are missing
     const missingKeys: string[] = [];
     for (const [settingsKey, envVar] of Object.entries(SETTINGS_TO_ENV)) {
+      // Secret values are runtime/launcher-owned. Configured markers may be
+      // displayed by the dashboard but raw database rows are never trusted as
+      // credentials, including legacy rows left by older releases.
       if (!process.env[envVar]) {
-        missingKeys.push(settingsKey);
+        missingKeys.push(SECRET_KEYS.has(settingsKey) ? encryptedCredentialSettingKey(settingsKey) : settingsKey);
       }
     }
 
@@ -118,9 +123,16 @@ export async function loadConfigFromDatabase(): Promise<number> {
     let loaded = 0;
     if (settings) {
       for (const row of settings) {
-        if (row.value && SETTINGS_TO_ENV[row.key]) {
-          const envVar = SETTINGS_TO_ENV[row.key];
-          process.env[envVar] = row.value;
+        const encrypted = row.key.endsWith('_encrypted');
+        const baseKey = encrypted ? row.key.slice(0, -'_encrypted'.length) : row.key;
+        const envVar = SETTINGS_TO_ENV[baseKey];
+        if (SECRET_KEYS.has(baseKey) && !encrypted) continue;
+        if (row.value && envVar) {
+          const value = encrypted
+            ? decryptCloudCredential(row.value, baseKey, serviceKey, new URL(supabaseUrl).origin)
+            : row.value;
+          if (!value) continue;
+          process.env[envVar] = value;
           loaded++;
           // Don't log the actual value for security
           log.info(`Loaded ${envVar} from instance_settings`);

@@ -22,6 +22,7 @@
  * - 'stats-channels' → reload stats channel config
  * - 'embeds' → reload saved embed templates
  * - 'branding' → invalidate the white-label brand kit cache
+ * - diagnostics interval → reschedule health snapshots without a restart
  * - 'settings' → reload instance-wide settings (full reload)
  * - 'all' → full config reload
  */
@@ -51,6 +52,8 @@ import { invalidateProfilesCache } from '../features/profiles/index.js';
 import { invalidateHeistCache } from '../features/heist/index.js';
 import { invalidateBrandKitCache } from '../features/branding/index.js';
 import { invalidateAlertChannelCache } from './alert-service.js';
+import { loadReactionRoles } from '../features/reaction-roles/reaction-engine.js';
+import { deployButtonRolePanelsForGuild } from '../features/reaction-roles/button-roles.js';
 import { createLogger } from '@somnibot/shared';
 import type { ConfigChangedData, PlatformEvent } from '@somnibot/shared';
 
@@ -78,6 +81,10 @@ export class ConfigWatcher {
       intervalMinutes?: number,
       runImmediately?: boolean,
     ) => void,
+    private onAuditConfigChange?: () => void,
+    private onAutomationConfigChange?: () => void,
+    private onDiagnosticsConfigChange?: (snapshotIntervalMs?: number) => void,
+    private onOnboardingConfigChange?: () => void | Promise<void>,
   ) {}
 
   /**
@@ -92,6 +99,17 @@ export class ConfigWatcher {
       const section = event.data.section;
       const changedInterval = event.data.changes?.sync_interval_minutes;
       const changedEnabled = event.data.changes?.sync_enabled;
+      const changedSnapshotInterval = event.data.changes?.diagnostics_snapshot_interval_ms;
+      if (section === 'settings' || section === 'all') {
+        // Audit cadence is a runtime timer, not merely cached config. Refresh
+        // it on the same config event so the new value takes effect without a
+        // restart and the old timer is replaced exactly once.
+        this.onAuditConfigChange?.();
+        this.onAutomationConfigChange?.();
+        if (typeof changedSnapshotInterval === 'number' && Number.isFinite(changedSnapshotInterval)) {
+          this.onDiagnosticsConfigChange?.(changedSnapshotInterval);
+        }
+      }
       if (
         (section === 'settings' || section === 'all')
         && (
@@ -306,6 +324,7 @@ export class ConfigWatcher {
     await this.valkey.del(`onboarding:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
     // Also invalidate the guild_config cache used by the onboarding handler
     await this.valkey.del(`guild_config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    await this.onOnboardingConfigChange?.();
     log.info('Onboarding config reloaded');
   }
 
@@ -320,6 +339,8 @@ export class ConfigWatcher {
         if (batch.length > 0) await this.valkey.del(...batch);
       } while (cursor !== '0');
     } catch (e: unknown) { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); }
+    await loadReactionRoles(this.supabase, this.valkey, this.guild.id);
+    await deployButtonRolePanelsForGuild(this.guild, this.supabase);
     log.info('Reaction roles reloaded');
   }
 

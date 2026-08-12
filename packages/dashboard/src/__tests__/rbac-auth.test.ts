@@ -28,6 +28,7 @@ vi.mock('next/headers', () => ({
 
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createServerSupabase } from '@/lib/supabase/server';
+import { cookies, headers } from 'next/headers';
 
 // ── Permission helpers (pure logic, no mocking needed) ──────
 
@@ -77,8 +78,10 @@ describe('hasRouteAccess()', () => {
     expect(hasRouteAccess(['dashboard.full_access'], '/store')).toBe(true);
   });
 
-  it('grants access to unknown routes by default', () => {
-    expect(hasRouteAccess([], '/some-unknown-route')).toBe(true);
+  it('denies access to unknown routes by default (fail closed)', () => {
+    // New dashboard surfaces must be explicitly registered in
+    // ROUTE_PERMISSIONS before any role can reach them.
+    expect(hasRouteAccess([], '/some-unknown-route')).toBe(false);
   });
 
   it('blocks /settings/team without manage_team', () => {
@@ -174,6 +177,8 @@ describe('requireGuildOwner — 401/403 responses', () => {
     vi.resetAllMocks();
     mockCookieGet.mockReturnValue(undefined);
     mockHeaderGet.mockReturnValue(null);
+    vi.mocked(cookies).mockResolvedValue({ get: mockCookieGet } as never);
+    vi.mocked(headers).mockResolvedValue({ get: mockHeaderGet } as never);
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockAdminSupabase);
   });
 

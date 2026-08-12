@@ -65,7 +65,7 @@ export async function handleFarmingCommand(
       break;
     }
     case 'harvest': {
-      const { embed } = await manager.harvest(interaction.user.id);
+      const { embed } = await manager.harvest(interaction.user.id, interaction.id);
       await interaction.editReply({ embeds: [embed] });
       break;
     }

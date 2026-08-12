@@ -38,6 +38,7 @@ interface MusicConfig {
   defaultVolume: number;
   maxQueueLength: number;
   allowDuplicates: boolean;
+  perUserQueueCap: number;
   djRoleId: string | null;
   autoLeaveTimeout: number;   // ms — default 5 min
   inactivityTimeout: number;  // ms — default 30 min
@@ -67,8 +68,9 @@ export type ControlActor = { userId?: string; internal?: boolean };
 
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
-  maxQueueLength: 500,
+  maxQueueLength: 5000,
   allowDuplicates: true,
+  perUserQueueCap: 50,
   djRoleId: null,
   autoLeaveTimeout: 5 * 60 * 1000,
   inactivityTimeout: 30 * 60 * 1000,
@@ -136,7 +138,7 @@ export class MusicPlayerManager {
   private async loadConfig(): Promise<void> {
     const { data } = await this.supabase
       .from('guild_config')
-      .select('music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes, vote_skip_threshold_percent, self_skip_enabled, requester_move_enabled, priority_voting_enabled')
+      .select('music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes, max_queue_length, allow_duplicates, per_user_queue_cap, vote_skip_threshold_percent, self_skip_enabled, requester_move_enabled, priority_voting_enabled')
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
@@ -146,6 +148,9 @@ export class MusicPlayerManager {
       this.config = {
         ...DEFAULT_CONFIG,
         defaultVolume: data.music_default_volume ?? DEFAULT_CONFIG.defaultVolume,
+        maxQueueLength: data.max_queue_length ?? DEFAULT_CONFIG.maxQueueLength,
+        allowDuplicates: data.allow_duplicates ?? DEFAULT_CONFIG.allowDuplicates,
+        perUserQueueCap: data.per_user_queue_cap ?? DEFAULT_CONFIG.perUserQueueCap,
         djRoleId: data.dj_role_id ?? null,
         autoLeaveTimeout: autoLeaveMin * 60 * 1000,
         inactivityTimeout: autoDestroyMin * 60 * 1000,
@@ -154,6 +159,10 @@ export class MusicPlayerManager {
         requesterMoveEnabled: data.requester_move_enabled ?? DEFAULT_CONFIG.requesterMoveEnabled,
         priorityVotingEnabled: data.priority_voting_enabled ?? DEFAULT_CONFIG.priorityVotingEnabled,
       };
+      this.queueManager.setLimits({
+        maxQueueSize: this.config.maxQueueLength,
+        maxPerUserQueue: this.config.perUserQueueCap,
+      });
     }
   }
 
@@ -364,14 +373,14 @@ export class MusicPlayerManager {
 
     // V9 Audit §12.P2: Per-user queue limit — prevent one user from monopolizing the queue.
     const userQueueCount = queue.entries.filter((e) => e.requestedBy === userId).length;
-    const MAX_PER_USER = 50;
-    if (userQueueCount >= MAX_PER_USER) {
+    const maxPerUser = this.config.perUserQueueCap;
+    if (userQueueCount >= maxPerUser) {
       this.eventBus.emit('music.capacity_rejected', this.guild.id, {
         userId,
         reason: 'user_limit',
-        limit: MAX_PER_USER,
+        limit: maxPerUser,
       });
-      return { success: false, message: `You've reached the per-user limit of ${MAX_PER_USER} queued tracks` };
+      return { success: false, message: `You've reached the per-user limit of ${maxPerUser} queued tracks` };
     }
 
     // Resolve search query

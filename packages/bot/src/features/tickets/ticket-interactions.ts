@@ -29,7 +29,7 @@ import { createTicket, claimTicket, closeTicket, reopenTicket, deleteTicket } fr
 import { canMemberManageTicket, emitTicketDenied, ticketDeniedMessage } from './ticket-authz.js';
 import { generateTranscript } from './transcript-generator.js';
 import { createLogger } from '@somnibot/shared';
-import { resolveBrandKit } from '../branding/brand-kit.js';
+import { applyBrand, resolveBrandKit, voice } from '../branding/index.js';
 
 const log = createLogger('TicketInteractions');
 
@@ -49,7 +49,10 @@ async function ticketsUnavailableMessage(
     fallbackName: guild.name,
   }).catch(() => null);
   const name = brandKit?.brandName ?? guild.name ?? 'this server';
-  return `⚠️ ${name}'s ticket system is temporarily unavailable — please try again in a moment.`;
+  return voice(brandKit?.voicePreset ?? 'default', 'unavailable', {
+    brand: name,
+    feature: 'ticket system',
+  });
 }
 
 interface IntakeFormField {
@@ -261,9 +264,10 @@ async function openTicketFromPanel(
     return;
   }
 
-  await interaction.editReply(
-    `✅ Your ticket has been created: <#${result.channel.id}>`,
-  );
+  const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });
+  await interaction.editReply(voice(brandKit.voicePreset, 'success', {
+    message: `Your ticket has been created: <#${result.channel.id}>`,
+  }));
 }
 
 // ── Ticket Close ─────────────────────────────────────────
@@ -385,6 +389,7 @@ async function handleTicketClaim(
     .setColor(brandKit.accentColor)
     .setDescription(`🙋 **Ticket claimed by <@${interaction.user.id}>**`)
     .setTimestamp();
+  applyBrand(claimEmbed, brandKit, { intent: 'primary' });
 
   await interaction.reply({ embeds: [claimEmbed] });
 }
@@ -622,13 +627,15 @@ async function handleIntakeModalSubmit(
       .setDescription(responses.join('\n\n'))
       .setTimestamp()
       .setFooter({ text: `Submitted by ${interaction.user.tag}` });
+    applyBrand(intakeEmbed, brandKit, { intent: 'info' });
 
     await result.channel.send({ embeds: [intakeEmbed] });
   }
 
-  await interaction.editReply(
-    `✅ Your ticket has been created: <#${result.channel.id}>`,
-  );
+  const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });
+  await interaction.editReply(voice(brandKit.voicePreset, 'success', {
+    message: `Your ticket has been created: <#${result.channel.id}>`,
+  }));
 }
 
 // ── Ticket Feedback ──────────────────────────────────────

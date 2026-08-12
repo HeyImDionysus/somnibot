@@ -47,6 +47,21 @@ afterAll(async () => {
   await supa.from('guild').delete().eq('id', GUILD_ID);
 });
 
+describe('economy_leaderboard RPC', () => {
+  it('returns a funded wallet when pagination parameters select the current RPC', async () => {
+    const { data, error } = await supa.rpc('economy_leaderboard', {
+      p_guild_id: GUILD_ID,
+      p_limit: 10,
+      p_offset: 0,
+    });
+
+    expect(error).toBeNull();
+    expect(data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ user_id: USER_C, net_worth: 1000 }),
+    ]));
+  });
+});
+
 describe('economy_add_balance RPC', () => {
   it('creates a wallet on first credit (upsert)', async () => {
     const { error } = await supa.rpc('economy_add_balance', {

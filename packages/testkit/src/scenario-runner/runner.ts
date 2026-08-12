@@ -37,6 +37,10 @@ export interface RunDomainOptions {
   capabilities?: Capabilities;
   /** Supply an already-loaded catalog (defaults to the built-in v1 catalog). */
   catalog?: DomainCatalog;
+  /** Observe bounded child-run progress without changing scenario behavior. */
+  onScenarioStart?: (scenarioClass: string) => void;
+  /** Observe completion after teardown so a timeout can identify its exact lane. */
+  onScenarioComplete?: (scenarioClass: string, elapsedMs: number) => void;
 }
 
 /** Run one domain's 12 scenario scripts and return its evidence report. */
@@ -55,6 +59,8 @@ export async function runDomainProof(
 
   const scenarios: ScenarioEvidence[] = [];
   for (const scenarioClass of SCENARIO_CLASSES) {
+    const scenarioStartedAt = Date.now();
+    options.onScenarioStart?.(scenarioClass);
     const ctx = new ScenarioContextImpl({
       domain,
       scenarioClass,
@@ -80,6 +86,7 @@ export async function runDomainProof(
     // Always tear down (dispose handles + sweep run-prefixed rows), even on throw.
     await ctx.teardown();
     scenarios.push(ctx.buildEvidence(error));
+    options.onScenarioComplete?.(scenarioClass, Date.now() - scenarioStartedAt);
   }
 
   return {

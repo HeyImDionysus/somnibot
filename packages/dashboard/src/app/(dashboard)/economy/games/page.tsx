@@ -6,10 +6,12 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Gamepad2 } from 'lucide-react';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber, readConfirmedString } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -41,30 +43,20 @@ const DEFAULT_CONFIG: GamesConfig = {
 
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex items-center gap-3 cursor-pointer">
-      <div
-        className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-brand-primary' : 'bg-discord-bg-tertiary'}`}
+    <div className="flex items-center gap-3">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        className="relative flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
         onClick={() => onChange(!checked)}
       >
-        <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : ''}`} />
-      </div>
+        <span className={`absolute h-6 w-11 rounded-full transition-colors ${checked ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'}`}>
+          <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white transition-transform ${checked ? 'translate-x-5' : ''}`} />
+        </span>
+      </button>
       <span className="text-sm text-discord-text-primary">{label}</span>
-    </label>
-  );
-}
-
-function NumberField({ label, value, onChange, min, max }: { label: string; value: number; onChange: (v: number) => void; min?: number; max?: number }) {
-  return (
-    <div>
-      <span className="block text-sm text-discord-text-secondary mb-1">{label}</span>
-      <input
-        type="number"
-        className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
-        value={value}
-        min={min}
-        max={max}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(Number(e.target.value))}
-      />
     </div>
   );
 }
@@ -75,6 +67,7 @@ export default function GamesPage() {
   const { toast } = useToast();
   const [config, setConfig] = useState<GamesConfig>(DEFAULT_CONFIG);
   const [loading, setLoading] = useState(true);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -104,18 +97,35 @@ export default function GamesPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<GamesConfig>) => {
-    const updated = { ...config, ...patch };
-    setConfig(updated);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updated),
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_games_enabled: readConfirmedBoolean(result.config, 'economy_games_enabled'),
+        economy_daily_loss_limit: readConfirmedNumber(result.config, 'economy_daily_loss_limit'),
+        economy_coinflip_max_bet: readConfirmedNumber(result.config, 'economy_coinflip_max_bet'),
+        economy_slots_max_bet: readConfirmedNumber(result.config, 'economy_slots_max_bet'),
+        economy_blackjack_max_bet: readConfirmedNumber(result.config, 'economy_blackjack_max_bet'),
+        economy_lottery_enabled: readConfirmedBoolean(result.config, 'economy_lottery_enabled'),
+        economy_lottery_schedule: readConfirmedString(result.config, 'economy_lottery_schedule'),
+        economy_lottery_ticket_price: readConfirmedNumber(result.config, 'economy_lottery_ticket_price'),
+        economy_lottery_max_tickets: readConfirmedNumber(result.config, 'economy_lottery_max_tickets'),
       });
-      if (!res.ok) throw new Error();
-      toast({ title: 'Settings saved', variant: 'success' });
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save', variant: 'error' });
+        return 'failed' as const;
+      }
+      const [target] = Object.entries(patch)[0] ?? ['setting'];
+      const value = result.config[target];
+      toast({
+        title: 'Mini-game setting confirmed',
+        description: `${target} confirmed as ${String(value)} at ${new Date().toLocaleTimeString()}.`,
+        variant: 'success',
+      });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -132,10 +142,10 @@ export default function GamesPage() {
         <h2 className="text-lg font-semibold text-discord-text-primary">Mini-Games</h2>
         <Toggle label="Enable Mini-Games" checked={config.economy_games_enabled} onChange={(v) => saveConfig({ economy_games_enabled: v })} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <NumberField label="Daily Loss Limit (0 = none)" value={config.economy_daily_loss_limit} onChange={(v) => saveConfig({ economy_daily_loss_limit: v })} min={0} />
-          <NumberField label="Coinflip Max Bet" value={config.economy_coinflip_max_bet} onChange={(v) => saveConfig({ economy_coinflip_max_bet: v })} min={0} />
-          <NumberField label="Slots Max Bet" value={config.economy_slots_max_bet} onChange={(v) => saveConfig({ economy_slots_max_bet: v })} min={0} />
-          <NumberField label="Blackjack Max Bet" value={config.economy_blackjack_max_bet} onChange={(v) => saveConfig({ economy_blackjack_max_bet: v })} min={0} />
+          <ValidatedNumberInput label="Daily Loss Limit (coins)" help="Maximum coins a member can lose per day; 0 removes the limit." value={config.economy_daily_loss_limit} onCommit={(value) => saveConfig({ economy_daily_loss_limit: value })} min={0} />
+          <ValidatedNumberInput label="Coinflip Maximum Bet (coins)" help="Largest coinflip wager a member can place; 0 disables coinflip wagering." value={config.economy_coinflip_max_bet} onCommit={(value) => saveConfig({ economy_coinflip_max_bet: value })} min={0} />
+          <ValidatedNumberInput label="Slots Maximum Bet (coins)" help="Largest slots wager a member can place; 0 disables slots wagering." value={config.economy_slots_max_bet} onCommit={(value) => saveConfig({ economy_slots_max_bet: value })} min={0} />
+          <ValidatedNumberInput label="Blackjack Maximum Bet (coins)" help="Largest blackjack wager a member can place; 0 disables blackjack wagering." value={config.economy_blackjack_max_bet} onCommit={(value) => saveConfig({ economy_blackjack_max_bet: value })} min={0} />
         </div>
       </div>
 
@@ -145,8 +155,11 @@ export default function GamesPage() {
         <Toggle label="Enable Lottery" checked={config.economy_lottery_enabled} onChange={(v) => saveConfig({ economy_lottery_enabled: v })} />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div>
-            <span className="block text-sm text-discord-text-secondary mb-1">Drawing Schedule</span>
+            <label htmlFor="lottery-drawing-schedule" className="block text-sm text-discord-text-secondary mb-1">
+              Drawing Schedule
+            </label>
             <select
+              id="lottery-drawing-schedule"
               className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
               value={config.economy_lottery_schedule}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => saveConfig({ economy_lottery_schedule: e.target.value })}
@@ -157,8 +170,8 @@ export default function GamesPage() {
               <option value="monthly">Monthly</option>
             </select>
           </div>
-          <NumberField label="Ticket Price" value={config.economy_lottery_ticket_price} onChange={(v) => saveConfig({ economy_lottery_ticket_price: v })} min={1} />
-          <NumberField label="Max Tickets per Member" value={config.economy_lottery_max_tickets} onChange={(v) => saveConfig({ economy_lottery_max_tickets: v })} min={1} max={100} />
+          <ValidatedNumberInput label="Ticket Price (coins)" help="Coins charged for each lottery ticket." value={config.economy_lottery_ticket_price} onCommit={(value) => saveConfig({ economy_lottery_ticket_price: value })} min={1} />
+          <ValidatedNumberInput label="Maximum Tickets per Member" help="Ticket purchase cap for one drawing." value={config.economy_lottery_max_tickets} onCommit={(value) => saveConfig({ economy_lottery_max_tickets: value })} min={1} max={100} />
         </div>
       </div>
     </div>

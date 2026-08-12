@@ -35,11 +35,13 @@ export async function GET(req: NextRequest) {
   }
 
   const admin = createAdminSupabase();
-  const { data: guilds, error } = await admin
+  let guildQuery = admin
     .from('guild')
-    .select('id, name')
-    .eq('owner_discord_id', discordId)
-    .limit(1000);
+    .select('id, name');
+  guildQuery = auth.localGuildIds?.length
+    ? guildQuery.in('id', auth.localGuildIds)
+    : guildQuery.eq('owner_discord_id', discordId);
+  const { data: guilds, error } = await guildQuery.limit(1000);
 
   if (error || !guilds) {
     return NextResponse.json({ error: 'Failed to load guilds' }, { status: 500 });

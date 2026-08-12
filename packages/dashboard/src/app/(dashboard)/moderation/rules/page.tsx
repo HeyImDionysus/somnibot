@@ -8,8 +8,9 @@
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { useToast } from '@/components/shared/toast';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { isApiRecord, requireApiArray, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 interface AutoModRule {
@@ -24,6 +25,22 @@ interface AutoModRule {
   exempt_channels: string[];
   log_to_mod_channel: boolean;
   created_at: string;
+}
+
+function isAutoModRule(value: unknown): value is AutoModRule {
+  if (!isApiRecord(value)) return false;
+  const rule = value;
+  return typeof rule.id === 'string'
+    && typeof rule.name === 'string'
+    && typeof rule.type === 'string'
+    && typeof rule.enabled === 'boolean'
+    && !!rule.config && typeof rule.config === 'object' && !Array.isArray(rule.config)
+    && typeof rule.action === 'string'
+    && (typeof rule.mute_duration_minutes === 'number' || rule.mute_duration_minutes === null)
+    && Array.isArray(rule.exempt_roles) && rule.exempt_roles.every((role) => typeof role === 'string')
+    && Array.isArray(rule.exempt_channels) && rule.exempt_channels.every((channel) => typeof channel === 'string')
+    && typeof rule.log_to_mod_channel === 'boolean'
+    && typeof rule.created_at === 'string';
 }
 
 const RULE_TYPES = [
@@ -66,18 +83,22 @@ export default function AutoModRulesPage() {
   const [editingRule, setEditingRule] = useState<Partial<AutoModRule> | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const deleteInFlightRef = useRef(false);
+  const [confirmDelete, setConfirmDelete] = useState<{ readonly id: string; readonly name: string } | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
   const { toast } = useToast();
 
   const loadRules = useCallback(async () => {
     try {
       const res = await fetch('/api/moderation/rules');
-      const json = await res.json();
-      if (json.success) {
-        setRules(json.data);
-      }
-    } catch {
-      setError('Failed to load rules');
+      const json = await requireApiSuccess(res, 'Could not load auto-mod rules. Retry from this page.');
+      const nextRules = requireApiArray(json, 'data', isAutoModRule, 'The auto-mod service returned an invalid readback. Retry from this page.');
+      setRules(nextRules);
+      return nextRules;
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load auto-mod rules. Retry from this page.');
+      return null;
     } finally {
       setLoading(false);
     }
@@ -111,6 +132,11 @@ export default function AutoModRulesPage() {
 
   const handleSave = async () => {
     if (!editingRule) return;
+    if (!editingRule.name?.trim()) {
+      setNameError('Enter a rule name before saving.');
+      return;
+    }
+    setNameError(null);
     setSaving(true);
     setError(null);
 
@@ -121,11 +147,20 @@ export default function AutoModRulesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(editingRule),
       });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
+      await requireApiSuccess(res, 'Could not save this rule. Your rule fields are still here; correct them or retry.');
+      const nextRules = await loadRules();
+      const savedRule = nextRules?.find((rule) => isCreating ? rule.name === editingRule.name : rule.id === editingRule.id);
+      requireReadback(
+        !!savedRule
+          && savedRule.name === editingRule.name
+          && savedRule.type === editingRule.type
+          && savedRule.enabled === editingRule.enabled
+          && savedRule.action === editingRule.action
+          && JSON.stringify(savedRule.config) === JSON.stringify(editingRule.config),
+        'The rule mutation was accepted, but the authoritative readback is stale. Your rule fields are still here; reload before retrying.',
+      );
       setEditingRule(null);
       toast({ title: isCreating ? 'Rule created' : 'Rule updated', variant: 'success' });
-      await loadRules();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save rule';
       setError(msg);
@@ -136,16 +171,26 @@ export default function AutoModRulesPage() {
   };
 
   const handleDelete = async (ruleId: string) => {
+    if (deleteInFlightRef.current) return;
+    deleteInFlightRef.current = true;
+    setDeleting(true);
     try {
       const res = await fetch(`/api/moderation/rules?id=${ruleId}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
+      await requireApiSuccess(res, 'Could not delete this rule. It remains active.');
+      const nextRules = await loadRules();
+      requireReadback(
+        nextRules !== null && !nextRules.some((rule) => rule.id === ruleId),
+        'The delete was accepted, but the rule still appears in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: 'Rule deleted', variant: 'success' });
-      await loadRules();
+      setConfirmDelete(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to delete rule';
       setError(msg);
       toast({ title: msg, variant: 'error' });
+    } finally {
+      deleteInFlightRef.current = false;
+      setDeleting(false);
     }
   };
 
@@ -156,10 +201,13 @@ export default function AutoModRulesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: rule.id, enabled: !rule.enabled }),
       });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
+      await requireApiSuccess(res, `Could not ${rule.enabled ? 'disable' : 'enable'} this rule. Its current state is unchanged.`);
+      const nextRules = await loadRules();
+      requireReadback(
+        nextRules?.some((candidate) => candidate.id === rule.id && candidate.enabled === !rule.enabled) === true,
+        'The rule state change was accepted, but the authoritative readback still has the old state. Reload before retrying.',
+      );
       toast({ title: rule.enabled ? 'Rule disabled' : 'Rule enabled', variant: 'success' });
-      await loadRules();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to toggle rule';
       setError(msg);
@@ -174,7 +222,7 @@ export default function AutoModRulesPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Auto-Mod Rules</h1>
           <p className="mt-1 text-sm text-discord-text-muted">
@@ -223,9 +271,9 @@ export default function AutoModRulesPage() {
               rule.enabled ? 'border-discord-border-subtle' : 'border-discord-border-subtle/50 opacity-60'
             }`}
           >
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
                   <span>{ruleType?.icon ?? '🛡️'}</span>
                   <h3 className="font-medium text-discord-text-primary">{rule.name}</h3>
                   <span className="rounded-full bg-discord-bg-tertiary px-2 py-0.5 text-xs text-discord-text-muted">
@@ -247,13 +295,14 @@ export default function AutoModRulesPage() {
                 <ConfigSummary type={rule.type} config={rule.config} />
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                 <label className="relative inline-flex cursor-pointer items-center">
                   <input
                     type="checkbox"
                     className="peer sr-only"
                     checked={rule.enabled}
                     onChange={() => handleToggle(rule)}
+                    aria-label={`${rule.enabled ? 'Disable' : 'Enable'} rule ${rule.name}`}
                   />
                   <div className="peer h-5 w-9 rounded-full bg-discord-bg-tertiary after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-all peer-checked:bg-green-500 peer-checked:after:translate-x-full" />
                 </label>
@@ -264,7 +313,8 @@ export default function AutoModRulesPage() {
                   Edit
                 </button>
                 <button
-                  onClick={() => setConfirmDelete(rule.id)}
+                  onClick={() => setConfirmDelete({ id: rule.id, name: rule.name })}
+                  aria-label={`Delete ${rule.name}`}
                   className="rounded bg-discord-bg-tertiary px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/20"
                 >
                   Delete
@@ -284,20 +334,23 @@ export default function AutoModRulesPage() {
           onChange={setEditingRule}
           onSave={handleSave}
           onCancel={() => setEditingRule(null)}
+          nameError={nameError}
         />
       )}
 
       <ConfirmDialog
         open={!!confirmDelete}
         title="Delete Auto-Mod Rule"
-        description="Are you sure you want to delete this rule? This action cannot be undone."
+        description={confirmDelete ? `Delete auto-mod rule “${confirmDelete.name}” (${confirmDelete.id}). It will stop protecting the server immediately and cannot be undone.` : undefined}
         confirmLabel="Delete Rule"
         variant="danger"
+        loading={deleting}
         onConfirm={() => {
-          if (confirmDelete) handleDelete(confirmDelete);
-          setConfirmDelete(null);
+          if (confirmDelete) return handleDelete(confirmDelete.id);
         }}
-        onCancel={() => setConfirmDelete(null)}
+        onCancel={() => {
+          if (!deleting) setConfirmDelete(null);
+        }}
       />
     </div>
   );
@@ -358,6 +411,7 @@ function RuleEditor({
   onChange,
   onSave,
   onCancel,
+  nameError,
 }: {
   rule: Partial<AutoModRule>;
   isCreating: boolean;
@@ -365,6 +419,7 @@ function RuleEditor({
   onChange: (r: Partial<AutoModRule>) => void;
   onSave: () => void;
   onCancel: () => void;
+  nameError: string | null;
 }) {
   return (
     <div className="rounded-lg border-2 border-discord-accent/30 bg-discord-bg-secondary p-6">
@@ -375,14 +430,18 @@ function RuleEditor({
       <div className="mt-4 space-y-4">
         {/* Name */}
         <div>
-          <label className="block text-sm font-medium text-discord-text-primary mb-1">Name</label>
+          <label htmlFor="automod-rule-name" className="block text-sm font-medium text-discord-text-primary mb-1">Name</label>
           <input
+            id="automod-rule-name"
             type="text"
             value={rule.name ?? ''}
             onChange={(e) => onChange({ ...rule, name: e.target.value })}
             placeholder="e.g. Profanity Filter"
+            aria-invalid={nameError !== null}
+            aria-describedby={nameError ? 'automod-rule-name-error' : undefined}
             className="w-full max-w-md rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
           />
+          {nameError && <p id="automod-rule-name-error" className="mt-1 text-xs text-red-400">{nameError}</p>}
         </div>
 
         {/* Type */}
@@ -437,12 +496,13 @@ function RuleEditor({
         {/* Log to mod channel */}
         <div className="flex items-center gap-2">
           <input
+            id="automod-log-channel"
             type="checkbox"
             checked={rule.log_to_mod_channel ?? true}
             onChange={(e) => onChange({ ...rule, log_to_mod_channel: e.target.checked })}
             className="rounded"
           />
-          <label className="text-sm text-discord-text-primary">Log to mod-log channel</label>
+          <label htmlFor="automod-log-channel" className="text-sm text-discord-text-primary">Log to mod-log channel</label>
         </div>
 
         {/* Buttons */}
@@ -503,7 +563,7 @@ function WordFilterConfig({ config, onChange }: { config: Record<string, unknown
         {words.map((w, i) => (
           <span key={i} className="inline-flex items-center gap-1 rounded bg-red-500/20 px-2 py-0.5 text-xs text-red-400">
             {w}
-            <button onClick={() => onChange({ ...config, words: words.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
+            <button aria-label={`Remove banned word ${w}`} onClick={() => onChange({ ...config, words: words.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
           </span>
         ))}
       </div>
@@ -545,7 +605,7 @@ function LinkFilterConfig({ config, onChange }: { config: Record<string, unknown
         {domains.map((d, i) => (
           <span key={i} className="inline-flex items-center gap-1 rounded bg-blue-500/20 px-2 py-0.5 text-xs text-blue-400">
             {d}
-            <button onClick={() => onChange({ ...config, domains: domains.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
+            <button aria-label={`Remove domain ${d}`} onClick={() => onChange({ ...config, domains: domains.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
           </span>
         ))}
       </div>

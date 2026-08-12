@@ -6,7 +6,12 @@ import {
   type VpsDeploymentCommandRunner,
   type VpsDeploymentExecutionResult,
 } from './vps-deployment-executor.js';
-import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
+import {
+  buildVpsDeploymentPlan,
+  type VpsDeploymentPlan,
+  type VpsDeploymentPlanInput,
+} from './vps-deployment-plan.js';
+import { ensurePersistedVpsSecrets, materializeVpsDeploymentPlan, type PersistedVpsSecrets } from './vps-env-materializer.js';
 
 export interface VpsDeploymentRunRequest {
   operatorApproved?: boolean;
@@ -23,6 +28,11 @@ export interface VpsDeploymentRunRuntime {
   confirmApproval: (plan: VpsDeploymentPlan) => Promise<VpsDeploymentApprovalDecision>;
   createCommandRunner: () => VpsDeploymentCommandRunner;
   runGate: VpsDeploymentRunGate;
+  persistGeneratedSecrets: (patch: Partial<PersistedVpsSecrets>) => Promise<void> | void;
+  runApprovedDeployment?: (
+    execute: () => Promise<VpsDeploymentExecutionResult>,
+    plan: VpsDeploymentPlan,
+  ) => Promise<VpsDeploymentExecutionResult>;
   /**
    * [infrastructure-launcher] Optional sink for durable audit entries. Records
    * the operator approval decision and the deployment execution outcome (the
@@ -32,6 +42,12 @@ export interface VpsDeploymentRunRuntime {
   recordAudit?: (entry: LauncherAuditEntry) => void;
 }
 
+export function approvalCoversPlan(plan: VpsDeploymentPlan, approval: VpsDeploymentApprovalDecision): boolean {
+  if (!approval.operatorApproved) return false;
+  const approvedCommandIds = new Set(approval.approvedCommandIds);
+  return plan.commands.every((command) => !command.approvalRequired || approvedCommandIds.has(command.id));
+}
+
 function rendererApproval(request: VpsDeploymentRunRequest | undefined): VpsDeploymentApprovalDecision {
   return {
     operatorApproved: Boolean(request?.operatorApproved),
@@ -39,10 +55,13 @@ function rendererApproval(request: VpsDeploymentRunRequest | undefined): VpsDepl
   };
 }
 
-export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDeploymentPlan {
-  return buildVpsDeploymentPlan({
+export function vpsDeploymentPlanInputFromConfig(config: LauncherConfig): VpsDeploymentPlanInput {
+  return {
     runtimeMode: config.runtimeMode,
+    vpsPublicAccessMode: config.vpsPublicAccessMode,
     vpsDomain: config.vpsDomain,
+    vpsTailscaleFunnelUrl: config.vpsTailscaleFunnelUrl,
+    vpsTailscaleFunnelVerifiedUrl: config.vpsTailscaleFunnelVerifiedUrl,
     vpsSshHost: config.vpsSshHost,
     vpsSshUser: config.vpsSshUser,
     vpsDeployPath: config.vpsDeployPath,
@@ -52,7 +71,8 @@ export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDep
       && config.discordClientSecret
       && config.supabaseUrl
       && config.supabaseSecretKey
-      && config.supabasePublishableKey,
+      && config.supabasePublishableKey
+      && config.supabaseDbPassword
     ),
     paypalReady: Boolean(
       config.paypalClientId
@@ -61,7 +81,11 @@ export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDep
     ),
     supabaseAccessTokenReady: Boolean(config.supabaseAccessToken),
     supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
-  });
+  };
+}
+
+export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDeploymentPlan {
+  return buildVpsDeploymentPlan(vpsDeploymentPlanInputFromConfig(config));
 }
 
 export async function handleVpsDeploymentRunRequest(
@@ -70,17 +94,43 @@ export async function handleVpsDeploymentRunRequest(
   runtime: VpsDeploymentRunRuntime,
 ): Promise<VpsDeploymentExecutionResult> {
   const liveRequested = request?.dryRun === false && config.runtimeMode === 'vps';
-  const plan = buildVpsDeploymentPlanFromConfig(config);
+  const displayPlan = buildVpsDeploymentPlanFromConfig(config);
 
   const execute = async (): Promise<VpsDeploymentExecutionResult> => {
-    const approval = liveRequested
+    let plan = displayPlan;
+    let generatedSecretPatch: Partial<PersistedVpsSecrets> = {};
+    if (liveRequested && displayPlan.status === 'ready') {
+      const prepared = ensurePersistedVpsSecrets(config);
+      generatedSecretPatch = prepared.patch;
+      plan = materializeVpsDeploymentPlan(displayPlan, prepared.config);
+    }
+
+    const approval = liveRequested && plan.status === 'ready' && !request?.cancelRequested
       ? await runtime.confirmApproval(plan)
-      : rendererApproval(request);
+      : rendererApproval(liveRequested && request?.cancelRequested ? undefined : request);
+
+    const approvedForExecution = liveRequested && plan.status === 'ready' && approvalCoversPlan(plan, approval);
+    if (approvedForExecution && Object.keys(generatedSecretPatch).length > 0) {
+      try {
+        await runtime.persistGeneratedSecrets(generatedSecretPatch);
+      } catch {
+        plan = {
+          ...displayPlan,
+          status: 'blocked',
+          canApprove: false,
+          blockedReasons: [
+            ...displayPlan.blockedReasons,
+            'Generated VPS service credentials could not be persisted safely; no remote commands were run.',
+          ],
+          commands: [],
+        };
+      }
+    }
 
     // [infrastructure-launcher] Audit the operator's approval decision for a
     // live run — an approved or denied VPS deployment is a security-relevant
     // event that must be durably observable.
-    if (liveRequested) {
+    if (liveRequested && plan.status === 'ready' && !request?.cancelRequested) {
       runtime.recordAudit?.({
         action: 'launcher.vps_deployment.approval_decision',
         category: 'security',
@@ -95,19 +145,22 @@ export async function handleVpsDeploymentRunRequest(
       });
     }
 
-    const result = await runVpsDeployment({
-      plan,
-      operatorApproved: approval.operatorApproved,
-      approvedCommandIds: approval.approvedCommandIds,
-      dryRun: request?.dryRun !== false,
-      cancelRequested: Boolean(request?.cancelRequested),
-      ...(liveRequested && approval.operatorApproved ? { commandRunner: runtime.createCommandRunner() } : {}),
-    });
+    const executeDeployment = () => runVpsDeployment({
+        plan,
+        operatorApproved: approval.operatorApproved,
+        approvedCommandIds: approval.approvedCommandIds,
+        dryRun: request?.dryRun !== false,
+        cancelRequested: Boolean(request?.cancelRequested),
+        ...(approvedForExecution && plan.status === 'ready' ? { commandRunner: runtime.createCommandRunner() } : {}),
+      });
+    const result = approvedForExecution && plan.status === 'ready' && runtime.runApprovedDeployment
+      ? await runtime.runApprovedDeployment(executeDeployment, plan)
+      : await executeDeployment();
 
     // [infrastructure-launcher] Audit the remote-execution outcome for live
     // runs (VPS remote execute). Dry-runs never touch the host, so they are
     // not recorded.
-    if (liveRequested && approval.operatorApproved) {
+    if (approvedForExecution && plan.status === 'ready') {
       runtime.recordAudit?.({
         action: 'launcher.vps_deployment.executed',
         category: 'security',

@@ -18,6 +18,28 @@ import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
+const reactionRoleStyles = ['reaction', 'buttons', 'select-menu'] as const;
+type ReactionRoleStyle = typeof reactionRoleStyles[number];
+
+async function readDefaultStyle(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+): Promise<ReactionRoleStyle> {
+  try {
+    const { data } = await supabase
+      .from('guild_config')
+      .select('default_style')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    const configuredStyle = data?.default_style;
+    return reactionRoleStyles.includes(configuredStyle as ReactionRoleStyle)
+      ? configuredStyle as ReactionRoleStyle
+      : 'buttons';
+  } catch {
+    return 'buttons';
+  }
+}
+
 const reactionRoleUpdate = z.object({
   id: z.string().uuid(),
   channel_id: snowflake.optional(),
@@ -30,6 +52,7 @@ const reactionRoleUpdate = z.object({
   max_per_group: z.number().int().min(0).max(100).optional().nullable(),
   remove_on_unreact: z.boolean().optional(),
   log_actions: z.boolean().optional(),
+  active: z.boolean().optional(),
 });
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -49,7 +72,11 @@ export async function GET() {
     return dbError(error, 'reaction-roles');
   }
 
-  return NextResponse.json({ success: true, data: data ?? [] });
+  // Return the resolved guild surface alongside legacy rows. The table keeps
+  // explicit reaction mappings, while clients can route newly-created panels
+  // through the configured reaction/button/select-menu surface.
+  const default_style = await readDefaultStyle(supabase, guildId);
+  return NextResponse.json({ success: true, data: data ?? [], default_style });
 }
 
 export async function POST(req: NextRequest) {
@@ -61,6 +88,7 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
+  const default_style = await readDefaultStyle(supabase, guildId);
   const parsed = await parseBody(req, schemas.reactionRole.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
@@ -121,7 +149,34 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'reaction-roles');
   }
 
-  await notifyBot('reaction-roles');
+  // The guild default controls the newly-created Discord surface. Keep the
+  // legacy reaction row for compatibility, and mirror it into the existing
+  // button_roles panel table when buttons/select menus are selected.
+  if (default_style !== 'reaction') {
+    const { error: surfaceError } = await supabase.from('button_roles').insert({
+      guild_id: guildId,
+      panel_id: message_id,
+      channel_id,
+      // Keep the legacy source message untouched; the bot deploys a dedicated
+      // role panel in the same channel and records its message id.
+      message_id: null,
+      label: emoji,
+      emoji,
+      role_id,
+      style: 'primary',
+      sort_order: 0,
+      exclusive_group: exclusive_group ?? null,
+      require_role: require_role ?? null,
+      require_level: require_level ?? null,
+      active: true,
+    });
+    if (surfaceError) {
+      await supabase.from('reaction_roles').delete().eq('id', data?.id ?? '').eq('guild_id', guildId);
+      return dbError(surfaceError, 'button-role surface');
+    }
+  }
+
+  await notifyBot(guildId, 'reaction-roles');
 
   await recordCrudChange({
     guildId,
@@ -135,7 +190,7 @@ export async function POST(req: NextRequest) {
     after: data as Record<string, unknown> | null,
   }, supabase);
 
-  return NextResponse.json({ success: true, data });
+  return NextResponse.json({ success: true, data, default_style });
 }
 
 export async function PUT(req: NextRequest) {
@@ -151,7 +206,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const updates = typedPick(body, ['channel_id', 'message_id', 'emoji', 'role_id', 'exclusive_group', 'require_role', 'require_level', 'max_per_group', 'remove_on_unreact', 'log_actions']);
+  const updates = typedPick(body, ['channel_id', 'message_id', 'emoji', 'role_id', 'exclusive_group', 'require_role', 'require_level', 'max_per_group', 'remove_on_unreact', 'log_actions', 'active']);
 
   const before = await readRowBefore(supabase, 'reaction_roles', { id: body.id, guild_id: guildId });
 
@@ -167,7 +222,21 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'reaction-roles');
   }
 
-  await notifyBot('reaction-roles');
+  if (before?.message_id && before?.role_id) {
+    await supabase.from('button_roles').update({
+      panel_id: updates.message_id ?? before.message_id,
+      channel_id: updates.channel_id ?? before.channel_id,
+      label: updates.emoji ?? before.emoji,
+      emoji: updates.emoji ?? before.emoji,
+      role_id: updates.role_id ?? before.role_id,
+      exclusive_group: updates.exclusive_group ?? before.exclusive_group,
+      require_role: updates.require_role ?? before.require_role,
+      require_level: updates.require_level ?? before.require_level,
+      active: updates.active ?? before.active,
+    }).eq('guild_id', guildId).eq('panel_id', before.message_id).eq('role_id', before.role_id);
+  }
+
+  await notifyBot(guildId, 'reaction-roles');
 
   await recordCrudChange({
     guildId,
@@ -183,7 +252,8 @@ export async function PUT(req: NextRequest) {
     match: { id: body.id, guild_id: guildId },
   }, supabase);
 
-  return NextResponse.json({ success: true, data });
+  const default_style = await readDefaultStyle(supabase, guildId);
+  return NextResponse.json({ success: true, data, default_style });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -217,7 +287,12 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'reaction-roles');
   }
 
-  await notifyBot('reaction-roles');
+  if (before?.message_id && before?.role_id) {
+    await supabase.from('button_roles').delete()
+      .eq('guild_id', guildId).eq('panel_id', before.message_id).eq('role_id', before.role_id);
+  }
+
+  await notifyBot(guildId, 'reaction-roles');
 
   await recordCrudChange({
     guildId,

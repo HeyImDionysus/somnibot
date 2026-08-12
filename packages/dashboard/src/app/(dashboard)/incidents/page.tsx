@@ -183,7 +183,7 @@ export default function IncidentsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Incidents</h1>
           <p className="mt-1 text-sm text-discord-text-muted">Track and manage operational incidents</p>
@@ -266,9 +266,9 @@ export default function IncidentsPage() {
         ))}
       </div>
 
-      <div className="flex gap-6">
+      <div className="flex min-w-0 flex-col gap-6 xl:flex-row">
         {/* Incident List */}
-        <div className="flex-1 space-y-2">
+        <div className="min-w-0 flex-1 space-y-2">
           {loading ? (
             <TableSkeleton rows={6} />
           ) : incidents.length === 0 ? (
@@ -308,7 +308,7 @@ export default function IncidentsPage() {
 
         {/* Detail Panel */}
         {selectedIncident && (
-          <div className="w-[420px] shrink-0 rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto">
+          <div className="max-h-[calc(100vh-200px)] w-full shrink-0 space-y-4 overflow-y-auto rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 xl:w-[420px]">
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-sm font-mono text-discord-text-muted">#{selectedIncident.incident_number}</span>

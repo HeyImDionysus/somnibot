@@ -8,7 +8,7 @@ import { ChannelType } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { loadLevelConfig, loadRewards } from './xp-tracker.js';
-import { totalXpForLevel, LEVEL_CONFIG , createLogger } from '@somnibot/shared';
+import { totalXpForLevel, LEVEL_CONFIG, DEFAULT_LEVEL_CURVE, createLogger } from '@somnibot/shared';
 
 const log = createLogger('LevelAnnouncer');
 
@@ -95,7 +95,7 @@ export async function handleLevelUp(
           .replace(/\{user\}/g, `<@${userId}>`)
           .replace(/\{level\}/g, String(newLevel))
           .replace(/\{totalXp\}/g, String(totalXp))
-          .replace(/\{nextLevelXp\}/g, String(LEVEL_CONFIG.XP_FORMULA(newLevel)));
+          .replace(/\{nextLevelXp\}/g, String(Math.round((config.level_curve ?? DEFAULT_LEVEL_CURVE).base * Math.pow(newLevel + 1, (config.level_curve ?? DEFAULT_LEVEL_CURVE).exponent))));
 
         // Check for role reward to add extra flair
         const levelReward = rewards.find((r) => r.level === newLevel);

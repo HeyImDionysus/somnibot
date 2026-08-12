@@ -638,6 +638,8 @@ describe('loadFraudThresholds — config controls are now honored bot-side', () 
     const rules = [
       { rule_type: 'velocity_limit', config: { threshold: 2, window_minutes: 30 }, enabled: true },
       { rule_type: 'failed_payment', config: { threshold: 4 }, enabled: true },
+      { rule_type: 'device_limit', config: { threshold: 4 }, enabled: true },
+      { rule_type: 'ip_mismatch', config: { threshold: 7 }, enabled: true },
       { rule_type: 'critical_incident', config: { threshold: 5 }, enabled: true },
     ];
     const supabase = { from: vi.fn(() => dataChain(rules)) };
@@ -645,6 +647,8 @@ describe('loadFraudThresholds — config controls are now honored bot-side', () 
     expect(thresholds.velocityThreshold).toBe(2);
     expect(thresholds.velocityWindowMs).toBe(30 * 60_000);
     expect(thresholds.failedPaymentThreshold).toBe(4);
+    expect(thresholds.deviceAbuseMultiplier).toBe(4);
+    expect(thresholds.ipMismatchThreshold).toBe(7);
     expect(thresholds.criticalIncidentThreshold).toBe(5);
   });
 });

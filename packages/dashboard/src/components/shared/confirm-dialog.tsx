@@ -17,7 +17,7 @@
  */
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { AlertTriangle, Trash2, X } from 'lucide-react';
 
@@ -54,6 +54,15 @@ const VARIANT_STYLES = {
   },
 };
 
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
 export function ConfirmDialog({
   open,
   title,
@@ -66,70 +75,113 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCancelRef = useRef(onCancel);
+  const generatedId = useId();
+  const titleId = `${generatedId}-title`;
+  const descriptionId = `${generatedId}-description`;
   const styles = VARIANT_STYLES[variant];
   const Icon = styles.icon;
 
-  // Focus cancel button on open (safer default)
   useEffect(() => {
-    if (open) {
-      requestAnimationFrame(() => cancelRef.current?.focus());
-    }
-  }, [open]);
+    onCancelRef.current = onCancel;
+  }, [onCancel]);
 
-  // Close on Escape
   useEffect(() => {
     if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel();
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusFrame = requestAnimationFrame(() => cancelRef.current?.focus());
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCancelRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const focusable = Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [],
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        dialogRef.current?.focus();
+        return;
+      }
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [open, onCancel]);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', handler);
+      document.body.style.overflow = previousOverflow;
+      previousFocusRef.current?.focus();
+    };
+  }, [open]);
 
   if (!open) return null;
 
   return (
     <div
-      className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/60 backdrop-blur-[2px]"
+      className="fixed inset-0 z-[9998] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-[2px]"
       onClick={onCancel}
     >
       <div
-        className="w-full max-w-md rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 shadow-xl animate-in zoom-in-95 fade-in duration-200"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5 shadow-xl animate-in zoom-in-95 fade-in duration-200 sm:p-6"
         onClick={(e) => e.stopPropagation()}
         role="alertdialog"
         aria-modal="true"
-        aria-labelledby="confirm-title"
-        aria-describedby="confirm-desc"
+        aria-labelledby={titleId}
+        aria-describedby={description ? descriptionId : undefined}
+        aria-busy={loading || undefined}
       >
         {/* Icon + Close */}
         <div className="flex items-start justify-between mb-4">
           <div className={cn('rounded-full p-2.5', styles.iconBg)}>
-            <Icon size={20} className={styles.iconColor} />
+            <Icon size={20} className={styles.iconColor} aria-hidden="true" />
           </div>
           <button
+            type="button"
+            aria-label="Close confirmation dialog"
             onClick={onCancel}
-            className="text-discord-text-muted hover:text-discord-text-primary transition-colors"
+            disabled={loading}
+            className="inline-flex h-11 w-11 items-center justify-center rounded-input text-discord-text-muted transition-standard hover:bg-discord-bg-hover hover:text-discord-text-primary disabled:opacity-50"
           >
-            <X size={18} />
+            <X size={18} aria-hidden="true" />
           </button>
         </div>
 
         {/* Content */}
         <h2
-          id="confirm-title"
+          id={titleId}
           className="text-lg font-semibold text-discord-text-primary mb-1"
         >
           {title}
         </h2>
         {description && (
-          <p id="confirm-desc" className="text-sm text-discord-text-muted mb-6">
+          <p id={descriptionId} className="text-sm text-discord-text-muted mb-6">
             {description}
           </p>
         )}
 
         {/* Actions */}
-        <div className="flex justify-end gap-3">
+        <div className="flex flex-wrap justify-end gap-3">
           <button
+            type="button"
             ref={cancelRef}
             onClick={onCancel}
             disabled={loading}
@@ -138,6 +190,7 @@ export function ConfirmDialog({
             {cancelLabel}
           </button>
           <button
+            type="button"
             onClick={onConfirm}
             disabled={loading}
             className={cn(
@@ -147,7 +200,7 @@ export function ConfirmDialog({
           >
             {loading ? (
               <span className="flex items-center gap-2">
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                <span aria-hidden="true" className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
                 Processing…
               </span>
             ) : (

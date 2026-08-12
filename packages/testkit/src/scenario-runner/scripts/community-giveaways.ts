@@ -361,13 +361,13 @@ function gateMemberFacingSurfaces(ctx: ScenarioContext): void {
     'Discord',
     'discord-readback',
     'The /giveaway command posts the branded entry-button campaign, confirms each entrant, and delivers exactly-once winner announcement + DM in the live guild.',
-    '/giveaway is subcommand-based and runSlash cannot supply a subcommand; entry buttons need a live members cache + gateway; announcements/DMs are live Discord effects (DISCORD_TOKEN + live guild)',
+    'runSlash can now supply the /giveaway subcommand, but entry buttons still need a live members cache + gateway; announcements/DMs are live Discord effects (DISCORD_TOKEN + live guild)',
   );
   ctx.gate(
     'branding',
     'captured-reply',
     'Every member-facing giveaway surface shows the owner brand name, colors, and voice preset with zero stock-bot wording.',
-    'no member-facing giveaway reply/embed is drivable in this harness (subcommand command + gateway-less), so there is no captured surface to inspect for branding',
+    'the command confirmation can be driven in-process, but the campaign embed/entry button and winner notifications require live Discord message effects, so no equivalent branded campaign surface is captured here',
   );
   ctx.gate(
     'branding',
@@ -379,8 +379,8 @@ function gateMemberFacingSurfaces(ctx: ScenarioContext): void {
 
 /**
  * GATE the audit contract. The catalog contracts an append-only audit row per
- * giveaway state change, but the audit-writing layer is the (undrivable)
- * subcommand command handler, and the low-level RPCs write no audit row — so this
+ * giveaway state change, but neither the command handler nor the low-level
+ * RPCs write an audit row today — so this
  * cannot be exercised or fairly failed by a bot-only harness. Surfaced loudly.
  */
 function gateAudit(ctx: ScenarioContext): void {
@@ -388,7 +388,7 @@ function gateAudit(ctx: ScenarioContext): void {
     'audit',
     'audit-row',
     'Every giveaways state change lands exactly one append-only audit row with actor, guild, and correlation id.',
-    'giveaway audit rows would be written by the /giveaway command handler layer, which is undrivable here (subcommand command); the production giveaway feature writes no audit_logs row and the atomic RPCs write none, so the audit contract cannot be exercised (flagged for owner review)',
+    'the production giveaway command/RPC path writes no audit_logs row today, so the catalog audit contract has no backing event to observe (flagged for owner review)',
   );
 }
 
@@ -764,7 +764,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     'database-RLS',
     'db-observable',
     'An API-level over-1000-char prize is stored only in canonical btrim/left-1000 form.',
-    'prize canonicalization runs in the /giveaway start handler (codePointSlice+trim) and the notify snapshot path; the giveaways table has no canonicalizing trigger, so the handler layer (undrivable subcommand) owns this',
+    'prize canonicalization runs in the /giveaway start handler (codePointSlice+trim) and the notify snapshot path; the giveaways table has no canonicalizing trigger, so this handler-level behavior is not represented by the direct table probe',
   );
   gateAudit(ctx);
   gateMemberFacingSurfaces(ctx);
@@ -773,7 +773,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
 
 /** UNAUTH — administration is denied to unprivileged members. */
 async function UNAUTH(ctx: ScenarioContext): Promise<void> {
-  const handle = await ctx.bootGuild({ label: 'a' });
+  const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { giveaways_enabled: true } });
   const admin = ctx.userId('admin');
   const outsider = ctx.userId('b');
 
@@ -815,17 +815,49 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   await proveGiveawayRls(ctx, handle, giveawayId);
   await proveNoOwnerAlert(ctx, handle);
   gateMemberFacingSurfaces(ctx);
+  const denied = await ctx.runSlash(handle, {
+    commandName: 'giveaway',
+    userId: outsider,
+    member: { id: outsider, roles: [], permissions: { has: () => false } },
+    subcommand: 'end',
+    options: { id: giveawayId },
+  });
+  const denial = replyContent(denied);
+  const protectedAfter = await readGiveaway(handle, giveawayId);
+  ctx.expect(
+    /Manage Server/i.test(denial) && protectedAfter?.status === 'active',
+    {
+      assertionClass: 'Discord',
+      channel: 'captured-reply',
+      promise: 'A member without Manage Guild who runs /giveaway end gets an ephemeral denial and the giveaway remains active.',
+      observation: `captured denial=${JSON.stringify(denial)}; protected giveaway status=${protectedAfter?.status ?? '(missing)'}.`,
+      impact: 'A caller without Manage Guild reached giveaway administration or did not receive the required denial.',
+    },
+  );
+  const { data: deniedAudits } = await handle.supabase
+    .from('audit_logs')
+    .select('actor_id, action, success, details')
+    .eq('guild_id', handle.guildId)
+    .eq('actor_id', outsider)
+    .eq('action', 'giveaway.command.denied');
+  ctx.expect(
+    Array.isArray(deniedAudits)
+      && deniedAudits.length === 1
+      && deniedAudits[0]?.success === false
+      && (deniedAudits[0]?.details as { reason?: unknown } | null)?.reason === 'missing_manage_guild',
+    {
+      assertionClass: 'audit',
+      channel: 'audit-row',
+      promise: 'Each denied /giveaway attempt lands one audit row with actor, subcommand, and reason permission-denied.',
+      observation: `matching denied audit rows=${deniedAudits?.length ?? 0}; success=${deniedAudits?.[0]?.success ?? '(missing)'}.`,
+      impact: 'A denied giveaway-administration attempt was not recorded exactly once with its actor and reason.',
+    },
+  );
   ctx.gate(
     'Discord',
     'discord-readback',
-    'A member without Manage Guild who runs /giveaway start or end gets an ephemeral denial and no giveaway is created or ended.',
-    'the Manage Guild permission is enforced by the command’s setDefaultMemberPermissions + the dispatcher; /giveaway is subcommand-based and undrivable in this harness',
-  );
-  ctx.gate(
-    'audit',
-    'audit-row',
-    'Each denied /giveaway attempt lands one audit row with actor, subcommand, and reason permission-denied.',
-    'the denial is enforced Discord-side (default member permissions) and never reaches the handler; the giveaway feature writes no audit_logs row today (flagged for owner review)',
+    'The same Manage Guild denial is read back from a real Discord test-guild interaction.',
+    'the in-handler denial and immutable database outcome are proven through the real dispatcher; the required live test-guild readback remains pending',
   );
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');
 }

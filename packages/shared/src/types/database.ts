@@ -254,7 +254,27 @@ export interface DbGuildConfig {
   music_auto_leave_minutes: number;
   music_auto_destroy_minutes: number;
   store_enabled: boolean;
+  product_types_enabled: string[];
+  repeat_purchase_policy: 'unique' | 'stackable' | 'renewable' | 'seat-based';
+  free_claim_policy: 'one-claim' | 'repeatable';
+  gifting_enabled: boolean;
+  public_celebration_enabled: boolean;
+  celebration_channel_id: string | null;
+  store_brand_source: 'guild-profile' | 'custom';
+  max_storefront_products: number;
+  portal_session_ttl_ms: number;
+  download_link_ttl_ms: number;
+  self_service_cancellation: boolean;
+  cancellation_timing: 'end-of-term' | 'immediate';
+  refund_requests_enabled: boolean;
+  service_requests_enabled: boolean;
+  portal_brand_source: 'guild-profile' | 'custom';
   grace_period_days: number;
+  paypal_legacy_usd_sale_tolerance: boolean;
+  paypal_environment: 'sandbox' | 'live';
+  paypal_refund_strategy: 'provider-first' | 'local-first';
+  paypal_webhook_stale_processing_ms: number;
+  paypal_webhook_verify_attempts: number;
   stats_enabled: boolean;
   stats_update_interval_minutes: number;
   temp_channels_enabled: boolean;
@@ -334,6 +354,8 @@ export interface DbGuildConfig {
   economy_fishing_cooldown_seconds: number;
   economy_fishing_junk_chance_pct: number;
   economy_fishing_treasure_chance_pct: number;
+  economy_fishing_collection_reward_enabled: boolean;
+  economy_fishing_collection_reward_coins: number;
   // Adventures
   economy_adventures_enabled: boolean;
   economy_adventure_daily_limit: number;
@@ -344,6 +366,7 @@ export interface DbGuildConfig {
   economy_market_fee_pct: number;
   economy_market_listing_days: number;
   economy_market_max_listings: number;
+  economy_market_max_price_per_unit: number;
   // PR #45 — Trivia
   economy_trivia_enabled: boolean;
   economy_trivia_cooldown_seconds: number;
@@ -391,12 +414,48 @@ export interface DbGuildConfig {
   economy_prestige_multiplier_pct: number;
   economy_prestige_min_level: number;
   economy_prestige_min_net_worth: number;
+  economy_prestige_max_level: number;
+  prediction_min_bet: number;
+  prediction_max_bet: number;
+  fallback_mode: 'grant-after-timeout' | 'manual-review';
+  fallback_timeout_minutes: number;
+
+  // Community runtime controls
+  level_curve: { base: number; exponent: number };
+  max_poll_options: number;
+  allow_multiple_default: boolean;
+  reaction_roles_enabled: boolean;
+  default_style: 'reaction' | 'buttons' | 'select-menu';
+  default_max_per_group: number;
+  default_require_level: number;
+  default_remove_on_unreact: boolean;
+  max_schedules_per_guild: number;
+  default_timezone: string;
+  missed_run_policy: 'skip-missed' | 'send-latest';
+  allow_embeds: boolean;
+  variables_enabled: boolean;
 
   // V53 Phase 2 Observability / retention / ticketing additions
   alert_channel_id: string | null;
   anti_raid_ban_delete_seconds: number;
   data_retention_days: number;
   ticket_satisfaction_survey: boolean;
+  audit_export_row_limit: number;
+  audit_flush_interval_ms: number;
+  automation_dm_cooldown_seconds: number;
+  automation_max_chain_depth: number;
+  automation_preview_required: boolean;
+  automation_user_fire_limit_per_minute: number;
+  custom_commands_max_per_guild: number;
+  custom_commands_mention_safety: boolean;
+  diagnostics_snapshot_interval_ms: number;
+  incidents_auto_create_from_critical_alerts: boolean;
+  incidents_default_severity: 'info' | 'warning' | 'critical' | 'outage';
+  incidents_list_page_size: number;
+  rbac_custom_role_priority_default: number;
+  rbac_max_permissions_per_role: number;
+  rbac_priority_escalation_guard: boolean;
+  rbac_unknown_route_access: 'deny';
 }
 
 export interface DbInstanceSettings {
@@ -459,7 +518,9 @@ export interface DbGuildDesiredState {
   guild_id: string;
   roles: Record<string, unknown>[];
   channels: Record<string, unknown>[];
+  categories: Record<string, unknown>[];
   permission_map: Record<string, unknown>;
+  deploy_mode: 'safe' | 'destructive';
   applied_at: string | null;
   last_sync_at: string | null;
   drift_detected: boolean;
@@ -1221,8 +1282,10 @@ export interface DbEntitlement {
 export interface DbProductLicenseConfig {
   product_id: string;
   license_mode: 'portal_only' | 'portal_watermark' | 'embedded' | 'access_pass';
+  key_prefix: string;
   max_devices: number;
   heartbeat_interval_seconds: number;
+  sdk_cache_ttl_ms: number;
   offline_grace_period_seconds: number;
   feature_flags: string[];
   tier: string | null;
@@ -1232,6 +1295,8 @@ export interface DbProductLicenseConfig {
   updated_at: string;
   // V19 Audit: added missing schema fields
   device_policy: string | null;
+  rotation_policy: 'rotate-and-invalidate' | 'disabled';
+  self_service_device_removal: boolean;
 }
 
 export interface DbLicenseSession {
@@ -1336,6 +1401,26 @@ export interface DbAuditLog {
   // V19 Audit: added missing schema fields
   category: string | null;
   correlation_id: string | null;
+}
+
+// Consent-based dashboard-team invitation lifecycle. The expiry timestamp is
+// immutable for an invitation; resend only re-queues delivery while status
+// remains pending.
+export interface DbTeamInvitations {
+  id: string;
+  guild_id: string;
+  discord_id: string;
+  role_id: string;
+  status: 'pending' | 'accepted' | 'declined' | 'expired' | 'revoked';
+  delivery_mode: 'dm' | 'dashboard' | null;
+  dm_status: 'queued' | 'sent' | 'failed' | 'skipped';
+  invited_by: string | null;
+  invited_by_name: string | null;
+  accept_notified: boolean;
+  expires_at: string;
+  accepted_at: string | null;
+  responded_at: string | null;
+  created_at: string;
 }
 
 export interface DbWebhookEvent {
@@ -1908,6 +1993,8 @@ export interface DbFishCatch {
   weight: number;
   price_earned: number;
   caught_at: string;
+  paid: boolean;
+  correlation_id: string | null;
 }
 
 // ── Adventures ────────────────────────────────────────────
@@ -2505,4 +2592,18 @@ export interface DbCommerceAdminRefundOperation {
   updated_at: string;
   provider_outcome_at: string | null;
   completed_at: string | null;
+}
+
+// ── Runtime Ownership (runtime_leases) ───────────────────────────
+// Service-role-only coordination row used to prevent a local and VPS bot from
+// connecting concurrently during an owner-controlled runtime handoff.
+
+export interface DbRuntimeLease {
+  lease_name: string;
+  holder_id: string;
+  session_id: string;
+  runtime_mode: 'regular-local' | 'vps';
+  acquired_at: string;
+  heartbeat_at: string;
+  expires_at: string;
 }

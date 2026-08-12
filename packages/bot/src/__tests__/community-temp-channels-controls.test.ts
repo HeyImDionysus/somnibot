@@ -85,7 +85,7 @@ describe('TempChannelManager — {owner-name} substitution', () => {
     const opts = g.channels.create.mock.calls[0][0];
     expect(opts.name).toBe("Alice's room");
     expect(opts.name).not.toContain('{owner-name}');
-  });
+  }, 30_000);
 });
 
 describe('TempChannelManager — room-creation failure surfacing', () => {

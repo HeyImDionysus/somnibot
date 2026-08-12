@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
     if (error) return dbError(error, 'economy/trivia');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -118,7 +118,7 @@ export async function PUT(request: NextRequest) {
       .select()
       .single();
     if (error) return dbError(error, 'economy/trivia');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -163,7 +163,7 @@ export async function DELETE(request: NextRequest) {
       .eq('id', id)
       .eq('guild_id', ctx.guildId);
     if (error) return dbError(error, 'economy/trivia');
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,

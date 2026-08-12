@@ -8,12 +8,14 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Sprout, Plus, Pencil, Trash2 } from 'lucide-react';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -91,7 +93,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Name</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               value={form.name ?? ''}
               onChange={(e) => setForm((p) => ({ ...p, name: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -102,7 +104,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Emoji</span>
             <input
               type="text"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple text-center"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent text-center"
               value={form.emoji ?? '🌱'}
               onChange={(e) => setForm((p) => ({ ...p, emoji: e.target.value.slice(0, 64) }))}
               maxLength={64}
@@ -114,7 +116,7 @@ function CropFormModal({
         <label className="flex flex-col gap-1">
           <span className="text-xs text-discord-text-secondary">Category</span>
           <select
-            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
             value={form.category ?? 'Vegetable'}
             onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))}
           >
@@ -130,7 +132,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Grow Time (seconds)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={60}
               max={604800}
               value={form.grow_seconds ?? 7200}
@@ -142,7 +144,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Wilt Time (seconds)</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={3600}
               max={604800}
               value={form.wilt_seconds ?? 86400}
@@ -158,7 +160,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Sell Price</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={1000000}
               value={form.sell_price ?? 50}
@@ -169,7 +171,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Seeds Returned</span>
             <input
               type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={10}
               value={form.seeds_returned ?? 1}
@@ -184,7 +186,7 @@ function CropFormModal({
             <span className="text-xs text-discord-text-secondary">Sort Order</span>
             <input
               type="number"
-              className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+              className="w-24 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
               min={0}
               max={999}
               value={form.sort_order ?? 0}
@@ -214,7 +216,7 @@ function CropFormModal({
           </button>
           <button
             type="button"
-            className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+            className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
             onClick={() => onSave(form)}
             disabled={saving || !form.name?.trim()}
           >
@@ -236,6 +238,7 @@ export default function FarmingPage() {
   const [editCrop, setEditCrop] = useState<Partial<Crop> | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const { toast } = useToast();
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const fetchAll = useCallback(async () => {
     try {
@@ -271,16 +274,23 @@ export default function FarmingPage() {
   const saveSettings = async (patch: Partial<FarmingSettings>) => {
     setSaving(true);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setSettings({
+        economy_farming_enabled: readConfirmedBoolean(result.config, 'economy_farming_enabled'),
+        economy_farm_grid_size: readConfirmedNumber(result.config, 'economy_farm_grid_size'),
+        economy_farming_wilt_enabled: readConfirmedBoolean(result.config, 'economy_farming_wilt_enabled'),
+        economy_fertilizer_time_reduction_pct: readConfirmedNumber(result.config, 'economy_fertilizer_time_reduction_pct'),
       });
-      if (!res.ok) throw new Error();
-      setSettings((prev) => prev ? { ...prev, ...patch } : prev);
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     } finally {
       setSaving(false);
     }
@@ -342,7 +352,7 @@ export default function FarmingPage() {
           </div>
         </div>
         <button
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
           onClick={() => setEditCrop({ ...BLANK_CROP })}
         >
           <Plus size={16} />
@@ -377,38 +387,8 @@ export default function FarmingPage() {
             </label>
           </div>
           <div className="flex flex-wrap gap-6">
-            <label className="flex items-center gap-2">
-              <span className="text-xs text-discord-text-secondary">Grid Size</span>
-              <input
-                type="number"
-                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
-                min={1}
-                max={25}
-                value={settings.economy_farm_grid_size}
-                onChange={(e) => {
-                  const v = Math.max(1, Math.min(25, parseInt(e.target.value, 10) || 9));
-                  setSettings((p) => p ? { ...p, economy_farm_grid_size: v } : p);
-                }}
-                onBlur={() => saveSettings({ economy_farm_grid_size: settings.economy_farm_grid_size })}
-                disabled={saving}
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              <span className="text-xs text-discord-text-secondary">Fertilizer Reduction (%)</span>
-              <input
-                type="number"
-                className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
-                min={0}
-                max={90}
-                value={settings.economy_fertilizer_time_reduction_pct}
-                onChange={(e) => {
-                  const v = Math.max(0, Math.min(90, parseInt(e.target.value, 10) || 50));
-                  setSettings((p) => p ? { ...p, economy_fertilizer_time_reduction_pct: v } : p);
-                }}
-                onBlur={() => saveSettings({ economy_fertilizer_time_reduction_pct: settings.economy_fertilizer_time_reduction_pct })}
-                disabled={saving}
-              />
-            </label>
+            <ValidatedNumberInput label="Farm Grid Size (plots)" help="Number of plots available to each member." value={settings.economy_farm_grid_size} onCommit={(value) => saveSettings({ economy_farm_grid_size: value })} min={1} max={25} disabled={saving} className="mt-1 w-24 rounded-input border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary" />
+            <ValidatedNumberInput label="Fertilizer Time Reduction (%)" help="Percent removed from crop grow time; 0 gives no speed-up." value={settings.economy_fertilizer_time_reduction_pct} onCommit={(value) => saveSettings({ economy_fertilizer_time_reduction_pct: value })} min={0} max={90} disabled={saving} className="mt-1 w-24 rounded-input border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-sm text-discord-text-primary" />
           </div>
         </div>
       )}
@@ -436,7 +416,7 @@ export default function FarmingPage() {
                     <span className="text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">disabled</span>
                   )}
                   {crop.is_default && (
-                    <span className="text-xs bg-discord-blurple/20 text-discord-blurple px-1.5 py-0.5 rounded">default</span>
+                    <span className="text-xs bg-discord-accent/20 text-discord-accent px-1.5 py-0.5 rounded">default</span>
                   )}
                 </div>
                 <p className="text-xs text-discord-text-secondary mt-1">
@@ -445,16 +425,16 @@ export default function FarmingPage() {
               </div>
               <div className="flex items-center gap-1 ml-2">
                 <button
-                  className="p-2 text-discord-text-secondary hover:text-discord-text-primary"
+                  className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-discord-text-primary"
                   onClick={() => setEditCrop(crop)}
-                  title="Edit"
+                  aria-label={`Edit ${crop.name}`}
                 >
                   <Pencil size={16} />
                 </button>
                 <button
-                  className="p-2 text-discord-text-secondary hover:text-red-400"
+                  className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-red-400"
                   onClick={() => setDeleteId(crop.id)}
-                  title="Delete"
+                  aria-label={`Delete ${crop.name}`}
                 >
                   <Trash2 size={16} />
                 </button>

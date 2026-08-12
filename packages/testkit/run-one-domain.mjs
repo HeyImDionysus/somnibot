@@ -7,26 +7,41 @@
  *
  * Usage: node _run-domain.mjs <domainId>
  */
-// Arm the loopback guard env BEFORE importing the bot/testkit (mirrors live-setup.ts).
-const DEMO_SERVICE =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
-const DEMO_ANON =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
+// Arm the loopback guard env BEFORE importing the bot/testkit (mirrors
+// live-setup.ts). Credentials come from an isolated override or the local
+// Supabase CLI status; there are no embedded/demo-key fallbacks.
+const { resolveLocalSupabaseCredentials } = await import('./dist/local-supabase.js');
+const localSupabase = resolveLocalSupabaseCredentials();
 // ── Fault proxies ────────────────────────────────────────────────────────────
 // Route the WHOLE process through local TCP fault proxies so DEPFAIL/RETRY
 // scenarios can sever/restore a REAL network path (ctx.faults). Importing
 // dist/fault-proxy.js alone pulls no bot code, so env can still be armed after.
 // Falls back to direct URLs if a proxy cannot start (fault scenarios then GATE).
-const DIRECT_SUPABASE = 'http://127.0.0.1:54321';
-const DIRECT_VALKEY = process.env.VALKEY_URL || 'redis://localhost:6379';
+// The child runner does not pass through Vitest's live-setup.ts, so it must
+// independently force the same explicit isolated endpoints before importing
+// production code. Ambient developer/production connection settings are never
+// a valid fleet target.
+const DIRECT_SUPABASE = localSupabase.url;
+const DIRECT_VALKEY = process.env.SOMNIBOT_E2E_VALKEY_URL || 'redis://127.0.0.1:6379';
+const { assertSupabaseUrlIsLocal, assertValkeyUrlIsLocal } = await import('./dist/guard.js');
+assertSupabaseUrlIsLocal(DIRECT_SUPABASE, 'SOMNIBOT_E2E_SUPABASE_URL');
+assertValkeyUrlIsLocal(DIRECT_VALKEY, 'SOMNIBOT_E2E_VALKEY_URL');
+
+// Never carry unrelated customer/production Supabase variables into the
+// isolated child. The resolver has already read the local source of truth.
+for (const key of Object.keys(process.env)) {
+  if (/^SUPABASE_/i.test(key)) delete process.env[key];
+}
+
 let faultControls = null;
 let supabaseUrl = DIRECT_SUPABASE;
 let valkeyUrl = DIRECT_VALKEY;
 try {
   const { startFaultProxy } = await import('./dist/fault-proxy.js');
+  const supabaseTarget = new URL(DIRECT_SUPABASE);
   const valkeyTarget = new URL(DIRECT_VALKEY);
   const [sbProxy, vkProxy] = await Promise.all([
-    startFaultProxy('127.0.0.1', 54321, 0),
+    startFaultProxy(supabaseTarget.hostname || '127.0.0.1', Number(supabaseTarget.port) || 54321, 0),
     startFaultProxy(valkeyTarget.hostname || '127.0.0.1', Number(valkeyTarget.port) || 6379, 0),
   ]);
   faultControls = { supabase: sbProxy, valkey: vkProxy };
@@ -43,18 +58,17 @@ Object.assign(process.env, {
   SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: 'e2e-live-disposable-guild',
   DISCORD_TOKEN: 'e2e-live-no-login-dummy-token',
   DISCORD_APPLICATION_ID: '000000000000000000',
-  SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY || DEMO_SERVICE,
-  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
-  SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || DEMO_ANON,
-  // Real Valkey (local docker / CI service) so cooldown/streak/rate-limit legs drive.
+  // The resolver supplied current keys from an isolated E2E shard or local
+  // CLI status. Never inherit launcher/customer credentials into this rig.
+  SUPABASE_SECRET_KEY: localSupabase.serviceRoleKey,
+  SUPABASE_SERVICE_ROLE_KEY: localSupabase.serviceRoleKey,
+  SUPABASE_ANON_KEY: localSupabase.anonKey,
+  // Real, isolated Valkey so cooldown/streak/rate-limit legs drive.
   VALKEY_URL: valkeyUrl,
-  // The local Valkey container runs with --requirepass from the repo .env, so
-  // the harness must authenticate exactly like the bot does. Without this,
-  // every command failed NOAUTH, the bot raised a valkey_disconnected owner
-  // alert in every scenario, and every happy-path assertion failed on the
-  // false alarm. Passthrough only — empty stays empty (CI's service container
-  // has no auth), and the fault proxy relays AUTH bytes untouched.
-  VALKEY_PASSWORD: process.env.VALKEY_PASSWORD || '',
+  // Disposable Valkey is deliberately unauthenticated. Clearing an ambient
+  // password prevents a child from inheriting an established installation's
+  // connection shape.
+  VALKEY_PASSWORD: '',
   SOMNIBOT_LOOPBACK_E2E_CONFIRMATION:
     'I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE',
   PAYPAL_ENV: 'sandbox',
@@ -62,11 +76,21 @@ Object.assign(process.env, {
 
 const id = process.argv[2];
 const emit = (o) => console.log('RESULT ' + JSON.stringify({ id, ...o }));
+let activeScenario = 'initialization';
+const completedScenarios = [];
 
 const hardTimeout = setTimeout(() => {
-  emit({ hang: true, pass: 0, gated: 0, fail: 0, findings: [] });
+  emit({
+    hang: true,
+    pass: 0,
+    gated: 0,
+    fail: 0,
+    findings: [],
+    activeScenario,
+    completedScenarios,
+  });
   process.exit(0);
-}, 150_000);
+}, 300_000);
 hardTimeout.unref?.();
 
 try {
@@ -83,13 +107,50 @@ try {
     process.exit(0);
   }
   const capabilities = await mod.detectCapabilities();
-  const report = await mod.runDomainProof(proof, { capabilities });
+  const report = await mod.runDomainProof(proof, {
+    capabilities,
+    onScenarioStart(scenarioClass) {
+      activeScenario = scenarioClass;
+    },
+    onScenarioComplete(scenarioClass, elapsedMs) {
+      completedScenarios.push({ scenarioClass, elapsedMs });
+      activeScenario = 'report-assembly';
+    },
+  });
   const s = mod.summarize(report);
+  // The fleet aggregate closes functional assertion cells, not every internal
+  // facet record. A class is GATED when any of its records is gated; emit one
+  // deterministic inventory entry per scenario/class so the manifest count
+  // matches summarize(report).gated and external receipts cannot be duplicated
+  // or silently hidden behind raw facet multiplicity.
+  const gates = report.scenarios.flatMap((scenario) =>
+    scenario.classes.flatMap((evidence) => {
+      if (evidence.status !== 'GATED') return [];
+      const record = evidence.records.find((candidate) => candidate.status === 'GATED')
+        ?? evidence.records[0];
+      return [{
+        scenario: scenario.scenarioClass,
+        class: evidence.assertionClass,
+        channel: record.channel,
+        promise: record.promise,
+        reason: record.gateReason ?? '(no gate reason recorded)',
+      }];
+    }),
+  );
   emit({
     pass: s.pass,
     gated: s.gated,
     fail: s.fail,
-    findings: report.findings.map((f) => ({ scenario: f.scenarioClass, class: f.assertionClass, impact: f.impact })),
+    capabilities: report.capabilities,
+    completedScenarios,
+    findings: report.findings.map((f) => ({
+      scenario: f.scenarioClass,
+      class: f.assertionClass,
+      promise: f.promise,
+      observation: f.observation,
+      impact: f.impact,
+    })),
+    gates,
     errored: report.scenarios.filter((x) => x.error).map((x) => `${x.scenarioClass}: ${x.error}`),
   });
 } catch (err) {

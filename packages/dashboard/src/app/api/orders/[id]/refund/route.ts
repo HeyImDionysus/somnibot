@@ -22,6 +22,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
+import { loadPayPalPolicy, paypalApiBaseForEnvironment } from '@/lib/paypal-policy';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { isCanonicalPayPalResourceId } from '@/lib/paypal-resource-id';
 import { readRowBefore, recordAdminChange } from '@/lib/admin-changes';
@@ -376,6 +377,18 @@ export async function POST(
   const parsed = await parseBody(req, schemas.order.refund);
   if (!parsed.ok) return parsed.response;
   const supabase = createAdminSupabase();
+  const paypalPolicy = await loadPayPalPolicy(supabase, guildId);
+  if (paypalPolicy.refundStrategy === 'local-first') {
+    return NextResponse.json(
+      {
+        success: false,
+        status: 'manual_review_required',
+        code: 'PAYPAL_REFUND_MANUAL_REVIEW',
+        error: 'Local-first PayPal refunds are not enabled for money paths; obtain manual review before refunding.',
+      },
+      { status: 409 },
+    );
+  }
 
   const { data: preparationData, error: preparationError } = await supabase.rpc(
     'commerce_prepare_admin_refund',
@@ -428,7 +441,12 @@ export async function POST(
   if (attempt.providerAction === 'create' || attempt.providerAction === 'poll') {
     let outcome: ProviderOutcome;
     try {
-      const paypalConfig = await getPayPalRuntimeConfig();
+      const runtimeConfig = await getPayPalRuntimeConfig();
+      const paypalConfig = {
+        ...runtimeConfig,
+        apiBase: paypalApiBaseForEnvironment(paypalPolicy.environment),
+        sandbox: paypalPolicy.environment === 'sandbox',
+      };
       const rawToken = await getPayPalToken(paypalConfig);
       const token = typeof rawToken === 'string' ? rawToken.trim() : '';
       if (!token) return providerUnconfirmedResponse();

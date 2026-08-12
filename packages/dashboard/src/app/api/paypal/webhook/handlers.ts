@@ -5,9 +5,10 @@
  * Each handler deals with one PayPal event type (or a small group).
  */
 
-import { createHash } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
+import { applyPayPalPolicyEnvironment, loadPayPalPolicy, type PayPalEnvironment } from '@/lib/paypal-policy';
 import { isCanonicalPayPalResourceId } from '@/lib/paypal-resource-id';
 import {
   paypalCaptureResourceSchema,
@@ -42,6 +43,24 @@ function requireSupabaseSuccess(error: unknown, operation: string) {
 
 type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 const LIFECYCLE_SCAN_PAGE_SIZE = 500;
+const DEFAULT_LICENSE_KEY_PREFIX = 'SMNI';
+
+async function loadLicenseKeyPrefix(
+  supabase: AdminSupabase,
+  productId: string,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from('product_license_config')
+    .select('key_prefix')
+    .eq('product_id', productId)
+    .maybeSingle();
+  requireSupabaseSuccess(error, 'Failed to load product license key prefix');
+  const prefix = typeof data?.key_prefix === 'string' ? data.key_prefix : DEFAULT_LICENSE_KEY_PREFIX;
+  if (!/^[A-Z]{2,8}$/.test(prefix)) {
+    throw new Error('Product license key prefix is malformed');
+  }
+  return prefix;
+}
 const DELIVERY_TYPES = [
   'file',
   'link',
@@ -171,6 +190,7 @@ type SubscriptionLifecycleEventType =
 export interface ProviderMoneyHandlerOptions {
   webhookEventId: string;
   providerOccurredAt?: string;
+  paypalEnvironment?: PayPalEnvironment;
 }
 
 type ProviderMoneyEventType =
@@ -180,12 +200,14 @@ type ProviderMoneyEventType =
 
 type ProviderIncidentReason =
   | 'provider_identity_malformed'
+  | 'checkout_identity_missing_or_mismatched'
   | 'custom_identity_missing_or_malformed'
   | 'customer_identity_missing_or_mismatched'
   | 'order_identity_missing_or_ambiguous'
   | 'product_identity_missing_or_mismatched'
   | 'plan_identity_missing_or_mismatched'
   | 'financial_identity_malformed'
+  | 'gift_intent_invalid_or_replayed'
   | 'subscription_sale_router_failed';
 
 function isNonEmptyString(value: unknown): value is string {
@@ -231,6 +253,12 @@ async function recordProviderMoneyIncident(
     observedGuildId?: unknown;
     reason: ProviderIncidentReason;
     evidence: Record<string, unknown>;
+    /**
+     * Capture incidents normally enqueue the provider recovery/refund lane.
+     * Ledger-finalization failures happen after fulfillment is released, so
+     * callers can persist the alert/incident without authorizing a refund.
+     */
+    enqueueRecovery?: boolean;
   },
 ): Promise<void> {
   if (
@@ -281,6 +309,211 @@ async function recordProviderMoneyIncident(
   ) {
     throw new Error('Provider money incident returned malformed durable identity');
   }
+  if (input.eventType === 'PAYMENT.CAPTURE.COMPLETED' && input.enqueueRecovery !== false) {
+    const { error: recoveryError } = await supabase
+      .from('commerce_provider_money_recovery')
+      .insert({
+        webhook_event_id: input.webhookEventId,
+        provider_resource_id: providerResourceId,
+        provider_parent_id: providerParentId,
+        guild_id: observedGuildId,
+        reason: input.reason,
+        status: 'pending',
+      });
+    if (recoveryError && recoveryError.code !== '23505') {
+      requireSupabaseSuccess(recoveryError, 'Failed to persist provider money recovery task');
+    }
+  }
+}
+
+/**
+ * Mark a checkout ledger row captured only after the fulfillment carrier has
+ * been durably released. The transition is replay-safe: an already-captured
+ * row is success, while an error or missing row records the provider identity
+ * incident and throws so PayPal retries the webhook instead of silently
+ * claiming a captured payment was accounted for.
+ */
+export async function markCheckoutIntentCaptured(
+  supabase: AdminSupabase,
+  input: {
+    checkoutToken: string;
+    providerResourceId: string;
+    providerParentId?: string | null;
+    guildId: string;
+    eventType: ProviderMoneyEventType;
+    webhookEventId: string;
+  },
+): Promise<void> {
+  const { data, error } = await supabase
+    .from('commerce_checkout_intents')
+    .update({ status: 'captured' })
+    .eq('token', input.checkoutToken)
+    .in('status', ['bound', 'captured'])
+    .select('token, status, provider_id')
+    .maybeSingle();
+  if (!error && data && data.status === 'captured') return;
+
+  await recordProviderMoneyIncident(supabase, {
+    webhookEventId: input.webhookEventId,
+    eventType: input.eventType,
+    resourceId: input.providerResourceId,
+    parentId: input.providerParentId,
+    observedGuildId: input.guildId,
+    reason: 'checkout_identity_missing_or_mismatched',
+    enqueueRecovery: false,
+    evidence: {
+      checkout_token: input.checkoutToken,
+      transition: 'captured',
+      update_error: error ? formatSupabaseError(error) : null,
+      observed_status: data?.status ?? null,
+    },
+  });
+
+  throw new Error(
+    error
+      ? `Failed to mark checkout intent captured: ${formatSupabaseError(error)}`
+      : 'Checkout intent captured transition returned no durable captured row',
+  );
+}
+
+/** Idempotent operator/cron consumer for malformed captures. */
+export async function executeProviderMoneyRecovery(
+  supabase: AdminSupabase,
+  recoveryId: string,
+): Promise<'refunded' | 'retry' | 'manual_review'> {
+  const { data: claimed, error: claimError } = await supabase.rpc(
+    'commerce_claim_provider_money_recovery',
+    { p_webhook_event_id: recoveryId },
+  );
+  requireSupabaseSuccess(claimError, 'Failed to claim provider money recovery task');
+  const row = Array.isArray(claimed) && claimed.length === 1 ? claimed[0] : null;
+  // A concurrent worker owns the lease (or the row is already terminal). It
+  // must not issue a second provider refund or write a duplicate audit row.
+  if (!row) return 'retry';
+  const leaseToken = typeof row.lease_token === 'string' ? row.lease_token : null;
+  if (!leaseToken) throw new Error('Provider recovery claim returned no lease token');
+  const finish = async (values: Record<string, unknown>): Promise<boolean> => {
+    const { data, error } = await supabase
+      .from('commerce_provider_money_recovery')
+      .update(values)
+      .eq('webhook_event_id', recoveryId)
+      .eq('status', 'processing')
+      .eq('lease_token', leaseToken)
+      .select('webhook_event_id');
+    requireSupabaseSuccess(error, 'Failed to finalize provider money recovery task');
+    return Array.isArray(data) && data.length === 1;
+  };
+  if (!row.provider_resource_id) {
+    const transitioned = await finish({
+      status: 'manual_review',
+      resolved_at: new Date().toISOString(),
+      leased_until: null,
+    });
+    if (transitioned && typeof row.guild_id === 'string' && row.guild_id.length > 0) {
+      await supabase.from('audit_logs').insert({
+        guild_id: row.guild_id,
+        actor_type: 'system',
+        actor_id: 'paypal-recovery',
+        action: 'commerce.provider_money_recovery_manual_review',
+        target_type: 'provider_capture',
+        target_id: recoveryId,
+        details: { webhook_event_id: recoveryId, reason: 'missing_provider_resource_id' },
+      });
+    }
+    return 'manual_review';
+  }
+  const runtimeConfig = await getPayPalRuntimeConfig();
+  const policy = await loadPayPalPolicy(supabase, typeof row.guild_id === 'string' ? row.guild_id : null);
+  // Recovery is tenant-routed: never let a sandbox guild's malformed capture
+  // hit the live endpoint (or vice versa), even when process env defaults are
+  // shared across all guilds.
+  const config = applyPayPalPolicyEnvironment(runtimeConfig, policy.environment);
+  const token = await getPayPalToken(config);
+  if (!token) throw new Error('PayPal recovery token unavailable');
+  const response = await fetch(`${config.apiBase}/v2/payments/captures/${encodeURIComponent(row.provider_resource_id)}/refund`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': `recovery-${createHash('sha256').update(recoveryId).digest('hex')}`,
+    },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(10_000),
+  });
+  // PayPal uses 409 RESOURCE_CONFLICT for an in-flight duplicate request
+  // (for example PREVIOUS_REQUEST_IN_PROGRESS). That response does not prove
+  // the refund completed. Keep it on the retry path below so we never close
+  // the recovery row or emit a refunded audit event without confirmation.
+  if (response.ok) {
+    const transitioned = await finish({ status: 'refunded', resolved_at: new Date().toISOString(), leased_until: null });
+    if (!transitioned) return 'retry';
+    if (typeof row.guild_id === 'string' && row.guild_id.length > 0) {
+      await supabase.from('audit_logs').insert({ guild_id: row.guild_id, actor_type: 'system', actor_id: 'paypal-recovery', action: 'commerce.provider_money_refunded', target_type: 'provider_capture', target_id: row.provider_resource_id, details: { webhook_event_id: recoveryId } });
+    }
+    return 'refunded';
+  }
+  const attempts = Number(row.attempts ?? 0);
+  const maxAttempts = Number(row.max_attempts ?? 5);
+  const terminal = attempts >= maxAttempts;
+  const transitioned = await finish({
+    status: terminal ? 'manual_review' : 'pending',
+    next_retry_at: terminal ? null : new Date(Date.now() + 60_000).toISOString(),
+    leased_until: null,
+    resolved_at: terminal ? new Date().toISOString() : null,
+  });
+  if (transitioned && terminal && typeof row.guild_id === 'string' && row.guild_id.length > 0) {
+    await supabase.from('audit_logs').insert({
+      guild_id: row.guild_id,
+      actor_type: 'system',
+      actor_id: 'paypal-recovery',
+      action: 'commerce.provider_money_recovery_manual_review',
+      target_type: 'provider_capture',
+      target_id: row.provider_resource_id,
+      details: {
+        webhook_event_id: recoveryId,
+        attempts,
+        max_attempts: maxAttempts,
+        provider_status: response.status,
+      },
+    });
+  }
+  return terminal ? 'manual_review' : 'retry';
+}
+
+/** Run a bounded provider-money recovery sweep under the same leased consumer
+ * used by the operator endpoint. Concurrent schedulers safely skip processing
+ * rows already claimed by another worker. */
+export async function sweepProviderMoneyRecovery(
+  supabase: AdminSupabase,
+  limit = 20,
+): Promise<Array<{ id: string; result?: string; error?: string }>> {
+  const { data: rows, error } = await supabase
+    .from('commerce_provider_money_recovery')
+    .select('webhook_event_id')
+    .in('status', ['pending', 'processing'])
+    .limit(Math.min(Math.max(limit, 1), 100));
+  requireSupabaseSuccess(error, 'Failed to list provider money recovery tasks');
+  const results: Array<{ id: string; result?: string; error?: string }> = [];
+  for (const row of rows ?? []) {
+    if (!row || typeof row.webhook_event_id !== 'string') continue;
+    try {
+      results.push({ id: row.webhook_event_id, result: await executeProviderMoneyRecovery(supabase, row.webhook_event_id) });
+    } catch (recoveryError) {
+      results.push({
+        id: row.webhook_event_id,
+        error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+      });
+    }
+  }
+  return results;
+}
+
+function verifyCheckoutSignature(token: string, signature: string): boolean {
+  const secret = process.env.PAYPAL_RECONCILE_SECRET || process.env.PAYPAL_CLIENT_SECRET;
+  if (!secret || !/^[a-f0-9]{64}$/.test(signature)) return false;
+  const expected = Buffer.from(createHmac('sha256', secret).update(`somnibot-checkout:v1:${token}`).digest('hex'), 'utf8');
+  const provided = Buffer.from(signature, 'utf8');
+  return expected.length === provided.length && timingSafeEqual(expected, provided);
 }
 
 function parseDeliveryTypeSnapshot(value: unknown): DeliveryType | null {
@@ -1124,20 +1357,32 @@ async function ensureStagedLicenseKey(
   }
 
   const groups = plaintext.split('-');
-  if (groups.length !== 5 || groups[0] !== 'SMNI' || groups.slice(1).some((group) => group.length !== 4)) {
+  const payloadPrefix = payload.license_key_prefix;
+  const prefix = typeof payloadPrefix === 'string' ? payloadPrefix : groups[0];
+  if (
+    groups.length !== 5
+    || typeof prefix !== 'string'
+    || !/^[A-Z]{2,8}$/.test(prefix)
+    || groups[0] !== prefix
+    || groups.slice(1).some((group) => !/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/.test(group))
+  ) {
     throw new Error('Staged license key plaintext is malformed');
   }
   const keyHash = createHash('sha256').update(plaintext).digest('hex');
+  const deliveryCustomerId = typeof payload.recipient_customer_id === 'string'
+    ? payload.recipient_customer_id : order.customer_id;
+  const deliveryDiscordId = typeof payload.recipient_discord_id === 'string'
+    ? payload.recipient_discord_id : String(payload.discord_id ?? '');
   const row = {
     id: licenseKeyId,
     order_id: order.id,
-    customer_id: order.customer_id,
+    customer_id: deliveryCustomerId,
     product_id: order.product_id,
     guild_id: order.guild_id,
     key_hash: keyHash,
-    key_prefix: 'SMNI',
+    key_prefix: prefix,
     key_suffix: groups[4]!,
-    bound_discord_id: String(payload.discord_id ?? ''),
+    bound_discord_id: deliveryDiscordId,
     status: 'pending_activation',
   };
   if (!isNonEmptyString(row.bound_discord_id)) {
@@ -1166,7 +1411,7 @@ async function ensureStagedLicenseKey(
   if (
     !existing ||
     existing.order_id !== order.id ||
-    existing.customer_id !== order.customer_id ||
+    existing.customer_id !== deliveryCustomerId ||
     existing.product_id !== order.product_id ||
     existing.guild_id !== order.guild_id ||
     existing.key_hash !== keyHash
@@ -1268,10 +1513,20 @@ function resolveCaptureRefundPaymentId(resource: Record<string, unknown>): strin
   }
 
   for (const link of capture.links ?? []) {
-    if (link.rel?.toLowerCase() !== 'capture') continue;
+    const rel = link.rel?.toLowerCase();
+    if (rel !== 'capture' && rel !== 'up') continue;
     if (typeof link.href !== 'string') return null;
     const match = link.href.match(/\/payments\/captures?\/([^/?#]+)\/?(?:[?#]|$)/i);
-    if (!match?.[1] || !addCanonicalPayPalCandidate(candidates, match[1])) return null;
+    // PayPal's v2 Refund resource identifies its parent capture with a
+    // HATEOAS `rel=up` link. A Capture resource can also use `rel=up` for its
+    // parent order, so only treat an `up` link as a witness when its URL is
+    // actually a Payments v2 capture URL. The explicit legacy `rel=capture`
+    // contract remains fail-closed when malformed.
+    if (!match?.[1]) {
+      if (rel === 'up') continue;
+      return null;
+    }
+    if (!addCanonicalPayPalCandidate(candidates, match[1])) return null;
   }
 
   const unique = [...new Set(candidates)];
@@ -1396,7 +1651,10 @@ export async function handleOrderApproved(
     throw new Error('Approved PayPal order has no exact resumable local carrier');
   }
 
-  const paypalConfig = await getPayPalRuntimeConfig();
+  const runtimeConfig = await getPayPalRuntimeConfig();
+  const paypalConfig = options.paypalEnvironment
+    ? applyPayPalPolicyEnvironment(runtimeConfig, options.paypalEnvironment)
+    : runtimeConfig;
   const token = await getPayPalToken(paypalConfig);
   if (!token) {
     throw new Error('Could not get PayPal token to capture order');
@@ -1482,11 +1740,18 @@ export async function handlePaymentCaptured(
     product_id: string;
     customer_id: string;
     discord_id: string;
+    gift_intent_id?: string;
   } | null = null;
   let observedGuildId: string | null = null;
+  let checkoutToken: string | null = null;
+  let checkoutSignature: string | null = null;
 
   if (customId) {
-    try {
+    const signed = customId.match(/^v1:([0-9a-f-]{36})\.([a-f0-9]{64})$/i);
+    if (signed) {
+      checkoutToken = signed[1]!;
+      checkoutSignature = signed[2]!;
+    } else try {
       const raw = JSON.parse(customId) as unknown;
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         const custom = raw as Record<string, unknown>;
@@ -1499,6 +1764,7 @@ export async function handlePaymentCaptured(
             product_id: String(custom.p),
             customer_id: String(custom.c),
             discord_id: String(custom.d),
+            ...(typeof custom.gi === 'string' ? { gift_intent_id: custom.gi } : {}),
           };
         } else {
           meta = {
@@ -1506,6 +1772,7 @@ export async function handlePaymentCaptured(
             product_id: String(custom.product_id ?? ''),
             customer_id: String(custom.customer_id ?? ''),
             discord_id: String(custom.discord_id ?? ''),
+            ...(typeof custom.gift_intent_id === 'string' ? { gift_intent_id: custom.gift_intent_id } : {}),
           };
         }
       }
@@ -1553,12 +1820,41 @@ export async function handlePaymentCaptured(
     return;
   }
 
+  if (checkoutToken) {
+    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+      await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId, parentId: paypalOrderId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
+      return;
+    }
+    const { data: checkoutIntent, error: checkoutIntentError } = await supabase
+      .from('commerce_checkout_intents')
+      .select('token, guild_id, customer_id, product_id, gift_checkout_token, provider_id, expires_at, status')
+      .eq('token', checkoutToken)
+      .maybeSingle();
+    requireSupabaseSuccess(checkoutIntentError, 'Failed to validate checkout identity');
+    if (!checkoutIntent || checkoutIntent.status === 'cancelled' || (['pending', 'bound'].includes(String(checkoutIntent.status)) && Date.parse(String(checkoutIntent.expires_at)) <= Date.now())
+      || checkoutIntent.provider_id !== paypalOrderId) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId,
+        parentId: paypalOrderId, observedGuildId,
+        reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken },
+      });
+      return;
+    }
+    meta = {
+      guild_id: String(checkoutIntent.guild_id), product_id: String(checkoutIntent.product_id),
+      customer_id: String(checkoutIntent.customer_id), discord_id: '',
+      ...(typeof checkoutIntent.gift_checkout_token === 'string' && checkoutIntent.gift_checkout_token.length > 0
+        ? { gift_intent_id: checkoutIntent.gift_checkout_token } : {}),
+    };
+    observedGuildId = boundedObservedGuildId(meta.guild_id);
+  }
+
   if (
     !meta ||
     !isNonEmptyString(meta.guild_id) ||
     !isNonEmptyString(meta.product_id) ||
     !isNonEmptyString(meta.customer_id) ||
-    !isNonEmptyString(meta.discord_id)
+    (!checkoutToken && !meta.gift_intent_id && !isNonEmptyString(meta.discord_id))
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -1584,11 +1880,15 @@ export async function handlePaymentCaptured(
     customerError,
     'Failed to validate captured payment customer',
   );
+  if (checkoutToken && customer && isNonEmptyString(customer.discord_id)) {
+    meta.discord_id = customer.discord_id;
+  }
   if (
     !customer
     || customer.id !== meta.customer_id
     || customer.guild_id !== meta.guild_id
-    || customer.discord_id !== meta.discord_id
+    || !isNonEmptyString(customer.discord_id)
+    || (!meta.gift_intent_id && customer.discord_id !== meta.discord_id)
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -1603,6 +1903,33 @@ export async function handlePaymentCaptured(
       },
     });
     return;
+  }
+
+  if (meta.gift_intent_id) {
+    const token = meta.gift_intent_id;
+    const legacyIntentId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token);
+    if (!legacyIntentId && !/^[a-f0-9]{16}(?:[a-f0-9]{32})?$/.test(token)) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId,
+        parentId: paypalOrderId, observedGuildId: meta.guild_id,
+        reason: 'gift_intent_invalid_or_replayed', evidence: { gift_token: token },
+      });
+      return;
+    }
+    meta.discord_id = customer.discord_id;
+    let giftLookup = supabase.from('commerce_gift_intents').select('id').eq('guild_id', meta.guild_id).eq('buyer_customer_id', meta.customer_id).eq('product_id', meta.product_id);
+    giftLookup = legacyIntentId ? giftLookup.eq('id', token) : giftLookup.eq('checkout_token', token);
+    const { data: giftIntent, error: giftLookupError } = await giftLookup.maybeSingle();
+    requireSupabaseSuccess(giftLookupError, 'Failed to validate gift checkout token');
+    if (!giftIntent?.id) {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId,
+        parentId: paypalOrderId, observedGuildId: meta.guild_id,
+        reason: 'gift_intent_invalid_or_replayed', evidence: { gift_token: token },
+      });
+      return;
+    }
+    meta.gift_intent_id = giftIntent.id;
   }
 
   // A resumed event first follows the capture's unique payment row back to
@@ -1780,6 +2107,34 @@ export async function handlePaymentCaptured(
     currency: captureCurrency,
   })) return;
 
+  let deliveryCustomerId = order.customer_id;
+  let deliveryDiscordId = meta.discord_id;
+  if (meta.gift_intent_id) {
+    const { data: giftClaim, error: giftError } = await supabase.rpc('commerce_claim_gift_fulfillment', {
+      p_intent_id: meta.gift_intent_id,
+      p_order_id: order.id,
+      p_guild_id: order.guild_id,
+      p_buyer_customer_id: order.customer_id,
+      p_product_id: order.product_id,
+    });
+    if (giftError || !Array.isArray(giftClaim) || giftClaim.length !== 1
+      || typeof giftClaim[0]?.recipient_customer_id !== 'string'
+      || typeof giftClaim[0]?.recipient_discord_id !== 'string') {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId,
+        eventType: 'PAYMENT.CAPTURE.COMPLETED',
+        resourceId: paypalCaptureId,
+        parentId: paypalOrderId,
+        observedGuildId: order.guild_id,
+        reason: 'gift_intent_invalid_or_replayed',
+        evidence: { gift_intent_id: meta.gift_intent_id, order_id: order.id },
+      });
+      return;
+    }
+    deliveryCustomerId = giftClaim[0].recipient_customer_id;
+    deliveryDiscordId = giftClaim[0].recipient_discord_id;
+  }
+
   const expected: FulfillmentExpectation = {
     idempotencyKey: `paypal:capture:${paypalCaptureId}:fulfill_purchase`,
     action: 'fulfill_purchase',
@@ -1793,6 +2148,7 @@ export async function handlePaymentCaptured(
             guild_id: order.guild_id,
             customer_id: order.customer_id,
             discord_id: meta.discord_id,
+            ...(meta.gift_intent_id ? { recipient_customer_id: deliveryCustomerId, recipient_discord_id: deliveryDiscordId, gift_intent_id: meta.gift_intent_id } : {}),
             product_id: order.product_id,
             order_id: order.id,
             order_number: order.order_number,
@@ -1824,7 +2180,7 @@ export async function handlePaymentCaptured(
     });
     return;
   }
-  if (amountMatches) {
+  if (amountMatches && !meta.gift_intent_id) {
     // The database claim is the atomic double-fulfillment boundary. It must run
     // before a random licence key or staged queue payload is created. Historical
     // PayPal links can arrive concurrently, so a JavaScript entitlement read is
@@ -1853,13 +2209,14 @@ export async function handlePaymentCaptured(
     );
 
     const license = snapshot.delivery_type_snapshot === 'license_key'
-      ? generateLicenseKey()
+      ? generateLicenseKey(await loadLicenseKeyPrefix(supabase, order.product_id))
       : null;
     staged = await stageFulfillment(supabase, expected, {
       fulfillment_type: 'one_time_purchase',
       guild_id: order.guild_id,
       customer_id: order.customer_id,
       discord_id: meta.discord_id,
+      ...(meta.gift_intent_id ? { recipient_customer_id: deliveryCustomerId, recipient_discord_id: deliveryDiscordId, gift_intent_id: meta.gift_intent_id } : {}),
       product_id: order.product_id,
       product_name: productName,
       order_id: order.id,
@@ -1874,6 +2231,7 @@ export async function handlePaymentCaptured(
         ? {
             license_key_id: crypto.randomUUID(),
             license_key_plaintext: license.plaintext,
+            license_key_prefix: license.prefix,
           }
         : {}),
       entitlement_type: 'one_time',
@@ -1885,6 +2243,16 @@ export async function handlePaymentCaptured(
   validateStagedLicenseDelivery(staged.payload, snapshot.delivery_type_snapshot);
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
+  if (checkoutToken) {
+    await markCheckoutIntentCaptured(supabase, {
+      checkoutToken,
+      providerResourceId: paypalCaptureId,
+      providerParentId: order.paypal_order_id,
+      guildId: order.guild_id,
+      eventType: 'PAYMENT.CAPTURE.COMPLETED',
+      webhookEventId,
+    });
+  }
 
   console.log(
     `[Webhook] Order completed + fulfillment queued: ${order.order_number} for ${meta.discord_id}`,
@@ -1917,8 +2285,15 @@ export async function handleSubscriptionActivated(
     discord_id: string;
   } | null = null;
   let observedGuildId: string | null = null;
+  let checkoutToken: string | null = null;
+  let checkoutSignature: string | null = null;
   try {
-    const raw = JSON.parse(customId ?? '') as unknown;
+    const signed = typeof customId === 'string' ? customId.match(/^v1:([0-9a-f-]{36})\.([a-f0-9]{64})$/i) : null;
+    if (signed) {
+      checkoutToken = signed[1]!;
+      checkoutSignature = signed[2]!;
+    }
+    const raw = checkoutToken ? null : JSON.parse(customId ?? '') as unknown;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
       const custom = raw as Record<string, unknown>;
       observedGuildId = boundedObservedGuildId(
@@ -1962,13 +2337,42 @@ export async function handleSubscriptionActivated(
     return;
   }
 
+  if (checkoutToken) {
+    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+      await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'BILLING.SUBSCRIPTION.ACTIVATED', resourceId: subscriptionId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
+      return;
+    }
+    const { data: checkoutIntent, error: checkoutIntentError } = await supabase
+      .from('commerce_checkout_intents')
+      .select('token, guild_id, customer_id, product_id, plan_id, provider_id, expires_at, status')
+      .eq('token', checkoutToken)
+      .maybeSingle();
+    requireSupabaseSuccess(checkoutIntentError, 'Failed to validate subscription checkout identity');
+    if (!checkoutIntent || checkoutIntent.status === 'cancelled' || (['pending', 'bound'].includes(String(checkoutIntent.status)) && Date.parse(String(checkoutIntent.expires_at)) <= Date.now())
+      || checkoutIntent.provider_id !== subscriptionId || typeof checkoutIntent.plan_id !== 'string') {
+      await recordProviderMoneyIncident(supabase, {
+        webhookEventId, eventType: 'BILLING.SUBSCRIPTION.ACTIVATED', resourceId: subscriptionId,
+        observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken },
+      });
+      return;
+    }
+    meta = {
+      guild_id: String(checkoutIntent.guild_id),
+      product_id: String(checkoutIntent.product_id),
+      plan_id: String(checkoutIntent.plan_id),
+      customer_id: String(checkoutIntent.customer_id),
+      discord_id: '',
+    };
+    observedGuildId = boundedObservedGuildId(meta.guild_id);
+  }
+
   if (
     !meta ||
     !isNonEmptyString(meta.guild_id) ||
     !isNonEmptyString(meta.product_id) ||
     !isNonEmptyString(meta.plan_id) ||
     !isNonEmptyString(meta.customer_id) ||
-    !isNonEmptyString(meta.discord_id)
+    (!checkoutToken && !isNonEmptyString(meta.discord_id))
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -2037,7 +2441,7 @@ export async function handleSubscriptionActivated(
     !customer
     || customer.id !== meta.customer_id
     || customer.guild_id !== meta.guild_id
-    || customer.discord_id !== meta.discord_id
+    || (!checkoutToken && customer.discord_id !== meta.discord_id)
   ) {
     await recordProviderMoneyIncident(supabase, {
       webhookEventId,
@@ -2053,6 +2457,7 @@ export async function handleSubscriptionActivated(
     });
     return;
   }
+  if (checkoutToken) meta.discord_id = customer.discord_id;
 
   if (!order) {
     firstProviderContract = await requireAuthoritativeSubscriptionAmount(subscriptionId);
@@ -2474,7 +2879,7 @@ export async function handleSubscriptionActivated(
     }
     const productName = product.name;
     const license = deliveryTypeSnapshot === 'license_key'
-      ? generateLicenseKey()
+      ? generateLicenseKey(await loadLicenseKeyPrefix(supabase, order.product_id))
       : null;
 
     staged = await stageFulfillment(supabase, expected, {
@@ -2502,6 +2907,7 @@ export async function handleSubscriptionActivated(
         ? {
             license_key_id: crypto.randomUUID(),
             license_key_plaintext: license.plaintext,
+            license_key_prefix: license.prefix,
           }
         : {}),
       entitlement_type: 'subscription',
@@ -2552,6 +2958,15 @@ export async function handleSubscriptionActivated(
 
   await ensureStagedLicenseKey(supabase, order, staged.payload);
   await releaseStagedFulfillment(supabase, staged);
+  if (checkoutToken) {
+    await markCheckoutIntentCaptured(supabase, {
+      checkoutToken,
+      providerResourceId: subscriptionId,
+      guildId: order.guild_id,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      webhookEventId,
+    });
+  }
 
   console.log(
     `[Webhook] Subscription activated + fulfillment queued: ${subscriptionId} for ${meta.discord_id}`,
@@ -3003,6 +3418,7 @@ export async function handleSubscriptionPayment(
 
 export interface RefundHandlerOptions {
   retryingFailedEvent?: boolean;
+  legacyUsdSaleTolerance?: boolean;
 }
 
 export async function handleCaptureRefunded(
@@ -3292,7 +3708,8 @@ async function handleExternalPaymentRefunded(
   // stating an amount without the confirming cumulative total stays
   // fail-closed — the payload then lacks its own proof of the sale's real
   // currency.
-  const legacyUsdMislabelTolerated = resourceType === 'sale'
+  const legacyUsdMislabelTolerated = options.legacyUsdSaleTolerance !== false
+    && resourceType === 'sale'
     && paymentCurrency === 'USD'
     && resolvedAmounts.refundAmountCents != null
     && resolvedAmounts.refundAmountCents > 0

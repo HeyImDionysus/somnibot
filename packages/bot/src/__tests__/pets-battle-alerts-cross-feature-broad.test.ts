@@ -77,11 +77,13 @@ vi.mock('../quests/quests-manager.js', () => ({
 describe('PetsManager battle & prestige', () => {
   let PetsManager: any;
 
+  // Cold imports are occasionally slower than the 10s global timeout when
+  // the full bot suite starts all workers at once.
   beforeEach(async () => {
     vi.clearAllMocks();
     const mod = await import('../features/pets/pets-manager.js');
     PetsManager = mod.PetsManager;
-  });
+  }, 30_000);
 
   it('battlePet both have pets', async () => {
     const supa = mockSupabase();

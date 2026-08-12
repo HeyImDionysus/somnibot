@@ -300,7 +300,15 @@ export class ProfilesManager {
 
   async setTitle(interaction: ChatInputCommandInteraction): Promise<void> {
     // Replay fence: a re-delivered interaction skips the write + confirmation.
-    if (this.isReplayedWrite(interaction.id)) return;
+    if (this.isReplayedWrite(interaction.id)) {
+      await writeAuditLog(this.supabase, {
+        guildId: interaction.guildId!, actorType: 'discord', actorId: interaction.user.id,
+        action: 'profiles.write_replay', category: 'profiles', targetType: 'member', targetId: interaction.user.id,
+        details: { field: 'title', interactionId: interaction.id }, success: false,
+        occurrenceKey: `profiles.write_replay:${interaction.id}`, correlationId: `profile:${interaction.guildId}:${interaction.user.id}`,
+      });
+      return;
+    }
     const title = interaction.options.getString('title')!;
     const guildId = interaction.guildId!;
     const cfg = await this.getConfig(guildId);
@@ -326,6 +334,8 @@ export class ProfilesManager {
         targetId: interaction.user.id,
         details: { field: 'title', mode: cfg.contentFilterMode, interactionId: interaction.id },
         success: false,
+        occurrenceKey: `profiles.content_rejected:${interaction.id}`,
+        correlationId: `profile:${guildId}:${interaction.user.id}`,
       });
       await interaction.reply({
         content: '❌ That title was blocked by the content filter. Please choose different wording; contact a moderator to appeal.',
@@ -362,6 +372,8 @@ export class ProfilesManager {
       targetType: 'member',
       targetId: interaction.user.id,
       details: { value: finalTitle, truncated, interactionId: interaction.id },
+      occurrenceKey: `profiles.title_updated:${interaction.id}`,
+      correlationId: `profile:${guildId}:${interaction.user.id}`,
     });
 
     this.eventBus.emit('profile.updated', guildId, {
@@ -380,7 +392,16 @@ export class ProfilesManager {
 
   async setBio(interaction: ChatInputCommandInteraction): Promise<void> {
     // Replay fence: a re-delivered interaction skips the write + confirmation.
-    if (this.isReplayedWrite(interaction.id)) return;
+    if (this.isReplayedWrite(interaction.id)) {
+      await writeAuditLog(this.supabase, {
+        guildId: interaction.guildId!, actorType: 'discord', actorId: interaction.user.id,
+        action: 'profiles.write_replay', category: 'profiles', targetType: 'member', targetId: interaction.user.id,
+        details: { field: 'bio', interactionId: interaction.id }, success: false,
+        occurrenceKey: `profiles.write_replay:${interaction.id}`,
+        correlationId: `profile:${interaction.guildId}:${interaction.user.id}`,
+      });
+      return;
+    }
     const bio = interaction.options.getString('bio')!;
     const guildId = interaction.guildId!;
     const cfg = await this.getConfig(guildId);
@@ -404,6 +425,8 @@ export class ProfilesManager {
         targetId: interaction.user.id,
         details: { field: 'bio', mode: cfg.contentFilterMode, interactionId: interaction.id },
         success: false,
+        occurrenceKey: `profiles.content_rejected:${interaction.id}`,
+        correlationId: `profile:${guildId}:${interaction.user.id}`,
       });
       await interaction.reply({
         content: '❌ That bio was blocked by the content filter. Please choose different wording; contact a moderator to appeal.',
@@ -438,6 +461,8 @@ export class ProfilesManager {
       targetType: 'member',
       targetId: interaction.user.id,
       details: { value: finalBio, truncated, interactionId: interaction.id },
+      occurrenceKey: `profiles.bio_updated:${interaction.id}`,
+      correlationId: `profile:${guildId}:${interaction.user.id}`,
     });
 
     this.eventBus.emit('profile.updated', guildId, {

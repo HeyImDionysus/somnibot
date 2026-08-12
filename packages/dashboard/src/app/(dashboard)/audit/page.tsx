@@ -12,6 +12,7 @@ import { ScrollText } from 'lucide-react';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
+import { downloadAuditExport } from '@/lib/audit-export';
 import { CATEGORIES, ACTOR_ICONS, CATEGORY_COLORS } from './audit-constants';
 
 // ── Types ─────────────────────────────────────────────────
@@ -49,6 +50,7 @@ export default function AuditLogPage() {
   });
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // Filters
   const [category, setCategory] = useState('');
@@ -87,31 +89,12 @@ export default function AuditLogPage() {
   useAutoRefresh('audit_log', undefined, refetchCurrentPage);
 
   const handleExport = async (format: 'csv' | 'json') => {
-    const params = new URLSearchParams({ export: 'true', format });
-    if (category) params.set('category', category);
-    if (search) params.set('search', search);
-    if (dateFrom) params.set('dateFrom', new Date(dateFrom).toISOString());
-    if (dateTo) params.set('dateTo', new Date(dateTo + 'T23:59:59').toISOString());
-
-    const res = await fetch(`/api/audit?${params}`);
-
-    if (format === 'csv') {
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `audit-log-${new Date().toISOString().slice(0, 10)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } else {
-      const json = await res.json();
-      const blob = new Blob([JSON.stringify(json.data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `audit-log-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+    setExportError(null);
+    try {
+      const result = await downloadAuditExport(format, { category, search, dateFrom, dateTo });
+      if (!result.ok) setExportError(result.error);
+    } catch {
+      setExportError('Could not reach the server to export audit logs.');
     }
   };
 
@@ -148,6 +131,12 @@ export default function AuditLogPage() {
           </button>
         </div>
       </div>
+
+      {exportError && (
+        <div role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
+          {exportError}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3 rounded-lg bg-discord-bg-secondary p-4">

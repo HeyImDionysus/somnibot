@@ -20,15 +20,12 @@
  */
 import { createClient } from '@supabase/supabase-js';
 import { createServerClient } from '@supabase/ssr';
+import { applyLocalSupabaseEnv } from '../../../scripts/local-supabase-env.mjs';
 
-const DEMO_SERVICE =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
-const DEMO_ANON =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
-
-const url = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
-const anonKey = process.env.SUPABASE_ANON_KEY || DEMO_ANON;
-const serviceKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE;
+const resolved = applyLocalSupabaseEnv({ env: process.env, requireStatus: true });
+const url = resolved.url;
+const anonKey = resolved.anonKey;
+const serviceKey = resolved.serviceKey;
 
 // Hard refusal, not a warning: this script creates auth users.
 if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(new URL(url).origin)) {

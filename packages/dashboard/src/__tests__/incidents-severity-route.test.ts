@@ -35,7 +35,16 @@ function makeAdmin() {
   const selectChain = { select: vi.fn().mockReturnValue(singleChain) };
   const incidentsChain = { insert: vi.fn().mockReturnValue(selectChain) };
   const eventsChain = { insert: vi.fn().mockResolvedValue({ data: null, error: null }) };
-  const from = vi.fn((table: string) => (table === 'incidents' ? incidentsChain : eventsChain));
+  const configChain = {
+    select: vi.fn().mockReturnThis(),
+    eq: vi.fn().mockReturnThis(),
+    maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+  };
+  const from = vi.fn((table: string) => {
+    if (table === 'incidents') return incidentsChain;
+    if (table === 'guild_config') return configChain;
+    return eventsChain;
+  });
   const rpc = vi.fn().mockResolvedValue({ data: 7, error: null });
   return { admin: { from, rpc }, incidentsChain };
 }

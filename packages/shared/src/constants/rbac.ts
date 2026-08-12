@@ -187,7 +187,9 @@ export function hasRouteAccess(
     .filter((r) => route === r || route.startsWith(r + '/'))
     .sort((a, b) => b.length - a.length)[0];
 
-  if (!matchingRoute) return true; // Unknown routes default to accessible
+  // Fail closed: unknown routes are a locked security invariant. New routes
+  // must be explicitly added to ROUTE_PERMISSIONS before they are reachable.
+  if (!matchingRoute) return false;
   return hasPermission(userPermissions, ROUTE_PERMISSIONS[matchingRoute]);
 }
 

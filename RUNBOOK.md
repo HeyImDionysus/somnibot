@@ -40,11 +40,15 @@ health server stays separate from the dashboard's `PORT=3000`. Use
 
 ```bash
 git pull origin main
-docker compose -f docker-compose.prod.yml up -d --build
+deploy_path=/opt/somnibot
+. "$deploy_path/scripts/lib/production-compose.sh"
+production_compose up -d --build
 ```
 
 The VPS stack keeps the dashboard, bot, Lavalink, and Valkey together on the VPS
-or private network. Caddy serves the public HTTPS dashboard domain.
+or private network. The helper fixes the Compose project to `somnibot-prod` and
+uses either bundled Caddy for domain mode or the loopback-only launcher override
+for Tailscale Funnel mode.
 
 ### CI
 All required GitHub checks must pass before merging: install, migration lint,
@@ -117,6 +121,8 @@ incident specifically requires it and that change has separate approval.
 ### VPS
 
 1. SSH to the VPS and enter the SomniBot checkout.
+   Preserve `.env`, `.env.rollback`, and `.somnibot/`; they hold the active
+   runtime identity and must survive a code rollback.
 2. Choose the last known-good commit:
    ```bash
    git fetch origin
@@ -124,17 +130,21 @@ incident specifically requires it and that change has separate approval.
    ```
 3. Check out the known-good commit and rebuild containers:
    ```bash
+   deploy_path=/opt/somnibot
+   . /usr/local/lib/somnibot/production-compose.sh
    git checkout <last-good-commit>
-   docker compose -f docker-compose.prod.yml up -d --build
+   production_compose up -d --build
    ```
+   The installed helper remains available even when the known-good checkout
+   predates the current recovery scripts.
 4. Verify:
    ```bash
-   docker compose -f docker-compose.prod.yml ps
+   production_compose ps
    curl -fsS https://your-domain.example/api/health
    ```
 5. Check logs if health is not green:
    ```bash
-   docker compose -f docker-compose.prod.yml logs --tail=100 dashboard bot caddy
+   production_compose logs --tail=100 dashboard bot valkey lavalink
    ```
 6. Treat HTTP fetch failure as a dashboard rollback failure. Treat
    `status: "degraded"` as a dependency alert, not a failed dashboard process
@@ -214,6 +224,17 @@ Check: process running → Discord gateway → Valkey → Supabase → restart
 ### Automation Failures
 Check: `alerts` table → `automation_executions` errors → fix perms/channels
 
+### Credential rotation
+
+For a suspected compromise, rotate the affected credential at its provider,
+update the established deployment secret source, and restart only the services
+that consume it. Rotate `DISCORD_TOKEN` and `DISCORD_CLIENT_SECRET` in the
+Discord portal; Supabase server and publishable keys in Supabase; PayPal app
+credentials in PayPal; and application secrets with `node scripts/gen-secret.mjs`.
+Rebuild the dashboard whenever a `NEXT_PUBLIC_*` value changes. Verify bot
+login, dashboard OAuth, PayPal webhook delivery, and health after rotation;
+changing `NEXTAUTH_SECRET` invalidates existing dashboard sessions.
+
 ### Action Queue Backup
 Check stuck `processing` items → `bot_action_queue_recover_stale()` RPC → check DLQ.
 For a **commerce-lane** alert, filter on `lane = 'commerce'` in both
@@ -289,6 +310,15 @@ Requirements and knobs:
   never bypasses an active owner or the exact-owner lease checks.
 
 ## Database
+
+### Backup and restore boundary
+
+Before a production migration or deployment, take a provider-verified database
+backup and record its timestamp, the deployed Git SHA, and the
+`schema_migrations` ledger. Rehearse restores on staging first. Before customer
+writes, restore only the recorded backup when necessary; after customer writes,
+disable `store_enabled`, preserve payment evidence, and use an additive
+forward-fix instead of overwriting live data.
 
 ### Migrations
 The bot's migration runner applies files from `packages/supabase/migrations/`

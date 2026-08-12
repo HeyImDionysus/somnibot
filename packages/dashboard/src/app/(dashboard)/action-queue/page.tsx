@@ -13,6 +13,9 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
+import { Fragment } from 'react';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -38,6 +41,22 @@ interface Pagination {
   totalPages: number;
 }
 
+function isDlqItem(value: unknown): value is DlqItem {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.action === 'string'
+    && isApiRecord(value.payload)
+    && (typeof value.error_message === 'string' || value.error_message === null)
+    && typeof value.retry_count === 'number'
+    && typeof value.max_retries === 'number'
+    && (typeof value.original_id === 'string' || value.original_id === null)
+    && typeof value.failed_at === 'string'
+    && typeof value.acknowledged === 'boolean'
+    && (typeof value.acknowledged_at === 'string' || value.acknowledged_at === null)
+    && typeof value.retried === 'boolean'
+    && (typeof value.retried_at === 'string' || value.retried_at === null);
+}
+
 type FilterType = 'pending' | 'acknowledged' | 'retried' | 'all';
 
 // ── Page Component ────────────────────────────────────────
@@ -56,6 +75,10 @@ export default function ActionQueuePage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [pendingAction, setPendingAction] = useState<{
+    action: 'acknowledge' | 'retry';
+    ids: string[];
+  } | null>(null);
 
   const fetchItems = useCallback(
     async (page = 1) => {
@@ -65,12 +88,22 @@ export default function ActionQueuePage() {
         const res = await fetch(
           `/api/action-queue?page=${page}&pageSize=20&filter=${filter}`,
         );
-        const json = await res.json();
-        if (!json.success) throw new Error(json.error ?? 'Failed to load');
-        setItems(json.data.items);
-        setPagination(json.data.pagination);
+        const json = await requireApiSuccess(res, 'Could not load the action queue. Retry from this page.');
+        const data = requireApiRecord(json, 'data', 'The action queue returned an invalid readback. Retry from this page.');
+        const nextItems = requireApiArray(data, 'items', isDlqItem, 'The action queue returned an invalid readback. Retry from this page.');
+        if (!isApiRecord(data.pagination)
+          || typeof data.pagination.page !== 'number'
+          || typeof data.pagination.pageSize !== 'number'
+          || typeof data.pagination.total !== 'number'
+          || typeof data.pagination.totalPages !== 'number') {
+          throw new Error('The action queue returned an invalid readback. Retry from this page.');
+        }
+        setItems(nextItems);
+        setPagination({ page: data.pagination.page, pageSize: data.pagination.pageSize, total: data.pagination.total, totalPages: data.pagination.totalPages });
+        return nextItems;
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unknown error');
+        return null;
       } finally {
         setLoading(false);
       }
@@ -82,21 +115,34 @@ export default function ActionQueuePage() {
     fetchItems(1);
   }, [fetchItems]);
 
-  const handleAction = async (action: 'acknowledge' | 'retry', ids: string[]) => {
-    if (ids.length === 0) return;
+  const handleAction = async () => {
+    if (!pendingAction || pendingAction.ids.length === 0) return;
     try {
       setActionLoading(true);
+      setError(null);
       const res = await fetch('/api/action-queue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, ids }),
+        body: JSON.stringify(pendingAction),
       });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error ?? 'Action failed');
+      await requireApiSuccess(
+        res,
+        pendingAction.action === 'retry'
+          ? 'Could not replay the selected action. Nothing was marked retried.'
+          : 'Could not dismiss the selected action. It remains pending.',
+      );
+      const nextItems = await fetchItems(pagination.page);
+      requireReadback(
+        nextItems !== null && pendingAction.ids.every((id) => {
+          const item = nextItems.find((candidate) => candidate.id === id);
+          return !item || (pendingAction.action === 'retry' ? item.retried : item.acknowledged);
+        }),
+        'The queue accepted the action, but the targeted items still have their previous state in the authoritative readback. Keep your selection and reload before retrying.',
+      );
       setSelectedIds(new Set());
-      await fetchItems(pagination.page);
+      setPendingAction(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Action failed');
+      setError(err instanceof Error ? err.message : 'The action failed. The selected items remain unchanged.');
     } finally {
       setActionLoading(false);
     }
@@ -156,6 +202,7 @@ export default function ActionQueuePage() {
           <button
             key={f}
             onClick={() => setFilter(f)}
+            aria-pressed={filter === f}
             className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
               filter === f
                 ? 'bg-discord-accent text-white'
@@ -174,14 +221,14 @@ export default function ActionQueuePage() {
             {selectedIds.size} selected
           </span>
           <button
-            onClick={() => handleAction('retry', [...selectedIds])}
+            onClick={() => setPendingAction({ action: 'retry', ids: [...selectedIds] })}
             disabled={actionLoading}
             className="rounded-md bg-discord-accent px-3 py-1 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
           >
             Retry selected
           </button>
           <button
-            onClick={() => handleAction('acknowledge', [...selectedIds])}
+            onClick={() => setPendingAction({ action: 'acknowledge', ids: [...selectedIds] })}
             disabled={actionLoading}
             className="rounded-md bg-discord-bg-primary px-3 py-1 text-sm font-medium text-discord-text-secondary hover:text-discord-text-primary disabled:opacity-50"
           >
@@ -192,7 +239,7 @@ export default function ActionQueuePage() {
 
       {/* Error */}
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
           {error}
         </div>
       )}
@@ -219,6 +266,7 @@ export default function ActionQueuePage() {
                     type="checkbox"
                     checked={selectedIds.size === items.length && items.length > 0}
                     onChange={toggleSelectAll}
+                    aria-label="Select all visible queue items"
                     className="rounded border-discord-border-subtle"
                   />
                 </th>
@@ -232,24 +280,28 @@ export default function ActionQueuePage() {
             </thead>
             <tbody className="divide-y divide-discord-border-subtle">
               {items.map((item) => (
-                <>
+                <Fragment key={item.id}>
                   <tr
-                    key={item.id}
-                    className="hover:bg-discord-bg-primary/30 transition-colors cursor-pointer"
-                    onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
+                    className="hover:bg-discord-bg-primary/30 transition-colors"
                   >
-                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <td className="px-4 py-3">
                       <input
                         type="checkbox"
                         checked={selectedIds.has(item.id)}
                         onChange={() => toggleSelect(item.id)}
+                        aria-label={`Select ${item.action} queue item`}
                         className="rounded border-discord-border-subtle"
                       />
                     </td>
                     <td className="px-4 py-3">
-                      <code className="rounded bg-discord-bg-tertiary px-1.5 py-0.5 text-xs text-discord-accent">
-                        {item.action}
-                      </code>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
+                        aria-expanded={expandedId === item.id}
+                        className="rounded bg-discord-bg-tertiary px-1.5 py-0.5 text-left font-mono text-xs text-discord-accent hover:bg-discord-bg-active"
+                      >
+                        {expandedId === item.id ? 'Collapse' : 'Expand'} {item.action}
+                      </button>
                     </td>
                     <td className="px-4 py-3 max-w-xs">
                       <span className="truncate block text-discord-text-secondary">
@@ -277,24 +329,24 @@ export default function ActionQueuePage() {
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
                         {!item.retried && (
                           <button
-                            onClick={() => handleAction('retry', [item.id])}
+                            onClick={() => setPendingAction({ action: 'retry', ids: [item.id] })}
                             disabled={actionLoading}
                             className="rounded px-2 py-1 text-xs text-discord-accent hover:bg-discord-accent/10 disabled:opacity-50"
-                            title="Retry"
+                            aria-label={`Replay ${item.action} queue item`}
                           >
                             ↻
                           </button>
                         )}
                         {!item.acknowledged && (
                           <button
-                            onClick={() => handleAction('acknowledge', [item.id])}
+                            onClick={() => setPendingAction({ action: 'acknowledge', ids: [item.id] })}
                             disabled={actionLoading}
                             className="rounded px-2 py-1 text-xs text-discord-text-muted hover:bg-discord-bg-tertiary disabled:opacity-50"
-                            title="Dismiss"
+                            aria-label={`Dismiss ${item.action} queue item`}
                           >
                             ✕
                           </button>
@@ -332,7 +384,7 @@ export default function ActionQueuePage() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -363,6 +415,19 @@ export default function ActionQueuePage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.action === 'retry' ? 'Replay failed action' : 'Dismiss failed action'}
+        description={pendingAction ? `${pendingAction.action === 'retry' ? 'Replay' : 'Dismiss'} ${pendingAction.ids.length} selected queue item${pendingAction.ids.length === 1 ? '' : 's'} (${pendingAction.ids.join(', ')}). ${pendingAction.action === 'retry' ? 'Replaying can repeat the original action’s side effects.' : 'Dismissed items leave the pending queue without running again.'}` : undefined}
+        confirmLabel={pendingAction?.action === 'retry' ? 'Replay action' : 'Dismiss action'}
+        variant="warning"
+        loading={actionLoading}
+        onConfirm={handleAction}
+        onCancel={() => {
+          if (!actionLoading) setPendingAction(null);
+        }}
+      />
     </div>
   );
 }

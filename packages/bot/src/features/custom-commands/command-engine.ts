@@ -18,6 +18,7 @@ import { writeAuditLog } from '../../services/audit.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { defaultBrandKit, resolveBrandKit } from '../branding/brand-kit.js';
 import { brandedEmbed } from '../branding/branded-embed.js';
+import { voice } from '../branding/voice.js';
 
 const log = createLogger('CommandEngine');
 
@@ -65,12 +66,24 @@ export async function loadCustomCommands(
   guild: Guild,
   _rest: REST,
 ): Promise<{ name: string; description: string; type: number }[]> {
+  let maxCommands = 1000;
+  try {
+    const { data: config } = await supabase
+      .from('guild_config')
+      .select('custom_commands_max_per_guild')
+      .eq('guild_id', guild.id)
+      .maybeSingle();
+    const configured = Number(config?.custom_commands_max_per_guild);
+    if (Number.isInteger(configured)) maxCommands = Math.max(1, Math.min(10000, configured));
+  } catch (err) {
+    log.warn('[CommandEngine] Using default custom command limit:', err);
+  }
   const { data } = await supabase
     .from('custom_commands')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('enabled', true)
-    .limit(1000);
+    .limit(maxCommands);
 
   // Build a fresh per-guild sub-map (replaces only this guild's commands)
   const guildMap = new Map<string, DbCustomCommand>();
@@ -124,6 +137,8 @@ export async function handleCustomCommand(
 ): Promise<boolean> {
   const cmd = commandRegistry.get(guild.id)?.get(interaction.commandName);
   if (!cmd) return false;
+  const brandKit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name })
+    .catch(() => defaultBrandKit(guild.name));
 
   // Check permissions: allowed roles
   if (cmd.allowed_roles.length > 0) {
@@ -135,7 +150,10 @@ export async function handleCustomCommand(
       const hasAllowedRole = cmd.allowed_roles.some((r: string) => memberRoles.includes(r));
       if (!hasAllowedRole) {
         await auditDenied(supabase, cmd, interaction, guild.id, 'missing_allowed_role');
-        await interaction.reply({ content: `❌ You do not have permission to use /${cmd.name} on ${guild.name}.`, ephemeral: true });
+        await interaction.reply({
+          content: voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} on ${guild.name}` }),
+          ephemeral: true,
+        });
         return true;
       }
     }
@@ -151,7 +169,10 @@ export async function handleCustomCommand(
       const hasDeniedRole = cmd.denied_roles.some((r: string) => memberRoles.includes(r));
       if (hasDeniedRole) {
         await auditDenied(supabase, cmd, interaction, guild.id, 'denied_role');
-        await interaction.reply({ content: `❌ You do not have permission to use /${cmd.name} on ${guild.name}.`, ephemeral: true });
+        await interaction.reply({
+          content: voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} on ${guild.name}` }),
+          ephemeral: true,
+        });
         return true;
       }
     }
@@ -160,13 +181,19 @@ export async function handleCustomCommand(
   // Check channel restrictions
   if (cmd.allowed_channels.length > 0 && !cmd.allowed_channels.includes(interaction.channelId)) {
     await auditDenied(supabase, cmd, interaction, guild.id, 'channel_not_allowed');
-    await interaction.reply({ content: `❌ /${cmd.name} can't be used in this channel.`, ephemeral: true });
+    await interaction.reply({
+      content: `${voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} in this channel` })} This command can't be used in this channel.`,
+      ephemeral: true,
+    });
     return true;
   }
 
   if (cmd.denied_channels.length > 0 && cmd.denied_channels.includes(interaction.channelId)) {
     await auditDenied(supabase, cmd, interaction, guild.id, 'channel_denied');
-    await interaction.reply({ content: `❌ /${cmd.name} can't be used in this channel.`, ephemeral: true });
+    await interaction.reply({
+      content: `${voice(brandKit.voicePreset, 'denied', { action: `use /${cmd.name} in this channel` })} This command can't be used in this channel.`,
+      ephemeral: true,
+    });
     return true;
   }
 
@@ -177,9 +204,68 @@ export async function handleCustomCommand(
   // the race and executes; the loser gets the cooldown notice.
   if (cmd.cooldown_seconds > 0) {
     const cooldownKey = `${COOLDOWN_PREFIX}:${guild.id}:${cmd.name}:${interaction.user.id}`;
-    const claimed = await valkey.set(cooldownKey, '1', 'EX', cmd.cooldown_seconds, 'NX');
+    let claimed: string | null;
+    try {
+      // Fail closed when the cooldown store is unavailable. Bypassing a
+      // configured cooldown during an outage would turn a safety control into
+      // an amplification path for command spam.
+      claimed = await valkey.set(cooldownKey, '1', 'EX', cmd.cooldown_seconds, 'NX');
+    } catch (err) {
+      log.warn('Custom command cooldown store unavailable; declining safely', {
+        guildId: guild.id,
+        commandId: cmd.id,
+        error: String(err),
+      });
+      const content = voice(brandKit.voicePreset, 'unavailable', {
+        brand: brandKit.brandName,
+        feature: `/${cmd.name}`,
+      });
+      await interaction.reply({
+        content,
+        ephemeral: true,
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+      eventBus.emit('custom_command.degraded', guild.id, {
+        commandId: cmd.id,
+        commandName: cmd.name,
+        userId: interaction.user.id,
+        channelId: interaction.channelId,
+        actionCount: 1,
+        failedActions: 1,
+        failedTypes: ['cooldown_store'],
+      });
+      await writeAuditLog(supabase, {
+        guildId: guild.id,
+        actorType: 'discord',
+        actorId: interaction.user.id,
+        action: 'custom_command.cooldown_unavailable',
+        category: 'custom_commands',
+        targetType: 'custom_command',
+        targetId: cmd.id,
+        details: { command: cmd.name, reason: 'valkey_unavailable' },
+        occurrenceKey: `custom-command:${interaction.id}:cooldown-store`,
+        success: false,
+        errorMessage: String(err),
+      });
+      await raiseCustomCommandFailingAlert(supabase, guild.id, cmd, ['cooldown_store'])
+        .catch((alertError: unknown) => log.warn('custom command outage alert failed', {
+          error: String(alertError),
+        }));
+      return true;
+    }
     if (!claimed) {
-      const ttl = await valkey.ttl(cooldownKey);
+      let ttl = cmd.cooldown_seconds;
+      try {
+        ttl = await valkey.ttl(cooldownKey);
+      } catch (err) {
+        // The claim already failed closed; use the configured window rather
+        // than turning a harmless TTL read outage into an unhandled error.
+        log.warn('Custom command cooldown TTL unavailable', {
+          guildId: guild.id,
+          commandId: cmd.id,
+          error: String(err),
+        });
+      }
       await interaction.reply({
         content: `⏳ Easy there — /${cmd.name} is on cooldown. Try again in ${ttl}s.`,
         ephemeral: true,
@@ -290,8 +376,7 @@ export async function handleCustomCommand(
     }
   }
 
-  const kit = await resolveBrandKit(supabase, guild.id, { fallbackName: guild.name })
-    .catch(() => defaultBrandKit(guild.name));
+  const kit = brandKit;
 
   if (failedActions.length > 0) {
     // Say what actually happened. If nothing replied, this IS the reply; if

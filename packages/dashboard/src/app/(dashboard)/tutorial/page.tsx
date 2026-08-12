@@ -230,7 +230,7 @@ export default function TutorialPage() {
             )}
             <button
               onClick={addStep}
-              className="rounded-md bg-discord-blurple px-3 py-1.5 text-xs text-white hover:bg-discord-blurple/80"
+              className="rounded-md bg-discord-accent px-3 py-1.5 text-xs text-white hover:bg-discord-accent/80"
             >
               + Add Step
             </button>
@@ -252,7 +252,7 @@ export default function TutorialPage() {
                   <span className="text-xs text-discord-text-muted font-mono">
                     Step {idx + 1}
                     {step.built_in_key && (
-                      <span className="ml-2 rounded bg-discord-blurple/20 px-1.5 py-0.5 text-discord-blurple">
+                      <span className="ml-2 rounded bg-discord-accent/20 px-1.5 py-0.5 text-discord-accent">
                         built-in: {step.built_in_key}
                       </span>
                     )}

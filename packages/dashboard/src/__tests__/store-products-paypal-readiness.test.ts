@@ -11,13 +11,19 @@ vi.mock('@/lib/paypal', () => ({
   getPayPalToken: vi.fn(),
 }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/store/paypal-plan-state', () => ({ ensurePayPalPlanState: vi.fn() }));
+vi.mock('@/lib/api/live-discord-facts', () => ({
+  validateAssignableDiscordTargets: vi.fn(),
+}));
 
-import { POST } from '@/app/api/store/products/route';
+import { POST, PUT } from '@/app/api/store/products/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { notifyBot } from '@/lib/notify-bot';
 import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
+import { validateAssignableDiscordTargets } from '@/lib/api/live-discord-facts';
 
 import {
   buildRequest,
@@ -100,6 +106,11 @@ describe('POST /api/store/products PayPal readiness', () => {
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
     (getPayPalRuntimeConfig as ReturnType<typeof vi.fn>).mockResolvedValue(paypalConfig);
+    (ensurePayPalPlanState as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+    vi.mocked(validateAssignableDiscordTargets).mockResolvedValue({
+      ok: true,
+      snapshotAt: '2026-08-10T22:00:00.000Z',
+    });
   });
 
   afterEach(() => {
@@ -204,10 +215,10 @@ describe('POST /api/store/products PayPal readiness', () => {
       type: 'one_time',
     }));
     expect(plansTable.insert).not.toHaveBeenCalled();
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
-  it('creates zero-price one-time products without PayPal setup', async () => {
+  it('creates zero-price static products with optional Discord fulfillment without PayPal setup', async () => {
     (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     vi.stubGlobal('fetch', vi.fn());
 
@@ -229,6 +240,9 @@ describe('POST /api/store/products PayPal readiness', () => {
         name: 'Community Pass',
         price_cents: 0,
         type: 'one_time',
+        delivery_type: 'file',
+        granted_role_ids: ['123456789012345678'],
+        granted_channel_ids: ['234567890123456789'],
       },
     }));
     const body = await res.json();
@@ -243,9 +257,17 @@ describe('POST /api/store/products PayPal readiness', () => {
       paypal_product_id: null,
       price_cents: 0,
       type: 'one_time',
+      granted_role_ids: ['123456789012345678'],
+      granted_channel_ids: ['234567890123456789'],
     }));
+    expect(validateAssignableDiscordTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      'guild-1',
+      ['123456789012345678'],
+      ['234567890123456789'],
+    );
     expect(plansTable.insert).not.toHaveBeenCalled();
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-free-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-free-123' });
   });
 
   it('blocks paid product creation before database writes when PayPal catalog sync fails', async () => {
@@ -351,7 +373,178 @@ describe('POST /api/store/products PayPal readiness', () => {
       paypal_plan_id: 'PLAN-123',
       product_id: 'product-123',
     }));
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
+  });
+
+  it('rejects the legacy access-pass delivery type before product or provider writes', async () => {
+    const guildConfig = registerTable(mock, 'guild_config');
+    guildConfig.select.mockReturnValue(guildConfig);
+    guildConfig.eq.mockReturnValue(guildConfig);
+    guildConfig.maybeSingle.mockResolvedValue({
+      data: { product_types_enabled: ['license-key', 'subscription'] },
+      error: null,
+    });
+    const paypalFetch = vi.fn();
+    vi.stubGlobal('fetch', paypalFetch);
+
+    const response = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        ...baseProductBody,
+        type: 'subscription',
+        delivery_type: 'access_pass',
+      },
+    }));
+
+    expect(response.status).toBe(409);
+    expect(productsTable.insert).not.toHaveBeenCalled();
+    expect(paypalFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects the legacy mixed delivery type while preserving optional Discord fulfillment', async () => {
+    const guildConfig = registerTable(mock, 'guild_config');
+    guildConfig.select.mockReturnValue(guildConfig);
+    guildConfig.eq.mockReturnValue(guildConfig);
+    guildConfig.maybeSingle.mockResolvedValue({
+      data: { product_types_enabled: ['license-key', 'subscription'] },
+      error: null,
+    });
+    productsTable.maybeSingle.mockResolvedValueOnce({
+      data: {
+        type: 'subscription',
+        delivery_type: 'license_key',
+        granted_role_ids: [],
+        granted_channel_ids: [],
+        active: false,
+      },
+      error: null,
+    });
+
+    const response = await PUT(buildRequest('/api/store/products', {
+      method: 'PUT',
+      body: {
+        id: '00000000-0000-4000-8000-000000000123',
+        delivery_type: 'mixed',
+      },
+    }));
+
+    expect(response.status).toBe(409);
+    expect(productsTable.update).not.toHaveBeenCalled();
+  });
+
+  it('creates the PayPal trial cycle and persists the complete plan contract', async () => {
+    (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('paypal-token');
+    const paypalFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'PROD-123' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'PLAN-123' }));
+    vi.stubGlobal('fetch', paypalFetch);
+
+    const product = {
+      id: 'product-123',
+      guild_id: 'guild-123',
+      name: 'Founder Pass',
+      type: 'subscription',
+      paypal_product_id: 'PROD-123',
+    };
+    productsTable.single
+      .mockResolvedValueOnce({ data: product, error: null })
+      .mockResolvedValueOnce({ data: { ...product, plans: [{ id: 'plan-db-123' }] }, error: null });
+    plansTable.single.mockResolvedValueOnce({ data: { id: 'plan-db-123' }, error: null });
+
+    const response = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        ...baseProductBody,
+        type: 'subscription',
+        plans: [{
+          name: 'Fourteen day monthly',
+          interval_unit: 'MONTH',
+          interval_count: 1,
+          price_cents: 2500,
+          trial_days: 14,
+          active: false,
+        }],
+      },
+    }));
+
+    expect(response.status).toBe(200);
+    const providerBody = JSON.parse(String(paypalFetch.mock.calls[1]?.[1]?.body));
+    expect(providerBody.billing_cycles).toEqual([
+      expect.objectContaining({ tenure_type: 'TRIAL', total_cycles: 14, sequence: 1 }),
+      expect.objectContaining({ tenure_type: 'REGULAR', sequence: 2 }),
+    ]);
+    expect(providerBody.status).toBe('INACTIVE');
+    expect(plansTable.insert).toHaveBeenCalledWith(expect.objectContaining({
+      trial_days: 14,
+      active: false,
+      paypal_plan_id: 'PLAN-123',
+    }));
+  });
+
+  it('returns a durable product and provider plan recovery contract when local plan persistence fails', async () => {
+    (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('paypal-token');
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'PROD-RECOVERY' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'PLAN-RECOVERY' })));
+    const recoveryProduct = {
+      id: '00000000-0000-4000-8000-000000000123',
+      guild_id: 'guild-123',
+      name: 'Founder Pass',
+      type: 'subscription',
+      paypal_product_id: 'PROD-RECOVERY',
+      metadata: {},
+    };
+    productsTable.single
+      .mockResolvedValueOnce({ data: recoveryProduct, error: null })
+      .mockImplementationOnce(() => Promise.resolve({
+        data: {
+          id: recoveryProduct.id,
+          active: false,
+          metadata: productsTable.update.mock.calls.at(-1)?.[0]?.metadata,
+        },
+        error: null,
+      }));
+    plansTable.single.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'temporary plan insert failure' },
+    });
+
+    const response = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        ...baseProductBody,
+        type: 'subscription',
+        plans: [{
+          name: 'Monthly recovery',
+          interval_unit: 'MONTH',
+          interval_count: 1,
+          price_cents: 2500,
+          trial_days: 7,
+          active: true,
+        }],
+      },
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(body).toMatchObject({
+      success: false,
+      code: 'PRODUCT_CREATED_PLAN_SAVE_FAILED',
+      data: {
+        id: '00000000-0000-4000-8000-000000000123',
+        paypal_product_id: 'PROD-RECOVERY',
+        recovery_plan: {
+          id: expect.any(String),
+          product_id: '00000000-0000-4000-8000-000000000123',
+          paypal_plan_id: 'PLAN-RECOVERY',
+          trial_days: 7,
+          active: true,
+        },
+      },
+    });
+    expect(productsTable.update).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
+    expect(productsTable.eq).toHaveBeenCalledWith('id', '00000000-0000-4000-8000-000000000123');
+    expect(ensurePayPalPlanState).toHaveBeenCalledWith(paypalConfig, 'PLAN-RECOVERY', false);
   });
 
   it('creates PayPal plans for paid subscription plans when the parent product price is zero', async () => {
@@ -415,7 +608,7 @@ describe('POST /api/store/products PayPal readiness', () => {
       price_cents: 2500,
       product_id: 'product-123',
     }));
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
   it('creates a default backed PayPal plan for paid subscriptions without submitted plans', async () => {
@@ -465,6 +658,6 @@ describe('POST /api/store/products PayPal readiness', () => {
       price_cents: 2500,
       product_id: 'product-123',
     }));
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 });

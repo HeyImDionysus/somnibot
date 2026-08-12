@@ -151,7 +151,7 @@ export function applyBrand(
   const attribution = kit.poweredByAttribution;
   if (opts.attribution === false || !attribution) return embed;
 
-  const existing = embed.data.footer;
+  const existing = embed.data?.footer;
   if (existing?.text) {
     if (!existing.text.includes(attribution)) {
       embed.setFooter({ text: `${existing.text} • ${attribution}`, iconURL: existing.icon_url });

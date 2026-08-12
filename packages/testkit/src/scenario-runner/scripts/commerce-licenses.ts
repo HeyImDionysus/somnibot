@@ -32,10 +32,10 @@
  *     FOR UPDATE) enforces max-devices — a second device is refused, self-service
  *     removal frees a slot, and two devices racing for the last slot resolve to
  *     exactly one session at the DATABASE (not in bot memory).
- *   - Rotation: the REAL production `license_rotate_key` RPC (atomic, FOR UPDATE)
- *     revokes the old key, mints the hashed successor carrying the entitlement, and
- *     audits key.rotated — a replay returns the completed rotation; the license
- *     terminal-transition trigger immediately drains the old key's live sessions.
+ *   - Rotation: the REAL production `commerce_rotate_license_and_stage_receipt`
+ *     RPC atomically revokes the old key, mints the hashed successor, stages the
+ *     protected delivery carrier, moves the entitlement, and audits key.rotated;
+ *     replay returns the completed rotation and old sessions drain immediately.
  *   - Guild-scoping / RLS: the hash+guild-scoped lookup that makes a guild-A key
  *     invalid in guild B, owner-only RLS denying anon reads of license_keys, and
  *     the two-economies wall.
@@ -145,6 +145,8 @@ interface ArrangeResult {
   entitlementId: string | null;
   roleId: string;
   key: KeyMaterial;
+  checkoutError: string | null;
+  captureError: string | null;
   keyError: string | null;
   entError: string | null;
 }
@@ -171,7 +173,7 @@ async function arrangeLicense(
   const entStatus = opts.entStatus ?? 'pending';
   const prefix = String(declaredDefault(ctx.domain, 'key-prefix') ?? 'SMNI');
   const key = makeKeyMaterial(prefix, opts.seed ?? `${ctx.runPrefix}${ctx.scenarioClass}-${opts.label}`);
-  const roleId = `${ctx.runPrefix}role-${opts.label}`;
+  const roleId = ctx.snowflake(`${ctx.scenarioClass}-${opts.label}-role`);
 
   // Customer (get-or-create for this discord/guild — UNIQUE(discord_id, guild_id)).
   let customerId: string | null = null;
@@ -197,7 +199,7 @@ async function arrangeLicense(
       guild_id: handle.guildId,
       name: `${ctx.runPrefix}${opts.label}-product`,
       type: 'one_time',
-      delivery_type: 'access_pass',
+      delivery_type: 'license_key',
       price_cents: 1500,
       currency: 'USD',
       granted_role_ids: [roleId],
@@ -207,20 +209,38 @@ async function arrangeLicense(
     .single();
   const productId = (prod as { id: string } | null)?.id ?? null;
 
-  const { data: order } = await handle.supabase
-    .from('orders')
-    .insert({
-      order_number: `${ctx.runPrefix}${ctx.scenarioClass}-${opts.label}-ord`,
-      customer_id: customerId,
-      guild_id: handle.guildId,
-      product_id: productId,
-      amount_cents: 1500,
-      status: 'completed',
-      source: 'purchase',
-    })
-    .select('id')
-    .single();
-  const orderId = (order as { id: string } | null)?.id ?? null;
+  const orderNumber = `${ctx.runPrefix}${ctx.scenarioClass}-${opts.label}-ord`;
+  const paypalOrderId = `${ctx.runPrefix}${ctx.scenarioClass}-${opts.label}-ppo`;
+  const paypalCaptureId = `${ctx.runPrefix}${ctx.scenarioClass}-${opts.label}-cap`;
+  const { data: checkout, error: checkoutErr } = await handle.supabase.rpc(
+    'commerce_create_active_paid_checkout',
+    {
+      p_order_number: orderNumber,
+      p_guild_id: handle.guildId,
+      p_customer_id: customerId,
+      p_product_id: productId,
+      p_plan_id: null,
+      p_provider_kind: 'capture',
+      p_provider_id: paypalOrderId,
+      p_approval_url: `https://paypal.test/approve/${paypalOrderId}`,
+      p_amount_cents: 1500,
+      p_currency: 'USD',
+    },
+  );
+  const orderId = (checkout as { id?: string } | null)?.id ?? null;
+
+  // Complete the exact frozen checkout through the production capture boundary;
+  // direct service-role status writes are deliberately forbidden.
+  const { error: captureErr } = await handle.supabase.rpc('commerce_finalize_paypal_capture', {
+    p_order_id: orderId,
+    p_guild_id: handle.guildId,
+    p_customer_id: customerId,
+    p_product_id: productId,
+    p_paypal_order_id: paypalOrderId,
+    p_paypal_capture_id: paypalCaptureId,
+    p_amount_cents: 1500,
+    p_currency: 'USD',
+  });
 
   const { data: keyRow, error: keyErr } = await handle.supabase
     .from('license_keys')
@@ -265,6 +285,8 @@ async function arrangeLicense(
     entitlementId,
     roleId,
     key,
+    checkoutError: checkoutErr ? checkoutErr.message : null,
+    captureError: captureErr ? captureErr.message : null,
     keyError: keyErr ? keyErr.message : null,
     entError: entErr ? entErr.message : null,
   };
@@ -588,13 +610,23 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     keyStatus: 'pending_activation',
     entStatus: 'pending',
   });
-  ctx.expect(arr.keyError === null && arr.entError === null && Boolean(arr.licenseKeyId), {
+  ctx.expect(
+    arr.checkoutError === null &&
+      arr.captureError === null &&
+      arr.keyError === null &&
+      arr.entError === null &&
+      Boolean(arr.licenseKeyId),
+    {
     assertionClass: 'Discord',
     channel: 'db-observable',
     promise: 'Test arrangement: a completed purchase issued a pending SMNI key bound to the buyer with a pending entitlement.',
-    observation: `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; key error=${arr.keyError ?? 'none'}, entitlement error=${arr.entError ?? 'none'}.`,
+    observation:
+      `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; checkout error=${arr.checkoutError ?? 'none'}, ` +
+      `capture error=${arr.captureError ?? 'none'}, key error=${arr.keyError ?? 'none'}, ` +
+      `entitlement error=${arr.entError ?? 'none'}.`,
     impact: 'Could not arrange the pending-key purchase chain — the DEF proof setup is invalid.',
-  });
+    },
+  );
 
   // Hash-at-rest: the stored row holds only the SHA-256 hash (+ prefix/suffix); the plaintext exists in no column.
   const { data: fullRow } = await handle.supabase.from('license_keys').select('*').eq('id', arr.licenseKeyId ?? '').maybeSingle();
@@ -707,13 +739,18 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   const limit = 1; // SET-A configures max-devices to 1
 
   const arr = await arrangeLicense(ctx, handle, { discordId: buyer, label: 'seta', keyStatus: 'active', entStatus: 'active' });
-  ctx.expect(arr.keyError === null && Boolean(arr.licenseKeyId) && arr.entError === null, {
+  ctx.expect(
+    arr.checkoutError === null && arr.captureError === null && arr.keyError === null && Boolean(arr.licenseKeyId) && arr.entError === null,
+    {
     assertionClass: 'Discord',
     channel: 'db-observable',
     promise: 'Test arrangement: an active license key + active entitlement exist so devices can bind.',
-    observation: `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; key error=${arr.keyError ?? 'none'}, entitlement error=${arr.entError ?? 'none'}.`,
+    observation:
+      `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; checkout error=${arr.checkoutError ?? 'none'}, ` +
+      `capture error=${arr.captureError ?? 'none'}, key error=${arr.keyError ?? 'none'}, entitlement error=${arr.entError ?? 'none'}.`,
     impact: 'Could not arrange the active license — the SET-A device-limit proof setup is invalid.',
-  });
+    },
+  );
 
   const a = await bindDevice(handle, arr.licenseKeyId ?? '', `${ctx.runPrefix}devA`, { maxDevices: limit, policy: 'reject' });
   const b = await bindDevice(handle, arr.licenseKeyId ?? '', `${ctx.runPrefix}devB`, { maxDevices: limit, policy: 'reject' });
@@ -796,15 +833,18 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     oldSessionArranged = !sErr;
   }
 
-  // Rotate through the REAL production `license_rotate_key` RPC (atomic, FOR UPDATE —
-  // the same pattern as `license_validate_device`): it revokes the old key first (the
-  // terminal-transition trigger drains its sessions in the same transaction), mints the
-  // hash-only successor for the same order/customer/product tuple, and moves the
-  // entitlement binding (rotate-and-invalidate as one transaction).
+  // Rotate through the REAL production staged-delivery RPC. The successor hash,
+  // protected plaintext receipt carrier, invalidation, session drain, entitlement
+  // move, and audit row all commit in one transaction.
   const newKey = makeKeyMaterial(prefix, `${ctx.runPrefix}setb-new`);
-  const { data: rotData, error: rotErr } = await handle.supabase.rpc('license_rotate_key', {
+  const { data: rotData, error: rotErr } = await handle.supabase.rpc('commerce_rotate_license_and_stage_receipt', {
     p_license_key_id: arr.licenseKeyId,
-    p_new_key_hash: newKey.hash,
+    p_guild_id: handle.guildId,
+    p_customer_id: arr.customerId,
+    p_product_id: arr.productId,
+    p_order_id: arr.orderId,
+    p_discord_id: buyer,
+    p_new_key_plaintext: newKey.plaintext,
     p_new_key_prefix: newKey.prefix,
     p_new_key_suffix: newKey.suffix,
     p_actor_discord_id: buyer,
@@ -829,7 +869,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
       channel: 'db-observable',
       promise: 'Rotate-and-invalidate: the old key hash is invalidated (revoked) while the new key hash is live and carries the entitlement — distinct rows, old key gone.',
       observation:
-        `license_rotate_key returned status=${rotation.status ?? rotErr?.message ?? '(none)'} (expected rotated); ` +
+        `commerce_rotate_license_and_stage_receipt returned status=${rotation.status ?? rotErr?.message ?? '(none)'} (expected rotated); ` +
         `old-hash lookup status=${oldByHash?.status} (expected revoked), new-hash lookup status=${newByHash?.status} (expected active); ` +
         `distinct rows=${oldByHash?.id !== newByHash?.id}; entitlement on the successor=${entOnNew?.status} (expected active).`,
       impact: 'Rotation did not invalidate the old key or the new key is not live — the rotate-and-invalidate guarantee failed.',
@@ -879,11 +919,17 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   // Replay-safety: replaying the rotation RPC on the already-rotated key returns the
   // COMPLETED rotation (same successor, no further mint), and the UNIQUE key_hash fence
   // rejects re-minting the same new key by any other path.
-  const { data: replayRotData, error: replayRotErr } = await handle.supabase.rpc('license_rotate_key', {
+  const replayKey = makeKeyMaterial(prefix, `${ctx.runPrefix}setb-replay`);
+  const { data: replayRotData, error: replayRotErr } = await handle.supabase.rpc('commerce_rotate_license_and_stage_receipt', {
     p_license_key_id: arr.licenseKeyId,
-    p_new_key_hash: makeKeyMaterial(prefix, `${ctx.runPrefix}setb-replay`).hash,
-    p_new_key_prefix: newKey.prefix,
-    p_new_key_suffix: newKey.suffix,
+    p_guild_id: handle.guildId,
+    p_customer_id: arr.customerId,
+    p_product_id: arr.productId,
+    p_order_id: arr.orderId,
+    p_discord_id: buyer,
+    p_new_key_plaintext: replayKey.plaintext,
+    p_new_key_prefix: replayKey.prefix,
+    p_new_key_suffix: replayKey.suffix,
     p_actor_discord_id: buyer,
   });
   const replayRotation = (replayRotData ?? {}) as { status?: string; new_key_id?: string };
@@ -909,7 +955,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
       channel: 'db-observable',
       promise: 'Replaying the rotation never mints a second key: the RPC returns the completed rotation (same successor) and a duplicate of the new key hash is rejected (UNIQUE key_hash).',
       observation:
-        `replayed license_rotate_key returned status=${replayRotation.status ?? replayRotErr?.message ?? '(none)'} (expected already_rotated) ` +
+        `replayed commerce_rotate_license_and_stage_receipt returned status=${replayRotation.status ?? replayRotErr?.message ?? '(none)'} (expected already_rotated) ` +
         `with the same successor=${replayRotation.new_key_id === newKeyId}; ` +
         `duplicate new-key insert rejected=${dupNewErr !== null} (error: ${dupNewErr?.message ?? 'NONE — a second key was minted!'}).`,
       impact: 'A replayed rotation minted an additional key — the exactly-one-new-key fence failed.',
@@ -967,11 +1013,13 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
   const prefix = String(declaredDefault(ctx.domain, 'key-prefix') ?? 'SMNI');
 
   const arr = await arrangeLicense(ctx, handle, { discordId: buyer, label: 'inv', keyStatus: 'active', entStatus: 'active' });
-  ctx.expect(Boolean(arr.licenseKeyId) && arr.keyError === null, {
+  ctx.expect(Boolean(arr.licenseKeyId) && arr.checkoutError === null && arr.captureError === null && arr.keyError === null, {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
     promise: 'Test arrangement: one real, valid license key exists as the positive control.',
-    observation: `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; key error=${arr.keyError ?? 'none'}.`,
+    observation:
+      `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; checkout error=${arr.checkoutError ?? 'none'}, ` +
+      `capture error=${arr.captureError ?? 'none'}, key error=${arr.keyError ?? 'none'}.`,
     impact: 'Could not arrange the valid key — the INVALID proof setup is invalid.',
   });
 
@@ -1297,11 +1345,13 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
   // intent then reconciles the member to the exact role set. Inducing the Discord API failure + running the
   // reconciler needs a fault-injection lane and a live gateway, so the fault-dependent behavior is GATED. What
   // runs now: the happy-path invariants that must hold around the reconciler — no spurious alert, the wall, RLS.
-  ctx.expect(Boolean(arr.licenseKeyId) && arr.entError === null, {
+  ctx.expect(Boolean(arr.licenseKeyId) && arr.checkoutError === null && arr.captureError === null && arr.entError === null, {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
     promise: 'Test arrangement: an active license/entitlement exists as the reconciliation baseline.',
-    observation: `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; entitlement error=${arr.entError ?? 'none'}.`,
+    observation:
+      `licenseKeyId=${arr.licenseKeyId ?? '(null)'}; checkout error=${arr.checkoutError ?? 'none'}, ` +
+      `capture error=${arr.captureError ?? 'none'}, entitlement error=${arr.entError ?? 'none'}.`,
     impact: 'Could not arrange the active license — the RETRY baseline is invalid.',
   });
   await proveLicenseRls(ctx, handle, arr.licenseKeyId ?? '');

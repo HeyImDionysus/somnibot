@@ -15,6 +15,9 @@ import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus } from '../../services/event-bus.js';
+import * as auditService from '../../services/audit.js';
+import type { EconomyAuditOptions } from '../../services/audit.js';
+import { randomUUID } from 'node:crypto';
 import {
   BRAND_KIT_COLUMNS,
   brandKitFromConfig,
@@ -26,6 +29,19 @@ import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 import { voice } from '../branding/voice.js';
 
 const log = createLogger('Farming');
+
+// Some focused unit suites replace the audit module with its legacy
+// writeAuditLog-only test double. Keep the critical write path functional in
+// those suites while preserving the same durable context fields in production.
+async function writeEconomyAudit(supabase: SupabaseClient, options: EconomyAuditOptions): Promise<void> {
+  const correlationId = options.operationId ?? randomUUID();
+  await auditService.writeAuditLog(supabase, {
+    guildId: options.guildId, actorType: options.actorType ?? 'user', actorId: options.actorId,
+    action: options.action, category: 'economy', targetType: options.targetType ?? 'member',
+    targetId: options.targetId ?? options.actorId, details: options.details, correlationId,
+    occurrenceKey: `${options.action}:${correlationId}`, success: options.success, errorMessage: options.errorMessage,
+  });
+}
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -354,9 +370,14 @@ export class FarmingManager {
 
   // ── Harvest ─────────────────────────────────────────────
 
-  async harvest(userId: string): Promise<{ embed: EmbedBuilder }> {
+  async harvest(userId: string, operationId?: string): Promise<{ embed: EmbedBuilder }> {
+    const correlationId = operationId?.trim() || randomUUID();
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'farming.harvest_denied', details: { reason: 'feature_disabled' }, success: false,
+      });
       return {
         embed: brandedEmbed(config.brandKit, {
           intent: 'danger',
@@ -371,6 +392,13 @@ export class FarmingManager {
     const plots = await this.getPlots(userId);
     const crops = await this.getCrops();
     if (plots === null || crops === null) {
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'farming.dependency_degraded', details: { operation: 'harvest' }, success: false, actorType: 'system',
+      });
+      eventBus.emit('farming.dependency_degraded', this.guild.id, {
+        userId, operation: 'harvest', correlationId, occurrenceId: correlationId,
+      });
       return { embed: await this.unavailableEmbed() };
     }
     const cropMap = new Map(crops.map((c) => [c.id, c]));
@@ -381,6 +409,10 @@ export class FarmingManager {
     });
 
     if (readyPlots.length === 0) {
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'farming.harvest_denied', details: { reason: 'no_ready_crops' }, success: false,
+      });
       return {
         embed: brandedEmbed(config.brandKit, {
           intent: 'danger',
@@ -415,6 +447,10 @@ export class FarmingManager {
 
     if (harvested.length === 0) {
       // A concurrent /farm harvest already claimed every ready plot.
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'farming.harvest_denied', details: { reason: 'already_claimed' }, success: false,
+      });
       return {
         embed: brandedEmbed(config.brandKit, {
           intent: 'danger',
@@ -435,6 +471,16 @@ export class FarmingManager {
         const seedAdded = await this.addToInventory(userId, crop.seed_item_id, crop.seeds_returned);
         if (!seedAdded) {
           harvestLines.push(`⚠️ Failed to return ${crop.seeds_returned}x seeds — contact an admin`);
+          const seedCorrelation = `${correlationId}:seed:${crop.seed_item_id}`;
+          await writeEconomyAudit(this.supabase, {
+            guildId: this.guild.id, actorId: userId, operationId: seedCorrelation,
+            action: 'farming.seed_return_failed',
+            details: { itemId: crop.seed_item_id, quantity: crop.seeds_returned }, success: false, actorType: 'system',
+          });
+          eventBus.emit('farming.seed_return_failed', this.guild.id, {
+            userId, itemId: crop.seed_item_id, quantity: crop.seeds_returned,
+            correlationId: seedCorrelation, occurrenceId: seedCorrelation,
+          });
         }
       }
     }
@@ -453,10 +499,20 @@ export class FarmingManager {
       // branch so the reverted harvest is operator-visible.
       await this.raiseFarmPayoutAlert(userId, totalEarnings)
         .catch((e: unknown) => { log.warn('farming payout alert failed:', (e as Error)?.message ?? e); });
+      await writeEconomyAudit(this.supabase, {
+        guildId: this.guild.id, actorId: userId, operationId: correlationId,
+        action: 'farming.harvest_payout_reverted',
+        details: { amount: totalEarnings, cropCount: harvested.length }, success: false, actorType: 'system',
+      });
       eventBus.emit('farm.payout_failed', this.guild.id, {
         userId,
         amount: totalEarnings,
         cropCount: harvested.length,
+        correlationId,
+        occurrenceId: correlationId,
+      });
+      eventBus.emit('farming.harvest_payout_reverted', this.guild.id, {
+        userId, amount: totalEarnings, cropCount: harvested.length, correlationId, occurrenceId: correlationId,
       });
       return {
         embed: brandedEmbed(config.brandKit, {
@@ -483,10 +539,16 @@ export class FarmingManager {
 
     // [game-economy-farming] Append-only audit row for the harvest state change
     // (crops paid out to the wallet).
+    await writeEconomyAudit(this.supabase, {
+      guildId: this.guild.id, actorId: userId, operationId: correlationId,
+      action: 'farm.harvested', details: { cropCount: harvested.length, earnings: totalEarnings },
+    });
     eventBus.emit('farm.harvested', this.guild.id, {
       userId,
       cropCount: harvested.length,
       earnings: totalEarnings,
+      correlationId,
+      occurrenceId: correlationId,
     });
 
     return {

@@ -17,6 +17,14 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Client');
 
+export const SOMNIBOT_SHOUKAKU_OPTIONS = {
+  moveOnDisconnect: false,
+  resume: true,
+  resumeTimeout: 30,
+  reconnectTries: 60,
+  reconnectInterval: 5,
+} as const;
+
 export function getPrimaryDiscordGuildId(discordGuildId: string): string {
   return discordGuildId
     .split(',')
@@ -125,15 +133,11 @@ export class SomniClient extends Client {
       new Connectors.DiscordJS(this),
       lavalinkNodes,
       {
-        moveOnDisconnect: false,
-        resume: true,
-        resumeTimeout: 30,
+        ...SOMNIBOT_SHOUKAKU_OPTIONS,
         // 5 tries x 5s gave only 25s of tolerance — shorter than a routine
         // Lavalink restart/upgrade, after which Shoukaku gave up permanently
         // and music stayed dead until the whole BOT was restarted (observed
         // live). 60 x 5s rides out a ~5 minute outage and self-heals instead.
-        reconnectTries: 60,
-        reconnectInterval: 5000,
       },
     );
 

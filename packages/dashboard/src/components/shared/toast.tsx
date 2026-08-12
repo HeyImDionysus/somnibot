@@ -96,8 +96,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       {/* Render toasts */}
       <div
-        className="fixed bottom-4 right-4 z-[9999] flex flex-col-reverse gap-2 pointer-events-none"
-        aria-live="polite"
+        className="pointer-events-none fixed inset-x-4 bottom-4 z-[9999] flex flex-col-reverse gap-2 sm:left-auto sm:right-4 sm:w-80"
       >
         {toasts.map((t) => (
           <ToastItem key={t.id} toast={t} onDismiss={dismiss} />
@@ -130,6 +129,13 @@ const ICON_COLORS: Record<ToastVariant, string> = {
   info: 'text-blue-400',
 };
 
+const TOAST_ROLES: Record<ToastVariant, 'alert' | 'status'> = {
+  success: 'status',
+  error: 'alert',
+  warning: 'alert',
+  info: 'status',
+};
+
 function ToastItem({
   toast: t,
   onDismiss,
@@ -141,16 +147,18 @@ function ToastItem({
 
   return (
     <div
+      role={TOAST_ROLES[t.variant]}
+      aria-atomic="true"
       className={cn(
-        'pointer-events-auto flex w-80 items-start gap-3 rounded-lg border px-4 py-3 shadow-lg backdrop-blur-sm animate-in slide-in-from-right-full fade-in duration-300',
+        'pointer-events-auto flex w-full min-w-0 max-w-full items-start gap-3 overflow-hidden rounded-card border px-4 py-3 shadow-lg backdrop-blur-sm animate-in slide-in-from-right-full fade-in duration-300',
         COLORS[t.variant],
       )}
     >
-      <Icon size={18} className={cn('mt-0.5 shrink-0', ICON_COLORS[t.variant])} />
+      <Icon aria-hidden="true" size={18} className={cn('mt-0.5 shrink-0', ICON_COLORS[t.variant])} />
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-discord-text-primary">{t.title}</p>
+        <p className="break-words text-sm font-medium text-discord-text-primary">{t.title}</p>
         {t.description && (
-          <p className="mt-0.5 text-xs text-discord-text-muted">{t.description}</p>
+          <p className="mt-0.5 break-words text-xs text-discord-text-muted">{t.description}</p>
         )}
         {t.onUndo && (
           <button
@@ -165,10 +173,12 @@ function ToastItem({
         )}
       </div>
       <button
+        type="button"
+        aria-label={`Dismiss ${t.title} notification`}
         onClick={() => onDismiss(t.id)}
-        className="shrink-0 text-discord-text-muted hover:text-discord-text-primary transition-colors"
+        className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-input text-discord-text-muted transition-standard hover:bg-white/5 hover:text-discord-text-primary"
       >
-        <X size={14} />
+        <X size={14} aria-hidden="true" />
       </button>
     </div>
   );

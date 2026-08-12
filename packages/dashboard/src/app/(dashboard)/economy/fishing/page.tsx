@@ -8,12 +8,14 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Fish, Plus, Pencil, Trash2 } from 'lucide-react';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -33,6 +35,8 @@ interface FishingConfig {
   economy_fishing_cooldown_seconds: number;
   economy_fishing_junk_chance_pct: number;
   economy_fishing_treasure_chance_pct: number;
+  economy_fishing_collection_reward_enabled: boolean;
+  economy_fishing_collection_reward_coins: number;
 }
 
 const DEFAULT_CONFIG: FishingConfig = {
@@ -40,6 +44,8 @@ const DEFAULT_CONFIG: FishingConfig = {
   economy_fishing_cooldown_seconds: 30,
   economy_fishing_junk_chance_pct: 15,
   economy_fishing_treasure_chance_pct: 5,
+  economy_fishing_collection_reward_enabled: true,
+  economy_fishing_collection_reward_coins: 5000,
 };
 
 const RARITIES = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
@@ -72,6 +78,7 @@ export default function FishingPage() {
   const [editing, setEditing] = useState<(Omit<FishSpecies, 'id'> & { id?: string }) | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   // ── Fetch ─────────────────────────────────────────────
 
@@ -102,18 +109,26 @@ export default function FishingPage() {
   // ── Config save ───────────────────────────────────────
 
   const saveConfig = async (patch: Partial<FishingConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_fishing_enabled: readConfirmedBoolean(result.config, 'economy_fishing_enabled'),
+        economy_fishing_cooldown_seconds: readConfirmedNumber(result.config, 'economy_fishing_cooldown_seconds'),
+        economy_fishing_junk_chance_pct: readConfirmedNumber(result.config, 'economy_fishing_junk_chance_pct'),
+        economy_fishing_treasure_chance_pct: readConfirmedNumber(result.config, 'economy_fishing_treasure_chance_pct'),
+        economy_fishing_collection_reward_enabled: readConfirmedBoolean(result.config, 'economy_fishing_collection_reward_enabled'),
+        economy_fishing_collection_reward_coins: readConfirmedNumber(result.config, 'economy_fishing_collection_reward_coins'),
       });
-      if (!res.ok) throw new Error();
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -165,7 +180,7 @@ export default function FishingPage() {
         </div>
         <button
           onClick={() => setEditing({ ...BLANK_SPECIES })}
-          className="flex items-center gap-2 rounded-md bg-discord-blurple px-3 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80"
+          className="flex items-center gap-2 rounded-md bg-discord-accent px-3 py-2 text-sm font-medium text-white hover:bg-discord-accent/80"
         >
           <Plus className="h-4 w-4" /> Add Species
         </button>
@@ -183,7 +198,7 @@ export default function FishingPage() {
               aria-checked={config.economy_fishing_enabled}
               onClick={() => saveConfig({ economy_fishing_enabled: !config.economy_fishing_enabled })}
               className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
-                config.economy_fishing_enabled ? 'bg-discord-blurple' : 'bg-discord-bg-tertiary'
+                config.economy_fishing_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
               }`}
             >
               <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
@@ -191,45 +206,26 @@ export default function FishingPage() {
               }`} />
             </button>
           </div>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Cooldown (seconds)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
-              value={config.economy_fishing_cooldown_seconds}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_fishing_cooldown_seconds: parseInt(e.target.value) || 30 })
-              }
-              min={5}
-              max={3600}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Junk Chance (%)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
-              value={config.economy_fishing_junk_chance_pct}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_fishing_junk_chance_pct: parseInt(e.target.value) || 15 })
-              }
-              min={0}
-              max={100}
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-sm text-discord-text-secondary">Treasure Chance (%)</span>
-            <input
-              type="number"
-              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
-              value={config.economy_fishing_treasure_chance_pct}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                saveConfig({ economy_fishing_treasure_chance_pct: parseInt(e.target.value) || 5 })
-              }
-              min={0}
-              max={100}
-            />
-          </label>
+          <ValidatedNumberInput label="Fishing Cooldown (seconds)" help="Wait time between fishing attempts." value={config.economy_fishing_cooldown_seconds} onCommit={(value) => saveConfig({ economy_fishing_cooldown_seconds: value })} min={5} max={3600} />
+          <ValidatedNumberInput label="Junk Catch Chance (%)" help="Percent chance that an attempt returns junk; 0 disables junk catches." value={config.economy_fishing_junk_chance_pct} onCommit={(value) => saveConfig({ economy_fishing_junk_chance_pct: value })} min={0} max={100} />
+          <ValidatedNumberInput label="Treasure Catch Chance (%)" help="Percent chance that an attempt returns treasure; 0 disables treasure catches." value={config.economy_fishing_treasure_chance_pct} onCommit={(value) => saveConfig({ economy_fishing_treasure_chance_pct: value })} min={0} max={100} />
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-discord-text-primary">Collection Completion Reward</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.economy_fishing_collection_reward_enabled}
+              onClick={() => saveConfig({ economy_fishing_collection_reward_enabled: !config.economy_fishing_collection_reward_enabled })}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+                config.economy_fishing_collection_reward_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
+              }`}
+            >
+              <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                config.economy_fishing_collection_reward_enabled ? 'translate-x-6' : 'translate-x-1'
+              }`} />
+            </button>
+          </div>
+          <ValidatedNumberInput label="Collection Reward (coins)" help="Coins awarded when a member completes the fish collection." value={config.economy_fishing_collection_reward_coins} onCommit={(value) => saveConfig({ economy_fishing_collection_reward_coins: value })} min={1} max={2147483647} />
         </div>
       </div>
 
@@ -255,10 +251,10 @@ export default function FishingPage() {
                 </div>
               </div>
               <div className="flex gap-1">
-                <button onClick={() => setEditing(s)} className="rounded p-2 hover:bg-discord-bg-tertiary">
+                <button type="button" aria-label={`Edit ${s.name}`} onClick={() => setEditing(s)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Pencil className="h-4 w-4 text-discord-text-secondary" />
                 </button>
-                <button onClick={() => setDeleteId(s.id)} className="rounded p-2 hover:bg-discord-bg-tertiary">
+                <button type="button" aria-label={`Delete ${s.name}`} onClick={() => setDeleteId(s.id)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Trash2 className="h-4 w-4 text-red-400" />
                 </button>
               </div>
@@ -278,7 +274,7 @@ export default function FishingPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Name</span>
                 <input
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.name}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, name: e.target.value })}
                 />
@@ -286,7 +282,7 @@ export default function FishingPage() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm text-discord-text-secondary">Emoji</span>
                 <input
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.emoji}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, emoji: e.target.value })}
                 />
@@ -295,7 +291,7 @@ export default function FishingPage() {
             <label className="flex flex-col gap-1">
               <span className="text-sm text-discord-text-secondary">Rarity</span>
               <select
-                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                 value={editing.rarity}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, rarity: e.target.value })}
               >
@@ -310,7 +306,7 @@ export default function FishingPage() {
                 <input
                   type="number"
                   step="0.1"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.min_weight}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, min_weight: parseFloat(e.target.value) || 0 })}
                 />
@@ -320,7 +316,7 @@ export default function FishingPage() {
                 <input
                   type="number"
                   step="0.1"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.max_weight}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, max_weight: parseFloat(e.target.value) || 0 })}
                 />
@@ -329,7 +325,7 @@ export default function FishingPage() {
                 <span className="text-sm text-discord-text-secondary">Base Price</span>
                 <input
                   type="number"
-                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-blurple"
+                  className="rounded-md border border-discord-bg-tertiary bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
                   value={editing.base_price}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, base_price: parseInt(e.target.value) || 0 })}
                 />
@@ -345,7 +341,7 @@ export default function FishingPage() {
               <button
                 onClick={saveSpecies}
                 disabled={saving || !editing.name}
-                className="rounded-md bg-discord-blurple px-4 py-2 text-sm font-medium text-white hover:bg-discord-blurple/80 disabled:opacity-50"
+                className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
               >
                 {saving ? 'Saving...' : 'Save'}
               </button>

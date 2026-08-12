@@ -19,6 +19,9 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { eventBus } from '../../services/event-bus.js';
+import * as auditService from '../../services/audit.js';
+import type { EconomyAuditOptions } from '../../services/audit.js';
+import { randomUUID } from 'node:crypto';
 import { resolveBrandKit, brandKitFromConfig } from '../branding/brand-kit.js';
 import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 
@@ -75,6 +78,36 @@ export class PetsManager {
   }
 
   clearCache(): void { this.configCache.clear(); }
+
+  private async auditPet(
+    guildId: string,
+    actorId: string,
+    action: string,
+    operationId: string | undefined,
+    details: Record<string, unknown>,
+    success = true,
+    errorMessage?: string,
+    actorType: 'user' | 'system' = 'user',
+    targetType: 'member' | 'guild' = 'member',
+    targetId = actorId,
+  ): Promise<{ correlationId: string; occurrenceKey: string }> {
+    const options: EconomyAuditOptions = {
+      guildId,
+      actorId,
+      action,
+      operationId: operationId?.trim() || randomUUID(),
+      details,
+      success,
+      errorMessage,
+    };
+    const correlationId = options.operationId!;
+    const occurrenceKey = `${action}:${correlationId}`;
+    await auditService.writeAuditLog(this.supabase, {
+      guildId, actorType, actorId, action, category: 'economy', targetType,
+      targetId, details, correlationId, occurrenceKey, success, errorMessage,
+    });
+    return { correlationId, occurrenceKey };
+  }
 
   /** Start the pet decay timer. Call once at boot. */
   async schedulePetDecay(guildId: string): Promise<void> {
@@ -183,6 +216,15 @@ export class PetsManager {
       log.info(`Processed ${pets.length} pets (decay=${decayRate}, guild=${guildId})`);
     } catch (err) {
       log.error('Decay cycle error:', { error: String(err) });
+      const operationId = `decay:${guildId}:${new Date().toISOString().slice(0, 13)}`;
+      await this.auditPet(guildId, 'pet-decay-worker', 'pets.decay_cycle_retried', operationId, {
+        operation: 'decay_cycle', error: err instanceof Error ? err.message : String(err),
+      }, false, err instanceof Error ? err.message : String(err), 'system', 'guild', guildId).catch((auditErr: unknown) => {
+        log.warn('decay retry audit failed:', auditErr instanceof Error ? auditErr.message : String(auditErr));
+      });
+      eventBus.emit('pets.decay_cycle_retried', guildId, {
+        guildId, operation: 'decay_cycle', correlationId: operationId, occurrenceId: operationId,
+      });
     }
   }
 
@@ -350,73 +392,49 @@ export class PetsManager {
     const userId = interaction.user.id;
     const petType = interaction.options.getString('type') ?? 'hunting';
 
-    const { pet: existing, degraded: existingDegraded } = await this.getPet(guildId, userId);
+    const { degraded: existingDegraded } = await this.getPet(guildId, userId);
     // An unreadable one-pet-per-member state is an outage — never press a debit
     // against a database we already know is unreachable.
     if (existingDegraded) {
       await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
       return;
     }
-    if (existing) {
+    const price = PET_PRICES[petType] ?? 5000;
+    const info = PET_TYPES[petType] ?? { emoji: '🐾', desc: '' };
+    // Atomic + idempotent purchase: wallet debit and pet insert commit as one
+    // operation keyed by the Discord interaction id.
+    const { data: buyResult, error: buyError } = await this.supabase.rpc('economy_pet_buy_atomic', {
+      p_guild_id: guildId, p_user_id: userId, p_pet_type: petType,
+      p_pet_name: `${info.emoji} Pet`,
+      p_price: price, p_request_id: interaction.id || randomUUID(),
+    });
+    if (buyError || !buyResult || typeof buyResult !== 'object') {
+      log.error('economy_pet_buy_atomic failed:', buyError?.message);
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
+    const br = buyResult as { status?: string; replayed?: boolean };
+    if (br.status === 'already_has_pet') {
       await interaction.reply({ content: '❌ You already have a pet! One pet per person.', ephemeral: true });
       return;
     }
-
-    const price = PET_PRICES[petType] ?? 5000;
-    const { data: wallet, error: walletErr } = await this.supabase
-      .from('economy_wallets').select('wallet').eq('guild_id', guildId).eq('user_id', userId).single();
-
-    // A FAILED wallet read is not an empty wallet — "you need N coins" off a
-    // read the bot could not perform is a fabricated balance verdict.
-    if (walletErr && walletErr.code !== 'PGRST116') {
+    if (br.status === 'insufficient_balance') {
+      await interaction.reply({ content: `❌ You need **${price.toLocaleString()}** coins. Check your /balance.`, ephemeral: true });
+      return;
+    }
+    if (br.status !== 'purchased') {
       await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
       return;
     }
 
-    if (!wallet || wallet.wallet < price) {
-      await interaction.reply({ content: `❌ You need **${price.toLocaleString()}** coins. Check your /balance.`, ephemeral: true });
-      return;
-    }
-
-    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
-      p_guild_id: guildId, p_user_id: userId, p_amount: price,
-    });
-    if (debitErr) {
-      // Only a genuine insufficient-balance raise may claim the member lacks
-      // coins; a network/transient RPC failure debited nothing.
-      if (/insufficient/i.test(debitErr.message ?? '')) {
-        await interaction.reply({ content: `❌ Payment failed — you need **${price.toLocaleString()}** coins.`, ephemeral: true });
-      } else {
-        await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
-      }
-      return;
-    }
-
-    // V49-M6: Check insert result — if pet already exists (23505) or any
-    // other error, refund the user.
-    const info = PET_TYPES[petType] ?? { emoji: '🐾', desc: '' };
-    const { error: insertErr } = await this.supabase.from('economy_pets').insert({
-      guild_id: guildId, user_id: userId, pet_type: petType, name: `${info.emoji} Pet`,
-    });
-
-    if (insertErr) {
-      log.error('buyPet insert failed — refunding:', insertErr.message);
-      const refunded = await this.refundCoins(guildId, userId, price, 'buy', interaction.id);
-      await interaction.reply({
-        content: refunded
-          ? '❌ Failed to create pet — your coins have been refunded.'
-          : '❌ Failed to create pet, and the refund could not be confirmed. Please contact an administrator.',
-        ephemeral: true,
+    const operationId = interaction.id || randomUUID();
+    if (!br.replayed) {
+      await this.auditPet(guildId, userId, 'pet.acquired', operationId, { petType, price });
+      // [game-economy-pets] Append-only audit row for the pet-acquired state change.
+      eventBus.emit('pet.acquired', guildId, {
+        userId, petType, price, correlationId: operationId, occurrenceId: operationId,
       });
-      return;
     }
-
-    // [game-economy-pets] Append-only audit row for the pet-acquired state change.
-    eventBus.emit('pet.acquired', guildId, {
-      userId,
-      petType,
-      price,
-    });
 
     await interaction.reply({
       embeds: [brandedEmbed(brandKitFromConfig(await this.getConfig(guildId), interaction.guild?.name), {
@@ -430,6 +448,7 @@ export class PetsManager {
   async feedPet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
+    const operationId = interaction.id || randomUUID();
     const config = await this.getConfig(guildId);
     const cost = config?.economy_pet_feed_cost ?? 50;
     const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
@@ -439,76 +458,50 @@ export class PetsManager {
       await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
       return;
     }
-    if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
-    if (pet.hunger >= 100) { await interaction.reply({ content: '🍖 Your pet is already full!', ephemeral: true }); return; }
-
-    // Check balance before deducting
-    const { data: feedWallet, error: feedWalletErr } = cost > 0
-      ? await this.supabase
-          .from('economy_wallets').select('wallet')
-          .eq('guild_id', guildId).eq('user_id', interaction.user.id).single()
-      : { data: { wallet: 0 }, error: null };
-
-    // A FAILED wallet read is not an empty wallet — never fabricate "you need
-    // N coins" from a read the bot could not perform.
-    if (feedWalletErr && feedWalletErr.code !== 'PGRST116') {
+    // Atomic + idempotent feed: balance debit and hunger mutation commit as
+    // one operation keyed by the Discord interaction id.
+    const { data: feedResult, error: feedError } = await this.supabase.rpc('economy_pet_feed_atomic', {
+      p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: 30,
+      p_cost: cost, p_request_id: operationId,
+    });
+    if (feedError || !feedResult || typeof feedResult !== 'object') {
+      log.error('economy_pet_feed_atomic failed:', feedError?.message);
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
+    const fr = feedResult as { status?: string; replayed?: boolean; old_hunger?: number; new_hunger?: number; pet_name?: string };
+    if (fr.status === 'no_pet') {
+      await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return;
+    }
+    if (fr.status === 'already_full') {
+      await interaction.reply({ content: '🍖 Your pet is already full!', ephemeral: true }); return;
+    }
+    if (fr.status === 'insufficient_balance') {
+      await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to feed your pet.`, ephemeral: true });
+      return;
+    }
+    if (fr.status !== 'fed' || fr.old_hunger === undefined || fr.new_hunger === undefined) {
       await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
       return;
     }
 
-    if (!feedWallet || feedWallet.wallet < cost) {
-      await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to feed your pet.`, ephemeral: true });
-      return;
-    }
+    if (!fr.replayed) {
+      getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
-    const { error: feedDebitErr } = cost > 0
-      ? await this.supabase.rpc('economy_subtract_balance', {
-          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-        })
-      : { error: null };
-    if (feedDebitErr) {
-      // Insufficient balance is the only honest "you need N coins" case; any
-      // other failure debited nothing and degrades honestly.
-      if (/insufficient/i.test(feedDebitErr.message ?? '')) {
-        await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
-      } else {
-        await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
-      }
-      return;
-    }
-
-    // Atomic feed — prevents TOCTOU race with decay timer
-    const { data: feedResult, error: feedError } = await this.supabase.rpc('economy_pet_feed', {
-      p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: 30,
-    });
-    const fr = feedResult as { success: boolean; old_hunger: number; new_hunger: number; status: string } | null;
-    if (feedError || !fr?.success) {
-      const refunded = await this.refundCoins(
-        guildId,
-        interaction.user.id,
-        cost,
-        'feed',
-        interaction.id,
-      );
-      const outcome = cost === 0
-        ? ' Nothing was charged.'
-        : refunded
-          ? ' Your coins have been refunded.'
-          : ' The refund could not be confirmed. Please contact an administrator.';
-      await interaction.reply({
-        content: `❌ Could not feed your pet — try again.${outcome}`,
-        ephemeral: true,
+      await this.auditPet(guildId, interaction.user.id, 'pets.fed', operationId, {
+        cost, oldHunger: fr.old_hunger, newHunger: fr.new_hunger,
       });
-      return;
+      eventBus.emit('pet.fed', guildId, {
+        userId: interaction.user.id, cost, oldHunger: fr.old_hunger, newHunger: fr.new_hunger,
+        correlationId: operationId, occurrenceId: operationId,
+      });
     }
-
-    getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), {
         intent: 'primary',
         title: '🍖 Pet Fed!',
-        description: `${pet.name} ate happily! Hunger: ${fr.old_hunger} → ${fr.new_hunger}/100\nCost: **${cost}** coins`,
+        description: `${fr.pet_name ?? pet?.name ?? 'Your pet'} ate happily! Hunger: ${fr.old_hunger} → ${fr.new_hunger}/100\nCost: **${cost}** coins`,
       })],
     });
   }
@@ -516,6 +509,7 @@ export class PetsManager {
   async playWithPet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
+    const operationId = interaction.id || randomUUID();
 
     // V49-M3: Atomic cooldown via SET PX NX — prevents two concurrent
     // /pet play commands from both bypassing the cooldown.
@@ -524,30 +518,50 @@ export class PetsManager {
     if (lockResult !== 'OK') {
       const ttl = await this.valkey.pttl(cdKey);
       const remaining = Math.ceil(Math.max(ttl, 0) / 1000);
+      await this.auditPet(guildId, interaction.user.id, 'pets.play_failed', operationId, { reason: 'cooldown', remaining }, false, 'cooldown');
+      eventBus.emit('pet.play_failed', guildId, { userId: interaction.user.id, reason: 'cooldown', correlationId: operationId, occurrenceId: operationId });
       await interaction.reply({ content: `⏳ Your pet needs a break! Try again in **${remaining}s**.`, ephemeral: true });
       return;
     }
 
     const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
     if (degraded) { await this.replyPetsUnavailable(interaction); return; }
-    if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
+    if (!pet) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.play_failed', operationId, { reason: 'no_pet' }, false, 'no_pet');
+      eventBus.emit('pet.play_failed', guildId, { userId: interaction.user.id, reason: 'no_pet', correlationId: operationId, occurrenceId: operationId });
+      await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return;
+    }
 
     // Atomic play — prevents TOCTOU race with decay timer
-    const { data: playResult } = await this.supabase.rpc('economy_pet_play', {
+    const { data: playResult, error: playError } = await this.supabase.rpc('economy_pet_play_atomic', {
       p_guild_id: guildId, p_user_id: interaction.user.id,
       p_happiness_gain: 25, p_energy_cost: 10,
+      p_request_id: operationId,
     });
-    const pr = playResult as { success: boolean; old_happiness: number; new_happiness: number; new_energy: number; status: string } | null;
-    if (!pr?.success) {
+    const pr = playResult as { status?: string; replayed?: boolean; old_happiness?: number; new_happiness?: number; new_energy?: number; pet_name?: string } | null;
+    if (playError || !pr || pr.status !== 'played') {
+      await this.auditPet(guildId, interaction.user.id, 'pets.play_failed', operationId, { reason: 'play_not_applied' }, false, 'play_not_applied');
+      eventBus.emit('pet.play_failed', guildId, { userId: interaction.user.id, reason: 'play_not_applied', correlationId: operationId, occurrenceId: operationId });
       await interaction.reply({ content: '❌ Could not play with your pet — try again.', ephemeral: true });
       return;
     }
+    const oldHappiness = pr.old_happiness ?? pet.happiness;
+    const newHappiness = pr.new_happiness ?? oldHappiness;
 
+    if (!pr.replayed) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.played', operationId, {
+        oldHappiness, newHappiness,
+      });
+      eventBus.emit('pet.played', guildId, {
+        userId: interaction.user.id, oldHappiness, newHappiness,
+        correlationId: operationId, occurrenceId: operationId,
+      });
+    }
     await interaction.reply({
       embeds: [brandedEmbed(brandKitFromConfig(await this.getConfig(guildId), interaction.guild?.name), {
         intent: 'primary',
         title: '🎾 Playtime!',
-        description: `${pet.name} loved playing! Happiness: ${pr.old_happiness} → ${pr.new_happiness}/100`,
+        description: `${pr.pet_name ?? pet.name} loved playing! Happiness: ${oldHappiness} → ${newHappiness}/100`,
       })],
     });
   }
@@ -555,6 +569,7 @@ export class PetsManager {
   async trainPet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
+    const operationId = interaction.id || randomUUID();
     const config = await this.getConfig(guildId);
     const cost = config?.economy_pet_train_cost ?? 100;
     const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
@@ -564,75 +579,55 @@ export class PetsManager {
       await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
       return;
     }
-    if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
-    if (pet.energy < 20) { await interaction.reply({ content: '⚡ Your pet needs more energy! Wait or play with it.', ephemeral: true }); return; }
-    if (pet.level >= MAX_LEVEL) { await interaction.reply({ content: '🎓 Your pet is at max level! Try `/pet prestige`.', ephemeral: true }); return; }
+    const xpGain = randomIntRange(20, 34);
 
-    // Check balance before deducting
-    const { data: trainWallet, error: trainWalletErr } = cost > 0
-      ? await this.supabase
-          .from('economy_wallets').select('wallet')
-          .eq('guild_id', guildId).eq('user_id', interaction.user.id).single()
-      : { data: { wallet: 0 }, error: null };
-
-    // A FAILED wallet read is not an empty wallet — never fabricate a balance verdict.
-    if (trainWalletErr && trainWalletErr.code !== 'PGRST116') {
+    // Atomic + idempotent train: debit and energy/xp/level mutation commit as
+    // one operation keyed by the Discord interaction id.
+    const { data: trainResult, error: trainError } = await this.supabase.rpc('economy_pet_train_atomic', {
+      p_guild_id: guildId, p_user_id: interaction.user.id,
+      p_xp_gain: xpGain, p_energy_cost: 20, p_cost: cost, p_request_id: operationId,
+    });
+    const tr = trainResult as { status?: string; replayed?: boolean; new_xp?: number; new_level?: number; leveled_up?: boolean; new_energy?: number; stat_bonus?: string | null; pet_name?: string } | null;
+    if (trainError || !tr) {
+      await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
+      return;
+    }
+    if (tr.status === 'no_pet') {
+      await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true });
+      return;
+    }
+    if (tr.status === 'low_energy') {
+      await interaction.reply({ content: '⚡ Your pet needs more energy! Wait or play with it.', ephemeral: true });
+      return;
+    }
+    if (tr.status === 'max_level') {
+      await interaction.reply({ content: '🎓 Your pet is at max level! Try `/pet prestige`.', ephemeral: true });
+      return;
+    }
+    if (tr.status === 'insufficient_balance') {
+      await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to train your pet.`, ephemeral: true });
+      return;
+    }
+    if (tr.status !== 'trained' || tr.new_xp === undefined || tr.new_level === undefined) {
       await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
       return;
     }
 
-    if (!trainWallet || trainWallet.wallet < cost) {
-      await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to train your pet.`, ephemeral: true });
-      return;
-    }
-
-    const { error: trainDebitErr } = cost > 0
-      ? await this.supabase.rpc('economy_subtract_balance', {
-          p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-        })
-      : { error: null };
-    if (trainDebitErr) {
-      if (/insufficient/i.test(trainDebitErr.message ?? '')) {
-        await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
-      } else {
-        await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
-      }
-      return;
-    }
-
-    const xpGain = randomIntRange(20, 34);
-
-    // Atomic train — prevents TOCTOU race with decay timer on energy/xp/level
-    const { data: trainResult } = await this.supabase.rpc('economy_pet_train', {
-      p_guild_id: guildId, p_user_id: interaction.user.id,
-      p_xp_gain: xpGain, p_energy_cost: 20,
-    });
-    const tr = trainResult as { success: boolean; new_xp: number; new_level: number; leveled_up: boolean; new_energy: number; stat_bonus: string | null } | null;
-    if (!tr?.success) {
-      const refunded = await this.refundCoins(
-        guildId,
-        interaction.user.id,
-        cost,
-        'train',
-        interaction.id,
-      );
-      const outcome = cost === 0
-        ? ' Nothing was charged.'
-        : refunded
-          ? ' Your coins have been refunded.'
-          : ' The refund could not be confirmed. Please contact an administrator.';
-      await interaction.reply({
-        content: `❌ Training failed.${outcome}`,
-        ephemeral: true,
-      });
-      return;
-    }
-
-    let desc = `${pet.name} trained hard! +${xpGain} XP (${tr.new_xp} total)\nCost: **${cost}** coins`;
+    let desc = `${tr.pet_name ?? pet?.name ?? 'Your pet'} trained hard! +${xpGain} XP (${tr.new_xp} total)\nCost: **${cost}** coins`;
     if (tr.leveled_up) desc += `\n🎉 *Level up! Now level ${tr.new_level}!*`;
     if (tr.stat_bonus) desc += `\n⭐ +1 ${tr.stat_bonus}!`;
 
-    getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    if (!tr.replayed) {
+      getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+
+      await this.auditPet(guildId, interaction.user.id, 'pets.trained', operationId, {
+        cost, xpGain, newLevel: tr.new_level,
+      });
+      eventBus.emit('pet.trained', guildId, {
+        userId: interaction.user.id, cost, xpGain, newLevel: tr.new_level,
+        correlationId: operationId, occurrenceId: operationId,
+      });
+    }
 
     await interaction.reply({
       embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), { intent: 'primary', title: '💪 Training Complete!', description: desc })],
@@ -655,13 +650,16 @@ export class PetsManager {
   async battlePet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
+    const operationId = interaction.id || randomUUID();
     const config = await this.getConfig(guildId);
     if (!config?.economy_pet_battle_enabled) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.battle_failed', operationId, { reason: 'feature_disabled' }, false, 'feature_disabled');
       await interaction.reply({ content: '🚫 Pet battles are not enabled.', ephemeral: true });
       return;
     }
     const opponent = interaction.options.getUser('user')!;
     if (opponent.id === interaction.user.id) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.battle_failed', operationId, { reason: 'self_battle' }, false, 'self_battle');
       await interaction.reply({ content: '❌ You can\'t battle yourself!', ephemeral: true }); return;
     }
 
@@ -674,10 +672,17 @@ export class PetsManager {
       await this.replyPetsUnavailable(interaction);
       return;
     }
-    if (!myPet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
-    if (!theirPet) { await interaction.reply({ content: '❌ They don\'t have a pet!', ephemeral: true }); return; }
+    if (!myPet) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.battle_failed', operationId, { reason: 'challenger_no_pet' }, false, 'challenger_no_pet');
+      await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return;
+    }
+    if (!theirPet) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.battle_failed', operationId, { reason: 'defender_no_pet', opponentId: opponent.id }, false, 'defender_no_pet');
+      await interaction.reply({ content: '❌ They don\'t have a pet!', ephemeral: true }); return;
+    }
     if (myPet.status === 'sad' || myPet.status === 'sick') {
       const emoji = myPet.status === 'sick' ? '🤒' : '😢';
+      await this.auditPet(guildId, interaction.user.id, 'pets.battle_failed', operationId, { reason: `status_${myPet.status}` }, false, `status_${myPet.status}`);
       await interaction.reply({ content: `${emoji} Your pet is too ${myPet.status} to battle! Take care of it first.`, ephemeral: true });
       return;
     }
@@ -688,7 +693,7 @@ export class PetsManager {
     const iWin = myPower > theirPower;
     const reward = 100 + myPet.level * 10;
 
-    await this.supabase.from('economy_pet_battles').insert({
+    const { error: battleInsertErr } = await this.supabase.from('economy_pet_battles').insert({
       guild_id: guildId,
       challenger_id: interaction.user.id,
       defender_id: opponent.id,
@@ -697,6 +702,14 @@ export class PetsManager {
       defender_dmg: Math.floor(theirPower),
       reward,
     });
+
+    if (battleInsertErr) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.battle_failed', operationId, {
+        challengerId: interaction.user.id, defenderId: opponent.id, reason: battleInsertErr.message,
+      }, false, battleInsertErr.message);
+      await interaction.reply({ content: '⚠️ The battle could not be recorded. No reward was charged; please try again.', ephemeral: true });
+      return;
+    }
 
     const battleWinnerId = iWin ? interaction.user.id : opponent.id;
     const { error: payoutErr } = await this.supabase.rpc('economy_add_balance', {
@@ -716,9 +729,14 @@ export class PetsManager {
         payload: { user_id: battleWinnerId, amount: reward, reason: 'battle_payout_failed', original_error: payoutErr.message },
         status: 'pending',
       })).catch((e: unknown) => { log.warn('pet battle payout retry-queue failed:', (e as Error)?.message ?? e); });
+      await this.auditPet(guildId, battleWinnerId, 'pets.battle_payout_failed', `${operationId}:payout`, {
+        reward, battleId: operationId,
+      }, false, payoutErr.message, 'system');
       eventBus.emit('pet.battle_payout_failed', guildId, {
         winnerId: battleWinnerId,
         reward,
+        correlationId: `${operationId}:payout`,
+        occurrenceId: `${operationId}:payout`,
       });
     }
 
@@ -731,12 +749,17 @@ export class PetsManager {
 
     // [game-economy-pets] Append-only audit row for the battle-resolved state
     // change (winner decided, reward credited or flagged failed).
+    await this.auditPet(guildId, interaction.user.id, 'pet.battle_resolved', operationId, {
+      challengerId: interaction.user.id, defenderId: opponent.id, winnerId: battleWinnerId, reward, payoutFailed: !!payoutErr,
+    });
     eventBus.emit('pet.battle_resolved', guildId, {
       challengerId: interaction.user.id,
       defenderId: opponent.id,
       winnerId: battleWinnerId,
       reward,
       payoutFailed: !!payoutErr,
+      correlationId: operationId,
+      occurrenceId: operationId,
     });
 
     await interaction.reply({
@@ -771,15 +794,21 @@ export class PetsManager {
   async prestigePet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
+    const operationId = interaction.id || randomUUID();
     const config = await this.getConfig(guildId);
     if (!config?.economy_pet_prestige_enabled) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.prestige_failed', operationId, { reason: 'feature_disabled' }, false, 'feature_disabled');
       await interaction.reply({ content: '❌ Pet prestige is not enabled.', ephemeral: true }); return;
     }
 
     const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
     if (degraded) { await this.replyPetsUnavailable(interaction); return; }
-    if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
+    if (!pet) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.prestige_failed', operationId, { reason: 'no_pet' }, false, 'no_pet');
+      await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return;
+    }
     if (pet.level < MAX_LEVEL) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.prestige_failed', operationId, { reason: 'not_max_level', level: pet.level }, false, 'not_max_level');
       await interaction.reply({ content: `❌ Your pet must be level ${MAX_LEVEL} to prestige.`, ephemeral: true }); return;
     }
 
@@ -790,6 +819,7 @@ export class PetsManager {
     });
 
     if (!prestigeResult || !Array.isArray(prestigeResult) || prestigeResult.length === 0) {
+      await this.auditPet(guildId, interaction.user.id, 'pets.prestige_failed', operationId, { reason: 'rpc_not_applied' }, false, 'rpc_not_applied');
       await interaction.reply({ content: '❌ Prestige failed — your pet may no longer be at max level.', ephemeral: true });
       return;
     }
@@ -797,9 +827,12 @@ export class PetsManager {
     const pr = prestigeResult[0] as { new_prestige: number };
 
     // [game-economy-pets] Append-only audit row for the pet-prestige state change.
+    await this.auditPet(guildId, interaction.user.id, 'pet.prestiged', operationId, { newPrestige: pr.new_prestige });
     eventBus.emit('pet.prestiged', guildId, {
       userId: interaction.user.id,
       newPrestige: pr.new_prestige,
+      correlationId: operationId,
+      occurrenceId: operationId,
     });
 
     await interaction.reply({

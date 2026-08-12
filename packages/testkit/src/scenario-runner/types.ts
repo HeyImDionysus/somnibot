@@ -173,6 +173,8 @@ export interface ScenarioContext {
   scenarioGuildId(label?: string): string;
   /** A run-prefixed user id for a stable label (e.g. 'a', 'b'). */
   userId(label: string): string;
+  /** A deterministic 18-digit Discord snowflake for a run-scoped fixture label. */
+  snowflake(label: string): string;
   /** Create an injector bound to a booted handle (mints its own capability token). */
   injectorFor(handle: LiveClientHandle): BoundInjector;
 
@@ -246,6 +248,9 @@ export interface RunSlashParams {
   readonly commandName: string;
   readonly userId: string;
   readonly userLabel?: string;
+  /** Values are already decoded the way Discord presents them to handlers:
+   * strings, numbers, booleans, or resolved user/channel/role-like objects.
+   * The runner forwards these without stringifying/coercing them. */
   readonly options?: Record<string, unknown>;
   readonly member?: unknown;
   /** Override the interaction id (used to prove replay: same id twice). */

@@ -203,6 +203,35 @@ describe('PayPal refund parent identity', () => {
     }, 'PAYMENT.CAPTURE.REFUNDED')).toBe('CAPTURE-1');
   });
 
+  it('accepts the v2 refund parent capture from its rel=up link', () => {
+    expect(resolveRefundPaymentId({
+      id: 'REFUND-CAPTURE-1',
+      status: 'COMPLETED',
+      links: [
+        {
+          rel: 'self',
+          href: 'https://api-m.sandbox.paypal.com/v2/payments/refunds/REFUND-CAPTURE-1',
+          method: 'GET',
+        },
+        {
+          rel: 'up',
+          href: 'https://api-m.sandbox.paypal.com/v2/payments/captures/CAPTURE-1',
+          method: 'GET',
+        },
+      ],
+    }, 'PAYMENT.CAPTURE.REFUNDED')).toBe('CAPTURE-1');
+
+    expect(resolveRefundPaymentId({
+      id: 'CAPTURE-REVERSED-1',
+      capture_id: 'CAPTURE-REVERSED-1',
+      links: [{
+        rel: 'up',
+        href: 'https://api-m.sandbox.paypal.com/v2/checkout/orders/ORDER-1',
+        method: 'GET',
+      }],
+    }, 'PAYMENT.CAPTURE.REVERSED')).toBe('CAPTURE-REVERSED-1');
+  });
+
   it('rejects conflicting or noncanonical capture witnesses', () => {
     expect(resolveRefundPaymentId({
       id: 'REFUND-CAPTURE-1',
@@ -778,7 +807,13 @@ function completedSaleRenewalContext(input: {
 describe('PayPal webhook — full refund semantics', () => {
   it('full capture refund revokes durable access and delegates roles to the atomic trigger', async () => {
     const { inserts, updates, inCalls, rpcCalls, eqCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      // First read resolves the tenant for policy selection; second read is
+      // the handler's full payment row.
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 1000 }], error: null },
@@ -903,7 +938,11 @@ describe('PayPal webhook — full refund semantics', () => {
 
   it('uses the serialized ledger result as the sole cumulative full-refund proof', async () => {
     const { rpcCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       entitlements: [{ data: [], error: null }, { data: null, error: null }],
       license_keys: [{ data: [], error: null }, { data: null, error: null }],
     }, {
@@ -991,7 +1030,11 @@ describe('PayPal webhook — full refund semantics', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
         const { updates, inserts, rpcCalls } = useWebhookRows({
-          payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+          payments: [
+            { data: basePayment, error: null },
+            { data: basePayment, error: null },
+            { data: null, error: null },
+          ],
           entitlements: [{ data: [], error: null }, { data: null, error: null }],
           license_keys: [{ data: [], error: null }, { data: null, error: null }],
         }, { record });
@@ -1102,7 +1145,11 @@ describe('PayPal webhook — full refund semantics', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
         const { updates, inserts, rpcCalls } = useWebhookRows({
-          payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+          payments: [
+            { data: basePayment, error: null },
+            { data: basePayment, error: null },
+            { data: null, error: null },
+          ],
           entitlements: [{ data: [], error: null }, { data: null, error: null }],
           license_keys: [{ data: [], error: null }, { data: null, error: null }],
         }, { record });
@@ -1126,7 +1173,11 @@ describe('PayPal webhook — full refund semantics', () => {
 
   it('full refund emits no legacy partial queue for shared or suspended role owners', async () => {
     const { inserts } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 1000 }], error: null },
@@ -1178,7 +1229,11 @@ describe('PayPal webhook — full refund semantics', () => {
 
   it('capture reversal with omitted money uses the atomic ledger canonical amount', async () => {
     const { updates, rpcCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       entitlements: [
         { data: [], error: null },
         { data: null, error: null },
@@ -1219,7 +1274,11 @@ describe('PayPal webhook — full refund semantics', () => {
 
   it('accepts an omitted-money reversal whose canonical remaining amount is zero', async () => {
     const { rpcCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       entitlements: [{ data: [], error: null }, { data: null, error: null }],
       license_keys: [{ data: [], error: null }, { data: null, error: null }],
     }, {
@@ -1269,7 +1328,11 @@ describe('PayPal webhook — full refund semantics', () => {
 
   it('partial refund becomes full once PayPal cumulative total covers the payment', async () => {
     const { rpcCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 250 }], error: null },
@@ -1310,7 +1373,11 @@ describe('PayPal webhook — full refund semantics', () => {
   it('full refund does not mark the payment refunded when entitlement revocation fails', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { rpcCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 1000 }], error: null },
@@ -1355,7 +1422,11 @@ describe('PayPal webhook — full refund semantics', () => {
   it('full refund no longer performs a second legacy role queue insert', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { rpcCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 1000 }], error: null },
@@ -2233,7 +2304,8 @@ describe('PayPal webhook — refund ordering (out-of-order webhooks)', () => {
         ],
         payments: [
           { data: { guild_id: 'guild-1' }, error: null }, // guild resolution
-          { data: basePayment, error: null },
+          { data: { guild_id: 'guild-1' }, error: null }, // authenticated guild resolution
+          { data: basePayment, error: null }, // handler payment row
           { data: null, error: null },
         ],
         payment_refunds: [
@@ -2306,6 +2378,7 @@ describe('PayPal webhook — refund ordering (out-of-order webhooks)', () => {
           { data: null, error: null },
         ],
         payments: [
+          { data: { guild_id: 'guild-1' }, error: null },
           { data: { guild_id: 'guild-1' }, error: null },
           { data: basePayment, error: null },
           { data: null, error: null },
@@ -2951,6 +3024,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
       // Pre-resource-typing row: paypal_resource_type never adopted.
       payments: [
         { data: { ...baseSalePayment, paypal_resource_type: null }, error: null },
+        { data: { ...baseSalePayment, paypal_resource_type: null }, error: null },
         { data: null, error: null },
       ],
       orders: {
@@ -3100,7 +3174,11 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     // otherwise the reversal throws on every retry forever with money
     // returned at PayPal and access retained locally.
     const { rpcCalls } = useWebhookRows({
-      payments: [{ data: baseSalePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: baseSalePayment, error: null },
+        { data: baseSalePayment, error: null },
+        { data: null, error: null },
+      ],
       orders: { data: null, error: null },
       entitlements: [
         { data: [], error: null },
@@ -3181,7 +3259,11 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
   it('sale refund currency mismatch fails before ledger or access mutation', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { inserts, rpcCalls } = useWebhookRows({
-      payments: [{ data: baseSalePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: baseSalePayment, error: null },
+        { data: baseSalePayment, error: null },
+        { data: null, error: null },
+      ],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 250 }], error: null },
@@ -3217,7 +3299,11 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
   it('capture refund currency mismatch fails even when the payload self-confirms it', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { inserts, rpcCalls } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+        { data: null, error: null },
+      ],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 250 }], error: null },
@@ -3576,9 +3662,12 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
       const outageRes = await POST(makeRedelivery() as never);
       expect(outageRes.status).toBe(503);
       expect(outageRes.headers.get('Retry-After')).toBe('60');
-      // No database access at all on the outage path — in particular the
-      // errored webhook_events row is not claimed (result left as 'error').
-      expect(mockSb.from).not.toHaveBeenCalled();
+      // Tenant policy selection happens before signature verification. The
+      // outage path must still avoid event claims or money/access writes.
+      expect(mockSb.from.mock.calls.map(([table]) => table)).toEqual([
+        'orders',
+        'guild_config',
+      ]);
       expect(inserts).toEqual([]);
       expect(updates).toEqual([]);
       expect(upserts).toEqual([]);

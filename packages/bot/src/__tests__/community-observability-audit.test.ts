@@ -82,7 +82,7 @@ describe('community-giveaways audit', () => {
 
     expect(eventBus.emit).toHaveBeenCalledWith('giveaway.paused', 'g1',
       expect.objectContaining({ giveawayId: 'gw1', actorId: 'mod1' }));
-  });
+  }, 30_000);
 
   it('emits giveaway.failed and writes an owner alert when create fails', async () => {
     const { GiveawayManager } = await import('../features/giveaways/giveaway-manager.js');
@@ -488,6 +488,27 @@ describe('community-scheduled-messages audit', () => {
     expect(eventBus.emit).toHaveBeenCalledWith('scheduled_message.delivery_failed', 'g1',
       expect.objectContaining({ scheduleId: 's1', reason: 'channel_missing:ch1' }));
     expect(supa.from).toHaveBeenCalledWith('alerts');
+  });
+
+  it('emits one durable missed-occurrence event when skip-missed advances the cursor', async () => {
+    const { ScheduledMessageRunner } = await import('../features/scheduled-messages/runner.js');
+    const eventBus = bus();
+    const guild: any = { id: 'g1', name: 'Test', channels: { cache: new Map() } };
+    const supa = makeSupa({ scheduled_messages: { data: [{ id: 's1' }], error: null }, alerts: { data: null, error: null } });
+    const runner = new ScheduledMessageRunner(guild, supa, eventBus);
+    const baseline = new Date('2026-07-30T11:00:00.000Z');
+    const lastOcc = new Date('2026-07-30T11:59:00.000Z');
+    await (runner as any).noticeMissed(
+      { id: 's1', name: 'Daily', channel_id: 'ch1', cron_expression: '* * * * *', timezone: 'UTC' },
+      baseline,
+      lastOcc,
+      new Date('2026-07-30T11:59:30.000Z'),
+    );
+
+    expect(eventBus.emit).toHaveBeenCalledWith('scheduled_message.missed', 'g1', expect.objectContaining({
+      scheduleId: 's1', missedCount: expect.any(Number), lastOccurrenceAt: lastOcc.toISOString(),
+      occurrenceId: `s1:missed:${lastOcc.toISOString()}`,
+    }));
   });
 });
 

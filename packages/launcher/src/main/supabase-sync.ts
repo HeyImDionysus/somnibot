@@ -9,6 +9,9 @@
  * Uses direct REST calls (no SDK dependency in the launcher).
  */
 
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
+import { canonicalSupabaseProjectOrigin } from './runtime-lease-client.js';
+
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
@@ -19,8 +22,79 @@ export interface SyncableCredentials {
   discordApplicationId: string;
   discordClientSecret: string;
   discordGuildId: string;
+  supabaseUrl: string;
+  supabaseSecretKey: string;
   supabasePublishableKey: string;
   supabaseDbPassword: string;
+  supabaseDbUrlTemplate?: string;
+  supabaseAccessToken: string;
+  supabaseDiscordAuthProviderConfigured: boolean;
+  paypalClientId: string;
+  paypalClientSecret: string;
+  paypalWebhookId: string;
+  paypalWebhookProofKey: string;
+  paypalSandbox: boolean;
+  lavalinkEnabled: boolean;
+  autoInstallOnQuit?: boolean;
+  keychainRequired?: boolean;
+  ownerBrandName?: string;
+  updatePromptBeforeDownload?: boolean;
+  sdkCacheTtlMs?: number;
+  publicCallbackBaseUrl: string;
+  vpsDomain: string;
+  vpsSshHost: string;
+  vpsSshUser: string;
+  vpsDeployPath: string;
+  tailscaleAuthKey?: string;
+  vpsCsrfSecret?: string;
+  vpsNextAuthSecret?: string;
+  vpsWebhookReplaySecret?: string;
+  vpsValkeyPassword?: string;
+  vpsLavalinkPassword?: string;
+}
+
+/** Complete set of existing SomniBot connection values the launcher can restore. */
+export type RestorableCredentials = SyncableCredentials;
+
+export type RestoredCredentials = Partial<RestorableCredentials>;
+
+const RESTORED_SECRET_KEYS: ReadonlySet<keyof RestorableCredentials> = new Set([
+  'discordToken',
+  'discordClientSecret',
+  'supabaseSecretKey',
+  'supabaseDbPassword',
+  'supabaseDbUrlTemplate',
+  'supabaseAccessToken',
+  'paypalClientSecret',
+  'paypalWebhookId',
+  'paypalWebhookProofKey',
+  'tailscaleAuthKey',
+  'vpsCsrfSecret',
+  'vpsNextAuthSecret',
+  'vpsWebhookReplaySecret',
+  'vpsValkeyPassword',
+  'vpsLavalinkPassword',
+]);
+
+export interface LauncherSettingsRow {
+  key: string;
+  value: string;
+  section: string;
+  updated_at?: string;
+}
+
+/** Keep restored secrets in the main process while preserving configured state in the UI. */
+export function maskRestoredCredentials(
+  credentials: RestoredCredentials,
+  mask: string,
+): RestoredCredentials {
+  const masked: RestoredCredentials = { ...credentials };
+  for (const key of RESTORED_SECRET_KEYS) {
+    if (typeof masked[key] === 'string' && masked[key]) {
+      (masked as Record<string, unknown>)[key] = mask;
+    }
+  }
+  return masked;
 }
 
 /** Map from SyncableCredentials key → instance_settings row key.
@@ -30,16 +104,230 @@ export interface SyncableCredentials {
  * expects `discord_bot_token` (not `discord_token`), so we use that
  * here to ensure the launcher → DB → bot flow works on fresh starts.
  */
-const SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
+const BASE_SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   discordToken: 'discord_bot_token',
   discordApplicationId: 'discord_application_id',
   discordClientSecret: 'discord_client_secret',
   discordGuildId: 'discord_guild_id',
+  supabaseUrl: 'supabase_url',
+  supabaseSecretKey: 'supabase_secret_key',
   supabasePublishableKey: 'supabase_publishable_key',
   supabaseDbPassword: 'supabase_db_password',
+  supabaseDbUrlTemplate: 'supabase_db_url_template',
+  supabaseAccessToken: 'supabase_access_token',
+  supabaseDiscordAuthProviderConfigured: 'supabase_discord_auth_provider_configured',
+  paypalClientId: 'paypal_client_id',
+  paypalClientSecret: 'paypal_client_secret',
+  paypalWebhookId: 'paypal_webhook_id',
+  paypalWebhookProofKey: 'paypal_webhook_proof_key',
+  paypalSandbox: 'paypal_sandbox',
+  lavalinkEnabled: 'lavalink_enabled',
+  autoInstallOnQuit: 'auto_install_on_quit',
+  keychainRequired: 'keychain_required',
+  ownerBrandName: 'owner_brand_name',
+  updatePromptBeforeDownload: 'update_prompt_before_download',
+  sdkCacheTtlMs: 'sdk_cache_ttl_ms',
+  publicCallbackBaseUrl: 'local_public_callback_base_url',
+  vpsDomain: 'vps_domain',
+  vpsSshHost: 'vps_ssh_host',
+  vpsSshUser: 'vps_ssh_user',
+  vpsDeployPath: 'vps_deploy_path',
+  tailscaleAuthKey: 'tailscale_auth_key',
+  vpsCsrfSecret: 'vps_csrf_secret',
+  vpsNextAuthSecret: 'vps_nextauth_secret',
+  vpsWebhookReplaySecret: 'vps_webhook_replay_secret',
+  vpsValkeyPassword: 'vps_valkey_password',
+  vpsLavalinkPassword: 'vps_lavalink_password',
 };
 
+const CLOUD_ENCRYPTED_PREFIX = 'somnibot-cloud-v1:';
+const CLOUD_SECRET_INFO = Buffer.from('SomniBot launcher cross-machine credential sync v1', 'utf8');
+
+function cloudSettingsKey(localKey: keyof SyncableCredentials): string {
+  const baseKey = BASE_SETTINGS_MAP[localKey];
+  return RESTORED_SECRET_KEYS.has(localKey) ? `${baseKey}_encrypted` : baseKey;
+}
+
+const PUSH_SETTINGS_MAP = Object.fromEntries(
+  (Object.keys(BASE_SETTINGS_MAP) as Array<keyof SyncableCredentials>)
+    .map((key) => [key, cloudSettingsKey(key)]),
+) as Record<keyof SyncableCredentials, string>;
+
+const RESTORE_SETTINGS_MAP: Record<keyof RestorableCredentials, string> = PUSH_SETTINGS_MAP;
+
+function deriveCloudSyncKey(supabaseSecretKey: string, projectOrigin: string): Buffer {
+  return Buffer.from(hkdfSync(
+    'sha256',
+    Buffer.from(supabaseSecretKey, 'utf8'),
+    Buffer.from(projectOrigin, 'utf8'),
+    CLOUD_SECRET_INFO,
+    32,
+  ));
+}
+
+function encryptCloudSecret(value: string, settingsKey: string, key: Buffer): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(settingsKey, 'utf8'));
+  const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${CLOUD_ENCRYPTED_PREFIX}${Buffer.concat([iv, tag, ciphertext]).toString('base64url')}`;
+}
+
+function decryptCloudSecret(value: string, settingsKey: string, key: Buffer): string | null {
+  if (!value.startsWith(CLOUD_ENCRYPTED_PREFIX)) return null;
+  try {
+    const payload = Buffer.from(value.slice(CLOUD_ENCRYPTED_PREFIX.length), 'base64url');
+    if (payload.length < 29) return null;
+    const iv = payload.subarray(0, 12);
+    const tag = payload.subarray(12, 28);
+    const ciphertext = payload.subarray(28);
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAAD(Buffer.from(settingsKey, 'utf8'));
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Keys written by earlier launcher builds or the Discord setup wizard. */
+const RESTORE_ALIASES: Record<string, Exclude<keyof RestorableCredentials, 'paypalSandbox'>> = {
+  discord_token: 'discordToken',
+  discord_app_id: 'discordApplicationId',
+  supabase_anon_key: 'supabasePublishableKey',
+};
+
+const BOOLEAN_SETTINGS: ReadonlySet<keyof RestorableCredentials> = new Set([
+  'paypalSandbox',
+  'supabaseDiscordAuthProviderConfigured',
+  'lavalinkEnabled',
+  'autoInstallOnQuit',
+  'keychainRequired',
+  'updatePromptBeforeDownload',
+]);
+const NUMERIC_SETTINGS: ReadonlySet<keyof RestorableCredentials> = new Set(['sdkCacheTtlMs']);
+
+const RESTORE_SETTING_KEYS = [
+  ...new Set([
+    ...Object.values(RESTORE_SETTINGS_MAP),
+    ...Object.keys(RESTORE_ALIASES),
+    // Dashboard/Discord setup stores the complete connection URL encrypted;
+    // launcher state separates its password from the reusable template.
+    'supabase_db_url_encrypted',
+    // Older setup flows stored the derived callback but not the launcher's
+    // local public base. Recover the base from this exact endpoint contract.
+    'paypal_webhook_url',
+  ]),
+];
+
 const SECTION = 'launcher';
+
+/**
+ * Build non-destructive cloud-sync rows.
+ *
+ * Blank local strings are deliberately omitted: a partial/older desktop cache
+ * must never erase credentials that another SomniBot surface already saved in
+ * Supabase. Save and restore intentionally use the same connection contract.
+ */
+export function buildSyncRows(
+  credentials: SyncableCredentials,
+  supabaseSecretKey: string,
+  projectOrigin: string,
+  updatedAt = new Date().toISOString(),
+): LauncherSettingsRow[] {
+  const cloudKey = deriveCloudSyncKey(supabaseSecretKey, projectOrigin);
+  return Object.entries(PUSH_SETTINGS_MAP).flatMap(([localKey, settingsKey]) => {
+    const key = localKey as keyof SyncableCredentials;
+    const rawValue = credentials[key];
+    if (rawValue === undefined) return [];
+    if (typeof rawValue === 'string' && rawValue.trim().length === 0) return [];
+    const value = RESTORED_SECRET_KEYS.has(key)
+      ? encryptCloudSecret(String(rawValue), settingsKey, cloudKey)
+      : String(rawValue);
+    return [{ key: settingsKey, value, section: SECTION, updated_at: updatedAt }];
+  });
+}
+
+/** Parse only values that are actually present, so restore merges safely. */
+export function parseSyncRows(
+  rows: Array<Pick<LauncherSettingsRow, 'key' | 'value'>>,
+  supabaseSecretKey: string,
+  projectOrigin: string,
+): RestoredCredentials {
+  const cloudKey = deriveCloudSyncKey(supabaseSecretKey, projectOrigin);
+  const reverseMap: Record<string, keyof RestorableCredentials> = {};
+  for (const [localKey, settingsKey] of Object.entries(RESTORE_SETTINGS_MAP)) {
+    reverseMap[settingsKey] = localKey as keyof RestorableCredentials;
+  }
+
+  const credentials: RestoredCredentials = {};
+  for (const row of rows) {
+    if (row.key === 'paypal_webhook_url' && row.value) {
+      try {
+        const webhookUrl = new URL(row.value);
+        const suffix = '/api/paypal/webhook';
+        if (webhookUrl.protocol === 'https:' && webhookUrl.pathname.endsWith(suffix)) {
+          webhookUrl.pathname = webhookUrl.pathname.slice(0, -suffix.length) || '/';
+          webhookUrl.search = '';
+          webhookUrl.hash = '';
+          credentials.publicCallbackBaseUrl = webhookUrl.toString().replace(/\/$/, '');
+        }
+      } catch {
+        // Ignore malformed legacy callback rows instead of replacing local state.
+      }
+      continue;
+    }
+
+    if (row.key === 'supabase_db_url_encrypted' && row.value) {
+      const decrypted = decryptCloudSecret(row.value, row.key, cloudKey)
+        ?? decryptCloudSecret(row.value, 'supabase_db_url_template_encrypted', cloudKey);
+      if (decrypted) {
+        try {
+          const databaseUrl = new URL(decrypted);
+          if (databaseUrl.protocol === 'postgres:' || databaseUrl.protocol === 'postgresql:') {
+            const password = decodeURIComponent(databaseUrl.password);
+            if (password) credentials.supabaseDbPassword = password;
+            databaseUrl.password = '';
+            credentials.supabaseDbUrlTemplate = databaseUrl.toString();
+          }
+        } catch {
+          // Malformed encrypted connection values fail closed.
+        }
+      }
+      continue;
+    }
+
+    const localKey = reverseMap[row.key] ?? RESTORE_ALIASES[row.key];
+    if (!localKey || row.value === '') continue;
+
+    if (BOOLEAN_SETTINGS.has(localKey)) {
+      const normalized = row.value.trim().toLowerCase();
+      if (normalized === 'true' || normalized === 'false') {
+        (credentials as Record<string, unknown>)[localKey] = normalized === 'true';
+      }
+      continue;
+    }
+    if (NUMERIC_SETTINGS.has(localKey)) {
+      const parsed = Number(row.value);
+      if (Number.isInteger(parsed) && parsed >= 1000 && parsed <= 3600000) {
+        (credentials as Record<string, unknown>)[localKey] = parsed;
+      }
+      continue;
+    }
+
+    const stringKey = localKey as Exclude<keyof RestorableCredentials,
+      'paypalSandbox' | 'supabaseDiscordAuthProviderConfigured' | 'lavalinkEnabled' | 'autoInstallOnQuit' | 'keychainRequired' | 'updatePromptBeforeDownload' | 'sdkCacheTtlMs'>;
+    if (RESTORED_SECRET_KEYS.has(localKey)) {
+      const decrypted = decryptCloudSecret(row.value, row.key, cloudKey);
+      if (decrypted) credentials[stringKey] = decrypted;
+      continue;
+    }
+    credentials[stringKey] = row.value;
+  }
+
+  return credentials;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -68,15 +356,11 @@ export async function pushToSupabase(
   supabaseSecretKey: string,
   credentials: SyncableCredentials,
 ): Promise<{ ok: boolean; error?: string }> {
-  const rows = Object.entries(SETTINGS_MAP).map(([localKey, settingsKey]) => ({
-    key: settingsKey,
-    value: credentials[localKey as keyof SyncableCredentials] || '',
-    section: SECTION,
-    updated_at: new Date().toISOString(),
-  }));
-
   try {
-    const res = await fetch(`${supabaseUrl.replace(/\/+$/, '')}/rest/v1/instance_settings`, {
+    const projectOrigin = canonicalSupabaseProjectOrigin(supabaseUrl);
+    const rows = buildSyncRows(credentials, supabaseSecretKey, projectOrigin);
+    if (rows.length === 0) return { ok: true };
+    const res = await fetch(`${projectOrigin}/rest/v1/instance_settings`, {
       method: 'POST',
       headers: headers(supabaseSecretKey),
       body: JSON.stringify(rows),
@@ -94,6 +378,32 @@ export async function pushToSupabase(
   }
 }
 
+export async function pushToSupabaseWithRetry(
+  supabaseUrl: string,
+  supabaseSecretKey: string,
+  credentials: SyncableCredentials,
+  options: {
+    maxAttempts?: number;
+    wait?: (delayMs: number) => Promise<void>;
+  } = {},
+): Promise<{ ok: boolean; attempts: number; error?: string }> {
+  const maxAttempts = options.maxAttempts ?? 3;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error('Credential sync attempts must be a positive integer.');
+  }
+  const wait = options.wait ?? ((delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  let lastError = 'unknown error';
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await pushToSupabase(supabaseUrl, supabaseSecretKey, credentials);
+    if (result.ok) return { ok: true, attempts: attempt };
+    lastError = result.error ?? lastError;
+    if (attempt < maxAttempts) await wait(1_000 * (2 ** (attempt - 1)));
+  }
+
+  return { ok: false, attempts: maxAttempts, error: lastError };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Pull from Supabase                                                 */
 /* ------------------------------------------------------------------ */
@@ -105,10 +415,15 @@ export async function pushToSupabase(
 export async function pullFromSupabase(
   supabaseUrl: string,
   supabaseSecretKey: string,
-): Promise<{ ok: boolean; credentials?: SyncableCredentials; error?: string }> {
+): Promise<{ ok: boolean; credentials?: RestoredCredentials; error?: string }> {
   try {
+    const projectOrigin = canonicalSupabaseProjectOrigin(supabaseUrl);
+    const query = new URLSearchParams({
+      select: 'key,value',
+      key: `in.(${RESTORE_SETTING_KEYS.join(',')})`,
+    });
     const res = await fetch(
-      `${supabaseUrl.replace(/\/+$/, '')}/rest/v1/instance_settings?section=eq.${SECTION}&select=key,value`,
+      `${projectOrigin}/rest/v1/instance_settings?${query.toString()}`,
       {
         headers: {
           apikey: supabaseSecretKey,
@@ -126,34 +441,12 @@ export async function pullFromSupabase(
     const rows = (await res.json()) as { key: string; value: string }[];
 
     if (rows.length === 0) {
-      return { ok: false, error: 'No saved launcher credentials found in Supabase. Run the bot once to sync.' };
+      return { ok: false, error: 'No saved SomniBot connection values were found in Supabase.' };
     }
 
-    // Reverse-map: instance_settings key → SyncableCredentials key
-    const reverseMap: Record<string, keyof SyncableCredentials> = {};
-    for (const [localKey, settingsKey] of Object.entries(SETTINGS_MAP)) {
-      reverseMap[settingsKey] = localKey as keyof SyncableCredentials;
-    }
-
-    const credentials: SyncableCredentials = {
-      discordToken: '',
-      discordApplicationId: '',
-      discordClientSecret: '',
-      discordGuildId: '',
-      supabasePublishableKey: '',
-      supabaseDbPassword: '',
-    };
-
-    for (const row of rows) {
-      const localKey = reverseMap[row.key];
-      if (localKey) {
-        credentials[localKey] = row.value || '';
-      }
-    }
-
-    // Check that at least the Discord token was found
-    if (!credentials.discordToken) {
-      return { ok: false, error: 'Credentials found but Discord token is empty. Was the bot started at least once on another machine?' };
+    const credentials = parseSyncRows(rows, supabaseSecretKey, projectOrigin);
+    if (Object.keys(credentials).length === 0) {
+      return { ok: false, error: 'Saved SomniBot rows were found, but none contained restorable connection values.' };
     }
 
     return { ok: true, credentials };

@@ -63,9 +63,9 @@ function declaredDefault(domain: DomainContract, controlId: string): JsonValue |
   return domain.defaults.find((d) => d.controlId === controlId)?.value;
 }
 
-/** A deterministic, run-prefixed DJ role id for this domain's config proofs. */
+/** A deterministic Discord snowflake for this domain's DJ-role config proofs. */
 function djRoleId(ctx: ScenarioContext, suffix = 'dj'): string {
-  return `${ctx.runPrefix}role-${suffix}`;
+  return ctx.snowflake(`dj-role-${suffix}`);
 }
 
 async function readMusicConfig(handle: LiveClientHandle): Promise<MusicConfigRow | null> {

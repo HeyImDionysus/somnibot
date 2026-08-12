@@ -14,7 +14,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 
 const DEFAULT_PAGE_SIZE = 50;
-const MAX_EXPORT_ROWS = 10_000;
+const DEFAULT_MAX_EXPORT_ROWS = 10_000;
 
 export async function GET(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'standard');
@@ -26,6 +26,19 @@ export async function GET(req: NextRequest) {
 
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
+  const isExport = searchParams.get('export') === 'true';
+
+  // Read the owner-configured export cap from the same guild_config row that
+  // the Settings control writes. Missing/legacy rows retain the shipped cap.
+  const { data: config } = await supabase
+    .from('guild_config')
+    .select('audit_export_row_limit')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  const configuredExportRows = Number(config?.audit_export_row_limit);
+  const maxExportRows = Number.isInteger(configuredExportRows)
+    ? Math.max(1, Math.min(100_000, configuredExportRows))
+    : DEFAULT_MAX_EXPORT_ROWS;
 
   const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10));
   const pageSize = Math.min(100, Math.max(1, parseInt(searchParams.get('pageSize') ?? String(DEFAULT_PAGE_SIZE), 10)));
@@ -35,7 +48,6 @@ export async function GET(req: NextRequest) {
   const search = searchParams.get('search');
   const dateFrom = searchParams.get('dateFrom');
   const dateTo = searchParams.get('dateTo');
-  const isExport = searchParams.get('export') === 'true';
   const format = searchParams.get('format') ?? 'json';
 
   // Build query
@@ -44,7 +56,7 @@ export async function GET(req: NextRequest) {
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('timestamp', { ascending: false })
-    .limit(500);
+    .limit(isExport ? maxExportRows : 500);
 
   if (category) {
     query = query.eq('category', category);
@@ -69,8 +81,8 @@ export async function GET(req: NextRequest) {
   }
 
   if (isExport) {
-    // Export — return all matching rows (up to MAX_EXPORT_ROWS)
-    query = query.limit(MAX_EXPORT_ROWS);
+    // Export — return all matching rows up to the persisted owner cap.
+    query = query.limit(maxExportRows);
   } else {
     // Paginate
     const from = (page - 1) * pageSize;
@@ -102,6 +114,15 @@ export async function GET(req: NextRequest) {
       headers: {
         'Content-Type': 'text/csv',
         'Content-Disposition': `attachment; filename="audit-log-${new Date().toISOString().slice(0, 10)}.csv"`,
+      },
+    });
+  }
+
+  if (isExport && format === 'json') {
+    return new NextResponse(JSON.stringify(data ?? []), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Disposition': `attachment; filename="audit-log-${new Date().toISOString().slice(0, 10)}.json"`,
       },
     });
   }

@@ -97,7 +97,7 @@ export async function POST(req: NextRequest) {
     return dbError(error, 'embeds');
   }
 
-  await notifyBot('embeds');
+  await notifyBot(guildId, 'embeds');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,
@@ -152,7 +152,7 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'embeds');
   }
 
-  await notifyBot('embeds');
+  await notifyBot(guildId, 'embeds');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,
@@ -203,7 +203,7 @@ export async function DELETE(req: NextRequest) {
     return dbError(error, 'embeds');
   }
 
-  await notifyBot('embeds');
+  await notifyBot(guildId, 'embeds');
 
   await recordCrudChange({
     guildId: auth.ctx.guildId,

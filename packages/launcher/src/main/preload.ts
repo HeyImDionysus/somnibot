@@ -27,8 +27,15 @@ window.addEventListener('beforeunload', () => {
 
 export interface SomniBotAPI {
   // Config
+  waitForStartupReady: () => Promise<void>;
   getConfig: () => Promise<Record<string, unknown>>;
   saveConfig: (config: Record<string, unknown>) => Promise<void>;
+  importExistingEnv: () => Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    importedFields: string[];
+    error?: string;
+  }>;
   getSetupStatus: (input?: Record<string, unknown>) => Promise<Record<string, unknown>>;
   runSetupAutomation: (config: Record<string, unknown>) => Promise<{
     ok: boolean;
@@ -112,7 +119,40 @@ export interface SomniBotAPI {
   // V5 Audit §10.P3a: No args — main process owns the secret
   pullFromSupabase: () => Promise<{
     ok: boolean;
-    credentials?: Record<string, string>;
+    credentials?: Record<string, string | boolean>;
+    error?: string;
+  }>;
+  discoverSupabaseProjects: (accessToken: string) => Promise<{
+    ok: boolean;
+    projects?: Array<{
+      ref: string;
+      name: string;
+      region?: string;
+      status?: string;
+      url: string;
+    }>;
+    error?: string;
+  }>;
+  selectSupabaseProject: (ref: string) => Promise<{
+    ok: boolean;
+    project?: {
+      ref: string;
+      name: string;
+      region?: string;
+      status?: string;
+      url: string;
+    };
+    secretKeyReady?: boolean;
+    publishableKeyReady?: boolean;
+    databasePasswordReady?: boolean;
+    databaseConnectionReady?: boolean;
+    databasePasswordGenerationError?: string;
+    error?: string;
+  }>;
+  generateSupabaseDatabasePassword: () => Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    databasePasswordReady?: boolean;
     error?: string;
   }>;
   runVpsDeployment: (payload: {
@@ -136,6 +176,28 @@ export interface SomniBotAPI {
     blockedReason?: string;
     redactedOutput?: string[];
     healthProof?: Record<string, unknown>;
+    recovery?: { action: 'vps:run-rollback'; detail: string };
+  }>;
+  runVpsRollback: (payload: {
+    lastGoodCommit: string;
+    cancelRequested?: boolean;
+  }) => Promise<{
+    state: string;
+    planStatus: string;
+    canRetry: boolean;
+    commandStates: Array<{
+      commandId: string;
+      executable: string;
+      redactedDisplay: string;
+      status: 'pending' | 'running' | 'success' | 'failed' | 'skipped' | 'cancelled';
+      detail?: string;
+    }>;
+    logs: Array<{ level: string; code: string; message: string; detail?: string }>;
+    manualBlockReasons: string[];
+    blockedReason?: string;
+    redactedOutput?: string[];
+    healthProof?: Record<string, unknown>;
+    recovery?: { action: 'vps:run-rollback'; detail: string };
   }>;
   runVpsPreflight: () => Promise<{
     state: string;
@@ -210,8 +272,10 @@ export interface SomniBotAPI {
 
 contextBridge.exposeInMainWorld('somnibot', {
   // Config
+  waitForStartupReady: () => ipcRenderer.invoke('wait-for-startup-ready'),
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config: Record<string, unknown>) => ipcRenderer.invoke('save-config', config),
+  importExistingEnv: () => ipcRenderer.invoke('import-existing-env'),
   getSetupStatus: (input?: Record<string, unknown>) => ipcRenderer.invoke('get-setup-status', input),
   runSetupAutomation: (config: Record<string, unknown>) =>
     ipcRenderer.invoke('run-setup-automation', config),
@@ -230,7 +294,12 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Cloud sync
   // V5 Audit §10.P3a: Secret stays in main process
   pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
+  discoverSupabaseProjects: (accessToken: string) =>
+    ipcRenderer.invoke('supabase:discover-projects', accessToken),
+  selectSupabaseProject: (ref: string) => ipcRenderer.invoke('supabase:select-project', ref),
+  generateSupabaseDatabasePassword: () => ipcRenderer.invoke('supabase:generate-db-password'),
   runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload),
+  runVpsRollback: (payload) => ipcRenderer.invoke('vps:run-rollback', payload),
   runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight'),
 
   // Tailscale / public callback readiness

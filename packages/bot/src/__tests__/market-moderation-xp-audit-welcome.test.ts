@@ -167,6 +167,7 @@ describe('MarketManager deep', () => {
     economy_market_enabled: true,
     economy_market_tax_pct: 5,
     economy_market_max_listings: 10,
+    economy_market_max_price_per_unit: 100,
     economy_market_listing_fee: 10,
     economy_market_max_price: 100000,
     currency_name: 'coins', currency_emoji: '🪙',
@@ -251,6 +252,13 @@ describe('MarketManager deep', () => {
     const mgr = new MarketManager(guild(), s, valkey());
     const result = await mgr.listItem('u1', 'Iron Sword', 50, 3);
     expect(result.data.description).toContain('not enabled');
+  });
+
+  it('listItem enforces the guild-configured maximum price', async () => {
+    const { MarketManager } = await import('../features/market/market-manager.js');
+    const mgr = new MarketManager(guild(), marketSupa(), valkey());
+    const result = await mgr.listItem('u1', 'Iron Sword', 1, 101);
+    expect(result.data.description).toContain('100');
   });
 
   it('myListings', async () => {

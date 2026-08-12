@@ -78,7 +78,7 @@ export async function handleRoleUpdate(
 
       // Auto-repair @everyone if configured
       const config = await getSyncConfig(client, newRole.guild.id);
-      if (config.autoRepairEveryone) {
+      if (config.autoRepair && config.autoRepairEveryone) {
         try {
           await newRole.setPermissions(0n, 'SomniBot auto-repair — @everyone must be 0');
           log.info('[Sync:Drift] Auto-repaired @everyone permissions to 0');
@@ -291,7 +291,7 @@ async function getSyncConfig(client: SomniClient, guildId: string): Promise<Sync
 
   const config: SyncConfigLocal = {
     autoRepair: data?.sync_auto_repair ?? false,
-    autoRepairEveryone: data?.sync_auto_repair_everyone ?? true,
+    autoRepairEveryone: data?.sync_auto_repair_everyone ?? false,
   };
 
   try {

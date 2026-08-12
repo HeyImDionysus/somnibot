@@ -86,7 +86,7 @@ describe('POST /api/store/products — drafts skip live-target validation', () =
   const DRAFT = {
     name: 'Prepared perk',
     type: 'free',
-    delivery_type: 'role',
+    delivery_type: 'file',
     price_cents: 0,
     granted_role_ids: ['123456789012345678'],
     active: false,

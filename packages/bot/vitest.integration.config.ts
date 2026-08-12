@@ -14,6 +14,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/__tests__/integration/**/*.integration.test.ts'],
+    setupFiles: ['./src/__tests__/integration/setup.ts'],
     testTimeout: 30_000,
     hookTimeout: 60_000,
     // Run sequentially — integration tests share a DB

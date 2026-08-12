@@ -70,7 +70,7 @@ describe.skipIf(!reachable)('LIVE: /api/store/products (real-session harness)', 
       name: 'E2E Supporter Badge',
       description: 'A free supporter perk',
       type: 'free',
-      delivery_type: 'access_pass',
+      delivery_type: 'file',
       price_cents: 0,
     }));
     expect(res.status).toBe(200);

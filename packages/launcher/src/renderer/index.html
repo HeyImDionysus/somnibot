@@ -60,8 +60,8 @@
         </p>
         <ol class="onboarding-steps-list">
           <li>Create a Discord application and bot, then copy the token, application ID, and client secret.</li>
-          <li>Create a Supabase project, then copy the project URL, publishable key, and secret key.</li>
-          <li>Use the database password only for local migrations.</li>
+          <li>In Supabase → Account → Access Tokens, create one Personal Access Token starting with <code>sbp_</code>.</li>
+          <li>The launcher uses that token to discover the project and load its API keys. Leave database password blank for normal Supabase use.</li>
         </ol>
         <div class="onboarding-actions">
           <button class="btn btn-secondary" id="onboarding-open-discord">Open Discord ↗</button>
@@ -134,7 +134,7 @@
           <button class="runtime-choice" id="runtime-vps" data-runtime="vps" type="button" aria-pressed="false">
             <div>
               <strong>VPS</strong>
-              <p>Run on a server. Domain, SSH target, and deploy readiness come first.</p>
+              <p>Run on a server. The launcher can provision or update the GitHub checkout, then deploy it.</p>
             </div>
           </button>
         </div>
@@ -149,8 +149,21 @@
 
         <div id="vps-runtime-fields" class="runtime-fields hidden">
           <div class="field">
+            <label for="vpsPublicAccessMode">Public access</label>
+            <select id="vpsPublicAccessMode">
+              <option value="domain">Conventional domain + Caddy</option>
+              <option value="tailscale-funnel">Tailscale Funnel (no domain purchase)</option>
+            </select>
+          </div>
+          <div class="field" id="vps-domain-field">
             <label for="vpsDomain">VPS Domain <span class="req">*</span></label>
             <input type="text" id="vpsDomain" placeholder="somnibot.example.com" autocomplete="off" inputmode="url" />
+          </div>
+          <div class="field hidden" id="vps-tailscale-funnel-field">
+            <label for="vpsTailscaleFunnelUrl">Tailscale Funnel URL <span class="req">*</span></label>
+            <input type="url" id="vpsTailscaleFunnelUrl" placeholder="https://somnibot-vps.example.ts.net" autocomplete="off" inputmode="url" />
+            <p class="runtime-hint vps-funnel-url-preview">Current Funnel base: <strong id="vps-funnel-url-preview">Not set yet</strong></p>
+            <p class="runtime-hint">Use the exact HTTPS *.ts.net URL. SSH preflight checks remote install/login/policy/Funnel status. Login stays a bounded manual step; the launcher never asks for or sends a Tailscale auth key to the VPS.</p>
           </div>
           <div class="field-row">
             <div class="field">
@@ -166,7 +179,7 @@
             <label for="vpsDeployPath">Deploy Path <span class="req">*</span></label>
             <input type="text" id="vpsDeployPath" placeholder="/opt/somnibot" autocomplete="off" />
           </div>
-          <p class="runtime-hint">The launcher records non-secret readiness details only. Use read-only preflight, dry-run deploy, or approval-gated deployment from the deployment plan.</p>
+          <p class="runtime-hint">The launcher checks a fresh or existing target, can install the supported Ubuntu/Debian Docker runtime, provisions the authoritative GitHub checkout, and then runs the disclosed deployment plan after explicit approval.</p>
         </div>
 
         <div class="runtime-summary" id="runtime-summary" aria-live="polite">
@@ -211,6 +224,9 @@
             <button class="link-btn" id="btn-open-discord-invite" disabled>
               Open Bot Invite ↗
             </button>
+            <button class="link-btn" id="btn-verify-discord" disabled>
+              Verify Saved Connection
+            </button>
           </div>
         </div>
 
@@ -218,7 +234,7 @@
           <div class="field">
             <label for="discordToken">Bot Token <span class="req">*</span></label>
             <input type="password" id="discordToken" placeholder="MTI3NjEz..." autocomplete="off" />
-            <button class="toggle-vis" data-target="discordToken" title="Show/hide">👁</button>
+            <button class="toggle-vis" data-target="discordToken" title="Show/hide" type="button">👁</button>
           </div>
 
           <div class="field-row">
@@ -229,7 +245,7 @@
             <div class="field">
               <label for="discordClientSecret">Client Secret <span class="req">*</span></label>
               <input type="password" id="discordClientSecret" placeholder="Wq3k8f..." autocomplete="off" />
-              <button class="toggle-vis" data-target="discordClientSecret" title="Show/hide">👁</button>
+              <button class="toggle-vis" data-target="discordClientSecret" title="Show/hide" type="button">👁</button>
             </div>
           </div>
 
@@ -248,31 +264,47 @@
 
         <div class="field-group">
           <div class="field">
-            <label for="supabaseUrl">Project URL <span class="req">*</span></label>
+            <label for="supabaseUrl">Project URL <span class="opt">(auto-filled from Personal Access Token)</span></label>
             <input type="url" id="supabaseUrl" placeholder="https://your-project.supabase.co" />
           </div>
 
           <div class="field-row">
             <div class="field">
-              <label for="supabaseSecretKey">Secret Key <span class="req">*</span></label>
+              <label for="supabaseSecretKey">Secret Key <span class="opt">(auto-filled from Personal Access Token)</span></label>
               <input type="password" id="supabaseSecretKey" placeholder="sb_secret_... or eyJ... (service_role key)" autocomplete="off" />
-              <button class="toggle-vis" data-target="supabaseSecretKey" title="Show/hide">👁</button>
+              <button class="toggle-vis" data-target="supabaseSecretKey" title="Show/hide" type="button">👁</button>
             </div>
             <div class="field">
-              <label for="supabasePublishableKey">Publishable Key <span class="req">*</span></label>
-              <input type="password" id="supabasePublishableKey" placeholder="sb_publishable_... or eyJ... (anon/public key)" autocomplete="off" />
-              <button class="toggle-vis" data-target="supabasePublishableKey" title="Show/hide">👁</button>
+              <label for="supabasePublishableKey">Publishable Key <span class="opt">(auto-filled from Personal Access Token)</span></label>
+              <input type="text" id="supabasePublishableKey" placeholder="sb_publishable_... or eyJ... (anon/public key)" autocomplete="off" />
             </div>
           </div>
           <div class="field">
             <label for="supabaseDbPassword">Database Password <small>(for migrations)</small></label>
-            <input type="password" id="supabaseDbPassword" placeholder="The password you set when creating the Supabase project" autocomplete="off" />
-            <button class="toggle-vis" data-target="supabaseDbPassword" title="Show/hide">👁</button>
+            <input type="password" id="supabaseDbPassword" placeholder="Existing password, or generate one below" autocomplete="off" />
+            <button class="toggle-vis" data-target="supabaseDbPassword" title="Show/hide" type="button">👁</button>
+            <div class="field-actions">
+              <button class="btn btn-secondary" id="btn-generate-supabase-db-password" type="button">Generate database password</button>
+            </div>
+            <p class="field-help">Use this only when direct Postgres access is needed for VPS or migrations. It rotates the Supabase password and invalidates existing direct database connections.</p>
+            <p id="supabase-db-password-status" class="field-help"></p>
           </div>
           <div class="field">
-            <label for="supabaseAccessToken">Management API Token <span class="opt">(optional)</span></label>
-            <input type="password" id="supabaseAccessToken" placeholder="Supabase account token for automatic auth setup" autocomplete="off" />
-            <button class="toggle-vis" data-target="supabaseAccessToken" title="Show/hide">👁</button>
+            <label for="supabaseAccessToken">Supabase Personal Access Token <span class="req">*</span></label>
+            <input type="password" id="supabaseAccessToken" placeholder="sbp_... (Supabase → Account → Access Tokens)" autocomplete="off" />
+            <button class="toggle-vis" data-target="supabaseAccessToken" title="Show/hide" type="button">👁</button>
+            <div class="field-actions">
+              <button class="btn btn-secondary" id="btn-discover-supabase" type="button">Discover Supabase Projects</button>
+            </div>
+            <p class="field-help">This is the only Supabase value needed for a normal setup. It lists your projects, loads the selected project URL/API keys, enables Discord auth setup, and lets the bot run migrations through Supabase. The database password is only for direct Postgres/VPS migrations.</p>
+            <div id="supabase-project-picker" class="supabase-project-picker hidden" aria-live="polite">
+              <label for="supabase-project-select">Supabase project</label>
+              <div class="field-row">
+                <select id="supabase-project-select" aria-label="Supabase project"></select>
+                <button class="btn btn-primary" id="btn-select-supabase-project" type="button">Use Selected Project</button>
+              </div>
+              <p id="supabase-project-status" class="field-help"></p>
+            </div>
           </div>
           <label class="toggle-label setup-confirmation-row" for="supabaseDiscordAuthProviderConfigured">
             <input type="checkbox" id="supabaseDiscordAuthProviderConfigured" />
@@ -293,19 +325,18 @@
         <div class="field-group">
           <div class="field">
             <label for="paypalClientId">Client ID <span class="req">*</span></label>
-            <input type="password" id="paypalClientId" placeholder="PayPal REST app client ID" autocomplete="off" />
-            <button class="toggle-vis" data-target="paypalClientId" title="Show/hide">👁</button>
+            <input type="text" id="paypalClientId" placeholder="PayPal REST app client ID" autocomplete="off" />
           </div>
           <div class="field-row">
             <div class="field">
               <label for="paypalClientSecret">Client Secret <span class="req">*</span></label>
               <input type="password" id="paypalClientSecret" placeholder="PayPal REST app secret" autocomplete="off" />
-              <button class="toggle-vis" data-target="paypalClientSecret" title="Show/hide">👁</button>
+              <button class="toggle-vis" data-target="paypalClientSecret" title="Show/hide" type="button">👁</button>
             </div>
             <div class="field">
               <label for="paypalWebhookId">Webhook ID <span class="req">*</span></label>
               <input type="password" id="paypalWebhookId" placeholder="Webhook ID for the URL above" autocomplete="off" />
-              <button class="toggle-vis" data-target="paypalWebhookId" title="Show/hide">👁</button>
+              <button class="toggle-vis" data-target="paypalWebhookId" title="Show/hide" type="button">👁</button>
             </div>
           </div>
           <label class="toggle-label setup-confirmation-row" for="paypalSandbox">
@@ -325,7 +356,7 @@
           <div class="field">
             <label for="tailscaleAuthKey">Tailscale Auth Key <span class="opt">(optional)</span></label>
             <input type="password" id="tailscaleAuthKey" placeholder="tskey-auth-..." autocomplete="off" />
-            <button class="toggle-vis" data-target="tailscaleAuthKey" title="Show/hide">👁</button>
+            <button class="toggle-vis" data-target="tailscaleAuthKey" title="Show/hide" type="button">👁</button>
           </div>
           <div class="tailscale-summary">
             <span class="status-dot" id="tailscale-dot"></span>
@@ -377,9 +408,17 @@
         </div>
       </section>
 
+      <!-- Existing installation recovery -->
+      <div class="restore-banner" id="existing-env-banner">
+        <span>Already configured SomniBot? Import its existing <code>.env</code>. Only missing launcher fields are filled.</span>
+        <button class="btn btn-small btn-secondary" id="btn-import-existing-env">
+          Import Existing Setup
+        </button>
+      </div>
+
       <!-- Cloud restore banner -->
       <div id="restore-banner" class="restore-banner hidden">
-        <span>Have Supabase credentials from another machine?</span>
+        <span>Restore saved Discord, Supabase, and PayPal connections from Supabase.</span>
         <button class="btn btn-small btn-accent" id="btn-restore-cloud">
           Restore from Cloud
         </button>

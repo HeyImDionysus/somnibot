@@ -1,14 +1,15 @@
 {
   "name": "@somnibot/launcher",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "SomniBot Desktop Launcher \u2014 download, configure, run.",
-  "main": "dist/main/index.js",
+  "main": "dist/main/bootstrap.js",
   "type": "module",
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist/main/release-source.json',{force:true})\"",
     "build": "tsc && tsc -p tsconfig.preload.json && node -e \"require('node:fs').cpSync('src/renderer','dist/renderer',{recursive:true})\"",
-    "start": "electron dist/main/index.js",
-    "dev": "tsc && electron dist/main/index.js",
+    "start": "electron dist/main/bootstrap.js",
+    "dev": "tsc && electron dist/main/bootstrap.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "clean": "node ../../scripts/clean.mjs dist",
@@ -21,7 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "electron": "^33.0.0",
+    "electron": "^39.8.5",
     "electron-builder": "^26.15.3",
     "electron-builder-squirrel-windows": "26.15.3",
     "typescript": "^5.7.0",

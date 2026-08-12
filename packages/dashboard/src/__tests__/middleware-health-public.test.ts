@@ -16,6 +16,7 @@ describe('middleware health access', () => {
     delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
     delete process.env.SOMNIBOT_CSP_INLINE_COMPAT;
     delete process.env.PAYPAL_RECONCILE_SECRET;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://example.supabase.co';
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'test-key';
 
@@ -52,6 +53,32 @@ describe('middleware health access', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
+  it('allows launcher health probes in local mode without a session cookie', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'launcher-session-token';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('allows unauthenticated container supervision to reach /api/health/live', async () => {
+    mockCreateServerClient.mockImplementation(() => {
+      throw new Error('liveness checks must not depend on Supabase auth');
+    });
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health/live'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
   it('does not touch Supabase auth for /api/health', async () => {
     mockCreateServerClient.mockImplementation(() => {
       throw new Error('health checks must not depend on Supabase auth');
@@ -76,6 +103,18 @@ describe('middleware health access', () => {
 
     expect(res.headers.get('content-security-policy')).toContain("script-src 'self' 'unsafe-inline'");
     expect(res.headers.get('content-security-policy')).toContain("style-src 'self' 'unsafe-inline'");
+  });
+
+  it('allows development tooling without weakening the production policy', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health'));
+    const csp = res.headers.get('content-security-policy');
+
+    expect(csp).toContain("script-src 'self' 'nonce-");
+    expect(csp).toContain("'strict-dynamic' 'unsafe-eval'");
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'");
+    vi.unstubAllEnvs();
   });
 
   it('allows first-run setup page without public Supabase env', async () => {
@@ -124,6 +163,19 @@ describe('middleware health access', () => {
     const res = await runWithoutPublicSupabaseEnv('/api/paypal/reconcile', {
       method: 'POST',
       headers: { 'x-reconcile-secret': 'scheduler-secret-value' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('lets the exact PayPal recovery secret reach its route without Supabase or CSRF', async () => {
+    process.env.PAYPAL_RECONCILE_SECRET = 'recovery-secret-value';
+
+    const res = await runWithoutPublicSupabaseEnv('/api/paypal/recovery', {
+      method: 'POST',
+      headers: { 'x-paypal-reconcile-secret': 'recovery-secret-value' },
     });
 
     expect(res.status).toBe(200);
@@ -184,6 +236,30 @@ describe('middleware health access', () => {
     expect(res.headers.get('location')).toBe('http://localhost:3000/login');
   });
 
+  it('keeps Funnel redirects on the configured public host', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.tailbd9d28.ts.net';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('https://localhost:3456/dashboard', {
+      headers: { host: 'somni.tailbd9d28.ts.net' },
+    }));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('https://somni.tailbd9d28.ts.net/login');
+  });
+
+  it('keeps direct local operator redirects on localhost when Funnel is configured', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.tailbd9d28.ts.net';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3456/dashboard', {
+      headers: { host: 'localhost:3456' },
+    }));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost:3456/login');
+  });
+
   it('does not treat SESSION_TOKEN alone as launcher local mode', async () => {
     process.env.SESSION_TOKEN = 'accidental-cloud-token';
 
@@ -207,7 +283,16 @@ describe('middleware health access', () => {
     }));
 
     expect(mockCreateServerClient).not.toHaveBeenCalled();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost:3000/dashboard');
     expect(res.cookies.get('somnibot-local-session')?.value).toBe('launcher-token');
+
+    const bound = await middleware(new NextRequest('http://localhost:3000/dashboard', {
+      headers: {
+        host: 'localhost:3000',
+        cookie: 'somnibot-local-session=launcher-token',
+      },
+    }));
+    expect(bound.status).toBe(200);
   });
 });

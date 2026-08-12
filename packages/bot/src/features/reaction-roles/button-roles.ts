@@ -19,6 +19,9 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+  type StringSelectMenuInteraction,
   type TextChannel,
   type MessageActionRowComponentBuilder,
 } from 'discord.js';
@@ -52,6 +55,12 @@ const STYLE_MAP: Record<string, ButtonStyle> = {
   success: ButtonStyle.Success,
   danger: ButtonStyle.Danger,
 };
+
+function selectMenuEmoji(raw: string): { name?: string; id?: string; animated?: boolean } {
+  const custom = raw.match(/^<(a?):([^:>]+):(\d+)>$/);
+  if (custom) return { animated: custom[1] === 'a', name: custom[2], id: custom[3] };
+  return { name: raw };
+}
 
 /**
  * Handle a button role toggle interaction.
@@ -199,6 +208,76 @@ export async function handleButtonRoleInteraction(
   return true;
 }
 
+/** Handle a select-menu role panel (`selrole:{panelId}`). */
+export async function handleSelectMenuRoleInteraction(
+  interaction: StringSelectMenuInteraction,
+  supabase: SupabaseClient,
+  eventBus: PlatformEventBus = defaultEventBus,
+): Promise<boolean> {
+  if (!interaction.customId.startsWith('selrole:')) return false;
+  const panelId = interaction.customId.slice('selrole:'.length);
+  if (!panelId || !interaction.values.length || !interaction.guild) return true;
+
+  const guild = interaction.guild as Guild;
+  const { data: entries } = await supabase
+    .from('button_roles')
+    .select('role_id, active, require_role, require_level, exclusive_group')
+    .eq('guild_id', guild.id)
+    .eq('panel_id', panelId)
+    .in('role_id', interaction.values)
+    .limit(25);
+  const configured = (entries ?? []) as Array<{
+    role_id: string;
+    active: boolean;
+    require_role: string | null;
+    require_level: number | null;
+    exclusive_group: string | null;
+  }>;
+  const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!member) return true;
+
+  let changed = 0;
+  for (const entry of configured) {
+    if (!entry.active) continue;
+    if (entry.require_role && !member.roles.cache.has(entry.require_role)) continue;
+    if (entry.require_level && entry.require_level > 0) {
+      const { data: levelData } = await supabase.from('member_levels').select('level')
+        .eq('guild_id', guild.id).eq('member_id', member.id).maybeSingle();
+      if ((levelData?.level ?? 0) < entry.require_level) continue;
+    }
+    try {
+      if (member.roles.cache.has(entry.role_id)) {
+        await member.roles.remove(entry.role_id, 'Select-menu role toggle');
+        eventBus.emit('role.lost', guild.id, {
+          discordId: member.id, roleId: entry.role_id,
+          roleName: guild.roles.cache.get(entry.role_id)?.name ?? entry.role_id,
+          source: 'bot',
+        });
+      } else {
+        if (entry.exclusive_group) {
+          const { data: peers } = await supabase.from('button_roles').select('role_id')
+            .eq('guild_id', guild.id).eq('panel_id', panelId)
+            .eq('exclusive_group', entry.exclusive_group).neq('role_id', entry.role_id).limit(25);
+          for (const peer of peers ?? []) {
+            if (member.roles.cache.has(peer.role_id)) await member.roles.remove(peer.role_id, 'Select-menu exclusive group swap');
+          }
+        }
+        await member.roles.add(entry.role_id, 'Select-menu role toggle');
+        eventBus.emit('role.gained', guild.id, {
+          discordId: member.id, roleId: entry.role_id,
+          roleName: guild.roles.cache.get(entry.role_id)?.name ?? entry.role_id,
+          source: 'bot',
+        });
+      }
+      changed++;
+    } catch (err) {
+      log.warn('Select-menu role operation failed:', { error: String(err) });
+    }
+  }
+  await interaction.reply({ content: changed ? `✅ Updated ${changed} role(s).` : '❌ No eligible roles selected.', ephemeral: true });
+  return true;
+}
+
 /**
  * Deploy a button roles panel to a channel (called from dashboard or commands).
  */
@@ -235,34 +314,40 @@ export async function deployButtonRolesPanel(
     .setTimestamp();
   applyBrand(embed, kit, { intent: 'info' });
 
-  // Build rows (max 5 buttons per row, max 5 rows)
+  const { data: guildConfig } = await supabase.from('guild_config').select('default_style')
+    .eq('guild_id', guild.id).maybeSingle();
+  const interactionStyle = guildConfig?.default_style === 'select-menu' ? 'select-menu' : 'buttons';
+
+  // Build the configured Discord surface. Buttons support up to 25 entries;
+  // select menus support the same option count in one row.
   const rows: ActionRowBuilder<MessageActionRowComponentBuilder>[] = [];
-  let currentRow = new ActionRowBuilder<MessageActionRowComponentBuilder>();
-  let buttonCount = 0;
-
-  for (const entry of roles) {
-    if (buttonCount >= 5) {
-      rows.push(currentRow);
-      currentRow = new ActionRowBuilder<MessageActionRowComponentBuilder>();
-      buttonCount = 0;
+  if (interactionStyle === 'select-menu') {
+    const menu = new StringSelectMenuBuilder().setCustomId(`selrole:${panelId}`)
+      .setPlaceholder('Choose roles…').setMinValues(1).setMaxValues(Math.min(roles.length, 25));
+    for (const entry of roles.slice(0, 25)) {
+      const option = new StringSelectMenuOptionBuilder().setLabel(entry.label.slice(0, 100))
+        .setValue(entry.role_id);
+      if (entry.emoji) option.setEmoji(selectMenuEmoji(entry.emoji));
+      menu.addOptions(option);
     }
-    if (rows.length >= 5) break; // Discord limit
-
-    const button = new ButtonBuilder()
-      .setCustomId(`btnrole:${panelId}:${entry.role_id}`)
-      .setLabel(entry.label)
-      .setStyle(STYLE_MAP[entry.style] ?? ButtonStyle.Secondary);
-
-    if (entry.emoji) {
-      button.setEmoji(entry.emoji);
+    rows.push(new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(menu));
+  } else {
+    let currentRow = new ActionRowBuilder<MessageActionRowComponentBuilder>();
+    let buttonCount = 0;
+    for (const entry of roles) {
+      if (buttonCount >= 5) {
+        rows.push(currentRow);
+        currentRow = new ActionRowBuilder<MessageActionRowComponentBuilder>();
+        buttonCount = 0;
+      }
+      if (rows.length >= 5) break;
+      const button = new ButtonBuilder().setCustomId(`btnrole:${panelId}:${entry.role_id}`)
+        .setLabel(entry.label.slice(0, 80)).setStyle(STYLE_MAP[entry.style] ?? ButtonStyle.Secondary);
+      if (entry.emoji) button.setEmoji(entry.emoji);
+      currentRow.addComponents(button);
+      buttonCount++;
     }
-
-    currentRow.addComponents(button);
-    buttonCount++;
-  }
-
-  if (buttonCount > 0) {
-    rows.push(currentRow);
+    if (buttonCount > 0) rows.push(currentRow);
   }
 
   // Check if message already exists
@@ -288,4 +373,22 @@ export async function deployButtonRolesPanel(
     .eq('panel_id', panelId);
 
   return { success: true };
+}
+
+/** Deploy every configured non-reaction panel for a guild after a settings or CRUD change. */
+export async function deployButtonRolePanelsForGuild(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<void> {
+  const { data } = await supabase.from('button_roles').select('panel_id')
+    .eq('guild_id', guild.id).eq('active', true).limit(1000);
+  const rows = (data ?? []) as Array<{ panel_id?: string | null }>;
+  const panelIds = [...new Set(
+    rows.map((row) => row.panel_id).filter((panelId): panelId is string => Boolean(panelId)),
+  )];
+  for (const panelId of panelIds) {
+    await deployButtonRolesPanel(guild, supabase, panelId).catch((err) => {
+      log.warn(`Failed to deploy role panel ${panelId}:`, { error: String(err) });
+    });
+  }
 }

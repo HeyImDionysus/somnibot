@@ -83,6 +83,11 @@ function mockDownload(overrides: {
       : overrides.file,
     error: null,
   });
+  const products = registerTable(mock, 'products');
+  products.maybeSingle.mockResolvedValue({
+    data: { delivery_type: 'license_key' },
+    error: null,
+  });
   const deliveries = registerTable(mock, 'commerce_download_deliveries');
   deliveries.insert.mockResolvedValue({ error: overrides.deliveryError ?? null });
 

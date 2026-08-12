@@ -18,14 +18,14 @@ async function fetchWithTimeout(url: string, timeoutMs = 5_000): Promise<Respons
 }
 
 describe('Dashboard Smoke Tests', () => {
-  it('GET /api/health returns 200 with valid JSON status', async () => {
+  it('GET /api/health confirms the deployed stack is healthy', async () => {
     const res = await fetchWithTimeout(`${BASE_URL}/api/health`);
     expect(res.status).toBe(200);
 
     const body = await res.json();
     expect(body).toHaveProperty('status');
     expect(body).toHaveProperty('timestamp');
-    expect(['healthy', 'degraded']).toContain(body.status);
+    expect(body.status).toBe('healthy');
   });
 
   it('GET /api/csrf returns a CSRF token', async () => {

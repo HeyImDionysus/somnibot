@@ -9,6 +9,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   armDashboardLiveEnv,
   localSupabaseReachable,
@@ -31,6 +33,32 @@ vi.mock('next/headers', () => ({
 const reachable = await localSupabaseReachable(SUPA_URL);
 
 const INVITEE = '223456789012345695';
+
+function writeFleetProofReceipt(): void {
+  const directory = process.env.SOMNIBOT_FLEET_PROOF_DIR?.trim();
+  if (!directory) return;
+  const candidateSha = process.env.SOMNIBOT_CANDIDATE_SHA?.trim()
+    || process.env.GITHUB_SHA?.trim();
+  if (!candidateSha || !/^[0-9a-f]{40}$/i.test(candidateSha)) {
+    throw new Error('Fleet proof receipt requires an exact 40-character candidate SHA.');
+  }
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(
+    path.join(directory, 'fleet-proof-administration-team-management-def-audit.json'),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      candidateSha: candidateSha.toLowerCase(),
+      domainId: 'administration-team-management',
+      proofs: [{
+        scenario: 'DEF',
+        assertionClass: 'audit',
+        sensor: 'dashboard-live-route:team-users-route.live.test.ts',
+        observation: 'POST /api/rbac/users created one pending team invitation and one team.invite_sent audit row through the real owner session and real local Supabase route.',
+      }],
+    }, null, 2)}\n`,
+    'utf8',
+  );
+}
 
 describe.skipIf(!reachable)('LIVE: /api/rbac/users (real-session harness)', () => {
   const suffix = `${Date.now()}`;
@@ -103,6 +131,7 @@ describe.skipIf(!reachable)('LIVE: /api/rbac/users (real-session harness)', () =
     const { data: audits } = await admin
       .from('audit_logs').select('action').eq('guild_id', guildId).eq('action', 'team.invite_sent');
     expect((audits ?? []).length).toBeGreaterThanOrEqual(1);
+    writeFleetProofReceipt();
   });
 
   it('refuses to assign a SYSTEM role (403 + role_assign_denied audit + owner alert)', async () => {

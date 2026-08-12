@@ -62,7 +62,7 @@ export const POWERED_BY_ATTRIBUTION = 'Powered by SomniBot';
  * so the cached row they already hold can feed brandKitFromConfig() directly.
  */
 export const BRAND_KIT_COLUMNS =
-  'store_brand_name, store_show_powered_by, brand_primary_color, brand_accent_color, brand_voice_preset, currency_name, currency_emoji';
+  'store_brand_name, store_brand_source, store_show_powered_by, brand_primary_color, brand_accent_color, brand_voice_preset, currency_name, currency_emoji';
 
 /** Max valid Discord embed color (24-bit 0xFFFFFF). */
 const MAX_COLOR = 0xffffff;
@@ -133,7 +133,7 @@ export function brandKitFromConfig(
   if (!cfgRow) return fallback;
   const cfg = cfgRow as Record<string, unknown>;
 
-  const rawName = cfg.store_brand_name;
+  const rawName = cfg.store_brand_source === 'guild-profile' ? null : cfg.store_brand_name;
   const brandName =
     typeof rawName === 'string' && rawName.trim().length > 0 ? rawName.trim() : fallback.brandName;
 

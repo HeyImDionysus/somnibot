@@ -7,28 +7,41 @@
  * Usage:
  *   node scripts/build-launcher.mjs              # Build for current platform
  *   node scripts/build-launcher.mjs --win         # Build for Windows
- *   node scripts/build-launcher.mjs --mac         # Build for macOS
  *   node scripts/build-launcher.mjs --linux       # Build for Linux
- *   node scripts/build-launcher.mjs --all         # Build for all platforms
+ *   node scripts/build-launcher.mjs --all         # Build for supported Windows and Linux platforms
  *   node scripts/build-launcher.mjs --dir         # Pack to directory (no installer, for testing)
  *   node scripts/build-launcher.mjs --skip-build  # Skip package builds (use existing artifacts)
  */
 
-import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runPnpm } from './lib/pnpm.mjs';
+import { assertPackagedLauncherRuntime } from './launcher-runtime-verification.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const LAUNCHER_DIR = path.join(ROOT, 'packages', 'launcher');
 const STAGING = path.join(LAUNCHER_DIR, '.resources');
+const releaseDirName = process.env.SOMNIBOT_RELEASE_DIR?.trim() || 'release';
+const RELEASE_DIR = path.resolve(LAUNCHER_DIR, releaseDirName);
+if (
+  RELEASE_DIR === LAUNCHER_DIR
+  || !RELEASE_DIR.startsWith(`${LAUNCHER_DIR}${path.sep}`)
+) {
+  throw new Error('SOMNIBOT_RELEASE_DIR must resolve inside packages/launcher.');
+}
 
 /* ── Parse CLI args ────────────────────────────────────────────────── */
 
 const args = process.argv.slice(2);
+if (args.includes('--mac')) {
+  console.error('macOS launcher builds are not supported for the v1 release.');
+  process.exit(1);
+}
 const platformArg = args.find((a) =>
-  ['--win', '--mac', '--linux', '--all', '--dir'].includes(a),
+  ['--win', '--linux', '--all', '--dir'].includes(a),
 );
 const skipBuild = args.includes('--skip-build');
 
@@ -328,13 +341,39 @@ function stageBot() {
   // dereference:true to ensure everything is a real file.
   dereferenceNodeModules(path.join(botStaging, 'node_modules'));
 
-  // ── Fix transitive / peer dependencies ──────────────────────────
-  // pnpm deploy --prod can miss transitive deps of scoped packages and
-  // peer deps (e.g. ws is a peer of shoukaku, @supabase/* sub-packages
-  // are transitive deps of @supabase/supabase-js).
-  // Scan all installed packages' declared deps and copy any missing ones
-  // from the monorepo.
-  fixAllMissingDeps(botStaging, [], 'bot');
+  // ── Materialize direct, transitive, and peer dependencies ────────
+  // On Windows, pnpm deploy can leave only its hidden .pnpm virtual store
+  // in the deployment root. electron-builder does not copy that hidden
+  // store through extraResources, so an apparently successful installer
+  // can contain no usable bot node_modules at all. Seed every direct
+  // production dependency as a real top-level directory, then walk the
+  // resulting packages to materialize the transitive closure.
+  const botPackageJson = path.join(botStaging, 'package.json');
+  const botDirectDependencies = getRequiredDeps(botPackageJson);
+  fixAllMissingDeps(botStaging, botDirectDependencies, 'bot');
+
+  for (const dependency of botDirectDependencies) {
+    assertExists(
+      path.join(botStaging, 'node_modules', ...dependency.split('/'), 'package.json'),
+      `Bot runtime dependency (${dependency})`,
+    );
+  }
+
+  // electron-builder applies its node_modules exclusions even inside a
+  // generic extraResources tree. Keep the materialized packages under a
+  // neutral staging name and map that directory explicitly back to the
+  // runtime's required bot/node_modules destination in electron-builder.yml.
+  const stagedNodeModules = path.join(botStaging, 'node_modules');
+  const stagedRuntimeModules = path.join(botStaging, 'runtime_modules');
+  // The flat real-package copies above are authoritative. pnpm's virtual
+  // store and command shims are build-time implementation details; their
+  // internal links become invalid after the neutral-directory rename.
+  rmSync(path.join(stagedNodeModules, '.pnpm'), { recursive: true, force: true });
+  rmSync(path.join(stagedNodeModules, '.bin'), { recursive: true, force: true });
+  if (existsSync(stagedRuntimeModules)) {
+    rmSync(stagedRuntimeModules, { recursive: true, force: true });
+  }
+  renameSync(stagedNodeModules, stagedRuntimeModules);
 
   // ── Copy Supabase migrations alongside bot ─────────────────────
   // The migration-runner looks for migrations via process.resourcesPath.
@@ -399,6 +438,10 @@ function stageDashboard() {
   // "extras" are packages that aren't declared in any dep list but are
   // loaded dynamically at runtime.
   const dashPkgDir = path.join(dashStaging, 'packages', 'dashboard');
+  // Next standalone emits absolute symlinks into the build workspace. They
+  // resolve during staging but break once the runtime is moved into an
+  // AppImage, so materialize every dashboard dependency before packaging.
+  dereferenceNodeModules(path.join(dashPkgDir, 'node_modules'));
   fixAllMissingDeps(dashPkgDir, ['styled-jsx', '@swc/helpers'], 'dashboard');
 
   // Also fix root-level node_modules (standalone has two: root + per-package)
@@ -419,43 +462,116 @@ function stageDashboard() {
 function buildElectron() {
   console.log('\n⚡ Building Electron app...\n');
 
+  // Release metadata must describe only artifacts produced by this invocation.
+  // In particular, never let an older launcher version survive into checksum,
+  // updater-manifest, or upload discovery.
+  rmSync(RELEASE_DIR, { recursive: true, force: true });
+
   // Build launcher TypeScript (src/main/*.ts → dist/main/*.js)
   runPnpm(['--filter', '@somnibot/launcher', 'run', 'build']);
+
+  const configuredReleaseSha = process.env.RELEASE_SHA?.trim()
+    || process.env.SOMNIBOT_RELEASE_SHA?.trim()
+    || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  if (!/^[0-9a-f]{40}$/i.test(configuredReleaseSha)) {
+    throw new Error('Launcher packaging requires an exact 40-character release commit SHA.');
+  }
+  writeFileSync(
+    path.join(LAUNCHER_DIR, 'dist', 'main', 'release-source.json'),
+    `${JSON.stringify({ repositoryRef: configuredReleaseSha.toLowerCase() }, null, 2)}\n`,
+    'utf8',
+  );
+  console.log(`   Embedded immutable VPS source SHA: ${configuredReleaseSha.toLowerCase()}`);
 
   // Determine platform flags for electron-builder
   const platformFlags =
     {
       '--win': '--win',
-      '--mac': '--mac',
       '--linux': '--linux',
-      '--all': '-mwl',
+      '--all': '--win --linux',
       '--dir': '--dir',
     }[platformArg] ?? '';
 
   // Run electron-builder from the launcher directory.
   // GH_TOKEN env var enables GitHub Releases publishing.
-  runPnpm(['exec', 'electron-builder', ...platformFlags.split(' ').filter(Boolean), '--config', 'electron-builder.yml'], {
+  const releaseOutput = path.relative(LAUNCHER_DIR, RELEASE_DIR).split(path.sep).join('/');
+  runPnpm([
+    'exec',
+    'electron-builder',
+    ...platformFlags.split(' ').filter(Boolean),
+    '--config',
+    'electron-builder.yml',
+    `--config.directories.output=${releaseOutput}`,
+  ], {
     cwd: LAUNCHER_DIR,
   });
 
   console.log('✅ Electron build complete');
 }
 
+function verifyPackagedBotRuntime() {
+  const unpackedRoots = ['win-unpacked', 'linux-unpacked']
+    .map((name) => path.join(RELEASE_DIR, name))
+    .filter((candidate) => existsSync(candidate));
+
+  if (unpackedRoots.length === 0) {
+    throw new Error('Launcher packaging did not leave an unpacked runtime for smoke verification.');
+  }
+
+  for (const unpackedRoot of unpackedRoots) {
+    const botRoot = path.join(unpackedRoot, 'resources', 'bot');
+    const botEntry = path.join(botRoot, 'dist', 'index.js');
+    assertPackagedLauncherRuntime(unpackedRoot);
+    assertExists(botEntry, 'Packaged bot entry');
+    assertExists(
+      path.join(botRoot, 'node_modules', '@somnibot', 'shared', 'package.json'),
+      'Packaged @somnibot/shared runtime dependency',
+    );
+
+    const smokeEnv = { ...process.env };
+    for (const key of [
+      'DISCORD_TOKEN',
+      'DISCORD_APPLICATION_ID',
+      'SUPABASE_URL',
+      'SUPABASE_SECRET_KEY',
+      'SUPABASE_SERVICE_ROLE_KEY',
+      'NEXT_PUBLIC_SUPABASE_URL',
+    ]) {
+      delete smokeEnv[key];
+    }
+
+    const smoke = spawnSync(process.execPath, [botEntry], {
+      cwd: botRoot,
+      env: smokeEnv,
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    const output = `${smoke.stdout ?? ''}\n${smoke.stderr ?? ''}`;
+    if (smoke.error || /ERR_MODULE_NOT_FOUND|Cannot find package/.test(output)) {
+      throw new Error(`Packaged bot module-resolution smoke failed: ${smoke.error?.message ?? output.trim()}`);
+    }
+    if (!output.includes('[Boot]') || !output.includes('Invalid environment configuration')) {
+      throw new Error('Packaged bot did not reach its expected isolated configuration gate.');
+    }
+  }
+
+  console.log('✅ Packaged bot runtime dependencies verified');
+}
+
 /* ── Step 5: Summary ───────────────────────────────────────────────── */
 
 function printSummary() {
-  const releaseDir = path.join(LAUNCHER_DIR, 'release');
-  if (!existsSync(releaseDir)) return;
+  if (!existsSync(RELEASE_DIR)) return;
 
   console.log('\n📁 Output files:\n');
-  const files = readdirSync(releaseDir).filter(
+  const files = readdirSync(RELEASE_DIR).filter(
     (f) => !f.startsWith('.') && !f.endsWith('.blockmap'),
   );
   for (const f of files) {
-    const size = statSync(path.join(releaseDir, f)).size;
+    const size = statSync(path.join(RELEASE_DIR, f)).size;
     console.log(`   ${f}  (${formatMB(size)})`);
   }
-  console.log(`\n   Location: packages/launcher/release/`);
+  console.log(`\n   Location: ${path.relative(ROOT, RELEASE_DIR).split(path.sep).join('/')}/`);
   console.log('\n🎉 Build pipeline complete!\n');
 }
 
@@ -473,6 +589,7 @@ try {
   stageBot();
   stageDashboard();
   buildElectron();
+  verifyPackagedBotRuntime();
   printSummary();
 
   // Clean staging directory (large, not needed after build)

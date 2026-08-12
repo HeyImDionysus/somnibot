@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
   // Get desired state
   const { data: desiredState } = await admin
     .from('guild_desired_state')
-    .select('applied_at, roles, channels, updated_at')
+    .select('applied_at, roles, channels, categories, deploy_mode, updated_at')
     .eq('guild_id', guildId)
     .single();
 

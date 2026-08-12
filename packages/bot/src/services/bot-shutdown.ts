@@ -18,6 +18,10 @@ type Stoppable = {
   stop: () => void;
 };
 
+type Releasable = {
+  release: () => Promise<void>;
+};
+
 type LavalinkNode = {
   disconnect: (code?: number, reason?: string) => void;
 };
@@ -36,6 +40,7 @@ export type BotLevelServices = {
   stopTeamInvitationSweeper?: (() => void) | null;
   /** Portal-request notifier — stopped so its interval cannot outlive shutdown. */
   portalRequestNotifier?: Stoppable | null;
+  runtimeLease?: Releasable | null;
 };
 
 type ShutdownDependencies = {
@@ -50,6 +55,7 @@ export type ShutdownBotOptions = {
   client: ShutdownClient;
   botLevelServices?: BotLevelServices;
   dependencies?: ShutdownDependencies;
+  exitCode?: 0 | 1;
 };
 
 function stopSafely(name: string, stop: (() => void) | undefined | null, log: Logger): void {
@@ -66,6 +72,7 @@ export async function shutdownBot({
   client,
   botLevelServices = {},
   dependencies = {},
+  exitCode = 0,
 }: ShutdownBotOptions): Promise<void> {
   const log = dependencies.log ?? defaultLog;
   const destroyGuildServicesFn = dependencies.destroyGuildServices ?? destroyGuildServices;
@@ -118,6 +125,14 @@ export async function shutdownBot({
 
   stopSafely('Health server', stopHealthServerFn, log);
 
+  // Release only after Discord and guild services can no longer emit side
+  // effects. A successor may acquire immediately after this point.
+  try {
+    await botLevelServices.runtimeLease?.release();
+  } catch (err) {
+    log.warn('Runtime lease release failed; it will expire automatically', { error: String(err) });
+  }
+
   await client.valkey?.quit().catch(() => { /* intentionally silent */ });
 
   if (guildTeardownFailures.length > 0) {
@@ -129,5 +144,5 @@ export async function shutdownBot({
   }
 
   log.info('Goodbye.');
-  exit(0);
+  exit(exitCode);
 }

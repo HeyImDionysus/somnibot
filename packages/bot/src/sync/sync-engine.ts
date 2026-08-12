@@ -83,29 +83,40 @@ export async function runSyncCycle(
     }
   }
 
+  const managedCommunityChannelIds = new Set(
+    [guild.rulesChannelId, guild.publicUpdatesChannelId, guild.safetyAlertsChannelId]
+      .filter((channelId): channelId is string => typeof channelId === 'string'),
+  );
+  for (const mapping of mappings ?? []) {
+    if (mapping.entity_type !== 'channel'
+      || (mapping.template_key !== 'channel:moderator-only' && mapping.template_key !== 'moderator-only')
+      || typeof mapping.discord_id !== 'string') continue;
+    managedCommunityChannelIds.add(mapping.discord_id);
+  }
+  const ticketChannelIds = new Set<string>();
+  for (let offset = 0; ; offset += 1000) {
+    const { data: tickets } = await supabase
+      .from('tickets')
+      .select('channel_id')
+      .eq('guild_id', guild.id)
+      .in('status', ['open', 'claimed'])
+      .range(offset, offset + 999);
+    for (const ticket of tickets ?? []) {
+      if (typeof ticket.channel_id === 'string') ticketChannelIds.add(ticket.channel_id);
+    }
+    if (!tickets || tickets.length < 1000) break;
+  }
+
   // 4. Compute diff
   const diff = computeStateDiff(desiredState, actualState, idMap, entityIdMap);
 
   // 5. Classify drift
   const rawDriftItems = classifyDrift(diff);
 
-  // Filter out community-required channels and ticket channels.
-  // Community channels (rules, moderator-only, public-updates) are created by Discord
-  // itself when Community features are enabled — they're not user drift.
-  // Ticket channels are dynamically created/closed by the bot.
-  const communityNames = new Set<string>();
-  const rulesChannel = guild.rulesChannelId ? guild.channels.cache.get(guild.rulesChannelId) : null;
-  const updatesChannel = guild.publicUpdatesChannelId ? guild.channels.cache.get(guild.publicUpdatesChannelId) : null;
-  if (rulesChannel) communityNames.add(rulesChannel.name);
-  if (updatesChannel) communityNames.add(updatesChannel.name);
-  communityNames.add('moderator-only');
-
   const driftItems = rawDriftItems.filter((item) => {
     if (item.entityType !== 'channel') return true;
-    // Skip community-required channels
-    if (communityNames.has(item.entityName)) return false;
-    // Skip ticket channels (ticket-NNN-username pattern)
-    if (/^ticket-\d+/.test(item.entityName)) return false;
+    if (item.entityDiscordId && managedCommunityChannelIds.has(item.entityDiscordId)) return false;
+    if (item.entityDiscordId && ticketChannelIds.has(item.entityDiscordId)) return false;
     return true;
   });
 
@@ -129,6 +140,7 @@ export async function runSyncCycle(
   if (config.autoRepair) {
     for (const item of driftItems) {
       if (item.suggestedAction !== 'repair') continue;
+      if (item.type === 'EVERYONE_DRIFT') continue;
 
       try {
         const repairResult = await repairDriftItem(guild, supabase, item, idMap, entityIdMap);
@@ -354,7 +366,7 @@ async function repairDriftItem(
 
         const created = await guild.roles.create({
           name: roleDef.name,
-          color: roleDef.color ?? 0,
+          colors: { primaryColor: roleDef.color ?? 0 },
           permissions: BigInt(roleDef.permissions ?? '0'),
           hoist: roleDef.hoist ?? false,
           mentionable: roleDef.mentionable ?? false,

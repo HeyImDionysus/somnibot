@@ -91,6 +91,8 @@ export async function recordMemberJoin(
   member: GuildMember,
   isReturning: boolean,
 ): Promise<DbMember | null> {
+  if (member.user.bot) return null;
+
   const guildId = member.guild.id;
   const discordId = member.id;
 
@@ -264,6 +266,42 @@ function hasCompletedOnboarding(m: GuildMember): boolean {
  * can exceed that must page with .range() and accumulate.
  */
 const READ_PAGE = 1000;
+const GATEWAY_ROSTER_FETCH_TIMEOUT_MS = 15_000;
+
+export async function fetchCompleteRoster(guild: Guild): Promise<Map<string, GuildMember> | null> {
+  try {
+    const members = await guild.members.fetch({ time: GATEWAY_ROSTER_FETCH_TIMEOUT_MS });
+    log.info('Roster backfill roster fetched', { source: 'gateway', count: members.size });
+    return new Map(members);
+  } catch (gatewayError) {
+    log.warn('Roster backfill gateway fetch failed; using REST fallback', { error: String(gatewayError) });
+  }
+
+  const members = new Map<string, GuildMember>();
+  let after: string | undefined;
+  for (;;) {
+    let page;
+    try {
+      page = await guild.members.list({ limit: READ_PAGE, ...(after ? { after } : {}) });
+    } catch (restError) {
+      log.warn('Member backfill skipped — REST roster fallback failed', { error: String(restError) });
+      return null;
+    }
+
+    for (const member of page.values()) members.set(member.id, member);
+    if (page.size < READ_PAGE) {
+      log.info('Roster backfill roster fetched', { source: 'rest', count: members.size });
+      return members;
+    }
+
+    const lastMember = [...page.values()].at(-1);
+    if (!lastMember || lastMember.id === after) {
+      log.warn('Member backfill skipped — REST roster fallback cursor did not advance');
+      return null;
+    }
+    after = lastMember.id;
+  }
+}
 
 /**
  * Backfill and reconcile the roster with everyone ALREADY in the guild.
@@ -275,7 +313,7 @@ const READ_PAGE = 1000;
  * roster (automation conditions, profiles) sees a ghost town. Verified live:
  * zero rows for a guild the bot had been serving for days.
  *
- * Runs once per guild init and makes three kinds of writes:
+ * Runs once per guild init and makes four kinds of writes:
  * 1. INSERT missing members, oldest joiners first so member_number ordering
  *    roughly matches server seniority. Real join dates come from Discord.
  * 2. RECONCILE rows with a stale left_at — members who rejoined while the bot
@@ -286,6 +324,8 @@ const READ_PAGE = 1000;
  * 3. REPAIR onboarding_completed=false rows whose member the current fetch
  *    proves is past screening — otherwise pre-install members stay locked out
  *    of onboarding-gated features forever.
+ * 4. MARK active rows absent from the complete fetch as left, preserving their
+ *    history for a later returning-member flow.
  *
  * member_number and total_time_seconds are history this sweep never rewrites.
  * Members with a /forgetme erasure marker are excluded from every write:
@@ -296,13 +336,9 @@ export async function backfillMembers(
   supabase: SupabaseClient,
   guild: Guild,
 ): Promise<number> {
-  let discordMembers;
-  try {
-    discordMembers = await guild.members.fetch();
-  } catch (err) {
-    log.warn('Member backfill skipped — could not fetch member list', { error: String(err) });
-    return 0;
-  }
+  const discordMembers = await fetchCompleteRoster(guild);
+  if (!discordMembers) return 0;
+  guild.memberCount = discordMembers.size;
 
   // Read ALL existing rows, paged (a .limit() read is silently truncated at
   // PostgREST's max_rows — 1000 — which made big rosters re-insert forever).
@@ -350,6 +386,15 @@ export async function backfillMembers(
   }
 
   const fetched = [...discordMembers.values()].filter((m) => !m.user.bot && !erased.has(m.id));
+  const fetchedIds = new Set(fetched.map((m) => m.id));
+
+  // Partition 0 — a gateway disconnect can miss member-remove events. The
+  // complete startup fetch is authoritative, so retain a departed member's
+  // history but mark their active row left. This is intentionally startup-only
+  // rather than a periodic full-guild fetch.
+  const absentActiveIds = [...existing.entries()]
+    .filter(([discordId, row]) => row.left_at === null && !erased.has(discordId) && !fetchedIds.has(discordId))
+    .map(([discordId]) => discordId);
 
   // Partition 1 — present on Discord, no row at all: insert.
   const missing = fetched
@@ -417,6 +462,24 @@ export async function backfillMembers(
 
   // Chunked repair: identical payload for every row, so .in() batches apply.
   const CHUNK = 200;
+  let markedLeft = 0;
+  for (let i = 0; i < absentActiveIds.length; i += CHUNK) {
+    const chunkIds = absentActiveIds.slice(i, i + CHUNK);
+    const { data: updated, error } = await supabase
+      .from('members')
+      .update({ left_at: new Date().toISOString() })
+      .eq('guild_id', guild.id)
+      .is('left_at', null)
+      .in('discord_id', chunkIds)
+      .select('discord_id');
+
+    if (error) {
+      log.warn('Member backfill absent-row reconcile failed', { count: chunkIds.length, error: error.message });
+      continue;
+    }
+    markedLeft += (updated ?? []).length;
+  }
+
   let repaired = 0;
   for (let i = 0; i < onboardingRepair.length; i += CHUNK) {
     const chunkIds = onboardingRepair.slice(i, i + CHUNK).map((m) => m.id);
@@ -531,9 +594,9 @@ export async function backfillMembers(
     }
   }
 
-  if (inserted > 0 || reconciled > 0 || repaired > 0) {
+  if (inserted > 0 || reconciled > 0 || markedLeft > 0 || repaired > 0) {
     log.info(
-      `Roster backfill: ${inserted} inserted, ${reconciled} left_at reconciled, ${repaired} onboarding repaired`,
+      `Roster backfill: ${inserted} inserted, ${reconciled} left_at reconciled, ${markedLeft} marked left, ${repaired} onboarding repaired`,
     );
   }
   return inserted;

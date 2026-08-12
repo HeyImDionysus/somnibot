@@ -167,7 +167,7 @@ export default function BrandingPage() {
   const selectedEmbed = savedEmbeds.find((embed) => embed.id === selectedEmbedId) ?? savedEmbeds[0];
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
+    <div className="mx-auto max-w-3xl space-y-6 p-0 sm:p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -241,14 +241,14 @@ export default function BrandingPage() {
             },
           ]
         ).map((row) => (
-          <div key={row.key} className="flex items-center justify-between gap-4">
+          <div key={row.key} className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <label className="block text-sm font-medium text-discord-text-secondary">
                 {row.label}
               </label>
               <p className="mt-0.5 text-xs text-discord-text-muted">{row.desc}</p>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex max-w-full flex-wrap items-center gap-2 sm:shrink-0">
               <input
                 type="color"
                 value={row.hex}

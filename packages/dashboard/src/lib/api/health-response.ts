@@ -31,6 +31,8 @@ export async function buildHealthResponse(probe: HealthProbe | null = null) {
   const configStatus = getConfigStatus();
 
   let botStatus: 'online' | 'offline' | 'unknown' = 'unknown';
+  let botBootId: string | null = null;
+  let botHeartbeatAt: number | null = null;
   if (valkeyUp) {
     try {
       const heartbeatRaw = await probe?.readValkeyKey(BOT_HEARTBEAT_KEY);
@@ -38,6 +40,8 @@ export async function buildHealthResponse(probe: HealthProbe | null = null) {
         const heartbeat = JSON.parse(heartbeatRaw);
         const age = Date.now() - (heartbeat.timestamp ?? 0);
         botStatus = age < BOT_HEARTBEAT_STALE_MS ? 'online' : 'offline';
+        botBootId = typeof heartbeat.bootId === 'string' ? heartbeat.bootId : null;
+        botHeartbeatAt = typeof heartbeat.timestamp === 'number' ? heartbeat.timestamp : null;
       } else {
         botStatus = 'offline';
       }
@@ -56,8 +60,12 @@ export async function buildHealthResponse(probe: HealthProbe | null = null) {
         valkey: valkeyUp ? 'connected' : 'fallback',
         bot: botStatus,
       },
+      botRuntime: {
+        bootId: botBootId,
+        heartbeatAt: botHeartbeatAt,
+      },
       timestamp: new Date().toISOString(),
     },
-    { status: 200 },
+    { status: isHealthy ? 200 : 503 },
   );
 }

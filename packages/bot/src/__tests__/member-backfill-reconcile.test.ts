@@ -98,11 +98,23 @@ function makeDiscordMember(id: string, overrides: Record<string, unknown> = {}) 
   };
 }
 
-function makeGuild(members: ReturnType<typeof makeDiscordMember>[]) {
+function makeGuild(
+  members: ReturnType<typeof makeDiscordMember>[],
+  memberCount = members.length,
+  options: {
+    fetch?: () => Promise<Map<string, ReturnType<typeof makeDiscordMember>>>;
+    listPages?: Array<Map<string, ReturnType<typeof makeDiscordMember>>>;
+  } = {},
+) {
   const collection = new Map(members.map((m) => [m.id, m]));
+  let listPage = 0;
   return {
     id: 'guild-1',
-    members: { fetch: vi.fn(async () => collection) },
+    memberCount,
+    members: {
+      fetch: vi.fn(options.fetch ?? (async () => collection)),
+      list: vi.fn(async () => options.listPages?.[listPage++] ?? new Map()),
+    },
   };
 }
 
@@ -178,6 +190,82 @@ describe('backfillMembers — paged reads (B5)', () => {
 // ── B1: stale left_at reconciliation ────────────────────────
 
 describe('backfillMembers — left_at reconciliation (B1)', () => {
+  it('falls back to the paginated REST roster when the bounded gateway fetch fails', async () => {
+    const supabase = makeScriptedSupabase(standardHandler([
+      { discord_id: 'current', left_at: null, onboarding_completed: true },
+      { discord_id: 'departed', left_at: null, onboarding_completed: true },
+    ]));
+    const current = makeDiscordMember('current');
+    const bot = makeDiscordMember('bot', { user: { bot: true } });
+    const restRoster = new Map([[current.id, current], [bot.id, bot]]);
+    const guild = makeGuild([], 3, {
+      fetch: async () => { throw new Error('guild members chunk timed out'); },
+      listPages: [restRoster],
+    });
+
+    await backfillMembers(supabase as never, guild as never);
+
+    expect(guild.members.fetch).toHaveBeenCalledWith({ time: 15_000 });
+    expect(guild.members.list).toHaveBeenCalledWith({ limit: 1000 });
+    expect(guild.memberCount).toBe(2);
+    const departedUpdate = supabase.entries.find(
+      (entry) => entry.table === 'members' && opArgs(entry, 'in') !== undefined,
+    );
+    expect(opArgs(departedUpdate!, 'in')).toEqual(['discord_id', ['departed']]);
+  });
+
+  it('pages the REST fallback with the final first-page member as its after cursor', async () => {
+    const supabase = makeScriptedSupabase(standardHandler([]));
+    const firstPageMembers = Array.from({ length: 1000 }, (_, index) =>
+      makeDiscordMember(`member-${String(index).padStart(4, '0')}`),
+    );
+    const finalMember = makeDiscordMember('member-1000');
+    const firstPage = new Map(firstPageMembers.map((member) => [member.id, member]));
+    const secondPage = new Map([[finalMember.id, finalMember]]);
+    const guild = makeGuild([], 0, {
+      fetch: async () => { throw new Error('guild members chunk timed out'); },
+      listPages: [firstPage, secondPage],
+    });
+
+    const inserted = await backfillMembers(supabase as never, guild as never);
+
+    expect(guild.members.list).toHaveBeenNthCalledWith(1, { limit: 1000 });
+    expect(guild.members.list).toHaveBeenNthCalledWith(2, {
+      limit: 1000,
+      after: 'member-0999',
+    });
+    expect(guild.memberCount).toBe(1001);
+    expect(inserted).toBe(1001);
+  });
+
+  it('marks departed active rows left from a complete fetch and refreshes the live count including bots', async () => {
+    const supabase = makeScriptedSupabase(standardHandler([
+      { discord_id: 'current', left_at: null, onboarding_completed: true },
+      { discord_id: 'departed', left_at: null, onboarding_completed: true },
+      { discord_id: 'erased-departed', left_at: null, onboarding_completed: true },
+    ], ['erased-departed']));
+    const guild = makeGuild([
+      makeDiscordMember('current'),
+      makeDiscordMember('bot', { user: { bot: true } }),
+    ], 3);
+
+    await backfillMembers(supabase as never, guild as never);
+
+    expect(guild.memberCount).toBe(2);
+    const departedUpdate = supabase.entries.find(
+      (entry) => entry.table === 'members' && opArgs(entry, 'in') !== undefined,
+    );
+    expect(departedUpdate).toBeDefined();
+    expect((opArgs(departedUpdate!, 'update') as [Record<string, unknown>])[0]).toEqual({
+      left_at: expect.any(String),
+    });
+    expect(departedUpdate!.ops.filter(([method]) => method === 'eq').map(([, args]) => args)).toEqual([
+      ['guild_id', 'guild-1'],
+    ]);
+    expect(opArgs(departedUpdate!, 'is')).toEqual(['left_at', null]);
+    expect(opArgs(departedUpdate!, 'in')).toEqual(['discord_id', ['departed']]);
+  });
+
   it('clears stale left_at per-row, refreshing identity but never history columns', async () => {
     const supabase = makeScriptedSupabase(standardHandler([
       { discord_id: 'rejoiner', left_at: '2026-01-15T00:00:00Z', onboarding_completed: true },
@@ -374,6 +462,18 @@ describe('backfillMembers — erasure markers (B8)', () => {
 });
 
 describe('recordMemberJoin — erasure marker cleanup (B8)', () => {
+  it('does not create roster rows for bots', async () => {
+    const supabase = makeScriptedSupabase(() => ({ data: null, error: null }));
+    const bot = {
+      id: 'bot-1',
+      guild: { id: 'guild-1' },
+      user: { bot: true },
+    };
+
+    await expect(recordMemberJoin(supabase as never, bot as never, false)).resolves.toBeNull();
+    expect(supabase.entries).toEqual([]);
+  });
+
   it('deletes the erasure marker before any member write (voluntary rejoin = fresh consent)', async () => {
     const handler = (entry: Entry): { data?: unknown; error?: unknown } => {
       if (entry.table === 'members' && firstOp(entry) === 'select') {

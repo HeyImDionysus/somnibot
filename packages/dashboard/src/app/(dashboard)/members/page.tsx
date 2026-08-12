@@ -258,10 +258,10 @@ export default function MembersPage() {
               <th className="px-3 py-3">Member</th>
               <th className="px-3 py-3">Level</th>
               <th className="px-3 py-3">XP</th>
-              <th className="px-3 py-3">Wallet</th>
-              <th className="px-3 py-3">Bank</th>
-              <th className="px-3 py-3">Status</th>
-              <th className="px-3 py-3">Joined</th>
+              <th className="hidden px-3 py-3 md:table-cell">Wallet</th>
+              <th className="hidden px-3 py-3 md:table-cell">Bank</th>
+              <th className="hidden px-3 py-3 sm:table-cell">Status</th>
+              <th className="hidden px-3 py-3 lg:table-cell">Joined</th>
             </tr>
           </thead>
           <tbody>
@@ -269,7 +269,7 @@ export default function MembersPage() {
               <tr
                 key={m.discord_id}
                 className={`border-b border-discord-border-subtle/50 transition-colors ${
-                  selected.has(m.discord_id) ? 'bg-discord-blurple/10' : 'hover:bg-discord-bg-tertiary/50'
+                  selected.has(m.discord_id) ? 'bg-discord-accent/10' : 'hover:bg-discord-bg-tertiary/50'
                 }`}
               >
                 <td className="px-3 py-2.5">
@@ -303,14 +303,22 @@ export default function MembersPage() {
                       <div className="text-xs text-discord-text-muted">
                         @{m.username}
                       </div>
+                      <div className="mt-1 space-y-0.5 text-[11px] text-discord-text-muted sm:hidden">
+                        <div>Wallet {m.wallet?.toLocaleString()} · Bank {m.bank?.toLocaleString()}</div>
+                        <div>
+                          {m.is_banned ? 'Banned' : status === 'left' ? 'Left' : m.suspended ? 'Suspended' : m.is_muted ? 'Muted' : 'Active'}
+                          {' · Joined '}
+                          {m.joined_at ? new Date(m.joined_at).toLocaleDateString() : '—'}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </td>
                 <td className="px-3 py-2.5 text-discord-text-secondary">{m.level}</td>
                 <td className="px-3 py-2.5 text-discord-text-secondary">{m.xp?.toLocaleString()}</td>
-                <td className="px-3 py-2.5 text-discord-text-secondary">{m.wallet?.toLocaleString()}</td>
-                <td className="px-3 py-2.5 text-discord-text-secondary">{m.bank?.toLocaleString()}</td>
-                <td className="px-3 py-2.5">
+                <td className="hidden px-3 py-2.5 text-discord-text-secondary md:table-cell">{m.wallet?.toLocaleString()}</td>
+                <td className="hidden px-3 py-2.5 text-discord-text-secondary md:table-cell">{m.bank?.toLocaleString()}</td>
+                <td className="hidden px-3 py-2.5 sm:table-cell">
                   {m.is_banned ? (
                     <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-xs text-red-400">Banned</span>
                   ) : status === 'left' ? (
@@ -323,7 +331,7 @@ export default function MembersPage() {
                     <span className="rounded-full bg-green-500/20 px-2 py-0.5 text-xs text-green-400">Active</span>
                   )}
                 </td>
-                <td className="px-3 py-2.5 text-discord-text-muted text-xs">
+                <td className="hidden px-3 py-2.5 text-xs text-discord-text-muted lg:table-cell">
                   {m.joined_at ? new Date(m.joined_at).toLocaleDateString() : '—'}
                 </td>
               </tr>

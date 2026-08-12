@@ -38,9 +38,13 @@ permissions:
 env:
   NODE_VERSION: "22"
   PNPM_VERSION: "9.15.4"
+  # GITHUB_SHA is a temporary merge ref on pull_request events. Release proof
+  # must name the actual PR head so receipts cannot be carried across heads.
+  SOMNIBOT_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   # 2.110+ executes CREATE INDEX CONCURRENTLY outside the per-migration
   # transaction, which the online fraud-observation index migration requires.
   SUPABASE_CLI_VERSION: "2.110.0"
+  SUPABASE_CLI_PATH: /usr/local/bin/supabase
 
 # =============================================================================
 # Reusable setup anchor — keeps checkout+pnpm+node+cache consistent
@@ -57,6 +61,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -89,6 +95,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -121,6 +129,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -149,6 +159,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -177,6 +189,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -216,6 +230,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -247,6 +263,39 @@ jobs:
           retention-days: 14
 
   # ──────────────────────────────────────────────────────────────────────────
+  # 6a. Dashboard Browser Tests — rendered Chromium behavior
+  # ──────────────────────────────────────────────────────────────────────────
+  test-dashboard-browser:
+    name: 🌐 Browser Tests (Dashboard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
+      - uses: pnpm/action-setup@v5
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Build shared
+        run: pnpm --filter @somnibot/shared build
+      - name: Install Chromium runtime
+        run: pnpm --filter @somnibot/dashboard exec playwright install --with-deps chromium
+      - name: Run rendered dashboard browser tests
+        run: pnpm --filter @somnibot/dashboard test:e2e
+        env:
+          PLAYWRIGHT_START_SERVER: '1'
+
+  # ──────────────────────────────────────────────────────────────────────────
   # 6b. Shared Package Tests (V5 Audit §13.6)
   # ──────────────────────────────────────────────────────────────────────────
   test-shared:
@@ -255,6 +304,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -281,6 +332,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -308,6 +361,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -338,6 +393,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -375,6 +432,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -415,12 +474,14 @@ jobs:
           done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
       - name: Wait for Supabase REST API
         run: |
           echo "Waiting for Supabase REST API..."
           for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
-              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
               echo "✅ Supabase REST API ready (attempt $i)"
               exit 0
             fi
@@ -435,7 +496,6 @@ jobs:
         run: pnpm --filter @somnibot/bot test:integration --reporter=verbose
         env:
           SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       - name: Stop Supabase
         if: always()
         run: cd packages && supabase stop 2>/dev/null || true
@@ -480,6 +540,8 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -520,12 +582,14 @@ jobs:
           done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
       - name: Wait for Supabase REST API
         run: |
           echo "Waiting for Supabase REST API..."
           for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
-              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
               echo "✅ Supabase REST API ready (attempt $i)"
               exit 0
             fi
@@ -556,22 +620,7 @@ jobs:
           # NB: NO DISCORD_TOKEN — Discord-side readback stays gated/pending.
           NODE_ENV: test
           SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
           # Real Valkey (service container above) so cooldown/streak/rate-limit legs drive.
-          VALKEY_URL: redis://localhost:6379
-          DISCORD_GUILD_ID: e2e-live-disposable-guild
-          SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
-          SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
-          PAYPAL_ENV: sandbox
-      - name: Run A5 46-domain fleet (post-merge, once)
-        if: github.event_name == 'push' && matrix.shard == 1
-        run: >-
-          pnpm --filter @somnibot/testkit test:live --reporter=verbose
-          src/__tests__/live/all-domains-scenario.live.test.ts
-        env:
-          NODE_ENV: test
-          SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
           VALKEY_URL: redis://localhost:6379
           DISCORD_GUILD_ID: e2e-live-disposable-guild
           SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
@@ -587,15 +636,191 @@ jobs:
           --shard=${{ matrix.shard }}/4
         env:
           NODE_ENV: test
-          SUPABASE_URL: http://127.0.0.1:54321
-          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SECRET_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
-          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
-          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
           VALKEY_URL: redis://localhost:6379
+          SOMNIBOT_FLEET_PROOF_DIR: ${{ github.workspace }}/artifacts/proofs
       - name: Stop Supabase
         if: always()
         run: cd packages && supabase stop 2>/dev/null || true
+      - name: Upload external fleet proof receipts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fleet-proof-${{ matrix.shard }}
+          path: artifacts/proofs/*.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 7c. Strict A5 Fleet — all 46 catalog domains on every candidate head.
+  #     Four independent local stacks partition the catalog; domains remain
+  #     sequential inside each shard so shared Supabase state cannot race.
+  # ──────────────────────────────────────────────────────────────────────────
+  test-fleet:
+    name: 🧭 Strict A5 Fleet (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    needs: install
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
+      - uses: pnpm/action-setup@v5
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Supabase CLI
+        run: |
+          curl -fsSL -o /tmp/supabase.tar.gz \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
+          supabase --version
+      - name: Start Supabase local (with Realtime)
+        run: |
+          cd packages
+          for attempt in 1 2 3; do
+            if supabase start; then
+              exit 0
+            else
+              status=$?
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "supabase start failed after ${attempt} attempts (exit ${status})"
+              exit "$status"
+            fi
+
+            delay_seconds=$((attempt * 30))
+            echo "supabase start failed (attempt ${attempt}/3, exit ${status}); cleaning up and retrying in ${delay_seconds}s..."
+            supabase stop 2>/dev/null || true
+            sleep "$delay_seconds"
+          done
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
+      - name: Wait for Supabase REST API
+        run: |
+          echo "Waiting for Supabase REST API..."
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
+              echo "✅ Supabase REST API ready (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — waiting..."
+            sleep 2
+          done
+          echo "❌ Supabase REST API did not respond within 60s"
+          exit 1
+      - name: Build shared + e2e + bot + testkit
+        run: |
+          pnpm --filter @somnibot/shared build
+          pnpm --filter @somnibot/e2e build
+          pnpm --filter @somnibot/bot build
+          pnpm --filter @somnibot/testkit build
+      - name: Run strict assigned fleet shard
+        run: >-
+          pnpm --filter @somnibot/testkit test:live --reporter=verbose
+          src/__tests__/live/all-domains-scenario.live.test.ts
+        env:
+          NODE_ENV: test
+          VALKEY_URL: redis://localhost:6379
+          DISCORD_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_E2E_DISPOSABLE_GUILD_ID: e2e-live-disposable-guild
+          SOMNIBOT_LOOPBACK_E2E_CONFIRMATION: I_UNDERSTAND_THIS_MUTATES_A_DISPOSABLE_DISCORD_GUILD_AND_LOCAL_SUPABASE
+          SOMNIBOT_FLEET_SHARD: ${{ matrix.shard }}/4
+          SOMNIBOT_FLEET_MANIFEST: ${{ github.workspace }}/artifacts/fleet-shard-${{ matrix.shard }}.json
+          PAYPAL_ENV: sandbox
+      - name: Upload strict fleet manifest
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fleet-manifest-${{ matrix.shard }}
+          path: artifacts/fleet-shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop Supabase
+        if: always()
+        run: cd packages && supabase stop 2>/dev/null || true
+
+  aggregate-fleet:
+    name: 🧭 Validate 46-domain fleet (strict on main)
+    if: always()
+    needs: [test-live, test-fleet]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
+      - name: Download all shard manifests
+        uses: actions/download-artifact@v5
+        with:
+          pattern: fleet-manifest-*
+          path: artifacts/fleet
+          merge-multiple: true
+      - name: Prepare external fleet proof directory
+        run: mkdir -p artifacts/proofs
+      - name: Download external fleet proof receipts
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          pattern: fleet-proof-*
+          path: artifacts/proofs
+          merge-multiple: true
+      - name: Load exact-candidate operator acceptance receipts
+        shell: bash
+        run: |
+          evidence_branch="fleet-evidence/${SOMNIBOT_CANDIDATE_SHA}"
+          if git ls-remote --exit-code --heads origin "${evidence_branch}" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "refs/heads/${evidence_branch}"
+            mkdir -p /tmp/somnibot-fleet-evidence
+            git archive FETCH_HEAD fleet-proofs \
+              | tar -xf - -C /tmp/somnibot-fleet-evidence
+            find /tmp/somnibot-fleet-evidence/fleet-proofs \
+              -maxdepth 1 -type f -name 'fleet-proof-*.json' \
+              -exec cp '{}' artifacts/proofs/ ';'
+            echo "Loaded candidate-bound operator receipts from ${evidence_branch}."
+          else
+            echo "No operator receipt branch exists for this candidate yet."
+          fi
+      - name: Validate exact fleet structure and enforce release proof policy
+        run: >-
+          node scripts/aggregate-fleet-manifests.mjs artifacts/fleet artifacts/proofs
+          ${{ github.event_name == 'pull_request' && '--allow-unresolved' || '' }}
+      - name: Inventory every unresolved functional fleet gate
+        if: always()
+        run: node scripts/classify-fleet-gates.mjs artifacts/fleet artifacts/fleet-gate-classification.json
+      - name: Upload functional fleet gate inventory
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fleet-gate-classification
+          path: artifacts/fleet-gate-classification.json
+          if-no-files-found: error
+          retention-days: 30
 
   # ──────────────────────────────────────────────────────────────────────────
   # 8. Migration Lint
@@ -605,6 +830,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -716,6 +943,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - name: Install Supabase CLI
         run: |
           curl -fsSL -o /tmp/supabase.tar.gz \
@@ -743,11 +972,13 @@ jobs:
           done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Export current local Supabase credentials
+        run: node scripts/local-supabase-env.mjs --github-env
       - name: Wait for database
         run: |
           for i in $(seq 1 20); do
-            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
-              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+            if curl -sf -o /dev/null "${SUPABASE_URL}/rest/v1/" \
+              -H "apikey: ${SUPABASE_ANON_KEY}"; then
               echo "✅ DB ready"
               exit 0
             fi
@@ -903,12 +1134,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Fail on DB type drift
         run: |
           set -euo pipefail
+          python3 scripts/test_migration_sql_syntax.py
           python3 scripts/test_generate_db_types.py
           # --check regenerates in memory and exits non-zero if the committed
           # snapshot differs from a fresh generation. The generator resolves the
@@ -924,6 +1158,8 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOMNIBOT_CANDIDATE_SHA }}
       - uses: pnpm/action-setup@v5
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -1076,12 +1312,15 @@ jobs:
       - build
       - test-unit
       - test-dashboard
+      - test-dashboard-browser
       - test-shared
       - test-launcher
       - test-e2e-contract
       - test-testkit
       - test-integration
       - test-live
+      - test-fleet
+      - aggregate-fleet
       - migration-lint
       - db-security-audit
       - type-drift
@@ -1096,12 +1335,15 @@ jobs:
           echo "  build:             ${{ needs.build.result }}"
           echo "  test-unit:         ${{ needs.test-unit.result }}"
           echo "  test-dashboard:    ${{ needs.test-dashboard.result }}"
+          echo "  dashboard-browser: ${{ needs.test-dashboard-browser.result }}"
           echo "  test-shared:       ${{ needs.test-shared.result }}"
           echo "  test-launcher:     ${{ needs.test-launcher.result }}"
           echo "  test-e2e-contract: ${{ needs.test-e2e-contract.result }}"
           echo "  test-testkit:      ${{ needs.test-testkit.result }}"
           echo "  test-integration:  ${{ needs.test-integration.result }}"
           echo "  test-live:         ${{ needs.test-live.result }}"
+          echo "  test-fleet:        ${{ needs.test-fleet.result }}"
+          echo "  aggregate-fleet:   ${{ needs.aggregate-fleet.result }}"
           echo "  migration-lint:    ${{ needs.migration-lint.result }}"
           echo "  db-security-audit: ${{ needs.db-security-audit.result }}"
           echo "  type-drift:        ${{ needs.type-drift.result }}"
@@ -1117,12 +1359,15 @@ jobs:
             "${{ needs.build.result }}" \
             "${{ needs.test-unit.result }}" \
             "${{ needs.test-dashboard.result }}" \
+            "${{ needs.test-dashboard-browser.result }}" \
             "${{ needs.test-shared.result }}" \
             "${{ needs.test-launcher.result }}" \
             "${{ needs.test-e2e-contract.result }}" \
             "${{ needs.test-testkit.result }}" \
             "${{ needs.test-integration.result }}" \
             "${{ needs.test-live.result }}" \
+            "${{ needs.test-fleet.result }}" \
+            "${{ needs.aggregate-fleet.result }}" \
             "${{ needs.migration-lint.result }}" \
             "${{ needs.db-security-audit.result }}" \
             "${{ needs.type-drift.result }}" \

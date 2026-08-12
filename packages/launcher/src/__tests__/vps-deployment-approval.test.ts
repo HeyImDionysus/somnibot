@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { confirmVpsDeploymentApproval } from '../main/vps-deployment-approval';
 import { buildVpsDeploymentPlan } from '../main/vps-deployment-plan';
+import { SOMNIBOT_REPOSITORY_REF, SOMNIBOT_REPOSITORY_URL } from '../main/vps-bootstrap';
 
 const completeVpsInput = {
   runtimeMode: 'vps',
@@ -21,7 +22,20 @@ describe('VPS deployment approval confirmation', () => {
 
     expect(approval).toEqual({
       operatorApproved: true,
-      approvedCommandIds: ['protect-env-file', 'start-stack'],
+      approvedCommandIds: [
+        'ensure-vps-runtime',
+        'prepare-vps-checkout',
+        'write-env-file',
+        'protect-env-file',
+        'stage-local-valkey-state',
+        'quiesce-vps-state-consumers',
+        'start-vps-valkey',
+        'restore-transferred-valkey',
+        'remove-funnel-compose-override',
+        'start-stack',
+        'install-health-recovery',
+        'end-vps-maintenance',
+      ],
     });
     expect(showMessageBox).toHaveBeenCalledOnce();
   });
@@ -66,6 +80,7 @@ describe('VPS deployment approval confirmation', () => {
       title: 'Confirm VPS deployment',
     });
     expect(options?.detail).toContain('Target: deploy@somnibot.example.com (https://somnibot.example.com)');
+    expect(options?.detail).toContain(`Source: ${SOMNIBOT_REPOSITORY_URL} @ ${SOMNIBOT_REPOSITORY_REF}`);
     expect(options?.detail).toContain('[approval required] ssh ');
     expect(options?.detail).toContain('docker compose');
     expect(options?.detail).not.toContain('sb_secret_');

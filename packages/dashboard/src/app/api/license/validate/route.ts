@@ -37,6 +37,10 @@ interface LookupResult {
   config_feature_flags?: string[];
   config_tier?: string;
   config_heartbeat_interval_seconds?: number;
+  config_sdk_cache_ttl_ms?: number;
+  config_offline_grace_period_seconds?: number;
+  config_require_discord_guild_membership?: boolean;
+  config_license_mode?: string;
   customer_discord_username?: string;
   customer_discord_id?: string;
   product_guild_id?: string;
@@ -144,6 +148,36 @@ export async function POST(req: NextRequest) {
       status: 'revoked',
       error: 'License is not valid for this product',
     });
+  }
+
+  // Membership is a live entitlement prerequisite when the owner enables it.
+  // The members table is the bot's durable Discord roster snapshot; only an
+  // active row satisfies the check, so a departed member cannot keep a key
+  // alive indefinitely.
+  if (
+    result.config_require_discord_guild_membership === true
+    && result.product_guild_id
+    && result.customer_discord_id
+  ) {
+    const { data: member, error: memberError } = await supabase
+      .from('members')
+      .select('discord_id')
+      .eq('guild_id', result.product_guild_id)
+      .eq('discord_id', result.customer_discord_id)
+      .is('left_at', null)
+      .maybeSingle();
+    if (memberError) {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      return licenseUnavailable('License/validate guild membership', memberError);
+    }
+    if (!member) {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'guild_membership_required', clientIp, app_version);
+      return NextResponse.json({
+        valid: false,
+        status: 'guild_membership_required',
+        error: 'Join the product Discord server before using this license.',
+      });
+    }
   }
 
   // 4. Check entitlement
@@ -368,6 +402,10 @@ export async function POST(req: NextRequest) {
     grace_period_ends_at: inGracePeriod ? graceEndsAt : null,
     session_id: sessionId ?? null,
     heartbeat_interval_seconds: result.config_heartbeat_interval_seconds ?? 0,
+    sdk_cache_ttl_ms: result.config_sdk_cache_ttl_ms ?? 60000,
+    offline_grace_period_seconds: result.config_offline_grace_period_seconds ?? 86400,
+    require_discord_guild_membership: result.config_require_discord_guild_membership ?? true,
+    license_mode: result.config_license_mode ?? 'portal_only',
   });
 }
 
@@ -446,6 +484,37 @@ interface FraudCheckFailure {
   error: string;
 }
 
+const LICENSE_FRAUD_DEFAULTS = {
+  deviceAbuseMultiplier: 3,
+  ipMismatchThreshold: 5,
+  criticalIncidentThreshold: 3,
+};
+
+async function loadLicenseFraudThresholds(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+): Promise<typeof LICENSE_FRAUD_DEFAULTS> {
+  const result = { ...LICENSE_FRAUD_DEFAULTS };
+  try {
+    const { data } = await supabase
+      .from('fraud_rules')
+      .select('rule_type, config, enabled')
+      .eq('guild_id', guildId)
+      .eq('enabled', true)
+      .limit(100);
+    for (const rule of data ?? []) {
+      const value = Number((rule.config as Record<string, unknown> | null)?.threshold);
+      if (!Number.isInteger(value) || value <= 0) continue;
+      if (rule.rule_type === 'device_limit' && value >= 2 && value <= 10) result.deviceAbuseMultiplier = value;
+      if (rule.rule_type === 'ip_mismatch' && value >= 2 && value <= 100) result.ipMismatchThreshold = value;
+      if (rule.rule_type === 'critical_incident' && value >= 1 && value <= 50) result.criticalIncidentThreshold = value;
+    }
+  } catch {
+    // Fraud checks are advisory and never block license validation.
+  }
+  return result;
+}
+
 /**
  * Run all fraud checks and surface any failures.
  *
@@ -461,9 +530,10 @@ async function runFraudChecks(
   maxDevices: number,
   discordId: string | null,
 ): Promise<void> {
+  const thresholds = await loadLicenseFraudThresholds(supabase, guildId);
   const checks = [
-    { name: 'device_abuse', run: () => checkDeviceAbuse(supabase, guildId, licenseKeyId, maxDevices, discordId) },
-    { name: 'ip_mismatch', run: () => checkIPMismatch(supabase, guildId, licenseKeyId, discordId) },
+    { name: 'device_abuse', run: () => checkDeviceAbuse(supabase, guildId, licenseKeyId, maxDevices, discordId, thresholds.deviceAbuseMultiplier) },
+    { name: 'ip_mismatch', run: () => checkIPMismatch(supabase, guildId, licenseKeyId, discordId, thresholds.ipMismatchThreshold) },
   ];
 
   const settled = await Promise.allSettled(checks.map((c) => c.run()));
@@ -479,7 +549,7 @@ async function runFraudChecks(
   });
 
   try {
-    await checkCriticalFraudThreshold(supabase, guildId);
+    await checkCriticalFraudThreshold(supabase, guildId, thresholds.criticalIncidentThreshold);
   } catch (err) {
     failures.push({
       check: 'critical_fraud_threshold',
@@ -672,6 +742,7 @@ async function checkDeviceAbuse(
   licenseKeyId: string,
   maxDevices: number,
   discordId: string | null,
+  multiplier = DEVICE_ABUSE_HIGH_RATIO,
 ): Promise<void> {
   const since = new Date(Date.now() - DEVICE_ABUSE_WINDOW_MS).toISOString();
 
@@ -693,13 +764,13 @@ async function checkDeviceAbuse(
   const activeDevices = rows.filter((s) => s.active).length;
   const evictedInWindow = rows.filter((s) => s.deactivation_reason === 'device_limit').length;
 
-  if (devicesInWindow <= maxDevices * DEVICE_ABUSE_HIGH_RATIO) return;
+  if (devicesInWindow <= maxDevices * multiplier) return;
 
   const windowDays = Math.round(DEVICE_ABUSE_WINDOW_MS / (24 * 60 * 60 * 1000));
   await upsertOpenFraudSignal(supabase, {
     guildId,
     signalType: 'device_abuse',
-    severity: devicesInWindow > maxDevices * DEVICE_ABUSE_CRITICAL_RATIO ? 'critical' : 'high',
+    severity: devicesInWindow > maxDevices * (multiplier + 2) ? 'critical' : 'high',
     entityType: 'license_key',
     entityId: licenseKeyId,
     discordId,
@@ -709,6 +780,7 @@ async function checkDeviceAbuse(
       devices_in_window: devicesInWindow,
       window_days: windowDays,
       max_devices: maxDevices,
+      multiplier,
       ratio: devicesInWindow / maxDevices,
       // Context for the operator: under evict_oldest `active_sessions` is
       // pinned at max_devices, so a high device count with a pinned seat count
@@ -725,6 +797,7 @@ async function checkIPMismatch(
   guildId: string,
   licenseKeyId: string,
   discordId: string | null,
+  threshold = 5,
 ): Promise<void> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
@@ -741,16 +814,16 @@ async function checkIPMismatch(
 
   const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
 
-  if (uniqueIPs.size >= 5) {
+  if (uniqueIPs.size >= threshold) {
     await upsertOpenFraudSignal(supabase, {
       guildId,
       signalType: 'ip_mismatch',
-      severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
+      severity: uniqueIPs.size >= threshold * 2 ? 'critical' : 'medium',
       entityType: 'license_key',
       entityId: licenseKeyId,
       discordId,
       description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
-      evidence: { unique_ips: uniqueIPs.size, window_hours: 24 },
+      evidence: { unique_ips: uniqueIPs.size, threshold, window_hours: 24 },
     });
   }
 }
@@ -765,6 +838,7 @@ async function checkIPMismatch(
 async function checkCriticalFraudThreshold(
   supabase: ReturnType<typeof createAdminSupabase>,
   guildId: string,
+  threshold = 3,
 ): Promise<void> {
   // Errors are thrown to the caller (runFraudChecks), which logs and alerts —
   // still fire-and-forget, so incident creation cannot break license validation.
@@ -782,7 +856,7 @@ async function checkCriticalFraudThreshold(
     throw new Error(`fraud signal count query failed: ${countError.message}`);
   }
 
-  if (!count || count < 3) return;
+  if (!count || count < threshold) return;
 
   // Check if we already created an incident for this burst
   const { data: existing, error: existingError } = await supabase

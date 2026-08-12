@@ -73,7 +73,7 @@ export async function DELETE(
   // optional embed, so a non-matching parent yields no row at all.
   const { data: session, error: lookupError } = await admin
     .from('license_sessions')
-    .select('id, active, license_keys!inner(customer_id, guild_id)')
+    .select('id, active, license_keys!inner(customer_id, guild_id, product_id, products!inner(product_license_config(self_service_device_removal)))')
     .eq('id', sessionId)
     .eq('license_keys.customer_id', portalSession.customer_id)
     .eq('license_keys.guild_id', portalSession.guild_id)
@@ -85,6 +85,14 @@ export async function DELETE(
     // Deliberately indistinguishable from "does not exist": a customer must not
     // be able to probe for other customers' session ids.
     return NextResponse.json({ error: 'Session not found' }, { status: 404 });
+  }
+
+  const license = session.license_keys as {
+    products?: { product_license_config?: Array<{ self_service_device_removal?: boolean }> };
+  } | null;
+  const removalAllowed = license?.products?.product_license_config?.[0]?.self_service_device_removal ?? true;
+  if (!removalAllowed) {
+    return NextResponse.json({ error: 'Self-service device removal is disabled for this product.' }, { status: 403 });
   }
 
   // Idempotent: signing out an already-inactive device is a success, not an

@@ -50,14 +50,14 @@ export interface GuildQueue {
  * Prevents unbounded memory growth in Valkey (queue is serialized as JSON in
  * a single key). 5,000 tracks ≈ ~2.5 MB serialized — well within limits.
  */
-const MAX_QUEUE_SIZE = 5_000;
+const DEFAULT_MAX_QUEUE_SIZE = 5_000;
 
 /**
  * V9 Audit §12.P2: Per-user queue limit — prevents a single user from
  * monopolizing the entire queue. Each user may have at most this many
  * entries queued (not counting the currently playing track).
  */
-const MAX_PER_USER_QUEUE = 50;
+const DEFAULT_MAX_PER_USER_QUEUE = 50;
 
 // ── Valkey Key Helpers ────────────────────────────────────
 
@@ -76,7 +76,16 @@ function voteSkipKey(guildId: string): string {
 // ── Queue Manager ─────────────────────────────────────────
 
 export class MusicQueueManager {
+  private maxQueueSize = DEFAULT_MAX_QUEUE_SIZE;
+  private maxPerUserQueue = DEFAULT_MAX_PER_USER_QUEUE;
+
   constructor(private readonly valkey: Valkey) {}
+
+  /** Apply guild-configured limits loaded by MusicPlayerManager. */
+  setLimits(limits: { maxQueueSize?: number; maxPerUserQueue?: number }): void {
+    if (limits.maxQueueSize !== undefined) this.maxQueueSize = Math.max(1, Math.min(5_000, limits.maxQueueSize));
+    if (limits.maxPerUserQueue !== undefined) this.maxPerUserQueue = Math.max(1, Math.min(500, limits.maxPerUserQueue));
+  }
 
   /** Get the queue for a guild, or null if none exists. */
   async getQueue(guildId: string): Promise<GuildQueue | null> {
@@ -131,7 +140,7 @@ export class MusicQueueManager {
     if (!queue) return { queue: null };
 
     // Global queue cap
-    const available = MAX_QUEUE_SIZE - queue.entries.length;
+    const available = this.maxQueueSize - queue.entries.length;
     if (available <= 0) return { queue };
 
     // Per-user cap — count how many the requesting user already has queued
@@ -139,7 +148,7 @@ export class MusicQueueManager {
     if (entries.length > 0) {
       const userId = entries[0]!.requestedBy;
       const userCount = queue.entries.filter((e) => e.requestedBy === userId).length;
-      const userAvailable = MAX_PER_USER_QUEUE - userCount;
+      const userAvailable = this.maxPerUserQueue - userCount;
       if (userAvailable <= 0) return { queue, userLimitHit: true };
       const cap = Math.min(available, userAvailable);
       const toAdd = cap >= entries.length ? entries : entries.slice(0, cap);

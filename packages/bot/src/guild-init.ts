@@ -15,6 +15,7 @@ import type { Guild, RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 import { BOOT_ID } from './services/boot-identity.js';
 import { seedStarterContent } from './services/content-seeder.js';
 import { backfillMembers } from './features/welcome/member-service.js';
+import { reconcilePendingOnboardingMembers } from './features/welcome/onboarding-handler.js';
 import { REST, Routes } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
@@ -22,11 +23,12 @@ import type { PlatformEventBus } from './services/event-bus.js';
 import type { GuildContext } from './guild-context.js';
 import type { SomniClient } from './client.js';
 import { createLogger } from '@somnibot/shared';
+import { SOMNIBOT_VERSION } from './version.js';
 
 // ── Feature managers ──
 import { AutomationEngine } from './features/automations/index.js';
 import { initVoiceTracking, startVoiceXpTicker, buildLevelCommands } from './features/levels/index.js';
-import { loadReactionRoles } from './features/reaction-roles/index.js';
+import { loadReactionRoles, deployButtonRolePanelsForGuild } from './features/reaction-roles/index.js';
 import { loadCustomCommands } from './features/custom-commands/index.js';
 import { TempChannelManager } from './features/temp-channels/temp-channel-manager.js';
 import { buildTempChannelCommands } from './features/temp-channels/commands.js';
@@ -54,7 +56,7 @@ import { MusicStatusReporter } from './services/music-status-reporter.js';
 import { HeartbeatService } from './services/heartbeat.js';
 import { AlertService } from './services/alert-service.js';
 import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
-import { scheduleReconciliation } from './services/reconciliation.js';
+import { scheduleReconciliation, type ReconciliationSchedule } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
 import { startAntiRaidPruner, stopAntiRaidPruner, clearAntiRaidGuildState, resumeRaidState } from './features/anti-raid/index.js';
@@ -124,7 +126,7 @@ interface GuildServices {
     stop: () => Promise<void>;
     reconfigure: (intervalMinutes?: number, runImmediately?: boolean) => void;
   };
-  reconTimer?: ReturnType<typeof setInterval>;
+  reconciliationSchedule?: ReconciliationSchedule;
   ticketCleanupTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
   configWatcher?: ConfigWatcher;
@@ -163,6 +165,52 @@ export function initializeMarketFeature(
   for (const command of Object.values(commands)) {
     allCommands.push(command.toJSON());
   }
+}
+
+export function initializeLotteryFeature(
+  ctx: GuildContext,
+  client: SomniClient,
+  allCommands: RESTPostAPIApplicationCommandsJSONBody[],
+  scheduleDraws: boolean,
+): void {
+  const manager = new LotteryManager(ctx.supabase, client);
+  registerLotteryManager(manager, ctx.guildId);
+  ctx.setManager('lottery', manager);
+  if (scheduleDraws) manager.scheduleLotteryDraws(ctx.guildId);
+  const commands = buildLotteryCommands();
+  for (const command of Object.values(commands)) {
+    allCommands.push(command.toJSON());
+  }
+}
+
+export function initializePollsFeature(
+  ctx: GuildContext,
+  allCommands: RESTPostAPIApplicationCommandsJSONBody[],
+): void {
+  const manager = new PollsManager(ctx.supabase);
+  registerPollsManager(manager, ctx.guildId);
+  ctx.setManager('polls', manager);
+  const commands = buildPollCommands();
+  for (const command of Object.values(commands)) {
+    allCommands.push(command.toJSON());
+  }
+}
+
+export function getCommunityChannelMappings(
+  guild: Pick<Guild, 'rulesChannelId' | 'publicUpdatesChannelId' | 'safetyAlertsChannelId'> & {
+    channels: { cache: { has(discordId: string): boolean } };
+  },
+): Array<{ key: string; discordId: string }> {
+  const communityIds: Array<{ key: string; discordId: string }> = [];
+  const register = (key: string, discordId: string | null): void => {
+    if (discordId && guild.channels.cache.has(discordId)) {
+      communityIds.push({ key, discordId });
+    }
+  };
+  register('channel:rules', guild.rulesChannelId);
+  register('channel:public-updates', guild.publicUpdatesChannelId);
+  register('channel:moderator-only', guild.safetyAlertsChannelId);
+  return communityIds;
 }
 
 /**
@@ -213,11 +261,7 @@ export async function initGuildFeatures(
 
   // ── Community channels ──
   try {
-    const communityIds: { key: string; discordId: string }[] = [];
-    if (guild.rulesChannelId) communityIds.push({ key: 'channel:rules', discordId: guild.rulesChannelId });
-    if (guild.publicUpdatesChannelId) communityIds.push({ key: 'channel:public-updates', discordId: guild.publicUpdatesChannelId });
-    const modOnly = guild.channels.cache.find((c) => c.name === 'moderator-only');
-    if (modOnly) communityIds.push({ key: 'channel:moderator-only', discordId: modOnly.id });
+    const communityIds = getCommunityChannelMappings(guild);
 
     if (communityIds.length > 0) {
       const rows = communityIds.map((c) => ({
@@ -300,9 +344,16 @@ export async function initGuildFeatures(
       guildLog.warn('Member roster backfill failed', { error: String(err) });
     })
     : Promise.resolve();
+  const onboardingReconcileWork = eagerInitEnabled && guildCfg
+    ? backfillWork.then(async () => {
+      await reconcilePendingOnboardingMembers(client, guild, guildCfg);
+    }, (err) => {
+      guildLog.warn('Pending onboarding reconciliation skipped', { error: String(err) });
+    })
+    : Promise.resolve();
   // Tracked immediately: if the economy block below is disabled, the warmup
   // never runs, and the backfill must still be awaitable by the E2E harness.
-  ctx.backgroundInit = backfillWork;
+  ctx.backgroundInit = onboardingReconcileWork;
   const aqHandle = await startActionQueueListener(guild, supabase);
   services.actionQueueStaleTimer = aqHandle.staleRecoveryTimer;
   services.actionQueueStop = aqHandle.stop;
@@ -348,6 +399,7 @@ export async function initGuildFeatures(
     await initVoiceTracking(guild);
     services.voiceXpTimer = await startVoiceXpTicker(guild, supabase, valkey, eventBus);
     await loadReactionRoles(supabase, valkey, guildId);
+    await deployButtonRolePanelsForGuild(guild, supabase);
 
     const rest = new REST({ version: '10' }).setToken(client.env.DISCORD_TOKEN);
     // FIX #15: loadCustomCommands now returns command JSON bodies to merge
@@ -500,19 +552,8 @@ export async function initGuildFeatures(
         const cmds = buildGameCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
-      if (guildCfg.economy_lottery_enabled) {
-        const mgr = new LotteryManager(supabase, client);
-        registerLotteryManager(mgr, guildId); ctx.setManager('lottery', mgr);
-        mgr.scheduleLotteryDraws(guildId);
-        const cmds = buildLotteryCommands();
-        for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
-      }
-      if (guildCfg.polls_enabled || guildCfg.predictions_enabled) {
-        const mgr = new PollsManager(supabase);
-        registerPollsManager(mgr, guildId); ctx.setManager('polls', mgr);
-        const cmds = buildPollCommands();
-        for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
-      }
+      initializeLotteryFeature(ctx, client, allCommands, guildCfg.economy_lottery_enabled);
+      initializePollsFeature(ctx, allCommands);
       if (guildCfg.economy_pets_enabled) {
         const mgr = new PetsManager(supabase, client, valkey);
         registerPetsManager(mgr, guildId); ctx.setManager('pets', mgr);
@@ -605,7 +646,7 @@ export async function initGuildFeatures(
     })() : Promise.resolve();
     // Fold the warmup into the tracked background work (joins the backfill
     // registered above), so the E2E harness can wait for ALL init writes.
-    ctx.backgroundInit = Promise.allSettled([backfillWork, warmupWork]).then(() => undefined);
+    ctx.backgroundInit = Promise.allSettled([onboardingReconcileWork, warmupWork]).then(() => undefined);
   } catch (err) {
     guildLog.error('Economy system init error', { error: String(err) });
   }
@@ -628,7 +669,7 @@ export async function initGuildFeatures(
 
   // ── Entitlement reconciliation ──
   try {
-    services.reconTimer = scheduleReconciliation(guild, supabase);
+    services.reconciliationSchedule = scheduleReconciliation(guild, supabase);
     guildLog.info('Entitlement reconciliation scheduled');
   } catch (err) {
     guildLog.error('Reconciliation scheduler failed', { error: String(err) });
@@ -665,10 +706,16 @@ export async function initGuildFeatures(
       action: 'bot.started',
       actorType: 'system',
       actorId: 'system',
-      details: { version: '0.5.0' },
+      details: { version: SOMNIBOT_VERSION },
     });
 
-    services.diagnosticsService = new DiagnosticsService(client, supabase, guildId);
+    services.diagnosticsService = new DiagnosticsService(
+      client,
+      supabase,
+      guildId,
+      undefined,
+      Number(guildCfg?.diagnostics_snapshot_interval_ms ?? 60_000),
+    );
     services.diagnosticsService.start();
 
     // V5 Fix #9: Heartbeat is now bot-level (started in index.ts), not per-guild.
@@ -712,6 +759,16 @@ export async function initGuildFeatures(
       valkey,
       (intervalMinutes, runImmediately) =>
         services.syncHandle?.reconfigure(intervalMinutes, runImmediately),
+      () => { void services.auditService?.refreshFlushInterval(); },
+      () => { void services.automationEngine?.refreshPreviewRequirement(); },
+      (snapshotIntervalMs) => {
+        if (snapshotIntervalMs !== undefined) {
+          services.diagnosticsService?.setSnapshotInterval(snapshotIntervalMs);
+        }
+      },
+      async () => {
+        await reconcilePendingOnboardingMembers(client, guild);
+      },
     );
     services.configWatcher.start();
     ctx.setManager('configWatcher', services.configWatcher);
@@ -828,7 +885,21 @@ export async function registerGuildCommands(
 /**
  * Destroy all services for a guild context (called on guild leave or shutdown).
  */
-export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
+export interface DestroyGuildServicesOptions {
+  /**
+   * Test-only lifecycle seam for the loopback fleet: quiesce every background
+   * producer while retaining the real action-queue listener long enough for a
+   * privacy purge to settle its queued work.
+   */
+  preserveActionQueue?: boolean;
+  /** Do not unregister manager state while the retained queue is still live. */
+  preserveRegistries?: boolean;
+}
+
+export async function destroyGuildServices(
+  ctx: GuildContext,
+  options: DestroyGuildServicesOptions = {},
+): Promise<void> {
   const services = ctx.getManager<GuildServices>('_services');
   if (!services) return;
 
@@ -848,8 +919,10 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
   // accepting. Any final shutdown events therefore enter its serialized drain.
   if (services.snapshotTimer) clearInterval(services.snapshotTimer);
   if (services.voiceXpTimer) clearInterval(services.voiceXpTimer);
-  if (services.actionQueueStaleTimer) clearInterval(services.actionQueueStaleTimer);
-  if (services.actionQueueStop) {
+  if (!options.preserveActionQueue && services.actionQueueStaleTimer) {
+    clearInterval(services.actionQueueStaleTimer);
+  }
+  if (!options.preserveActionQueue && services.actionQueueStop) {
     try {
       pendingProducerStops.push({
         name: 'action queue',
@@ -859,7 +932,12 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
       stopFailures.push({ name: 'action queue', error });
     }
   }
-  if (services.reconTimer) clearInterval(services.reconTimer);
+  if (services.reconciliationSchedule) {
+    pendingProducerStops.push({
+      name: 'entitlement reconciliation',
+      promise: services.reconciliationSchedule.stop(),
+    });
+  }
   if (services.ticketCleanupTimer) clearInterval(services.ticketCleanupTimer);
   if (services.syncHandle) {
     try {
@@ -974,6 +1052,11 @@ export async function destroyGuildServices(ctx: GuildContext): Promise<void> {
       stopFailures.map(({ error }) => error),
       `Failed to stop ${stopFailures.length} guild service(s) for ${ctx.guildId}`,
     );
+  }
+
+  if (options.preserveRegistries) {
+    guildLog.info('Guild producers quiesced while retaining action queue for privacy purge');
+    return;
   }
 
   // Phase 3: only a fully successful audit drain authorizes irreversible

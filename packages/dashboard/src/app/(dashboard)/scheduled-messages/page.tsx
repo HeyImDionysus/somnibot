@@ -115,6 +115,7 @@ export default function ScheduledMessagesPage() {
   const [form, setForm] = useState(emptyForm);
   const [embedOptions, setEmbedOptions] = useState<EmbedOption[]>([]);
   const [featureEnabled, setFeatureEnabled] = useState(true);
+  const [defaults, setDefaults] = useState({ max_schedules_per_guild: 25, default_timezone: 'UTC', missed_run_policy: 'skip-missed', allow_embeds: true, variables_enabled: true });
   // Binds the form's variable chips to the message box so a click can never
   // insert into an unrelated field.
   const messageRef = useRef<HTMLTextAreaElement>(null);
@@ -127,6 +128,7 @@ export default function ScheduledMessagesPage() {
       ]);
       const json = await msgRes.json();
       if (json.success) setMessages(json.data);
+      if (json.success && json.config) setDefaults((d) => ({ ...d, ...json.config }));
       else setError(json.error);
       const guildJson = await guildRes.json();
       if (guildJson.success) {
@@ -184,6 +186,13 @@ export default function ScheduledMessagesPage() {
     }
   };
 
+  const saveDefaults = async (patch: Partial<typeof defaults>) => {
+    const next = { ...defaults, ...patch };
+    setDefaults(next);
+    const res = await fetch('/api/guild', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    if (!res.ok) toast({ title: 'Failed to save schedule defaults', variant: 'error' });
+  };
+
   const openEditor = (sm?: ScheduledMessage) => {
     if (sm) {
       setEditingId(sm.id);
@@ -203,7 +212,7 @@ export default function ScheduledMessagesPage() {
       });
     } else {
       setEditingId(null);
-      setForm({ ...emptyForm });
+      setForm({ ...emptyForm, timezone: defaults.default_timezone });
     }
     setShowForm(true);
   };
@@ -233,7 +242,7 @@ export default function ScheduledMessagesPage() {
       message: form.message || null,
       embed_config_id: form.embed_config_id || null,
       cron_expression: form.cron_expression,
-      timezone: form.timezone,
+      timezone: form.timezone || defaults.default_timezone,
       start_date: form.start_date ? new Date(form.start_date).toISOString() : null,
       end_date: form.end_date ? new Date(form.end_date).toISOString() : null,
       max_sends: form.max_sends ? parseInt(form.max_sends, 10) : null,
@@ -305,10 +314,10 @@ export default function ScheduledMessagesPage() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-6">
+    <div className="mx-auto max-w-4xl space-y-6 p-0 sm:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start justify-between gap-3 sm:items-center sm:justify-start">
           <div>
             <h1 className="text-2xl font-bold text-discord-text-primary">Scheduled Messages</h1>
             <p className="text-sm text-discord-text-muted">Automatically send recurring messages on a schedule</p>
@@ -323,7 +332,7 @@ export default function ScheduledMessagesPage() {
         </div>
         <button
           onClick={() => openEditor()}
-          className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard"
+          className="self-start rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard sm:self-auto"
         >
           + New Schedule
         </button>
@@ -333,6 +342,16 @@ export default function ScheduledMessagesPage() {
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
       )}
+
+      <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-3 text-sm text-discord-text-primary">
+        <div className="flex flex-wrap gap-4 items-center">
+          <label>Max schedules <input type="number" min={1} max={200} value={defaults.max_schedules_per_guild} onChange={(e) => saveDefaults({ max_schedules_per_guild: Number(e.target.value) })} className="ml-2 w-16 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
+          <label>Default timezone <input value={defaults.default_timezone} onChange={(e) => saveDefaults({ default_timezone: e.target.value })} className="ml-2 w-40 rounded bg-discord-bg-tertiary px-2 py-1" /></label>
+          <label>Missed runs <select value={defaults.missed_run_policy} onChange={(e) => saveDefaults({ missed_run_policy: e.target.value as typeof defaults.missed_run_policy })} className="ml-2 rounded bg-discord-bg-tertiary px-2 py-1"><option value="skip-missed">Skip + notify</option><option value="send-latest">Send latest</option></select></label>
+          <label><input type="checkbox" checked={defaults.allow_embeds} onChange={(e) => saveDefaults({ allow_embeds: e.target.checked })} /> Allow embeds</label>
+          <label><input type="checkbox" checked={defaults.variables_enabled} onChange={(e) => saveDefaults({ variables_enabled: e.target.checked })} /> Enable variables</label>
+        </div>
+      </div>
 
       {/* ── Editor Modal ─────────────────────────────── */}
       {showForm && (

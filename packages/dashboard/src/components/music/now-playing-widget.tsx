@@ -80,16 +80,16 @@ export default function NowPlayingWidget() {
 
   if (loading) {
     return (
-      <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle p-4 animate-pulse">
-        <div className="h-4 bg-discord-tertiary rounded w-32 mb-3" />
-        <div className="h-8 bg-discord-tertiary rounded w-full" />
+      <div className="bg-discord-bg-secondary rounded-lg border border-discord-border-subtle p-4 animate-pulse">
+        <div className="h-4 bg-discord-bg-tertiary rounded w-32 mb-3" />
+        <div className="h-8 bg-discord-bg-tertiary rounded w-full" />
       </div>
     );
   }
 
   if (!status?.enabled) {
     return (
-      <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle p-4">
+      <div className="bg-discord-bg-secondary rounded-lg border border-discord-border-subtle p-4">
         <h3 className="text-sm font-semibold text-white mb-2">🎵 Music</h3>
         <p className="text-xs text-discord-text-muted">Music system is disabled</p>
       </div>
@@ -97,7 +97,7 @@ export default function NowPlayingWidget() {
   }
 
   return (
-    <div className="bg-discord-secondary rounded-lg border border-discord-border-subtle overflow-hidden">
+    <div className="bg-discord-bg-secondary rounded-lg border border-discord-border-subtle overflow-hidden">
       {/* Header */}
       <div className="p-4 border-b border-discord-border-subtle">
         <div className="flex items-center justify-between">
@@ -134,9 +134,9 @@ export default function NowPlayingWidget() {
               </p>
               <div className="mt-2">
                 {/* Progress bar */}
-                <div className="w-full h-1 bg-discord-tertiary rounded-full overflow-hidden">
+                <div className="w-full h-1 bg-discord-bg-tertiary rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-discord-blurple rounded-full transition-all"
+                    className="h-full bg-discord-accent rounded-full transition-all"
                     style={{
                       width: `${Math.min(100, (status.nowPlaying.position / status.nowPlaying.duration) * 100)}%`,
                     }}
@@ -173,7 +173,7 @@ export default function NowPlayingWidget() {
           {status.recentTracks.slice(0, 5).map((track, i) => (
             <div
               key={i}
-              className="px-4 py-1.5 flex items-center justify-between text-xs hover:bg-discord-tertiary"
+              className="px-4 py-1.5 flex items-center justify-between text-xs hover:bg-discord-bg-tertiary"
             >
               <div className="flex-1 min-w-0">
                 <span className="text-white truncate">{track.title}</span>

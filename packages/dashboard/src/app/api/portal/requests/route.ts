@@ -46,6 +46,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
     }
 
+    const { data: portalConfig } = await admin
+      .from('guild_config')
+      .select('refund_requests_enabled, service_requests_enabled')
+      .eq('guild_id', session.guild_id)
+      .maybeSingle();
+
     const rl = await rateLimits.portalData(hashToken(token));
     if (rl.limited) {
       return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
@@ -54,6 +60,12 @@ export async function POST(request: NextRequest) {
     const parsed = await parseBody(request, portalRequestSchema);
     if (!parsed.ok) return parsed.response;
     const { type, order_id, reason } = parsed.data;
+    if (type === 'refund' && portalConfig?.refund_requests_enabled === false) {
+      return NextResponse.json({ error: 'Refund requests are disabled for this store.' }, { status: 403 });
+    }
+    if (type === 'service' && portalConfig?.service_requests_enabled === false) {
+      return NextResponse.json({ error: 'Service requests are disabled for this store.' }, { status: 403 });
+    }
 
     // If an order is referenced, it MUST belong to this customer in this guild —
     // never reveal or act on another customer's / guild's order.

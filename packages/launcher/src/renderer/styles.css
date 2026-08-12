@@ -885,10 +885,68 @@ main::-webkit-scrollbar-thumb:hover {
   border-color: var(--text-success);
 }
 
+.field select {
+  width: 100%;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.field select:focus {
+  border-color: var(--border-focus);
+  background: var(--bg-input-focus);
+}
+
+.field-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.field-help {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.supabase-project-picker {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+}
+
+.supabase-project-picker.hidden {
+  display: none;
+}
+
+.supabase-project-picker > label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.supabase-project-picker .field-row {
+  align-items: stretch;
+}
+
+.supabase-project-picker .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .toggle-vis {
   position: absolute;
   right: 8px;
-  bottom: 8px;
+  top: 27px;
   background: none;
   border: none;
   color: var(--text-muted);
@@ -901,6 +959,19 @@ main::-webkit-scrollbar-thumb:hover {
 }
 
 .toggle-vis:hover {
+  opacity: 1;
+}
+
+.field input.has-saved-secret {
+  padding-right: 58px;
+}
+
+.toggle-vis.saved,
+.toggle-vis.saved:hover {
+  color: var(--text-success);
+  cursor: default;
+  font-size: 10px;
+  font-weight: 600;
   opacity: 1;
 }
 
@@ -1187,6 +1258,26 @@ footer {
 .log-toggle:hover {
   background: var(--bg-hover);
   color: var(--text-secondary);
+}
+
+.vps-funnel-url-preview strong {
+  color: var(--text-secondary);
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  main {
+    padding: 16px 56px 16px 16px;
+  }
+
+  .runtime-choice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .field-row {
+    flex-direction: column;
+  }
 }
 
 .log-panel {

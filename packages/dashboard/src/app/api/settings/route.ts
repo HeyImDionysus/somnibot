@@ -9,6 +9,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { apiServerError, dbError } from '@/lib/api/response';
 import { recordAdminChange, humanizeColumn } from '@/lib/admin-changes';
 import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
+import { encryptCloudCredential } from '@/lib/cloud-credential-crypto';
 
 const settingsUpdate = z.object({
   section: z.string().min(1).max(64),
@@ -35,7 +36,27 @@ const SECRET_FIELDS = new Set([
   'discord_bot_token',
   'discord_client_secret',
   'paypal_client_secret',
+  'paypal_webhook_id',
   'lavalink_password',
+  'valkey_url',
+  'supabase_access_token',
+  'supabase_db_url',
+  'supabase_db_url_template',
+  'supabase_db_password',
+  'discord_token',
+  'paypal_webhook_proof_key',
+  'tailscale_auth_key',
+  'vps_csrf_secret',
+  'vps_nextauth_secret',
+  'vps_webhook_replay_secret',
+  'vps_valkey_password',
+  'vps_lavalink_password',
+]);
+
+const ENCRYPTED_SECRET_FIELDS = new Set([
+  'discord_bot_token', 'discord_client_secret', 'paypal_client_secret',
+  'paypal_webhook_id', 'lavalink_password', 'valkey_url',
+  'supabase_access_token', 'supabase_db_url',
 ]);
 
 /**
@@ -60,6 +81,17 @@ const ENV_MAP: Record<string, string[]> = {
   lavalink_password: ['LAVALINK_PASSWORD'],
   valkey_url: ['VALKEY_URL', 'REDIS_URL'],
 };
+const INSTALLATION_DEFAULTS: Record<string, string> = {
+  auto_install_on_quit: 'true',
+  keychain_required: 'true',
+  lavalink_enabled: 'false',
+  owner_brand_name: 'SomniBot',
+  runtime_mode: 'regular-local',
+  update_prompt_before_download: 'true',
+  vps_deploy_path: '',
+  sdk_cache_ttl_ms: '60000',
+};
+const ALLOWED_SETTING_KEYS = new Set([...Object.keys(ENV_MAP), ...Object.keys(INSTALLATION_DEFAULTS)]);
 
 function getEnvValue(key: string): string | null {
   const envNames = ENV_MAP[key];
@@ -103,6 +135,10 @@ export async function GET() {
         sources[key] = 'env';
       }
     }
+    for (const [key, value] of Object.entries(INSTALLATION_DEFAULTS)) {
+      values[key] = value;
+      sources[key] = 'none';
+    }
 
     // Step 2: Read DB overrides (instance_settings)
     const { data: settings } = await admin
@@ -112,7 +148,17 @@ export async function GET() {
 
     if (settings) {
       for (const row of settings) {
-        if (row.value && !values[row.key]) {
+        const encryptedBaseKey = row.key.endsWith('_encrypted')
+          ? row.key.slice(0, -'_encrypted'.length)
+          : null;
+        if (encryptedBaseKey && SECRET_FIELDS.has(encryptedBaseKey) && !values[encryptedBaseKey]) {
+          values[encryptedBaseKey] = '••••••••';
+          sources[encryptedBaseKey] = 'db';
+        } else if (SECRET_FIELDS.has(row.key)) {
+          // Ignore legacy plaintext secret rows. The migration retires them,
+          // and a stale row must never be treated as usable configuration.
+          continue;
+        } else if (row.value && (!values[row.key] || sources[row.key] === 'none')) {
           // DB value, only if env var isn't already set
           values[row.key] = SECRET_FIELDS.has(row.key) ? maskValue(row.value) : row.value;
           sources[row.key] = 'db';
@@ -205,9 +251,49 @@ export async function PUT(request: NextRequest) {
     // V10 Audit §6: Batch all upserts into a single operation to avoid
     // sequential timing that leaks info about which keys were skipped.
     const now = new Date().toISOString();
-    const upsertRows = Object.entries(values)
-      .filter(([, value]) => !value.includes('••••') && value.trim() !== '')
-      .map(([key, value]) => ({ key, value, section, updated_at: now }));
+    const writableEntries = Object.entries(values)
+      .filter(([, value]) => !value.includes('••••') && value.trim() !== '');
+    const unsupportedKey = writableEntries.find(([key]) => !ALLOWED_SETTING_KEYS.has(key))?.[0];
+    if (unsupportedKey) {
+      return NextResponse.json(
+        { error: `Unsupported installation setting: ${unsupportedKey}` },
+        { status: 400 },
+      );
+    }
+    if (writableEntries.some(([key]) => key === 'supabase_secret_key')) {
+      return NextResponse.json(
+        { error: 'The Supabase bootstrap secret must be changed through the encrypted launcher setup.' },
+        { status: 400 },
+      );
+    }
+    for (const [key, value] of writableEntries) {
+      if (['auto_install_on_quit', 'keychain_required', 'lavalink_enabled', 'update_prompt_before_download'].includes(key) && value !== 'true' && value !== 'false') {
+        return NextResponse.json({ error: `${key} must be true or false` }, { status: 400 });
+      }
+      if (key === 'runtime_mode' && !['regular-local', 'vps', 'development'].includes(value)) {
+        return NextResponse.json({ error: 'runtime_mode is invalid' }, { status: 400 });
+      }
+      if (key === 'sdk_cache_ttl_ms' && (!/^\d+$/.test(value) || Number(value) < 1000 || Number(value) > 3600000)) {
+        return NextResponse.json({ error: 'sdk_cache_ttl_ms must be between 1000 and 3600000' }, { status: 400 });
+      }
+      if (key === 'owner_brand_name' && value.length > 128) {
+        return NextResponse.json({ error: 'owner_brand_name is too long' }, { status: 400 });
+      }
+      if (key === 'vps_deploy_path' && value.length > 512) {
+        return NextResponse.json({ error: 'vps_deploy_path is too long' }, { status: 400 });
+      }
+    }
+    const bootstrapSecret = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    const projectOrigin = supabaseUrl ? new URL(supabaseUrl).origin : '';
+    const upsertRows = writableEntries.map(([key, value]) => {
+      if (!ENCRYPTED_SECRET_FIELDS.has(key)) return { key, value, section, updated_at: now };
+      if (!bootstrapSecret || !projectOrigin) {
+        throw new Error('Supabase bootstrap credentials are required to encrypt settings.');
+      }
+      const encrypted = encryptCloudCredential(value, key, bootstrapSecret, projectOrigin);
+      return { ...encrypted, section, updated_at: now };
+    });
 
     if (upsertRows.length === 0) {
       return NextResponse.json(
@@ -221,7 +307,7 @@ export async function PUT(request: NextRequest) {
       .upsert(upsertRows, { onConflict: 'key' });
     if (upsertError) return dbError(upsertError, 'settings');
 
-    await notifyBot('settings', { section });
+    await notifyBot(auth.ctx.guildId, 'settings', { section });
 
     {
       const changedKeys = upsertRows.map((r) => r.key);

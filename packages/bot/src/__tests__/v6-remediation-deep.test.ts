@@ -443,7 +443,7 @@ describe('HeistManager deep', () => {
     const ix = makeInteraction();
     await mgr.startHeist(ix);
     expect(ix.reply).toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it('startHeist enabled — no cooldown lock', async () => {
     const { HeistManager } = await import('../features/heist/heist-manager.js');

@@ -37,6 +37,14 @@ describe('launcher renderer Tailscale setup wiring', () => {
     expect(renderer).toContain('Public DNS can take up to 10 minutes');
   });
 
+  it('renders a permission-blocked state without offering an incorrect sign-in action', () => {
+    const renderer = readRendererFile('renderer.js');
+
+    expect(renderer).toContain("case 'needs-permission':");
+    expect(renderer).toContain('Restart SomniBot with the Windows permission required to read Tailscale');
+    expect(renderer).toContain("!['not-configured', 'not-logged-in'].includes(readiness.state)");
+  });
+
   it('updates the guided setup callback field when that field exists', () => {
     const renderer = readRendererFile('renderer.js');
 

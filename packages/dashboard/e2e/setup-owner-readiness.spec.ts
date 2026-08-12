@@ -49,6 +49,7 @@ test.describe('Owner setup browser readiness', () => {
 
   test('walks the regular-local ready path and finalizes with PayPal values', async ({ page }) => {
     const finalizeRequests: unknown[] = [];
+    let setupCompleted = false;
 
     await mockCsrf(page);
     await page.route('**/api/setup', async (route) => {
@@ -58,7 +59,7 @@ test.describe('Owner setup browser readiness', () => {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(READY_STATUS),
+          body: JSON.stringify({ ...READY_STATUS, setupCompleted }),
         });
         return;
       }
@@ -76,6 +77,7 @@ test.describe('Owner setup browser readiness', () => {
           paypal_sandbox: 'true',
         },
       });
+      setupCompleted = true;
 
       await route.fulfill({
         status: 200,
@@ -111,7 +113,7 @@ test.describe('Owner setup browser readiness', () => {
     await page.getByRole('button', { name: /Continue/ }).click();
     await page.getByRole('button', { name: 'Finalize Setup' }).click();
 
-    await expect(page.getByRole('heading', { name: 'SomniBot is Ready!' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Setup confirmed' })).toBeVisible();
     expect(finalizeRequests).toHaveLength(1);
   });
 
@@ -150,7 +152,7 @@ test.describe('Owner setup browser readiness', () => {
 
     await expect(page.getByRole('heading', { name: 'Invite Bot to Your Server' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Save Credentials' })).toBeDisabled();
-    await expect(page.getByRole('heading', { name: 'SomniBot is Ready!' })).not.toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Setup confirmed' })).not.toBeVisible();
   });
 
   test('updates readiness panel when invite polling detects the guild', async ({ page }) => {

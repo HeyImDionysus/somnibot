@@ -23,7 +23,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from('guild_config')
-    .select('escalation_chain, mod_log_channel_id, infraction_expiry_days')
+    .select('escalation_chain, mod_log_channel_id, infraction_expiry_days, appeals_enabled, appeal_cooldown_hours, appeal_review_channel_id, dm_on_action')
     .eq('guild_id', guildId)
     .maybeSingle();
 
@@ -37,6 +37,10 @@ export async function GET() {
       escalation_chain: data?.escalation_chain ?? [],
       mod_log_channel_id: data?.mod_log_channel_id ?? null,
       infraction_expiry_days: data?.infraction_expiry_days ?? 30,
+      appeals_enabled: data?.appeals_enabled ?? true,
+      appeal_cooldown_hours: data?.appeal_cooldown_hours ?? 24,
+      appeal_review_channel_id: data?.appeal_review_channel_id ?? null,
+      dm_on_action: data?.dm_on_action ?? true,
     },
   });
 }
@@ -97,6 +101,10 @@ export async function PUT(req: NextRequest) {
     }
     updates.infraction_expiry_days = days;
   }
+  if (body.appeals_enabled !== undefined) updates.appeals_enabled = body.appeals_enabled;
+  if (body.appeal_cooldown_hours !== undefined) updates.appeal_cooldown_hours = body.appeal_cooldown_hours;
+  if (body.appeal_review_channel_id !== undefined) updates.appeal_review_channel_id = body.appeal_review_channel_id || null;
+  if (body.dm_on_action !== undefined) updates.dm_on_action = body.dm_on_action;
 
   if (Object.keys(updates).length === 0) {
     return NextResponse.json({ success: false, error: 'No valid fields to update' }, { status: 400 });
@@ -115,7 +123,7 @@ export async function PUT(req: NextRequest) {
   }
 
   // Notify the bot so it hot-reloads moderation config (escalation chain, mod log, expiry).
-  await notifyBot('moderation', updates);
+  await notifyBot(guildId, 'moderation', updates);
 
   // Escalation drives automatic punishments — worth a confirmation on undo.
   await recordGuildConfigChange({

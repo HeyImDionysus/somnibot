@@ -10,11 +10,14 @@
  * forever; a transient error leaves the latch unset so the next sweep retries.
  */
 
-import { EmbedBuilder } from 'discord.js';
+import { EmbedBuilder, type Guild } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../../client.js';
 import { AppealsManager, type AppealRecord } from './appeals-manager.js';
 import { applyBrand, resolveBrandKit, type BrandKit } from '../branding/index.js';
+import { pardonInfraction } from '../moderation/infraction-service.js';
+import { writeAuditLog } from '../../services/audit.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('Appeals');
 
@@ -105,6 +108,7 @@ export async function deliverDecisionDmsForGuild(
   manager: AppealsManager,
   guildId: string,
   guildName: string,
+  guild?: Guild,
 ): Promise<number> {
   const pending = await manager.collectUndeliveredDecisions(guildId);
   if (pending.length === 0) return 0;
@@ -114,6 +118,9 @@ export async function deliverDecisionDmsForGuild(
   const kit = await resolveBrandKit(client.supabase, guildId, { fallbackName: guildName });
   let flipped = 0;
   for (const appeal of pending) {
+    if (appeal.status === 'approved') {
+      await applyApprovedAppeal(client, appeal, guildId, guildName, guild);
+    }
     const outcome = await deliverDecisionDm(client, appeal, guildName, kit);
     if (outcome !== 'transient') {
       await manager.markDecisionNotified(appeal.id);
@@ -121,6 +128,123 @@ export async function deliverDecisionDmsForGuild(
     }
   }
   return flipped;
+}
+
+/**
+ * An approved appeal is a moderation reversal, not just a status badge. Pardon
+ * the durable infraction and lift the live Discord punishment where possible.
+ * The operation is idempotent: the infraction update is harmless on a replay,
+ * Discord timeout removal/unban are both safe to repeat, and the audit row is
+ * occurrence-keyed. A failed live lift is surfaced to the owner and remains in
+ * the decided queue for the next maintenance pass.
+ */
+async function applyApprovedAppeal(
+  client: Pick<SomniClient, 'supabase' | 'users'>,
+  appeal: AppealRecord,
+  guildId: string,
+  guildName: string,
+  guild?: Guild,
+): Promise<void> {
+  try {
+    const { data: infraction, error } = await client.supabase
+      .from('infractions')
+      .select('id, member_id, type')
+      .eq('id', appeal.infraction_id)
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    if (error || !infraction) {
+      await recordAppealLiftFailure(client.supabase, guildId, appeal, `infraction lookup failed: ${error?.message ?? 'not found'}`);
+      return;
+    }
+
+    const pardoned = await pardonInfraction(
+      client.supabase,
+      appeal.infraction_id,
+      appeal.reviewer_id ?? 'appeal-reviewer',
+      guildId,
+    );
+    if (!pardoned) {
+      await recordAppealLiftFailure(client.supabase, guildId, appeal, 'infraction could not be pardoned');
+      return;
+    }
+
+    const member = guild
+      ? await guild.members.fetch(infraction.member_id).catch(() => null)
+      : null;
+    let lifted = infraction.type === 'warn' || infraction.type === 'kick';
+    if (infraction.type === 'mute' && member?.moderatable) {
+      await member.timeout(null, `Appeal approved for infraction ${appeal.infraction_id}`);
+      lifted = true;
+    } else if (infraction.type === 'ban' && guild) {
+      await guild.members.unban(
+        infraction.member_id,
+        `Appeal approved for infraction ${appeal.infraction_id}`,
+      );
+      lifted = true;
+    }
+
+    // Unlike warnings and kicks, a timeout/ban is a live Discord state that
+    // must be removed as part of approval. Keep the decision auditable and
+    // alert the owner when the bot cannot reach or control that member.
+    if ((infraction.type === 'mute' || infraction.type === 'ban') && !lifted) {
+      await recordAppealLiftFailure(
+        client.supabase,
+        guildId,
+        appeal,
+        `Discord ${infraction.type} could not be lifted (member unavailable or insufficient permissions)`,
+      );
+      return;
+    }
+
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'system',
+      actorId: appeal.reviewer_id ?? 'appeal-reviewer',
+      action: 'appeal.punishment_lifted',
+      category: 'moderation',
+      targetType: 'appeal',
+      targetId: appeal.id,
+      details: {
+        infraction_id: appeal.infraction_id,
+        member_id: infraction.member_id,
+        infraction_type: infraction.type,
+        live_lifted: lifted,
+        guild_name: guildName,
+      },
+      occurrenceKey: `appeal:${appeal.id}:punishment-lifted`,
+      success: true,
+    });
+  } catch (err) {
+    await recordAppealLiftFailure(client.supabase, guildId, appeal, String(err));
+  }
+}
+
+async function recordAppealLiftFailure(
+  supabase: SomniClient['supabase'],
+  guildId: string,
+  appeal: AppealRecord,
+  error: string,
+): Promise<void> {
+  await writeAuditLog(supabase, {
+    guildId,
+    actorType: 'system',
+    actorId: appeal.reviewer_id ?? 'appeal-reviewer',
+    action: 'appeal.punishment_lift_failed',
+    category: 'moderation',
+    targetType: 'appeal',
+    targetId: appeal.id,
+    details: { infraction_id: appeal.infraction_id, error },
+    occurrenceKey: `appeal:${appeal.id}:punishment-lift-failed`,
+    success: false,
+    errorMessage: error,
+  });
+  await raiseOwnerAlert(supabase, guildId, {
+    alertType: 'appeal_punishment_lift_failed',
+    severity: 'warning',
+    title: 'Approved appeal needs moderation cleanup',
+    message: `Appeal ${appeal.id} was approved, but the original punishment could not be fully lifted. Check the infraction and Discord permissions.`,
+    metadata: { appeal_id: appeal.id, infraction_id: appeal.infraction_id, error },
+  }).catch(() => {});
 }
 
 /**
@@ -132,7 +256,7 @@ export async function runAppealsMaintenance(client: SomniClient): Promise<void> 
   for (const ctx of client.router.all()) {
     try {
       await manager.sweepExpired(ctx.guildId);
-      await deliverDecisionDmsForGuild(client, manager, ctx.guildId, ctx.guild.name);
+      await deliverDecisionDmsForGuild(client, manager, ctx.guildId, ctx.guild.name, ctx.guild);
     } catch (err) {
       log.error('Appeals maintenance error', { guildId: ctx.guildId, error: String(err) });
     }

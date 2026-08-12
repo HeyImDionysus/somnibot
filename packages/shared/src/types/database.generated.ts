@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 244 migration files in packages/supabase/migrations/
+ * Source: 268 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -428,6 +428,67 @@ export interface DbGuildConfig {
   webhook_error_rate_threshold: number;
   diagnostics_guided_mode: boolean;
   automation_mass_action_threshold: number;
+  level_curve: Json;
+  max_poll_options: number;
+  allow_multiple_default: boolean;
+  reaction_roles_enabled: boolean;
+  default_style: 'reaction' | 'buttons' | 'select-menu';
+  default_max_per_group: number;
+  default_require_level: number;
+  default_remove_on_unreact: boolean;
+  max_schedules_per_guild: number;
+  default_timezone: string;
+  missed_run_policy: 'skip-missed' | 'send-latest';
+  allow_embeds: boolean;
+  variables_enabled: boolean;
+  economy_market_max_price_per_unit: number;
+  anti_raid_containment_ladder: Json;
+  anti_raid_raid_cooldown_minutes: number;
+  appeals_enabled: boolean;
+  appeal_cooldown_hours: number;
+  appeal_review_channel_id: string | null;
+  dm_on_action: boolean;
+  message_log_config_cache_ttl_ms: number;
+  data_export_enabled: boolean;
+  max_queue_length: number;
+  allow_duplicates: boolean;
+  per_user_queue_cap: number;
+  paypal_legacy_usd_sale_tolerance: boolean;
+  paypal_environment: string;
+  paypal_refund_strategy: string;
+  paypal_webhook_stale_processing_ms: number;
+  paypal_webhook_verify_attempts: number;
+  product_types_enabled: string[];
+  repeat_purchase_policy: string;
+  free_claim_policy: string;
+  gifting_enabled: boolean;
+  public_celebration_enabled: boolean;
+  celebration_channel_id: string | null;
+  store_brand_source: string;
+  max_storefront_products: number;
+  portal_session_ttl_ms: number;
+  download_link_ttl_ms: number;
+  self_service_cancellation: boolean;
+  cancellation_timing: string;
+  refund_requests_enabled: boolean;
+  service_requests_enabled: boolean;
+  portal_brand_source: string;
+  audit_export_row_limit: number;
+  audit_flush_interval_ms: number;
+  automation_dm_cooldown_seconds: number;
+  automation_max_chain_depth: number;
+  automation_preview_required: boolean;
+  automation_user_fire_limit_per_minute: number;
+  custom_commands_max_per_guild: number;
+  custom_commands_mention_safety: boolean;
+  diagnostics_snapshot_interval_ms: number;
+  incidents_auto_create_from_critical_alerts: boolean;
+  incidents_default_severity: string;
+  incidents_list_page_size: number;
+  rbac_custom_role_priority_default: number;
+  rbac_max_permissions_per_role: number;
+  rbac_priority_escalation_guard: boolean;
+  rbac_unknown_route_access: string;
 }
 
 export interface DbInstanceSettings {
@@ -494,6 +555,8 @@ export interface DbGuildDesiredState {
   drift_detected: boolean;
   drift_details: Record<string, unknown> | null;
   updated_at: string;
+  categories: Json;
+  deploy_mode: string;
 }
 
 export interface DbDiscordIdMap {
@@ -690,6 +753,8 @@ export interface DbAutomation {
   updated_at: string;
   rate_limit_per_user: number | null;
   rate_limit_window_seconds: number | null;
+  preview_hash: string | null;
+  previewed_at: string | null;
 }
 
 export interface DbAutomationExecution {
@@ -1054,6 +1119,10 @@ export interface DbProductLicenseConfig {
   created_at: string;
   updated_at: string;
   device_policy: 'evict_oldest' | 'reject';
+  rotation_policy: string;
+  self_service_device_removal: boolean;
+  sdk_cache_ttl_ms: number;
+  key_prefix: string;
 }
 
 export interface DbLicenseSession {
@@ -1573,6 +1642,22 @@ export interface DbCommerceCheckoutDeactivationProofs {
   proved_at: string;
 }
 
+export interface DbCommerceCheckoutIntents {
+  token: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string | null;
+  gift_checkout_token: string | null;
+  provider_id: string | null;
+  order_id: string | null;
+  status: 'pending' | 'bound' | 'captured' | 'cancelled';
+  created_at: string;
+  expires_at: string;
+  cancel_reason: string | null;
+  approval_exposed_at: string | null;
+}
+
 export interface DbCommerceDownloadDeliveries {
   id: string;
   guild_id: string;
@@ -1584,6 +1669,15 @@ export interface DbCommerceDownloadDeliveries {
   order_id: string | null;
   delivery_nonce_hash: string | null;
   delivered_at: string;
+}
+
+export interface DbCommerceFreeClaims {
+  request_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  order_id: string;
+  created_at: string;
 }
 
 export interface DbCommerceFulfillmentClaims {
@@ -1620,6 +1714,20 @@ export interface DbCommerceFulfillmentOutwardIntents {
   uncertain_at: string | null;
   last_error: string | null;
   updated_at: string;
+}
+
+export interface DbCommerceGiftIntents {
+  id: string;
+  guild_id: string;
+  buyer_customer_id: string;
+  recipient_discord_id: string;
+  product_id: string;
+  status: 'pending' | 'fulfilled' | 'cancelled';
+  fulfilled_order_id: string | null;
+  created_at: string;
+  fulfilled_at: string | null;
+  expires_at: string;
+  checkout_token: string;
 }
 
 export interface DbCommerceLegacySubscriptionGrantContracts {
@@ -1702,6 +1810,28 @@ export interface DbCommerceProviderIncidents {
   incident_reason: 'provider_identity_malformed' | 'custom_identity_missing_or_malformed' | 'customer_identity_missing_or_mismatched' | 'order_identity_missing_or_ambiguous' | 'product_identity_missing_or_mismatched' | 'plan_identity_missing_or_mismatched' | 'financial_identity_malformed' | 'subscription_sale_router_failed';
   evidence: Json;
   alert_id: string | null;
+  created_at: string;
+}
+
+export interface DbCommerceProviderMoneyRecovery {
+  webhook_event_id: string;
+  provider_resource_id: string | null;
+  provider_parent_id: string | null;
+  guild_id: string | null;
+  reason: string;
+  status: 'pending' | 'processing' | 'refunded' | 'resolved' | 'manual_review';
+  attempts: number;
+  next_retry_at: string | null;
+  created_at: string;
+  resolved_at: string | null;
+  max_attempts: number;
+  lease_token: string | null;
+  leased_until: string | null;
+}
+
+export interface DbCommercePurchaseCelebrations {
+  order_id: string;
+  guild_id: string;
   created_at: string;
 }
 
@@ -1949,6 +2079,7 @@ export interface DbEconomyFishCatches {
   price_earned: number;
   caught_at: string;
   paid: boolean;
+  correlation_id: string | null;
 }
 
 export interface DbEconomyFishCollectionRewards {
@@ -2099,6 +2230,16 @@ export interface DbEconomyPetBattles {
   challenger_dmg: number;
   defender_dmg: number;
   reward: number;
+  created_at: string;
+}
+
+export interface DbEconomyPetOperations {
+  guild_id: string;
+  user_id: string;
+  pet_id: string;
+  operation: string;
+  request_id: string;
+  result: Json;
   created_at: string;
 }
 
@@ -2331,6 +2472,26 @@ export interface DbMemberFeatureUnlocks {
   unlocked_at: string;
 }
 
+export interface DbOnboardingFallbackIntents {
+  id: string;
+  guild_id: string;
+  discord_id: string;
+  member_role_id: string;
+  timeout_minutes: number;
+  correlation_id: string;
+  role_add_authorized: boolean;
+  status: 'pending' | 'completed' | 'failed' | 'cancelled';
+  attempt_count: number;
+  attempt_token: string | null;
+  lease_expires_at: string | null;
+  next_attempt_at: string;
+  last_error: string | null;
+  completed_at: string | null;
+  completed_attempt_token: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DbPaymentRefunds {
   id: string;
   payment_id: string;
@@ -2417,6 +2578,16 @@ export interface DbPredictions {
   created_at: string;
   locked_at: string | null;
   resolved_at: string | null;
+}
+
+export interface DbRuntimeLeases {
+  lease_name: string;
+  holder_id: string;
+  session_id: string;
+  runtime_mode: 'regular-local' | 'vps';
+  acquired_at: string;
+  heartbeat_at: string;
+  expires_at: string;
 }
 
 export interface DbStarboardEntries {

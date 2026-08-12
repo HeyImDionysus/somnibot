@@ -1410,6 +1410,7 @@ export class EconomyManager {
       .rpc('economy_leaderboard', {
         p_guild_id: this.guild.id,
         p_limit: limit,
+        p_offset: 0,
       });
 
     if (!rpcError && rpcData) {

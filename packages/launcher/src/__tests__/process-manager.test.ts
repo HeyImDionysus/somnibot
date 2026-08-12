@@ -8,7 +8,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { shouldApplyBotReadyTimeout } from '../main/process-manager-guards';
+import {
+  PROCESS_RESTART_MAX_ATTEMPTS,
+  processRestartDelayMs,
+  shouldApplyBotReadyTimeout,
+  shouldRecoverManagedProcess,
+} from '../main/process-manager-guards';
 
 // ── Replicated pure functions from process-manager.ts ────────
 
@@ -156,5 +161,29 @@ describe('bot ready timeout guard', () => {
     const process = {};
 
     expect(shouldApplyBotReadyTimeout(process, process, 'online')).toBe(false);
+  });
+});
+
+describe('managed process recovery policy', () => {
+  it('uses bounded exponential backoff for every automatic restart attempt', () => {
+    expect(PROCESS_RESTART_MAX_ATTEMPTS).toBe(5);
+    expect(Array.from({ length: 5 }, (_, index) => processRestartDelayMs(index + 1)))
+      .toEqual([1_000, 2_000, 4_000, 8_000, 16_000]);
+    expect(processRestartDelayMs(10)).toBe(30_000);
+  });
+
+  it('rejects invalid restart attempt numbers', () => {
+    expect(() => processRestartDelayMs(0)).toThrow('positive integer');
+    expect(() => processRestartDelayMs(1.5)).toThrow('positive integer');
+  });
+
+  it('only recovers the current child while the owner wants services running', () => {
+    const currentProcess = {};
+    const staleProcess = {};
+
+    expect(shouldRecoverManagedProcess(true, currentProcess, currentProcess)).toBe(true);
+    expect(shouldRecoverManagedProcess(false, currentProcess, currentProcess)).toBe(false);
+    expect(shouldRecoverManagedProcess(true, currentProcess, staleProcess)).toBe(false);
+    expect(shouldRecoverManagedProcess(true, null, currentProcess)).toBe(false);
   });
 });

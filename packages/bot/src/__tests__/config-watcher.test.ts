@@ -69,7 +69,16 @@ vi.mock('../features/commerce/index.js', () => ({ EntitlementService: class {} }
 vi.mock('../features/music/index.js', () => ({ MusicPlayerManager: class {} }));
 vi.mock('../features/tickets/index.js', () => ({ reloadTicketConfig: vi.fn() }));
 vi.mock('../features/automations/index.js', () => ({ AutomationEngine: class { reload = vi.fn() } }));
-vi.mock('../features/reaction-roles/index.js', () => ({ loadReactionRoles: vi.fn() }));
+vi.mock('../features/reaction-roles/index.js', () => ({
+  loadReactionRoles: vi.fn(),
+  deployButtonRolePanelsForGuild: vi.fn(),
+}));
+vi.mock('../features/reaction-roles/button-roles.js', () => ({
+  deployButtonRolePanelsForGuild: vi.fn(),
+}));
+vi.mock('../features/reaction-roles/reaction-engine.js', () => ({
+  loadReactionRoles: vi.fn(),
+}));
 vi.mock('../features/giveaways/index.js', () => ({ GiveawayManager: class {} }));
 vi.mock('../features/temp-channels/index.js', () => ({ TempChannelManager: class {} }));
 vi.mock('../features/scheduled-messages/index.js', () => ({ ScheduledMessageRunner: class {} }));
@@ -116,6 +125,7 @@ describe('ConfigWatcher', () => {
   let watcher: ConfigWatcher;
   let eventBus: any;
   let configHandler: any;
+  let onboardingReload: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -125,7 +135,18 @@ describe('ConfigWatcher', () => {
       off: vi.fn(),
       emit: vi.fn(),
     };
-    watcher = new ConfigWatcher(makeGuild(), makeSupa() as any, eventBus, makeValkey());
+    onboardingReload = vi.fn().mockResolvedValue(undefined);
+    watcher = new ConfigWatcher(
+      makeGuild(),
+      makeSupa() as never,
+      eventBus,
+      makeValkey(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onboardingReload,
+    );
     watcher.start();
   });
 
@@ -137,6 +158,12 @@ describe('ConfigWatcher', () => {
   it('ignores events from other guilds', async () => {
     await configHandler({ guildId: 'other-guild', data: { section: 'economy', changedBy: 'user1' } });
     expect(mocks.invalidateEconomyCache).not.toHaveBeenCalled();
+  });
+
+  it('reconciles pending members after onboarding config reloads', async () => {
+    await configHandler({ guildId: 'guild-1', data: { section: 'onboarding', changedBy: 'owner' } });
+
+    expect(onboardingReload).toHaveBeenCalledOnce();
   });
 
   it('invalidates all economy caches on section=economy', async () => {

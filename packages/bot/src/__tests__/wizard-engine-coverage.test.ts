@@ -177,7 +177,7 @@ describe('detectConfigured', () => {
     const supabase = makeSupabase({
       instance_settings: {
         data: [
-          { key: 'discord_bot_token', value: 'token' },
+          { key: 'discord_bot_token_encrypted', value: 'somnibot-cloud-v1:ciphertext' },
           { key: 'discord_app_id', value: 'appid' },
           { key: 'paypal_client_id', value: 'pid' },
           // paypal_client_secret missing → paypal not configured
@@ -216,7 +216,7 @@ describe('detectConfigured', () => {
       instance_settings: {
         data: [
           { key: 'paypal_client_id', value: 'pid' },
-          { key: 'paypal_client_secret', value: 'secret' },
+          { key: 'paypal_client_secret_encrypted', value: 'somnibot-cloud-v1:ciphertext' },
           { key: 'paypal_sandbox', value: 'true' },
         ],
         error: null,
@@ -232,9 +232,9 @@ describe('detectConfigured', () => {
       instance_settings: {
         data: [
           { key: 'paypal_client_id', value: 'pid' },
-          { key: 'paypal_client_secret', value: 'secret' },
+          { key: 'paypal_client_secret_encrypted', value: 'somnibot-cloud-v1:ciphertext' },
           { key: 'paypal_sandbox', value: 'true' },
-          { key: 'paypal_webhook_id', value: 'WH-123' },
+          { key: 'paypal_webhook_id_encrypted', value: 'somnibot-cloud-v1:ciphertext' },
         ],
         error: null,
       },
@@ -253,6 +253,8 @@ describe('storeCredentials', () => {
   });
 
   it('stores credentials in instance_settings and updates env', async () => {
+    process.env.SUPABASE_URL = 'https://project.supabase.co';
+    process.env.SUPABASE_SECRET_KEY = 'service-role-test-key';
     const supabase = makeSupabase();
     const paypalStep = {
       id: 'paypal',

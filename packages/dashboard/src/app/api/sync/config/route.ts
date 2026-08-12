@@ -49,7 +49,7 @@ export async function PUT(req: NextRequest) {
   }
 
   // Notify the bot so it hot-reloads sync configuration.
-  await notifyBot('settings', allowed);
+  await notifyBot(guildId, 'settings', allowed);
 
   // Auto-repair rewrites roles/channels to match the dashboard, so a change
   // here can move real Discord objects on the next sync tick.

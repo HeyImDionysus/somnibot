@@ -38,7 +38,7 @@ import { runSyncCycle, type SyncConfig } from '../sync/sync-engine.js';
 function supaChain(data: any = null, error: any = null) {
   const c: any = {};
   const methods = ['select', 'insert', 'update', 'upsert', 'delete', 'eq', 'neq',
-    'gte', 'lt', 'lte', 'limit', 'order', 'in', 'filter', 'maybeSingle', 'single', 'match', 'then'];
+    'gte', 'lt', 'lte', 'limit', 'range', 'order', 'in', 'filter', 'maybeSingle', 'single', 'match', 'then'];
   for (const m of methods) c[m] = vi.fn((..._: any[]) => c);
   c.maybeSingle = vi.fn(async () => ({ data, error }));
   c.single = vi.fn(async () => ({ data, error }));

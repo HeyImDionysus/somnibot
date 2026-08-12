@@ -219,7 +219,7 @@ export default function SetupWizardPage() {
   const finalizeButtonLabel = canFinalizeSetup ? 'Finalize Setup' : 'Save Credentials';
 
   // Load initial status
-  const fetchStatus = useCallback(async () => {
+  const fetchStatus = useCallback(async (): Promise<SetupStatus | null> => {
     try {
       const res = await fetch('/api/setup');
       if (res.ok) {
@@ -251,9 +251,12 @@ export default function SetupWizardPage() {
         } else if (data.supabaseConnected && data.databaseInitialized && discordReady) {
           setCurrentStep(3);
         }
+        return data;
       }
+      return null;
     } catch {
       // Ignore — setup page still renders
+      return null;
     } finally {
       setLoading(false);
     }
@@ -391,8 +394,10 @@ export default function SetupWizardPage() {
         return;
       }
 
-      setStatus((prev) => prev ? { ...prev, setupCompleted: true } : prev);
-      setCurrentStep(5);
+      const confirmedStatus = await fetchStatus();
+      if (!confirmedStatus?.setupCompleted) {
+        setFinalizeError('Setup was accepted, but completion could not be confirmed. Refresh the setup status and try again.');
+      }
     } catch (err) {
       setFinalizeError(err instanceof Error ? err.message : SETUP_CSRF_UNAVAILABLE_MESSAGE);
     } finally {
@@ -1178,10 +1183,10 @@ export default function SetupWizardPage() {
                 <Rocket className="h-10 w-10 text-green-400" />
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-discord-text-primary">SomniBot is Ready! 🎉</h2>
+                <h2 className="text-2xl font-bold text-discord-text-primary">Setup confirmed</h2>
                 <p className="mt-2 text-discord-text-secondary">
-                  Your bot is online and connected to {guildName || status?.guildName || 'your server'}.
-                  Head to the dashboard to configure features.
+                  Setup finalization is confirmed for {guildName || status?.guildName || 'your server'}.
+                  Check the dashboard&apos;s bot status before relying on the bot.
                 </p>
               </div>
 

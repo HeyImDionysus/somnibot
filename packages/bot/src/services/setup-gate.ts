@@ -13,9 +13,8 @@
  *   - 'complete'     → setup_completed_at is set — OR the deployment is
  *                      configured purely via environment variables (see below).
  *                      Boot normally (full feature init).
- *   - 'in_progress'  → A setup flow has stored Discord credentials in
- *                      instance_settings (the wizard's verify-discord step or
- *                      the desktop launcher's credential sync) but setup is not
+ *   - 'in_progress'  → A setup flow has stored its non-secret setup-started
+ *                      marker (the wizard's verify-discord step) but setup is not
  *                      finalized. The setup wizard NEEDS the bot reachable to
  *                      verify "bot online" + "guild detected" before it can
  *                      finalize. Boot a minimal verification mode: log in, write
@@ -36,10 +35,9 @@
  * `setup_completed_at` row will EVER exist for it. It must NOT be gated into
  * verification mode: a token in the environment with NO wizard-stored
  * credential row in instance_settings classifies as 'complete'. The raw
- * `discord_bot_token` row is a reliable wizard marker because only the
- * owner-driven setup surfaces write it — the bot's own env→DB sync never
- * persists raw secrets (config-loader SECRET_KEYS writes a
- * `discord_bot_token_configured` flag instead).
+ * `setup_started_at` row is the reliable wizard marker. Credential rows and
+ * configured flags are deliberately not used because secrets are never stored
+ * raw and the bot itself writes configured flags during normal env-only boots.
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
@@ -79,7 +77,7 @@ export interface SetupGateEvaluation {
 
 const INSTANCE_SETTINGS_TABLE = 'instance_settings';
 const SETUP_COMPLETED_KEY = 'setup_completed_at';
-const DISCORD_BOT_TOKEN_KEY = 'discord_bot_token';
+const SETUP_STARTED_KEY = 'setup_started_at';
 
 /**
  * Build a lightweight Supabase client for the gate check, using the same
@@ -242,7 +240,7 @@ function notStartedEvaluation(dashboardUrl: string): SetupGateEvaluation {
  * Classify the instance's setup state so the boot sequence can gate itself.
  *
  *   1. setup_completed_at set → 'complete' (confirmed).
- *   2. otherwise, is there a wizard-stored `discord_bot_token` row in
+ *   2. otherwise, is there a wizard-stored `setup_started_at` row in
  *      instance_settings? → 'in_progress' (an owner-driven setup flow stored
  *      credentials but never finalized — the wizard needs the bot in
  *      verification mode to finish).
@@ -286,19 +284,15 @@ export async function evaluateSetupGate(
   }
 
   // No completion row (clean read). Distinguish a wizard-managed install
-  // mid-setup from a deployment configured purely via environment variables
-  // (codex round-3 finding #1). The raw `discord_bot_token` row is written
-  // ONLY by the owner-driven setup surfaces (dashboard wizard verify-discord,
-  // desktop launcher credential sync) — the bot's own env→DB sync never
-  // persists raw secrets. So this read must happen even when the token is
-  // already in env: a launcher-forked mid-wizard boot has BOTH the env token
-  // and the row, while an env-configured VPS/docker deployment has only the
-  // env token.
+  // mid-setup from a deployment configured purely via environment variables.
+  // This read must happen even when the token is already in env: a
+  // launcher-forked mid-wizard boot has both the env token and setup marker,
+  // while an env-configured VPS/docker deployment has only the env token.
   const tokenInEnv = hasDiscordTokenInEnv(env);
-  const dbToken = await readInstanceSetting(supabase, DISCORD_BOT_TOKEN_KEY);
+  const setupStarted = await readInstanceSetting(supabase, SETUP_STARTED_KEY);
 
-  if (dbToken.value !== null) {
-    // Wizard-stored credentials exist but setup was never finalized →
+  if (setupStarted.value !== null) {
+    // Wizard setup began but was never finalized →
     // verification mode so the wizard can finish.
     return inProgressEvaluation(dashboardUrl);
   }

@@ -18,6 +18,7 @@ import { resolveBrandKit, brandKitFromConfig } from '../branding/brand-kit.js';
 import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 import { voice } from '../branding/voice.js';
 import { createLogger } from '@somnibot/shared';
+import { writeAuditLog } from '../../services/audit.js';
 
 const log = createLogger('Polls');
 
@@ -57,6 +58,31 @@ export class PollsManager {
 
   clearCache(): void { this.configCache.clear(); }
 
+  private async audit(
+    guildId: string,
+    actorId: string,
+    action: string,
+    targetType: 'poll' | 'prediction' | 'poll_vote' | 'prediction_bet',
+    targetId: string,
+    details: Record<string, unknown>,
+    success: boolean,
+    occurrenceKey: string,
+  ): Promise<void> {
+    await writeAuditLog(this.supabase, {
+      guildId,
+      actorType: actorId === 'system' ? 'system' : 'user',
+      actorId,
+      action,
+      category: targetType.startsWith('prediction') ? 'predictions' : 'polls',
+      targetType,
+      targetId,
+      details,
+      success,
+      occurrenceKey,
+      correlationId: `${targetType}:${targetId}`,
+    });
+  }
+
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
@@ -71,7 +97,7 @@ export class PollsManager {
     interaction: ChatInputCommandInteraction,
     title: string,
     options: string[],
-    allowMultiple: boolean,
+    allowMultiple?: boolean,
   ): Promise<void> {
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
@@ -79,13 +105,17 @@ export class PollsManager {
 
     if (!config?.polls_enabled) {
       await interaction.reply({ content: voice(kit.voicePreset, 'disabled', { feature: 'Polls' }), ephemeral: true });
+      await this.audit(guildId, interaction.user.id, 'poll.create_denied', 'poll', 'new', { reason: 'disabled' }, false, `poll.create_denied:${interaction.id}`);
       return;
     }
 
-    if (options.length < 2 || options.length > 10) {
-      await interaction.reply({ content: '❌ Polls need 2-10 options.', ephemeral: true });
+    const maxOptions = Math.min(10, Math.max(2, Number(config.max_poll_options ?? 10)));
+    if (options.length < 2 || options.length > maxOptions) {
+      await interaction.reply({ content: `❌ Polls need 2-${maxOptions} options.`, ephemeral: true });
+      await this.audit(guildId, interaction.user.id, 'poll.create_denied', 'poll', 'new', { reason: 'invalid_options', count: options.length }, false, `poll.create_denied:${interaction.id}`);
       return;
     }
+    const effectiveAllowMultiple = allowMultiple ?? Boolean(config.allow_multiple_default ?? false);
 
     // Create poll
     const { data: poll } = await this.supabase
@@ -95,13 +125,14 @@ export class PollsManager {
         channel_id: interaction.channelId,
         creator_user_id: interaction.user.id,
         title,
-        allow_multiple: allowMultiple,
+        allow_multiple: effectiveAllowMultiple,
       })
       .select()
       .single();
 
     if (!poll) {
       await interaction.reply({ content: '❌ Failed to create poll.', ephemeral: true });
+      await this.audit(guildId, interaction.user.id, 'poll.create_failed', 'poll', 'new', { reason: 'database_insert' }, false, `poll.create_failed:${interaction.id}`);
       return;
     }
 
@@ -127,7 +158,7 @@ export class PollsManager {
           (insertedOptions ?? []).map((opt: any, i: number) =>
             `${numberEmojis[i]} **${opt.label}** — 0 votes`
           ).join('\n') +
-          `\n\n*${allowMultiple ? 'Multiple votes allowed' : 'One vote per person'}*`
+          `\n\n*${effectiveAllowMultiple ? 'Multiple votes allowed' : 'One vote per person'}*`
         )
         .setFooter({ text: `Poll ID: ${poll.id}` }),
       kit,
@@ -163,9 +194,11 @@ export class PollsManager {
       pollId: poll.id,
       title,
       optionCount: options.length,
-      allowMultiple,
+      allowMultiple: effectiveAllowMultiple,
       creatorId: interaction.user.id,
       channelId: interaction.channelId,
+      occurrenceId: poll.id,
+      correlationId: `poll:${poll.id}`,
     });
   }
 
@@ -184,6 +217,14 @@ export class PollsManager {
       .single();
 
     if (!poll || poll.status !== 'active') {
+      this.eventBus.emit('poll.late_interaction_rejected', buttonInteraction.guildId!, {
+        pollId,
+        actorId: userId,
+        action: 'vote',
+        reason: poll ? `status:${poll.status}` : 'not_found',
+        occurrenceId: `${pollId}:late-vote:${buttonInteraction.id}`,
+        correlationId: `poll:${pollId}`,
+      });
       await buttonInteraction.reply({ content: 'This poll is closed.', ephemeral: true });
       return;
     }
@@ -203,6 +244,7 @@ export class PollsManager {
       if (voteErr) {
         log.error('poll_vote_switch_single RPC error:', voteErr);
         await buttonInteraction.reply({ content: '❌ Failed to record vote — please try again.', ephemeral: true });
+        await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_failed', 'poll_vote', pollId, { optionId, error: voteErr.message }, false, `poll.vote_failed:${buttonInteraction.id}`);
         return;
       }
 
@@ -212,6 +254,7 @@ export class PollsManager {
       if (previousOptionId === optionId) {
         // Re-clicking the option they already hold — nothing changed.
         await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
+        await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_denied', 'poll_vote', pollId, { optionId, reason: 'duplicate' }, false, `poll.vote_denied:${buttonInteraction.id}`);
         return;
       }
 
@@ -223,6 +266,7 @@ export class PollsManager {
         content: previousOptionId === null ? '✅ Vote recorded!' : '🔄 Vote updated!',
         ephemeral: true,
       });
+      await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_recorded', 'poll_vote', pollId, { optionId, previousOptionId }, true, `poll.vote:${buttonInteraction.id}`);
       return;
     }
 
@@ -239,16 +283,19 @@ export class PollsManager {
     if (insertErr) {
       if ((insertErr as { code?: string }).code === '23505') {
         await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
+        await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_denied', 'poll_vote', pollId, { optionId, reason: 'duplicate' }, false, `poll.vote_denied:${buttonInteraction.id}`);
         return;
       }
       log.error('poll_votes insert error:', insertErr);
       await buttonInteraction.reply({ content: '❌ Failed to record vote — please try again.', ephemeral: true });
+      await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_failed', 'poll_vote', pollId, { optionId, error: insertErr.message }, false, `poll.vote_failed:${buttonInteraction.id}`);
       return;
     }
 
     getQuestsManager(buttonInteraction.guildId ?? undefined)?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
+    await this.audit(buttonInteraction.guildId!, userId, 'poll.vote_recorded', 'poll_vote', pollId, { optionId }, true, `poll.vote:${buttonInteraction.id}`);
   }
 
   async closePoll(interaction: ChatInputCommandInteraction, pollId: string): Promise<void> {
@@ -261,11 +308,13 @@ export class PollsManager {
 
     if (!poll) {
       await interaction.reply({ content: voice(kit.voicePreset, 'not_found', { thing: 'Poll' }), ephemeral: true });
+      await this.audit(interaction.guildId!, interaction.user.id, 'poll.close_denied', 'poll', pollId, { reason: 'not_found' }, false, `poll.close_denied:${interaction.id}`);
       return;
     }
 
     if (poll.creator_user_id !== interaction.user.id) {
       await interaction.reply({ content: '❌ Only the poll creator can close it.', ephemeral: true });
+      await this.audit(interaction.guildId!, interaction.user.id, 'poll.close_denied', 'poll', pollId, { reason: 'not_creator' }, false, `poll.close_denied:${interaction.id}`);
       return;
     }
 
@@ -284,6 +333,7 @@ export class PollsManager {
 
     if (!closedRows || closedRows.length === 0) {
       await interaction.reply({ content: '❌ Poll is already closed.', ephemeral: true });
+      await this.audit(interaction.guildId!, interaction.user.id, 'poll.close_denied', 'poll', pollId, { reason: 'already_closed' }, false, `poll.close_denied:${interaction.id}`);
       return;
     }
 
@@ -291,6 +341,8 @@ export class PollsManager {
       pollId,
       title: poll.title,
       actorId: interaction.user.id,
+      occurrenceId: `${pollId}:close`,
+      correlationId: `poll:${pollId}`,
     });
 
     // Get results
@@ -357,14 +409,17 @@ export class PollsManager {
 
     if (!config?.predictions_enabled) {
       await interaction.reply({ content: voice(kit.voicePreset, 'disabled', { feature: 'Predictions' }), ephemeral: true });
+      await this.audit(guildId, interaction.user.id, 'prediction.create_denied', 'prediction', 'new', { reason: 'disabled' }, false, `prediction.create_denied:${interaction.id}`);
       return;
     }
 
     // White-label: use the owner-configured currency name (never the stock 'coins').
     const currency = config?.currency_name ?? 'coins';
 
-    if (options.length < 2 || options.length > 10) {
-      await interaction.reply({ content: '❌ Predictions need 2-10 outcomes.', ephemeral: true });
+    const maxOptions = Math.min(10, Math.max(2, Number(config.max_poll_options ?? 10)));
+    if (options.length < 2 || options.length > maxOptions) {
+      await interaction.reply({ content: `❌ Predictions need 2-${maxOptions} outcomes.`, ephemeral: true });
+      await this.audit(guildId, interaction.user.id, 'prediction.create_denied', 'prediction', 'new', { reason: 'invalid_options', count: options.length }, false, `prediction.create_denied:${interaction.id}`);
       return;
     }
 
@@ -381,6 +436,7 @@ export class PollsManager {
 
     if (!prediction) {
       await interaction.reply({ content: '❌ Failed to create prediction.', ephemeral: true });
+      await this.audit(guildId, interaction.user.id, 'prediction.create_failed', 'prediction', 'new', { reason: 'database_insert' }, false, `prediction.create_failed:${interaction.id}`);
       return;
     }
 
@@ -426,6 +482,8 @@ export class PollsManager {
       optionCount: options.length,
       creatorId: interaction.user.id,
       channelId: interaction.channelId,
+      occurrenceId: prediction.id,
+      correlationId: `prediction:${prediction.id}`,
     });
   }
 
@@ -462,6 +520,12 @@ export class PollsManager {
       return;
     }
     if (!prediction || prediction.status !== 'open') {
+      this.eventBus.emit('prediction.late_interaction_rejected', guildId, {
+        predictionId, actorId: userId, action: 'bet',
+        reason: prediction ? `status:${prediction.status}` : 'not_found',
+        occurrenceId: `${predictionId}:late-bet:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: '❌ Prediction is not open for bets.', ephemeral: true });
       return;
     }
@@ -757,6 +821,8 @@ export class PollsManager {
       optionId: options[optionIndex].id,
       amount,
       newPool,
+      occurrenceId: betId,
+      correlationId: `prediction:${predictionId}`,
     });
 
     await interaction.reply({
@@ -788,11 +854,21 @@ export class PollsManager {
       .single();
 
     if (!prediction) {
+      this.eventBus.emit('prediction.resolve_rejected', guildId, {
+        predictionId, actorId: interaction.user.id, reason: 'not_found',
+        occurrenceId: `${predictionId}:resolve-rejected:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: voice(kit.voicePreset, 'not_found', { thing: 'Prediction' }), ephemeral: true });
       return;
     }
 
     if (prediction.creator_user_id !== interaction.user.id) {
+      this.eventBus.emit('prediction.resolve_rejected', guildId, {
+        predictionId, actorId: interaction.user.id, reason: 'not_creator',
+        occurrenceId: `${predictionId}:resolve-rejected:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: '❌ Only the creator can resolve this prediction.', ephemeral: true });
       return;
     }
@@ -805,6 +881,11 @@ export class PollsManager {
       .limit(1000);
 
     if (!options || winningIndex >= options.length) {
+      this.eventBus.emit('prediction.resolve_rejected', guildId, {
+        predictionId, actorId: interaction.user.id, reason: 'invalid_winner',
+        occurrenceId: `${predictionId}:resolve-rejected:${interaction.id}`,
+        correlationId: `prediction:${predictionId}`,
+      });
       await interaction.reply({ content: '❌ Invalid winning option.', ephemeral: true });
       return;
     }
@@ -856,6 +937,8 @@ export class PollsManager {
       payoutCount,
       refundedCount,
       actorId: interaction.user.id,
+      occurrenceId: `${predictionId}:resolve`,
+      correlationId: `prediction:${predictionId}`,
     });
 
     await interaction.reply({
@@ -926,6 +1009,14 @@ export class PollsManager {
       if (err) {
         // Marker stays NULL — the next resolve re-drive retries this bet.
         log.error(`Failed to settle bet ${bet.id} (${type}) for ${bet.user_id}:`, err.message);
+        this.eventBus.emit('prediction.settlement_payout_retried', guildId, {
+          predictionId,
+          betId: bet.id,
+          winnerId: bet.user_id,
+          settlementType: type,
+          occurrenceId: `${predictionId}:settlement-retry:${bet.id}`,
+          correlationId: `prediction:${predictionId}`,
+        });
         return false;
       }
       const settled = res as { status?: string; replayed?: boolean } | null;
@@ -1030,6 +1121,8 @@ export class PollsManager {
       refundedCount,
       actorId: interaction.user.id,
       redrive: true,
+      occurrenceId: `${predictionId}:resolve:redrive`,
+      correlationId: `prediction:${predictionId}`,
     });
 
     await interaction.reply({

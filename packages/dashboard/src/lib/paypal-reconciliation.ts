@@ -2399,6 +2399,12 @@ async function runPass(
   const unsettledLocalPayments: UnsettledLocalPayment[] = [];
   const missingProviderPayments: MissingProviderPayment[] = [];
   const orderGetTargets: LocalOrderRow[] = [];
+  const orderGetTargetIds = new Set<string>();
+  const addOrderGetTarget = (order: LocalOrderRow) => {
+    if (orderGetTargetIds.has(order.id)) return;
+    orderGetTargetIds.add(order.id);
+    orderGetTargets.push(order);
+  };
   for (const order of orders) {
     const pendingish = order.status === 'pending' || order.status === 'pending_review';
     const settled = SETTLED_ORDER_STATUSES.includes(order.status);
@@ -2432,7 +2438,7 @@ async function runPass(
       // reveal a SECOND settled capture whose webhook was lost. Captures
       // already verified individually are deduplicated by the known-row
       // check in the settled-captures sweep.
-      orderGetTargets.push(order);
+      addOrderGetTarget(order);
     }
   }
 
@@ -2445,7 +2451,6 @@ async function runPass(
     const cancelledLookbackStartIso = new Date(
       windowStartMs - Math.max(0, refundLookbackMs),
     ).toISOString();
-    const targetedOrderIds = new Set(orderGetTargets.map((order) => order.id));
     let scanComplete = false;
     for (let from = 0; from < LOCAL_SCAN_MAX_ROWS; from += LOCAL_PAGE_SIZE) {
       const heartbeatFailure = await heartbeat();
@@ -2490,12 +2495,11 @@ async function runPass(
           order.status !== 'cancelled'
           || !isProviderId(order.paypal_order_id)
           || String(order.created_at ?? '') >= windowStart
-          || targetedOrderIds.has(order.id)
+          || orderGetTargetIds.has(order.id)
         ) {
           continue;
         }
-        targetedOrderIds.add(order.id);
-        orderGetTargets.push(order);
+        addOrderGetTarget(order);
       }
       if (page.length < LOCAL_PAGE_SIZE) {
         scanComplete = true;
@@ -2534,27 +2538,6 @@ async function runPass(
     }
   }
 
-  // Customer identities back the custom_id tamper check on fetched orders.
-  const customerIdentityScan = await loadCustomerIdentities(
-    supabase,
-    [...new Set(
-      orderGetTargets
-        .map((order) => order.customer_id)
-        .filter((id): id is string => typeof id === 'string'),
-    )],
-    configuredGuildIds,
-  );
-  if (!customerIdentityScan.ok) {
-    return {
-      status: 'failed',
-      reason: customerIdentityScan.reason,
-      retriable: customerIdentityScan.retriable,
-    };
-  }
-  const customersById = new Map(
-    customerIdentityScan.rows.map((customer) => [customer.id, customer]),
-  );
-
   // Subscriptions to verify: the window's orders/payments seed the map, and
   // a PAGED sweep over every settled subscription order runs at judge time —
   // established subscriptions stay targets without a lifetime-wide cap.
@@ -2580,6 +2563,11 @@ async function runPass(
       verifiedByGuild.set(guildId, (verifiedByGuild.get(guildId) ?? 0) + 1);
     }
   };
+  // A provider payment object that was fetched and ownership-validated proves
+  // the provider has money evidence even when its parent order endpoint later
+  // becomes unavailable. Keep that transport failure distinct from a genuine
+  // missing-money finding.
+  const orderIdsWithVerifiedProviderPayment = new Set<string>();
   const PROVIDER_SETTLED_CAPTURE_STATUSES = ['COMPLETED', 'REFUNDED', 'PARTIALLY_REFUNDED'];
 
   // 1) Captures — every window payment by its own provider identity, plus a
@@ -3142,6 +3130,7 @@ async function runPass(
       // stripping supplementary_data.
       return { status: 'failed', reason: 'provider identity conflict', retriable: false };
     }
+    if (order) orderIdsWithVerifiedProviderPayment.add(order.id);
     const providerRefunded = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(capture.status)
       // A capture whose state changed inside the settlement lag has its
       // refund webhook in flight; without the order's refund list to time-
@@ -3314,6 +3303,7 @@ async function runPass(
         return { status: 'failed', reason: 'provider identity conflict', retriable: false };
       }
     }
+    if (order) orderIdsWithVerifiedProviderPayment.add(order.id);
     if (
       ['refunded', 'partially_refunded', 'reversed'].includes(sale.state)
       // A sale whose state changed inside the settlement lag has its refund
@@ -3473,6 +3463,27 @@ async function runPass(
         if (payment.guild_id !== parentOrder.guild_id) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
+        const providerId = payment.paypal_payment_id as string;
+        const existing = localByProviderId.get(providerId);
+        if (existing && existing.id !== payment.id) {
+          return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+        localByProviderId.set(providerId, payment);
+        paymentEvidenceById.set(payment.id, payment);
+        orderIdsWithPaymentIdentity.add(parentOrder.id);
+        if (
+          isProviderId(parentOrder.paypal_order_id)
+          && (
+            parentOrder.status === 'pending'
+            || parentOrder.status === 'pending_review'
+            || parentOrder.status === 'cancelled'
+            || SETTLED_ORDER_STATUSES.includes(parentOrder.status)
+          )
+        ) {
+          // Historical settled orders need the same capture enumeration as
+          // window orders: a known capture must not hide a lost sibling.
+          addOrderGetTarget(parentOrder);
+        }
       }
       const pageCaptureRows = pagePayments.filter((payment) => !isSubscriptionSaleRow(payment));
       const pageSaleRows = pagePayments.filter((payment) => isSubscriptionSaleRow(payment));
@@ -3540,14 +3551,33 @@ async function runPass(
           continue;
         }
         if (
-          lookbackOrder
-          && isProviderId(lookbackOrder.paypal_order_id)
-          && (
-            lookup.value.relatedOrderId === null
-            || lookup.value.relatedOrderId !== lookbackOrder.paypal_order_id
-          )
+          !lookbackOrder
+          || !isProviderId(lookbackOrder.paypal_order_id)
+          || lookup.value.relatedOrderId === null
+          || lookup.value.relatedOrderId !== lookbackOrder.paypal_order_id
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
+        }
+        orderIdsWithVerifiedProviderPayment.add(lookbackOrder.id);
+        const providerSettled = PROVIDER_SETTLED_CAPTURE_STATUSES.includes(lookup.value.status);
+        const providerPastLag = !(lookup.value.updateTimeMs !== null
+          && lookup.value.updateTimeMs > windowEndMs);
+        if (
+          providerSettled
+          && (payment.status === 'completed' || providerPastLag)
+          && (
+            lookup.value.amountCents !== payment.amount_cents
+            || lookup.value.currency !== normalizeCurrency(payment.currency)
+          )
+        ) {
+          amountMismatches.push({
+            transactionId: payment.paypal_payment_id as string,
+            guildId: payment.guild_id as string,
+            providerAmountCents: lookup.value.amountCents,
+            localAmountCents: payment.amount_cents,
+            providerCurrency: lookup.value.currency,
+            localCurrency: normalizeCurrency(payment.currency),
+          });
         }
         if (payment.status !== 'completed') {
           // Unresolved historical row: report only when the provider says
@@ -3555,9 +3585,8 @@ async function runPass(
           // same provider-settled vs local-unsettled divergence the window
           // pass reports.
           if (
-            PROVIDER_SETTLED_CAPTURE_STATUSES.includes(lookup.value.status)
-            && !(lookup.value.updateTimeMs !== null
-              && lookup.value.updateTimeMs > windowEndMs)
+            providerSettled
+            && providerPastLag
           ) {
             unsettledLocalPayments.push({
               transactionId: payment.paypal_payment_id as string,
@@ -3569,7 +3598,7 @@ async function runPass(
           }
           continue;
         }
-        if (!PROVIDER_SETTLED_CAPTURE_STATUSES.includes(lookup.value.status)) {
+        if (!providerSettled) {
           // Locally completed money the provider now calls PENDING/
           // DECLINED/FAILED — the same disagreement the window path
           // reports as missing provider evidence.
@@ -3584,22 +3613,6 @@ async function runPass(
             createdAt: payment.created_at,
           });
           continue;
-        }
-        // Settled provider money must match the historical row — the
-        // lookback is its only provider touch (refunded targets get the
-        // ledger judgment on top).
-        if (
-          lookup.value.amountCents !== payment.amount_cents
-          || lookup.value.currency !== normalizeCurrency(payment.currency)
-        ) {
-          amountMismatches.push({
-            transactionId: payment.paypal_payment_id as string,
-            guildId: payment.guild_id as string,
-            providerAmountCents: lookup.value.amountCents,
-            localAmountCents: payment.amount_cents,
-            providerCurrency: lookup.value.currency,
-            localCurrency: normalizeCurrency(payment.currency),
-          });
         }
         if (
           ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(lookup.value.status)
@@ -3638,21 +3651,39 @@ async function runPass(
         // is not a valid subscription-sale shape, and a mismatched one is a
         // borrowed identity — the lookback is this row's ONLY verification.
         if (
-          lookbackOrder
-          && isProviderId(lookbackOrder.paypal_subscription_id)
-          && (
-            lookup.value.billingAgreementId === null
-            || lookup.value.billingAgreementId !== lookbackOrder.paypal_subscription_id
-          )
+          !lookbackOrder
+          || !isProviderId(lookbackOrder.paypal_subscription_id)
+          || lookup.value.billingAgreementId === null
+          || lookup.value.billingAgreementId !== lookbackOrder.paypal_subscription_id
         ) {
           return { status: 'failed', reason: 'provider identity conflict', retriable: false };
         }
+        orderIdsWithVerifiedProviderPayment.add(lookbackOrder.id);
+        const providerSettled = ['completed', 'refunded', 'partially_refunded', 'reversed']
+          .includes(lookup.value.state);
+        const providerPastLag = !(lookup.value.updateTimeMs !== null
+          && lookup.value.updateTimeMs > windowEndMs);
+        if (
+          providerSettled
+          && (payment.status === 'completed' || providerPastLag)
+          && (
+            lookup.value.amountCents !== payment.amount_cents
+            || lookup.value.currency !== normalizeCurrency(payment.currency)
+          )
+        ) {
+          amountMismatches.push({
+            transactionId: payment.paypal_payment_id as string,
+            guildId: payment.guild_id as string,
+            providerAmountCents: lookup.value.amountCents,
+            localAmountCents: payment.amount_cents,
+            providerCurrency: lookup.value.currency,
+            localCurrency: normalizeCurrency(payment.currency),
+          });
+        }
         if (payment.status !== 'completed') {
           if (
-            ['completed', 'refunded', 'partially_refunded', 'reversed']
-              .includes(lookup.value.state)
-            && !(lookup.value.updateTimeMs !== null
-              && lookup.value.updateTimeMs > windowEndMs)
+            providerSettled
+            && providerPastLag
           ) {
             unsettledLocalPayments.push({
               transactionId: payment.paypal_payment_id as string,
@@ -3664,8 +3695,7 @@ async function runPass(
           }
           continue;
         }
-        if (!['completed', 'refunded', 'partially_refunded', 'reversed']
-          .includes(lookup.value.state)) {
+        if (!providerSettled) {
           missingProviderPayments.push({
             kind: 'payment',
             orderId: payment.order_id as string,
@@ -3677,19 +3707,6 @@ async function runPass(
             createdAt: payment.created_at,
           });
           continue;
-        }
-        if (
-          lookup.value.amountCents !== payment.amount_cents
-          || lookup.value.currency !== normalizeCurrency(payment.currency)
-        ) {
-          amountMismatches.push({
-            transactionId: payment.paypal_payment_id as string,
-            guildId: payment.guild_id as string,
-            providerAmountCents: lookup.value.amountCents,
-            localAmountCents: payment.amount_cents,
-            providerCurrency: lookup.value.currency,
-            localCurrency: normalizeCurrency(payment.currency),
-          });
         }
         if (
           ['refunded', 'partially_refunded', 'reversed'].includes(lookup.value.state)
@@ -4399,8 +4416,31 @@ async function runPass(
     }
   }
 
-  // 3) Orders — pending approval states and settled orders with no payment
-  //    identity.
+  // Customer identities back the custom_id tamper check on fetched orders.
+  // Load them only after the historical-payment sweep has added every old
+  // parent that also needs capture enumeration.
+  const customerIdentityScan = await loadCustomerIdentities(
+    supabase,
+    [...new Set(
+      orderGetTargets
+        .map((order) => order.customer_id)
+        .filter((id): id is string => typeof id === 'string'),
+    )],
+    configuredGuildIds,
+  );
+  if (!customerIdentityScan.ok) {
+    return {
+      status: 'failed',
+      reason: customerIdentityScan.reason,
+      retriable: customerIdentityScan.retriable,
+    };
+  }
+  const customersById = new Map(
+    customerIdentityScan.rows.map((customer) => [customer.id, customer]),
+  );
+
+  // 3) Orders — pending approval states and every settled order, including
+  //    historical parents discovered by the payment lookback.
   const orderMap = await mapChunkedWithHeartbeat(
     orderGetTargets,
     heartbeat,
@@ -4426,6 +4466,13 @@ async function runPass(
       // commerce with no payment identity means the settlement cannot be
       // evidenced at the provider.
       if (SETTLED_ORDER_STATUSES.includes(order.status)) {
+        if (orderIdsWithVerifiedProviderPayment.has(order.id)) {
+          return {
+            status: 'failed',
+            reason: 'settled-order capture enumeration unavailable: provider order missing',
+            retriable: true,
+          };
+        }
         missingProviderPayments.push({
           kind: 'order',
           orderId: order.id,

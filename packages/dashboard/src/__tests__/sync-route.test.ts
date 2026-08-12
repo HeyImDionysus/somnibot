@@ -119,7 +119,7 @@ describe('POST /api/sync', () => {
       expect.objectContaining({ sync_interval_minutes: 15 }),
       expect.anything(),
     );
-    expect(notifyBot).toHaveBeenCalledWith('settings', {
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'settings', {
       sync_enabled: true,
       sync_interval_minutes: 15,
       sync_auto_repair: false,

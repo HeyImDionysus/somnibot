@@ -4,6 +4,7 @@ import { cookies } from 'next/headers';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { getClientIp } from '@/lib/api/client-ip';
 import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
+import { getTrustedRedirectOrigin } from '@/lib/public-redirect-origin';
 
 /**
  * Discord OAuth callback handler.
@@ -20,7 +21,8 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
   }
 
-  const { searchParams, origin } = new URL(request.url);
+  const { searchParams } = new URL(request.url);
+  const origin = getTrustedRedirectOrigin(request);
   const code = searchParams.get('code');
   // Validate `next` to prevent open redirects.
   // Only allow relative paths starting with "/" and block protocol-relative URLs ("//").

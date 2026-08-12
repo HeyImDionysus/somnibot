@@ -29,6 +29,17 @@ vi.mock('../services/audit.js', () => ({
 import { handleBuyButton } from '../features/commerce/payment-handler.js';
 import { invalidateBrandKitCache } from '../features/branding/brand-kit.js';
 
+// The production path refuses to create a provider checkout unless its
+// opaque checkout handle can be HMAC-signed.  Every test that reaches PayPal
+// must therefore provide the same non-secret fixture key the durability suite
+// uses; otherwise the handler correctly stops at "signing unavailable".
+beforeEach(() => {
+  process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret';
+});
+afterEach(() => {
+  delete process.env.PAYPAL_CLIENT_SECRET;
+});
+
 function makeChain(data: any = null) {
   const chain: any = {};
   for (const m of ['from', 'select', 'insert', 'update', 'delete', 'eq', 'single', 'maybeSingle', 'order', 'limit', 'in', 'match']) {
@@ -254,7 +265,12 @@ function makeQueryEngine(
   let deactivationAttempts = 0;
   let activeCheckoutAttempts = 0;
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
-    if (name === 'commerce_create_active_paid_checkout') {
+    // The production handler now uses the atomic RPC that creates the order
+    // and binds the checkout intent in one transaction.  Keep the in-memory
+    // engine's row shape identical to the SQL function so these tests exercise
+    // the real reservation/exposure contract rather than falling through to
+    // the generic RPC stub.
+    if (name === 'commerce_create_and_bind_active_paid_checkout') {
       activeCheckoutAttempts += 1;
       if (options.orderInsertError) {
         return {
@@ -627,7 +643,10 @@ describe('handleBuyButton — cross-guild plan injection (subscription checkout)
     const payload = JSON.parse((subCall![1] as RequestInit).body as string);
     // The victim guild's own plan must be billed — not the attacker's $0 plan.
     expect(payload.plan_id).toBe('P-LEGIT');
-    expect(JSON.parse(payload.custom_id).plan_id).toBe('plan-legit');
+    // PayPal now receives only the opaque signed checkout handle; plan/guild
+    // identity stays in the service-role ledger.  The selected plan is proven
+    // by the provider plan id and the atomic order snapshot below.
+    expect(payload.custom_id).toMatch(/^v1:[^.]+\.[^.]+$/);
 
     // The pending order must reference the guild-owned plan too.
     expect(inserts.orders).toHaveLength(1);
@@ -838,7 +857,8 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
         'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
       );
 
-      expect(rpc).toHaveBeenCalledWith('commerce_create_active_paid_checkout', {
+      expect(rpc).toHaveBeenCalledWith('commerce_create_and_bind_active_paid_checkout', {
+        p_checkout_token: expect.any(String),
         p_order_number: 'ORD-TEST-1',
         p_guild_id: VICTIM_GUILD,
         p_customer_id: 'cust-1',
@@ -862,7 +882,7 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
         expect.objectContaining({ components: expect.any(Array) }),
       );
       const reservationCallOrder = rpc.mock.invocationCallOrder[
-        rpc.mock.calls.findIndex(([name]) => name === 'commerce_create_active_paid_checkout')
+        rpc.mock.calls.findIndex(([name]) => name === 'commerce_create_and_bind_active_paid_checkout')
       ];
       expect(reservationCallOrder).toBeLessThan(
         interaction.editReply.mock.invocationCallOrder.at(-1)!,
@@ -881,7 +901,7 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
       );
 
       expect(
-        rpc.mock.calls.some(([name]) => name === 'commerce_create_active_paid_checkout'),
+        rpc.mock.calls.some(([name]) => name === 'commerce_create_and_bind_active_paid_checkout'),
       ).toBe(true);
       expect(interaction.editReply).toHaveBeenLastCalledWith({
         content: expect.stringContaining('could not be safely recorded'),
@@ -907,7 +927,7 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
       );
 
       const reservationCalls = rpc.mock.calls.filter(
-        ([name]) => name === 'commerce_create_active_paid_checkout',
+      ([name]) => name === 'commerce_create_and_bind_active_paid_checkout',
       );
       expect(reservationCalls).toHaveLength(2);
       expect(reservationCalls[1]?.[1]).toEqual(reservationCalls[0]?.[1]);
@@ -948,7 +968,7 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
     );
 
     const reservationCalls = rpc.mock.calls.filter(
-      ([name]) => name === 'commerce_create_active_paid_checkout',
+      ([name]) => name === 'commerce_create_and_bind_active_paid_checkout',
     );
     expect(reservationCalls).toHaveLength(2);
     expect(reservationCalls[1]?.[1]).toEqual(reservationCalls[0]?.[1]);
@@ -983,7 +1003,7 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
       );
 
       expect(engine.rpc).toHaveBeenCalledWith(
-        'commerce_create_active_paid_checkout',
+        'commerce_create_and_bind_active_paid_checkout',
         expect.objectContaining({
           p_currency: type === 'one_time' ? 'USD' : 'EUR',
         }),

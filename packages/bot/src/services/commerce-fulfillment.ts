@@ -87,6 +87,11 @@ export interface FulfillmentPayload {
   guild_id: string;
   customer_id: string;
   discord_id: string;
+  /** Gift deliveries retain buyer identity while granting the recipient. */
+  recipient_customer_id?: string;
+  recipient_discord_id?: string;
+  gift_intent_id?: string;
+  free_claim?: boolean;
   product_id: string;
   product_name: string;
   order_id: string;
@@ -549,6 +554,9 @@ export class CommerceFulfillmentService {
       }
 
       result.success = result.errors.length === 0;
+      if (result.success && (payload.fulfillment_type === 'one_time_purchase' || payload.fulfillment_type === 'subscription_activated')) {
+        await this.maybePostPurchaseCelebration(payload);
+      }
     } catch (err) {
       if (err instanceof CommerceOutwardSupersededError) {
         if (this.entitlementService.getActivePurchaseRoleDeliveryAttempt()) {
@@ -610,6 +618,32 @@ export class CommerceFulfillmentService {
       throw new Error('Fulfillment action claim is required for paid role mutation');
     }
     return this.executionContext;
+  }
+
+  /** Post the opt-in public celebration once, without exposing price/payment data. */
+  private async maybePostPurchaseCelebration(payload: FulfillmentPayload): Promise<void> {
+    try {
+      const { data: config } = await this.supabase
+        .from('guild_config')
+        .select('public_celebration_enabled, celebration_channel_id')
+        .eq('guild_id', payload.guild_id)
+        .maybeSingle();
+      if (config?.public_celebration_enabled !== true || typeof config.celebration_channel_id !== 'string') return;
+      const channel = this.guild.channels.cache.get(config.celebration_channel_id);
+      if (!channel || !channel.isTextBased() || !('send' in channel)) return;
+      const { data: marker, error } = await this.supabase
+        .from('commerce_purchase_celebrations')
+        .insert({ order_id: payload.order_id, guild_id: payload.guild_id })
+        .select('order_id')
+        .maybeSingle();
+      if (error || !marker) return;
+      await channel.send({
+        content: `${payload.discord_id ? `<@${payload.discord_id}>` : 'A member'} just picked up ${payload.product_name} from the store — enjoy!`,
+        allowedMentions: { users: payload.discord_id ? [payload.discord_id] : [] },
+      });
+    } catch (error) {
+      log.warn('Public purchase celebration failed (fulfillment remains successful)', { detail: error });
+    }
   }
 
   private requireOutwardSent(
@@ -694,6 +728,10 @@ export class CommerceFulfillmentService {
         throw new Error('Terminal paid role cleanup remains unresolved');
       }
     }
+    // Terminal refund/dispute/expiry carriers freeze the channel vector on the
+    // same fulfillment payload as roles. Revoke it after durable role cleanup
+    // so a replay is safe and a Discord failure remains queue-retryable.
+    await this.revokeGrantedChannelAccess(payload);
     throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
   }
 
@@ -819,7 +857,8 @@ export class CommerceFulfillmentService {
       throw new Error('One-time fulfillment payload failed entitlement type validation');
     }
     const temporaryRoleGrants = normalizeTemporaryRoleGrants(payload.temporary_role_grants);
-    const orderStatus = await this.validatePayloadOrderSnapshot(payload, temporaryRoleGrants);
+    const freeClaim = payload.free_claim === true;
+    const orderStatus = await this.validatePayloadOrderSnapshot(payload, temporaryRoleGrants, freeClaim);
     if (orderStatus !== 'completed' && orderStatus !== 'pending_review') {
       requireTerminalOrderStatus(orderStatus);
       const terminalEntitlementId = await this.findOrderEntitlement(payload);
@@ -827,10 +866,34 @@ export class CommerceFulfillmentService {
       await this.finishTerminalRoleDelivery(payload, terminalEntitlementId);
     }
     await this.validatePayloadCustomerIdentity(payload);
-    const claim = await this.claimInitialPaidFulfillment(payload);
-    if (claim === 'held') {
-      result.paidFulfillmentHeld = true;
-      return;
+    // Arbitrate the paid order against the buyer before switching the
+    // delivery identity to the recipient. Gift rows have their own atomic
+    // intent claim and must not be treated as a second buyer entitlement.
+    const giftDelivery = Boolean(payload.recipient_customer_id || payload.gift_intent_id);
+    if (!giftDelivery && !freeClaim) {
+      const claim = await this.claimInitialPaidFulfillment(payload);
+      if (claim === 'held') {
+        result.paidFulfillmentHeld = true;
+        return;
+      }
+    }
+    if (payload.recipient_customer_id || payload.recipient_discord_id || payload.gift_intent_id) {
+      if (typeof payload.recipient_customer_id !== 'string' || typeof payload.recipient_discord_id !== 'string' || typeof payload.gift_intent_id !== 'string') {
+        throw new Error('Gift fulfillment buyer identity is malformed');
+      }
+      const { data: recipient, error: recipientError } = await this.supabase
+        .from('customers')
+        .select('id, guild_id, discord_id')
+        .eq('id', payload.recipient_customer_id)
+        .eq('guild_id', payload.guild_id)
+        .maybeSingle();
+      if (recipientError || !recipient || recipient.discord_id !== payload.recipient_discord_id) {
+        throw new Error('Gift recipient identity is missing or mismatched');
+      }
+      // The webhook has already validated buyer/payment identity; the queue
+      // contract now runs the sanctioned fulfillment pipeline as the recipient.
+      // Keep buyer_customer_id only as immutable audit metadata.
+      payload = { ...payload, customer_id: recipient.id, discord_id: recipient.discord_id };
     }
     if (orderStatus !== 'completed') {
       requireTerminalOrderStatus(orderStatus);
@@ -849,6 +912,8 @@ export class CommerceFulfillmentService {
         licenseKeyId: payload.license_key_id,
         discordId: payload.discord_id,
         type: 'one_time',
+        // Free claims persist their manual entitlement atomically in the RPC;
+        // this branch is only a defensive replay fallback for a missing row.
         source: 'purchase',
         grantedRoleIds: payload.granted_role_ids,
         grantedChannelIds: payload.granted_channel_ids,
@@ -905,6 +970,7 @@ export class CommerceFulfillmentService {
           contract,
           begun.attempt,
         );
+        await this.applyGrantedChannelAccess(payload);
       }
     }
     if (!roleDeliveryAlreadySettled && outwardGenerationId === null) {
@@ -921,6 +987,7 @@ export class CommerceFulfillmentService {
 
     // 3. Confirm the role generation before any outward row can be created.
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+    await this.applyGrantedChannelAccess(payload);
 
     // 4. Emit purchase.completed once. A crash after listener acceptance but
     // before the sent marker becomes a manual-review `uncertain`, never resend.
@@ -986,13 +1053,34 @@ export class CommerceFulfillmentService {
       || typeof data.status !== 'string'
       || !['active', 'pending', 'grace_period', 'suspended', 'expired', 'cancelled']
         .includes(data.status)
-      || data.source !== 'purchase'
+      || (data.source !== 'purchase' && !(payload.free_claim === true && data.source === 'manual'))
       || !isSameUniqueStringSet(data.granted_role_ids, payload.granted_role_ids)
       || !isSameUniqueStringSet(data.granted_channel_ids, payload.granted_channel_ids)
     ) {
       throw new Error('Existing order entitlement failed identity validation');
     }
     return data.id;
+  }
+
+  /** Apply the frozen channel vector idempotently for the delivery identity. */
+  private async applyGrantedChannelAccess(payload: FulfillmentPayload): Promise<void> {
+    if (payload.granted_channel_ids.length === 0) return;
+    const member = this.guild.members.cache.get(payload.discord_id) ?? await this.guild.members.fetch(payload.discord_id);
+    const me = this.guild.members.me ?? await this.guild.members.fetchMe();
+    if (!me.permissions.has('ManageChannels')) throw new Error('Bot lacks Manage Channels for commerce channel delivery');
+    for (const channelId of payload.granted_channel_ids) {
+      const channel = this.guild.channels.cache.get(channelId);
+      if (!channel || !('permissionOverwrites' in channel)) throw new Error(`Commerce channel ${channelId} is unavailable`);
+      await (channel as import('discord.js').GuildChannel).permissionOverwrites.edit(member.id, { ViewChannel: true }, { reason: `Commerce entitlement ${payload.order_id}` });
+    }
+  }
+
+  private async revokeGrantedChannelAccess(payload: FulfillmentPayload): Promise<void> {
+    for (const channelId of payload.granted_channel_ids) {
+      const channel = this.guild.channels.cache.get(channelId);
+      if (!channel || !('permissionOverwrites' in channel)) continue;
+      await (channel as import('discord.js').GuildChannel).permissionOverwrites.delete(payload.discord_id, `Commerce entitlement revoked ${payload.order_id}`);
+    }
   }
 
   private async validatePayloadCustomerIdentity(payload: FulfillmentPayload): Promise<void> {
@@ -1018,6 +1106,7 @@ export class CommerceFulfillmentService {
   private async validatePayloadOrderSnapshot(
     payload: FulfillmentPayload,
     temporaryRoleGrants: Array<{ role_id: string; duration_seconds: number }>,
+    freeClaim = false,
   ): Promise<string> {
     const { data, error } = await this.supabase
       .from('orders')
@@ -1038,7 +1127,7 @@ export class CommerceFulfillmentService {
       || !hasExactPayPalSubscriptionIdentity(data.paypal_subscription_id, payload)
       || data.amount_cents !== payload.amount_cents
       || data.currency !== payload.currency
-      || (data.source !== 'purchase' && data.source !== null)
+      || (data.source !== 'purchase' && !(freeClaim && data.source === 'manual') && data.source !== null)
       || typeof data.status !== 'string'
       || !KNOWN_ORDER_STATUSES.includes(data.status)
     ) {
@@ -1971,6 +2060,7 @@ export class CommerceFulfillmentService {
 
     // 3. Confirm the role generation before any outward row can be created.
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+    await this.applyGrantedChannelAccess(payload);
 
     // 4. Emit subscription.activated once under the same crash fence.
     const preparedEvent = outwardGenerationId === null
@@ -2074,6 +2164,7 @@ export class CommerceFulfillmentService {
     const outwardGenerationId =
       this.entitlementService.getPurchaseRoleDeliveryOutwardGeneration();
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
+    await this.applyGrantedChannelAccess(payload);
     const preparedEvent = outwardGenerationId === null
       ? null
       : this.eventBus.prepareEmitAndWait('subscription.activated', payload.guild_id, {
@@ -2161,6 +2252,7 @@ export class CommerceFulfillmentService {
         return;
       }
     }
+    await this.revokeGrantedChannelAccess(payload);
     const outwardGenerationId = revocation.outwardGenerationId ?? null;
     if (outwardGenerationId === null) {
       result.errors.push(

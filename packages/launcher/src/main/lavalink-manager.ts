@@ -16,6 +16,15 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { app, BrowserWindow } from 'electron';
+import {
+  PROCESS_RESTART_MAX_ATTEMPTS,
+  PROCESS_RESTART_STABLE_WINDOW_MS,
+  processRestartDelayMs,
+  shouldRecoverManagedProcess,
+} from './process-manager-guards.js';
+import { probeLavalinkReady, waitForServiceReady } from './service-readiness.js';
+import { getConfig, saveConfig } from './config-store.js';
+import { stopChildProcess } from './managed-child-stop.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +44,48 @@ export type LavalinkStatus = 'offline' | 'starting' | 'online' | 'error' | 'down
 let lavalinkProcess: ChildProcess | null = null;
 let currentStatus: LavalinkStatus = 'offline';
 let lastError = '';
+let desiredRunning = false;
+let restartAttempts = 0;
+let restartTimer: ReturnType<typeof setTimeout> | null = null;
+let stableTimer: ReturnType<typeof setTimeout> | null = null;
+let stopPromise: Promise<void> | null = null;
+
+function markStable(proc: ChildProcess): void {
+  if (stableTimer) clearTimeout(stableTimer);
+  stableTimer = setTimeout(() => {
+    stableTimer = null;
+    if (desiredRunning && lavalinkProcess === proc && currentStatus === 'online') {
+      restartAttempts = 0;
+    }
+  }, PROCESS_RESTART_STABLE_WINDOW_MS);
+  stableTimer.unref?.();
+}
+
+function scheduleRecovery(reason: string): void {
+  if (!desiredRunning || restartTimer || lavalinkProcess) return;
+  if (restartAttempts >= PROCESS_RESTART_MAX_ATTEMPTS) {
+    setStatus(
+      'error',
+      `Lavalink automatic recovery stopped after ${PROCESS_RESTART_MAX_ATTEMPTS} failed attempts. ${reason}`,
+    );
+    broadcastLavalinkStatus();
+    return;
+  }
+
+  restartAttempts += 1;
+  const delayMs = processRestartDelayMs(restartAttempts);
+  setStatus(
+    'error',
+    `Lavalink stopped unexpectedly. Restarting in ${Math.ceil(delayMs / 1_000)}s (attempt ${restartAttempts}/${PROCESS_RESTART_MAX_ATTEMPTS}). ${reason}`,
+  );
+  broadcastLavalinkStatus();
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (!desiredRunning || lavalinkProcess) return;
+    void startLavalink();
+  }, delayMs);
+  restartTimer.unref?.();
+}
 
 // V7 Audit §9.8: Single source of truth for the managed Lavalink password.
 // Resolved once at startup — used in both application.yml and LAVALINK_PASSWORD env var.
@@ -47,6 +98,12 @@ export function getLavalinkPassword(): string {
     _lavalinkPassword = process.env.LAVALINK_PASSWORD || randomBytes(16).toString('hex');
   }
   return _lavalinkPassword;
+}
+
+/** Reuse the portable instance password before starting the managed process. */
+export function setLavalinkPassword(password: string): void {
+  if (!password) throw new Error('Lavalink password cannot be empty.');
+  _lavalinkPassword = password;
 }
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +140,18 @@ export function isLavalinkJarPresent(): boolean {
 
 export function getLavalinkPid(): number | null {
   return lavalinkProcess?.pid ?? null;
+}
+
+function persistLavalinkPid(pid: number | null): void {
+  const config = getConfig();
+  const lastPids = config.lastPids
+    ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  const lastPidStartedAt = config.lastPidStartedAt
+    ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  saveConfig({
+    lastPids: { ...lastPids, lavalink: pid },
+    lastPidStartedAt: { ...lastPidStartedAt, lavalink: pid === null ? null : Date.now() },
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -259,6 +328,7 @@ export async function startLavalink(): Promise<{
 
   setStatus('starting');
   broadcastLavalinkStatus();
+  desiredRunning = true;
 
   return new Promise((resolve) => {
     const cwd = getLavalinkDir();
@@ -280,19 +350,12 @@ export async function startLavalink(): Promise<{
     });
 
     lavalinkProcess = proc;
+    persistLavalinkPid(proc.pid ?? null);
     let resolved = false;
 
     const onData = (chunk: Buffer) => {
       const text = chunk.toString();
       broadcastLog(text);
-
-      // Detect ready string from Lavalink 4.x
-      if (!resolved && (text.includes('Lavalink is ready') || text.includes('Started Launcher'))) {
-        resolved = true;
-        setStatus('online');
-        broadcastLavalinkStatus();
-        resolve({ ok: true });
-      }
     };
 
     proc.stdout?.on('data', onData);
@@ -301,18 +364,29 @@ export async function startLavalink(): Promise<{
     });
 
     proc.on('error', (err) => {
+      const shouldRecover = shouldRecoverManagedProcess(desiredRunning, lavalinkProcess, proc);
+      if (lavalinkProcess !== proc) return;
       const msg = `Lavalink failed to start: ${err.message}`;
+      if (stableTimer) clearTimeout(stableTimer);
+      stableTimer = null;
       lavalinkProcess = null;
+      persistLavalinkPid(null);
       setStatus('error', msg);
       broadcastLavalinkStatus();
       if (!resolved) {
         resolved = true;
         resolve({ ok: false, error: msg });
       }
+      if (shouldRecover) scheduleRecovery(msg);
     });
 
     proc.on('exit', (code) => {
+      const shouldRecover = shouldRecoverManagedProcess(desiredRunning, lavalinkProcess, proc);
+      if (lavalinkProcess !== proc) return;
+      if (stableTimer) clearTimeout(stableTimer);
+      stableTimer = null;
       lavalinkProcess = null;
+      persistLavalinkPid(null);
       if (currentStatus !== 'offline') {
         const msg = code ? `Lavalink exited with code ${code}` : 'Lavalink stopped';
         setStatus(code ? 'error' : 'offline', code ? msg : '');
@@ -322,41 +396,56 @@ export async function startLavalink(): Promise<{
         resolved = true;
         resolve({ ok: false, error: `Lavalink exited with code ${code}` });
       }
+      if (shouldRecover) scheduleRecovery(`Lavalink exited with code ${code}.`);
     });
 
-    // Timeout — if not detected as ready within 30s, assume OK
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        if (currentStatus === 'starting') {
-          setStatus('online');
-          broadcastLavalinkStatus();
-        }
+    // Prove the Lavalink HTTP API is listening; a live JVM alone is insufficient.
+    void waitForServiceReady(
+      () => probeLavalinkReady(),
+      () => !resolved && lavalinkProcess === proc,
+      30_000,
+    ).then((ready) => {
+      if (resolved || lavalinkProcess !== proc) return;
+      resolved = true;
+      if (ready) {
+        setStatus('online');
+        markStable(proc);
+        broadcastLavalinkStatus();
         resolve({ ok: true });
+      } else {
+        const msg = 'Lavalink did not report ready within 30s.';
+        setStatus('error', msg);
+        broadcastLavalinkStatus();
+        resolve({ ok: false, error: msg });
+        proc.kill('SIGTERM');
       }
-    }, 30_000);
+    });
   });
 }
 
-export function stopLavalink(): void {
-  if (lavalinkProcess) {
-    const pid = lavalinkProcess.pid;
-    lavalinkProcess.kill('SIGTERM');
-    // Force kill after 5s
-    if (pid) {
-      setTimeout(() => {
-        try {
-          process.kill(pid, 0); // Check if alive
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          // Already dead — good
-        }
-      }, 5_000);
-    }
-    lavalinkProcess = null;
-  }
+export function stopLavalink(): Promise<void> {
+  if (stopPromise) return stopPromise;
+
+  desiredRunning = false;
+  restartAttempts = 0;
+  if (restartTimer) clearTimeout(restartTimer);
+  if (stableTimer) clearTimeout(stableTimer);
+  restartTimer = null;
+  stableTimer = null;
+  const processToStop = lavalinkProcess;
   setStatus('offline');
   broadcastLavalinkStatus();
+
+  if (!processToStop) return Promise.resolve();
+
+  stopPromise = stopChildProcess(processToStop, { serviceName: 'Lavalink' }).then(() => {
+    if (lavalinkProcess === processToStop) lavalinkProcess = null;
+    persistLavalinkPid(null);
+  }).finally(() => {
+    stopPromise = null;
+  });
+
+  return stopPromise;
 }
 
 /* ------------------------------------------------------------------ */

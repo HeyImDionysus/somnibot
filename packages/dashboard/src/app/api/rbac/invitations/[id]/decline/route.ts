@@ -40,6 +40,9 @@ export async function POST(
   try {
     const auth = await requireAuth();
     if (!auth.ok) return auth.response;
+    if (auth.localGuildIds?.length) {
+      return NextResponse.json({ error: 'Invitation not found' }, { status: 404 });
+    }
 
     const { id } = await params;
     const admin = createAdminSupabase();
@@ -53,12 +56,27 @@ export async function POST(
 
     // Not found OR foreign → 404, no information leak.
     if (!inv || inv.discord_id !== auth.discordId) {
+      if (inv) {
+        await writeTeamAudit(admin, {
+          guildId: inv.guild_id,
+          actorId: auth.discordId ?? 'unknown',
+          action: 'team.invite_decline_denied',
+          targetId: inv.discord_id,
+          details: { invitation_id: inv.id, reason: 'foreign_invitation' },
+          correlationId: `team-invitation:${inv.id}`,
+          success: false,
+        });
+      }
       return NextResponse.json({ error: 'Invitation not found' }, { status: 404 });
     }
 
     // Replayed decline → idempotent success.
     if (inv.status === 'declined') {
-      return NextResponse.json({ success: true, alreadyDeclined: true });
+      return NextResponse.json({
+        success: true,
+        alreadyDeclined: true,
+        message: 'You already declined this invitation — nothing else changed.',
+      });
     }
     if (inv.status === 'accepted') {
       return NextResponse.json(
@@ -81,6 +99,7 @@ export async function POST(
       .eq('id', inv.id)
       .eq('discord_id', auth.discordId)
       .eq('status', 'pending')
+      .gt('expires_at', now)
       .select('id')
       .maybeSingle();
 
@@ -94,7 +113,13 @@ export async function POST(
         .eq('id', inv.id)
         .maybeSingle();
       const status = (fresh as { status?: string } | null)?.status;
-      if (status === 'declined') return NextResponse.json({ success: true, alreadyDeclined: true });
+      if (status === 'declined') {
+        return NextResponse.json({
+          success: true,
+          alreadyDeclined: true,
+          message: 'You already declined this invitation — nothing else changed.',
+        });
+      }
       if (status === 'accepted') {
         return NextResponse.json(
           { error: 'This invitation was already accepted — ask a manager to remove the role instead' },
@@ -111,6 +136,8 @@ export async function POST(
       action: 'team.invite_declined',
       targetId: inv.discord_id,
       details: { invitation_id: inv.id, role_id: inv.role_id, invited_by: inv.invited_by },
+      correlationId: `team-invitation:${inv.id}`,
+      occurrenceKey: `team.invite_declined:${inv.id}`,
     });
 
     return NextResponse.json({

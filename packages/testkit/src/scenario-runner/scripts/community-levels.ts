@@ -700,8 +700,8 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
 /** SET-B — a second config: no-XP role + a denylisted channel suppress accrual,
  *  voice XP off. Proven at the config-persistence layer (accrual gates). */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
-  const noXpRole = `${ctx.runPrefix}no-xp-role`;
-  const deniedChannel = `${ctx.runPrefix}denied-chan`;
+  const noXpRole = ctx.snowflake('no-xp-role');
+  const deniedChannel = ctx.snowflake('denied-channel');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {

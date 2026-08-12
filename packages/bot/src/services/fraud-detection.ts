@@ -124,6 +124,8 @@ export interface FraudThresholds {
   velocityWindowMs: number;
   failedPaymentThreshold: number;
   criticalIncidentThreshold: number;
+  deviceAbuseMultiplier: number;
+  ipMismatchThreshold: number;
 }
 
 export const DEFAULT_FRAUD_THRESHOLDS: FraudThresholds = {
@@ -131,6 +133,8 @@ export const DEFAULT_FRAUD_THRESHOLDS: FraudThresholds = {
   velocityWindowMs: 3_600_000,
   failedPaymentThreshold: 3,
   criticalIncidentThreshold: 3,
+  deviceAbuseMultiplier: 3,
+  ipMismatchThreshold: 5,
 };
 
 function toPositiveInt(value: unknown): number | null {
@@ -176,6 +180,14 @@ export async function loadFraudThresholds(
         }
         case 'critical_incident': {
           if (threshold !== null) result.criticalIncidentThreshold = threshold;
+          break;
+        }
+        case 'device_limit': {
+          if (threshold !== null) result.deviceAbuseMultiplier = threshold;
+          break;
+        }
+        case 'ip_mismatch': {
+          if (threshold !== null) result.ipMismatchThreshold = threshold;
           break;
         }
       }
@@ -231,6 +243,7 @@ export async function checkDeviceAbuse(
   licenseKeyId: string,
   maxDevices: number,
   discordId: string | null,
+  opts?: { multiplier?: number },
 ): Promise<void> {
   const { count } = await ctx.supabase
     .from('license_sessions')
@@ -239,16 +252,17 @@ export async function checkDeviceAbuse(
 
   const totalDevices = count || 0;
 
-  // Flag if total unique sessions exceed 3x the allowed device limit
-  if (totalDevices > maxDevices * 3) {
+  const multiplier = opts?.multiplier ?? DEFAULT_FRAUD_THRESHOLDS.deviceAbuseMultiplier;
+  // Flag if total unique sessions exceed the configured multiple of the limit.
+  if (totalDevices > maxDevices * multiplier) {
     await createSignal(ctx, {
       signal_type: 'device_abuse',
-      severity: totalDevices > maxDevices * 5 ? 'critical' : 'high',
+      severity: totalDevices > maxDevices * (multiplier + 2) ? 'critical' : 'high',
       entity_type: 'license_key',
       entity_id: licenseKeyId,
       discord_id: discordId,
       description: `${totalDevices} total device sessions on a ${maxDevices}-device license`,
-      evidence: { total_sessions: totalDevices, max_devices: maxDevices, ratio: totalDevices / maxDevices },
+      evidence: { total_sessions: totalDevices, max_devices: maxDevices, multiplier, ratio: totalDevices / maxDevices },
     });
   }
 }
@@ -261,6 +275,7 @@ export async function checkIPMismatch(
   ctx: FraudContext,
   licenseKeyId: string,
   discordId: string | null,
+  opts?: { threshold?: number },
 ): Promise<void> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
@@ -273,15 +288,16 @@ export async function checkIPMismatch(
 
   const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
 
-  if (uniqueIPs.size >= 5) {
+  const threshold = opts?.threshold ?? DEFAULT_FRAUD_THRESHOLDS.ipMismatchThreshold;
+  if (uniqueIPs.size >= threshold) {
     await createSignal(ctx, {
       signal_type: 'ip_mismatch',
-      severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
+      severity: uniqueIPs.size >= threshold * 2 ? 'critical' : 'medium',
       entity_type: 'license_key',
       entity_id: licenseKeyId,
       discord_id: discordId,
       description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
-      evidence: { unique_ips: uniqueIPs.size, window_hours: 24, ips: Array.from(uniqueIPs).slice(0, 10) },
+      evidence: { unique_ips: uniqueIPs.size, threshold, window_hours: 24, ips: Array.from(uniqueIPs).slice(0, 10) },
     });
   }
 }

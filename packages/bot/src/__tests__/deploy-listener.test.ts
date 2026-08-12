@@ -54,7 +54,7 @@ import { getDeployStatus, startDeployListener } from '../deploy/deploy-listener.
 
 function makeSupa() {
   const chain: any = {};
-  for (const m of ['from', 'select', 'insert', 'update', 'delete', 'upsert', 'eq', 'single', 'maybeSingle', 'order', 'limit']) {
+  for (const m of ['from', 'select', 'insert', 'update', 'delete', 'upsert', 'eq', 'is', 'single', 'maybeSingle', 'order', 'limit']) {
     chain[m] = vi.fn(() => chain);
   }
   chain.then = (resolve: Function) => resolve({ data: null, error: null });

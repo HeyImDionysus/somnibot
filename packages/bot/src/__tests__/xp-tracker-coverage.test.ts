@@ -23,9 +23,11 @@ vi.mock('@somnibot/shared', () => {
     }
     return level;
   };
+  const DEFAULT_LEVEL_CURVE = { base: 100, exponent: 1.9 };
   return {
   calculateLevel: vi.fn().mockImplementation(calculateLevel),
   randomXp: vi.fn().mockReturnValue(25),
+  DEFAULT_LEVEL_CURVE,
   LEVEL_CONFIG: {
     DEFAULT_MIN_XP: 15,
     DEFAULT_MAX_XP: 25,

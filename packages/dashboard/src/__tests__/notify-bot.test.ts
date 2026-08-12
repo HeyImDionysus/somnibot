@@ -48,6 +48,35 @@ describe('notifyBot', () => {
     expect(insertedRow.created_at).toBeDefined();
   });
 
+  it('uses only the primary guild for legacy multi-guild callers', async () => {
+    process.env.DISCORD_GUILD_ID = 'guild_primary,guild_secondary';
+    const { notifyBot } = await import('@/lib/notify-bot');
+
+    await notifyBot('welcome', { enabled: true });
+
+    expect(mockInsert.mock.calls[0][0].guild_id).toBe('guild_primary');
+  });
+
+  it('keeps ten concurrent owner-guild notifications isolated', async () => {
+    const { notifyBot } = await import('@/lib/notify-bot');
+    const guildIds = Array.from({ length: 10 }, (_, index) => `guild_${index + 1}`);
+
+    await Promise.all(guildIds.map((guildId, index) => notifyBot(
+      guildId,
+      'onboarding',
+      { onboarding_enabled: index % 2 === 0, marker: guildId },
+    )));
+
+    expect(mockInsert).toHaveBeenCalledTimes(10);
+    const inserted = mockInsert.mock.calls.map(([row]) => row);
+    expect(new Set(inserted.map((row) => row.guild_id))).toEqual(new Set(guildIds));
+    for (const row of inserted) {
+      expect(row.payload.marker).toBeUndefined();
+      expect(row.payload.changes.marker).toBe(row.guild_id);
+      expect(row.payload.section).toBe('onboarding');
+    }
+  });
+
   it('uses custom changedBy value', async () => {
     const { notifyBot } = await import('@/lib/notify-bot');
 

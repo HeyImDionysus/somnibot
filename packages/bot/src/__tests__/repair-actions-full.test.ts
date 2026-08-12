@@ -6,6 +6,7 @@
  * EXTRA_RESOURCE. Tests both success and error paths.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { DriftItem } from '@somnibot/shared';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -16,7 +17,8 @@ vi.mock('../services/audit.js', () => ({
   writeAuditLog: vi.fn(async () => {}),
 }));
 
-import { repairDriftItem, acceptDriftItem } from '../sync/repair-actions.js';
+import { repairDriftItem, acceptDriftItem, ignoreDriftItem } from '../sync/repair-actions.js';
+import { canonicalTemplateKey } from '../deploy/deployer.js';
 import { writeAuditLog } from '../services/audit.js';
 import { MockCollection } from './helpers/discord-mocks.js';
 
@@ -48,6 +50,10 @@ function makeGuild(overrides: Record<string, any> = {}): any {
     name: 'ExtraRole',
     managed: false,
     position: 1,
+    permissions: { bitfield: 8n },
+    color: 0x123456,
+    hoist: true,
+    mentionable: true,
     delete: vi.fn(async () => {}),
     edit: vi.fn(async () => {}),
   };
@@ -66,6 +72,12 @@ function makeGuild(overrides: Record<string, any> = {}): any {
   const textChannel = {
     id: 'ch1',
     name: 'test-channel',
+    type: 0,
+    position: 2,
+    parentId: null,
+    topic: 'user topic',
+    nsfw: false,
+    rateLimitPerUser: 5,
     delete: vi.fn(async () => {}),
     edit: vi.fn(async () => {}),
   };
@@ -154,7 +166,7 @@ describe('repairDriftItem — EVERYONE_DRIFT', () => {
 });
 
 describe('repairDriftItem — EXTRA_RESOURCE (role)', () => {
-  it('deletes non-managed extra role', async () => {
+  it('leaves an untracked user role untouched and requires manual review', async () => {
     const guild = makeGuild();
     const supabase = makeSupabase();
     const drift = {
@@ -166,11 +178,14 @@ describe('repairDriftItem — EXTRA_RESOURCE (role)', () => {
 
     const result = await repairDriftItem(guild, supabase, drift as any);
 
-    expect(result.success).toBe(true);
-    expect(guild.roles.cache.get('extra1').delete).toHaveBeenCalledWith(expect.any(String));
+    expect(result).toEqual({
+      success: false,
+      error: 'Extra resources must be accepted or removed manually',
+    });
+    expect(guild.roles.cache.get('extra1').delete).not.toHaveBeenCalled();
   });
 
-  it('does not delete managed roles', async () => {
+  it('leaves managed roles untouched and requires manual review', async () => {
     const guild = makeGuild();
     const supabase = makeSupabase();
     const drift = {
@@ -181,13 +196,13 @@ describe('repairDriftItem — EXTRA_RESOURCE (role)', () => {
     };
 
     const result = await repairDriftItem(guild, supabase, drift as any);
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     expect(guild.roles.cache.get('managed1').delete).not.toHaveBeenCalled();
   });
 });
 
 describe('repairDriftItem — EXTRA_RESOURCE (channel)', () => {
-  it('deletes extra channel', async () => {
+  it('leaves an untracked user channel untouched and requires manual review', async () => {
     const guild = makeGuild();
     const supabase = makeSupabase();
     const drift = {
@@ -199,8 +214,8 @@ describe('repairDriftItem — EXTRA_RESOURCE (channel)', () => {
 
     const result = await repairDriftItem(guild, supabase, drift as any);
 
-    expect(result.success).toBe(true);
-    expect(guild.channels.cache.get('ch1').delete).toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(guild.channels.cache.get('ch1').delete).not.toHaveBeenCalled();
   });
 });
 
@@ -217,7 +232,7 @@ describe('repairDriftItem — EXTRA_RESOURCE without Discord ID', () => {
 
     const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
-    expect(result.error).toContain('No Discord ID');
+    expect(result.error).toContain('accepted or removed manually');
   });
 });
 
@@ -251,7 +266,9 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
     expect(result.success).toBe(true);
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
+      colors: { primaryColor: 0xFF0000 },
     }));
+    expect(guild.roles.create.mock.calls[0][0]).not.toHaveProperty('color');
   });
 
   it('recreates a deleted role from a queued template key when the old Discord ID is absent', async () => {
@@ -283,7 +300,9 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
     expect(result.success).toBe(true);
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
+      colors: { primaryColor: 0xFF0000 },
     }));
+    expect(guild.roles.create.mock.calls[0][0]).not.toHaveProperty('color');
     expect(idMapChain.eq).toHaveBeenCalledWith('entity_type', 'role');
   });
 
@@ -347,11 +366,41 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
       entityType: 'role' as const,
       entityName: 'Unknown',
       entityDiscordId: 'gone',
+      templateKey: 'unknown',
     };
 
     const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
     expect(result.error).toContain('No desired config');
+  });
+
+  it('requires an ID mapping or template key before recreating a same-named missing role', async () => {
+    const guild = makeGuild();
+    const supabase = makeIdentitySupabase(
+      supaChain({
+        roles: [{ template_key: 'role:moderator', name: 'Moderator', permissions: '0' }],
+        channels: [],
+      }),
+      [],
+    );
+
+    const drift = {
+      type: 'MISSING_RESOURCE',
+      severity: 'warning',
+      entityType: 'role',
+      entityName: 'Moderator',
+      entityDiscordId: 'deleted-user-resource',
+      description: 'A mapped role is missing from Discord.',
+      suggestedAction: 'repair',
+    } satisfies DriftItem;
+
+    const result = await repairDriftItem(guild, supabase, drift);
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Missing resource has no ownership mapping or template key — manual review required',
+    });
+    expect(guild.roles.create).not.toHaveBeenCalled();
   });
 });
 
@@ -544,6 +593,41 @@ describe('repairDriftItem — unknown type', () => {
   });
 });
 
+describe('ignoreDriftItem', () => {
+  it('removes only the selected same-named resource when its Discord ID is present', async () => {
+    const selected = {
+      type: 'EXTRA_RESOURCE',
+      severity: 'info',
+      entityType: 'channel',
+      entityName: 'support',
+      entityDiscordId: 'channel-one',
+      description: 'An untracked channel exists in Discord.',
+      suggestedAction: 'accept',
+    } satisfies DriftItem;
+    const remaining = {
+      type: 'EXTRA_RESOURCE',
+      severity: 'info',
+      entityType: 'channel',
+      entityName: 'support',
+      entityDiscordId: 'channel-two',
+      description: 'Another untracked channel exists in Discord.',
+      suggestedAction: 'accept',
+    } satisfies DriftItem;
+    const desiredStateChain = supaChain({ drift_details: [selected, remaining] });
+    const supabase = {
+      from: vi.fn((table: string) => table === 'guild_desired_state' ? desiredStateChain : supaChain()),
+    } as unknown as Parameters<typeof ignoreDriftItem>[0];
+
+    const result = await ignoreDriftItem(supabase, 'g1', selected);
+
+    expect(result.success).toBe(true);
+    expect(desiredStateChain.update).toHaveBeenCalledWith({
+      drift_detected: true,
+      drift_details: [remaining],
+    });
+  });
+});
+
 describe('acceptDriftItem', () => {
   it('rejects accepting @everyone drift', async () => {
     const guild = makeGuild();
@@ -559,17 +643,17 @@ describe('acceptDriftItem', () => {
     expect(result.error).toContain('cannot be accepted');
   });
 
-  it('accepts extra resource by adding to ID map', async () => {
+  it('accepts an extra role into desired state with a mapping the safe deploy path recognizes', async () => {
     const guild = makeGuild();
-    const drift_items_chain = supaChain();
+    const desiredStateChain = supaChain({ roles: [], channels: [], categories: [], drift_details: [] });
     const id_map_chain = supaChain();
     const supabase = {
       from: vi.fn((table: string) => {
         if (table === 'discord_id_map') return id_map_chain;
-        if (table === 'drift_items') return drift_items_chain;
+        if (table === 'guild_desired_state') return desiredStateChain;
         return supaChain();
       }),
-    } as any;
+    } as unknown as Parameters<typeof acceptDriftItem>[1];
 
     const drift = {
       type: 'EXTRA_RESOURCE' as const,
@@ -580,7 +664,151 @@ describe('acceptDriftItem', () => {
 
     const result = await acceptDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(true);
-    expect(supabase.from).toHaveBeenCalledWith('discord_id_map');
+    const acceptedKey = 'accepted-extra1';
+    expect(desiredStateChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      roles: [expect.objectContaining({
+        key: acceptedKey,
+        name: 'ExtraRole',
+        permissions: '8',
+        color: 0x123456,
+      })],
+    }));
+    expect(id_map_chain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entity_type: 'role',
+        template_key: canonicalTemplateKey('role', acceptedKey),
+        discord_id: 'extra1',
+      }),
+      { onConflict: 'guild_id,entity_type,template_key' },
+    );
+  });
+
+  it('accepts an extra channel into desired state with a mapping the safe deploy path recognizes', async () => {
+    const guild = makeGuild();
+    const overwrites = new MockCollection();
+    overwrites.set('g1', {
+      id: 'g1',
+      allow: { bitfield: 1024n },
+      deny: { bitfield: 8n },
+    });
+    overwrites.set('role-member', {
+      id: 'role-member',
+      allow: { bitfield: 2048n },
+      deny: { bitfield: 16n },
+    });
+    guild.channels.cache.get('ch1').permissionOverwrites = { cache: overwrites };
+    const desiredStateChain = supaChain({ roles: [], channels: [], categories: [], drift_details: [] });
+    const idMapChain = supaChain([
+      { entity_type: 'role', template_key: 'role:member', discord_id: 'role-member' },
+    ]);
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'discord_id_map') return idMapChain;
+        if (table === 'guild_desired_state') return desiredStateChain;
+        return supaChain();
+      }),
+    } as unknown as Parameters<typeof acceptDriftItem>[1];
+
+    const drift = {
+      type: 'EXTRA_RESOURCE',
+      severity: 'info',
+      entityType: 'channel',
+      entityName: 'test-channel',
+      entityDiscordId: 'ch1',
+      description: 'An untracked channel exists in Discord.',
+      suggestedAction: 'accept',
+    } satisfies DriftItem;
+
+    const result = await acceptDriftItem(guild, supabase, drift);
+
+    expect(result.success).toBe(true);
+    const acceptedKey = 'accepted-ch1';
+    expect(desiredStateChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      channels: [expect.objectContaining({
+        key: acceptedKey,
+        name: 'test-channel',
+        categoryKey: null,
+        type: 0,
+        topic: 'user topic',
+        slowmode: 5,
+        overrides: [
+          { roleKey: 'everyone', allow: '1024', deny: '8' },
+          { roleKey: 'member', allow: '2048', deny: '16' },
+        ],
+      })],
+    }));
+    expect(idMapChain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entity_type: 'channel',
+        template_key: canonicalTemplateKey('channel', acceptedKey),
+        discord_id: 'ch1',
+      }),
+      { onConflict: 'guild_id,entity_type,template_key' },
+    );
+  });
+
+  it('refuses channel adoption when managed overwrite ownership cannot be read', async () => {
+    const guild = makeGuild();
+    const desiredStateChain = supaChain({ roles: [], channels: [], categories: [], drift_details: [] });
+    const idMapChain = supaChain(null, { message: 'mapping unavailable' });
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'discord_id_map') return idMapChain;
+        if (table === 'guild_desired_state') return desiredStateChain;
+        return supaChain();
+      }),
+    } as unknown as Parameters<typeof acceptDriftItem>[1];
+    const drift = {
+      type: 'EXTRA_RESOURCE',
+      severity: 'info',
+      entityType: 'channel',
+      entityName: 'test-channel',
+      entityDiscordId: 'ch1',
+      description: 'An untracked channel exists in Discord.',
+      suggestedAction: 'accept',
+    } satisfies DriftItem;
+
+    const result = await acceptDriftItem(guild, supabase, drift);
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Could not verify managed permission overwrites for the extra channel',
+    });
+    expect(desiredStateChain.update).not.toHaveBeenCalled();
+    expect(idMapChain.upsert).not.toHaveBeenCalled();
+  });
+
+  it('restores desired state when recording adopted ownership fails', async () => {
+    const guild = makeGuild();
+    const originalState = { roles: [], channels: [], categories: [], drift_details: [] };
+    const desiredStateChain = supaChain(originalState);
+    const idMapChain = supaChain(null, { message: 'mapping write failed' });
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'discord_id_map') return idMapChain;
+        if (table === 'guild_desired_state') return desiredStateChain;
+        return supaChain();
+      }),
+    } as unknown as Parameters<typeof acceptDriftItem>[1];
+    const drift = {
+      type: 'EXTRA_RESOURCE',
+      severity: 'info',
+      entityType: 'role',
+      entityName: 'ExtraRole',
+      entityDiscordId: 'extra1',
+      description: 'An untracked role exists in Discord.',
+      suggestedAction: 'accept',
+    } satisfies DriftItem;
+
+    const result = await acceptDriftItem(guild, supabase, drift);
+
+    expect(result.success).toBe(false);
+    expect(desiredStateChain.update).toHaveBeenCalledTimes(2);
+    expect(desiredStateChain.update).toHaveBeenLastCalledWith({
+      roles: originalState.roles,
+      channels: originalState.channels,
+      categories: originalState.categories,
+    });
   });
 
   it('rejects unstructured channel permission drift accept instead of removing drift without updating overwrites', async () => {

@@ -114,10 +114,17 @@ function client(attempt: Record<string, unknown>, result: Record<string, unknown
     }),
   };
 
+  const policyChain: Record<string, Mock> = {};
+  for (const method of ['select', 'eq']) {
+    policyChain[method] = vi.fn(() => policyChain);
+  }
+  policyChain.maybeSingle = vi.fn(async () => ({ data: null, error: null }));
+
   const supabase = {
     from: vi.fn((table: string) => {
       if (table === 'orders') return ordersChain;
       if (table === 'admin_changes') return changesChain;
+      if (table === 'guild_config') return policyChain;
       throw new Error(`Unexpected table ${table}`);
     }),
     rpc: vi.fn(async (name: string) => {

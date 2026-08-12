@@ -155,6 +155,23 @@ describe('addEntries', () => {
     expect(result.queue!.entries).toHaveLength(51);
     expect(result.userLimitHit).toBeFalsy();
   });
+
+  it('honors guild-configured queue and per-user caps', async () => {
+    mgr.setLimits({ maxQueueSize: 2, maxPerUserQueue: 1 });
+    const q = mgr.createQueue('g1', 'vc1', 'tc1', 50);
+    await mgr.saveQueue(q);
+
+    const first = await mgr.addEntries('g1', [
+      makeEntry({ title: 'A', requestedBy: 'u1' }),
+      makeEntry({ title: 'B', requestedBy: 'u1' }),
+    ]);
+    expect(first.queue!.entries).toHaveLength(1);
+    expect(first.userLimitHit).toBe(true);
+
+    const second = await mgr.addEntries('g1', [makeEntry({ title: 'C', requestedBy: 'u2' })]);
+    expect(second.queue!.entries).toHaveLength(2);
+    expect(second.userLimitHit).toBeFalsy();
+  });
 });
 
 describe('removeEntry', () => {

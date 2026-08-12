@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { parseEnv } from 'node:util';
 import { type LauncherConfig } from '../main/config-store';
 import {
   type VpsCommandRunResult,
   VpsDeploymentRunGate,
 } from '../main/vps-deployment-executor';
-import { handleVpsDeploymentRunRequest } from '../main/vps-deployment-request';
+import { buildVpsDeploymentPlanFromConfig, handleVpsDeploymentRunRequest } from '../main/vps-deployment-request';
 import { type VpsDeploymentCommand, type VpsDeploymentPlan } from '../main/vps-deployment-plan';
+import { dotenvValue } from '../main/vps-env-materializer';
 
 const completeConfig: LauncherConfig = {
   discordToken: 'discord-token',
@@ -13,15 +15,16 @@ const completeConfig: LauncherConfig = {
   discordClientSecret: 'discord-secret',
   discordGuildId: '',
   guilds: [],
-  supabaseUrl: 'https://supabase.example.com',
+  supabaseUrl: 'https://projectref.supabase.co',
   supabaseSecretKey: 'supabase-secret',
   supabasePublishableKey: 'supabase-publishable',
-  supabaseDbPassword: '',
+  supabaseDbPassword: 'database-password',
   supabaseAccessToken: 'supabase-management-token',
   supabaseDiscordAuthProviderConfigured: false,
   paypalClientId: 'paypal-client-id',
   paypalClientSecret: 'paypal-client-secret',
   paypalWebhookId: 'paypal-webhook-id',
+  paypalWebhookProofKey: '',
   paypalSandbox: true,
   runtimeMode: 'vps',
   publicCallbackBaseUrl: 'https://somnibot.example.com',
@@ -73,6 +76,7 @@ describe('VPS deployment run request coordinator', () => {
           return async (command) => successfulCommand(command);
         },
         runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
       },
     );
 
@@ -83,6 +87,7 @@ describe('VPS deployment run request coordinator', () => {
 
   it('executes live commands when main-process approval confirms them', async () => {
     const executedCommandIds: string[] = [];
+    let handoffCalls = 0;
 
     const result = await handleVpsDeploymentRunRequest(
       completeConfig,
@@ -98,19 +103,248 @@ describe('VPS deployment run request coordinator', () => {
           return successfulCommand(command);
         },
         runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+        runApprovedDeployment: async (execute) => {
+          handoffCalls += 1;
+          return execute();
+        },
       },
     );
 
     expect(result.state).toBe('success');
+    expect(handoffCalls).toBe(1);
     expect(executedCommandIds).toEqual([
-      'enter-deploy-path',
+      'ensure-vps-runtime',
+      'prepare-vps-checkout',
+      'write-env-file',
       'protect-env-file',
+      'stage-local-valkey-state',
+      'quiesce-vps-state-consumers',
+      'start-vps-valkey',
+      'restore-transferred-valkey',
+      'remove-funnel-compose-override',
       'start-stack',
+      'install-health-recovery',
       'check-stack',
       'check-dashboard',
       'check-health',
       'check-lavalink',
+      'end-vps-maintenance',
     ]);
+  });
+
+  it('streams saved credentials to the VPS env writer without placing them in argv or results', async () => {
+    let envWriter: VpsDeploymentCommand | undefined;
+
+    const result = await handleVpsDeploymentRunRequest(
+      completeConfig,
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => approvalFor(plan),
+        createCommandRunner: () => async (command) => {
+          if (command.id === 'write-env-file') envWriter = command;
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+      },
+    );
+
+    expect(result.state).toBe('success');
+    expect(envWriter?.sensitiveStdin).toContain("DISCORD_TOKEN='discord-token'");
+    expect(envWriter?.sensitiveStdin).toContain("PAYPAL_CLIENT_" + "SECRET='paypal-client-secret'");
+    expect(envWriter?.sensitiveStdin).toContain("SUPABASE_DB_URL='postgresql://postgres:database-password@db.projectref.supabase.co:5432/postgres'");
+    expect(envWriter?.args.join(' ')).not.toContain('discord-token');
+    expect(envWriter?.redactedDisplay).not.toContain('paypal-client-secret');
+    expect(JSON.stringify(result)).not.toContain('database-password');
+  });
+
+  it('streams the fixed checkout bootstrap script only on the live main-process plan', async () => {
+    let bootstrap: VpsDeploymentCommand | undefined;
+    const result = await handleVpsDeploymentRunRequest(
+      completeConfig,
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => approvalFor(plan),
+        createCommandRunner: () => async (command) => {
+          if (command.id === 'prepare-vps-checkout') bootstrap = command;
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+      },
+    );
+
+    expect(result.state).toBe('success');
+    expect(bootstrap?.sensitiveStdin).toContain('git -C "$deploy_path" fetch --prune --depth 1 origin "$repo_ref"');
+    expect(bootstrap?.sensitiveStdin).toContain('git -C "$deploy_path" checkout --detach --force "$repo_ref"');
+    expect(bootstrap?.sensitiveStdin).toContain('checked-out SomniBot commit does not match the approved immutable release ref');
+    expect(bootstrap?.sensitiveStdin).not.toContain('--branch "$repo_ref"');
+    expect(bootstrap?.sensitiveStdin).toContain('refusing to overwrite');
+    expect(bootstrap?.args.join(' ')).not.toContain('discord-token');
+    expect(bootstrap?.redactedDisplay).not.toContain('SomniBot VPS checkout');
+  });
+
+  it('streams the fixed runtime bootstrap script only on the live main-process plan', async () => {
+    let runtimeBootstrap: VpsDeploymentCommand | undefined;
+    const result = await handleVpsDeploymentRunRequest(
+      completeConfig,
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => approvalFor(plan),
+        createCommandRunner: () => async (command) => {
+          if (command.id === 'ensure-vps-runtime') runtimeBootstrap = command;
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+      },
+    );
+
+    expect(result.state).toBe('success');
+    expect(runtimeBootstrap?.sensitiveStdin).toContain('apt-get update');
+    expect(runtimeBootstrap?.sensitiveStdin).toContain('docker-compose-v2');
+    expect(runtimeBootstrap?.args.join(' ')).not.toContain('discord-token');
+    expect(runtimeBootstrap?.redactedDisplay).not.toContain('apt-get update');
+  });
+
+  it('keeps dry-run plans placeholder-only and never attaches credential stdin', async () => {
+    const plan = buildVpsDeploymentPlanFromConfig(completeConfig);
+
+    expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_DB_URL=<SUPABASE_DB_URL>');
+    expect(plan.commands.find((command) => command.id === 'write-env-file')?.sensitiveStdin).toBeUndefined();
+    expect(JSON.stringify(plan)).not.toContain(completeConfig.discordToken);
+    expect(JSON.stringify(plan)).not.toContain(completeConfig.paypalClientSecret);
+  });
+
+  it('serializes dotenv special characters without changing backslashes', () => {
+    const original = "back\\slash'quote$dollar#hash and spaces";
+
+    expect(dotenvValue(original)).toBe("'back\\slash\\'quote$dollar#hash and spaces'");
+  });
+
+  it('persists one generated service-secret generation and reuses it on retry', async () => {
+    const retryConfig: LauncherConfig = { ...completeConfig };
+    const envPayloads: string[] = [];
+    let persistCalls = 0;
+    const events: string[] = [];
+    const runtime = {
+      confirmApproval: async (plan: VpsDeploymentPlan) => {
+        events.push('confirm');
+        return approvalFor(plan);
+      },
+      createCommandRunner: () => async (command: VpsDeploymentCommand) => {
+        if (command.id === 'write-env-file') envPayloads.push(command.sensitiveStdin ?? '');
+        return successfulCommand(command);
+      },
+      runGate: new VpsDeploymentRunGate(),
+      persistGeneratedSecrets: async (patch: Partial<LauncherConfig>) => {
+        events.push('persist');
+        persistCalls += 1;
+        Object.assign(retryConfig, patch);
+      },
+    };
+
+    await handleVpsDeploymentRunRequest(retryConfig, { dryRun: false }, runtime);
+    await handleVpsDeploymentRunRequest(retryConfig, { dryRun: false }, runtime);
+
+    expect(persistCalls).toBe(1);
+    expect(events.slice(0, 2)).toEqual(['confirm', 'persist']);
+    expect(envPayloads).toHaveLength(2);
+    for (const key of ['CSRF_SECRET', 'NEXTAUTH_SECRET', 'WEBHOOK_REPLAY_SECRET', 'VALKEY_PASSWORD', 'LAVALINK_PASSWORD']) {
+      const value = parseEnv(envPayloads[0] ?? '')[key];
+      expect(value).toBeTruthy();
+      expect(parseEnv(envPayloads[1] ?? '')[key]).toBe(value);
+    }
+    const firstHolder = parseEnv(envPayloads[0] ?? '').SOMNIBOT_RUNTIME_HOLDER_ID;
+    expect(firstHolder).toMatch(/^[a-f0-9]{64}$/);
+    expect(parseEnv(envPayloads[1] ?? '').SOMNIBOT_RUNTIME_HOLDER_ID).toBe(firstHolder);
+  });
+
+  it('allows VPS mechanics without PayPal while leaving payments disabled', async () => {
+    let envPayload = '';
+    const result = await handleVpsDeploymentRunRequest(
+      {
+        ...completeConfig,
+        paypalClientId: '',
+        paypalClientSecret: '',
+        paypalWebhookId: '',
+      },
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => approvalFor(plan),
+        createCommandRunner: () => async (command) => {
+          if (command.id === 'write-env-file') envPayload = command.sensitiveStdin ?? '';
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+      },
+    );
+
+    expect(result.state).toBe('success');
+    expect(parseEnv(envPayload).PAYPAL_CLIENT_ID).toBe('');
+    expect(parseEnv(envPayload).PAYPAL_CLIENT_SECRET).toBe('');
+  });
+
+  it('runs no remote command when generated service secrets cannot be persisted', async () => {
+    let approvalCalls = 0;
+    let runnerCalls = 0;
+    const result = await handleVpsDeploymentRunRequest(
+      { ...completeConfig },
+      { dryRun: false },
+      {
+        confirmApproval: async (plan) => {
+          approvalCalls += 1;
+          return approvalFor(plan);
+        },
+        createCommandRunner: () => async (command) => {
+          runnerCalls += 1;
+          return successfulCommand(command);
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {
+          throw new Error('simulated local keychain failure');
+        },
+      },
+    );
+
+    expect(result.state).toBe('blocked');
+    expect(approvalCalls).toBe(1);
+    expect(runnerCalls).toBe(0);
+    expect(JSON.stringify(result)).not.toContain('simulated local keychain failure');
+  });
+
+  it('cancelling before approval performs no persistence, sync, audit, or remote execution', async () => {
+    let confirmCalls = 0;
+    let persistCalls = 0;
+    let runnerCalls = 0;
+    const audits: unknown[] = [];
+    const result = await handleVpsDeploymentRunRequest(
+      { ...completeConfig },
+      { dryRun: false, cancelRequested: true, operatorApproved: true },
+      {
+        confirmApproval: async () => {
+          confirmCalls += 1;
+          return { operatorApproved: true, approvedCommandIds: [] };
+        },
+        createCommandRunner: () => async () => {
+          runnerCalls += 1;
+          return { ok: true };
+        },
+        runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {
+          persistCalls += 1;
+        },
+        recordAudit: (entry) => audits.push(entry),
+      },
+    );
+
+    expect(result.state).toBe('cancelled');
+    expect(confirmCalls).toBe(0);
+    expect(persistCalls).toBe(0);
+    expect(runnerCalls).toBe(0);
+    expect(audits).toEqual([]);
   });
 
   it('does not use native approval or live runners for dry-run requests', async () => {
@@ -119,7 +353,20 @@ describe('VPS deployment run request coordinator', () => {
       {
         dryRun: true,
         operatorApproved: true,
-        approvedCommandIds: ['protect-env-file', 'start-stack'],
+        approvedCommandIds: [
+          'ensure-vps-runtime',
+          'prepare-vps-checkout',
+          'write-env-file',
+          'protect-env-file',
+          'stage-local-valkey-state',
+          'quiesce-vps-state-consumers',
+          'start-vps-valkey',
+          'restore-transferred-valkey',
+          'remove-funnel-compose-override',
+          'start-stack',
+          'install-health-recovery',
+          'end-vps-maintenance',
+        ],
       },
       {
         confirmApproval: async () => {
@@ -129,6 +376,10 @@ describe('VPS deployment run request coordinator', () => {
           throw new Error('live command runner should not be created for dry-runs');
         },
         runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
+        runApprovedDeployment: async () => {
+          throw new Error('runtime handoff should not run for dry-runs');
+        },
       },
     );
 
@@ -151,6 +402,7 @@ describe('VPS deployment run request coordinator', () => {
           throw new Error('live command runner should not be created for blocked plans');
         },
         runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
       },
     );
 
@@ -168,6 +420,7 @@ describe('VPS deployment run request coordinator', () => {
         confirmApproval: async (plan) => approvalFor(plan),
         createCommandRunner: () => async (command) => successfulCommand(command),
         runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
         recordAudit: (entry) => audits.push(entry),
       },
     );
@@ -190,6 +443,7 @@ describe('VPS deployment run request coordinator', () => {
         confirmApproval: async () => ({ operatorApproved: false, approvedCommandIds: [] }),
         createCommandRunner: () => async (command) => successfulCommand(command),
         runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
         recordAudit: (entry) => audits.push(entry),
       },
     );
@@ -214,6 +468,7 @@ describe('VPS deployment run request coordinator', () => {
           throw new Error('live command runner should not be created for dry-runs');
         },
         runGate: new VpsDeploymentRunGate(),
+        persistGeneratedSecrets: async () => {},
         recordAudit: (entry) => audits.push(entry),
       },
     );
@@ -235,10 +490,14 @@ describe('VPS deployment run request coordinator', () => {
       },
       createCommandRunner: () => async (command: VpsDeploymentCommand) => successfulCommand(command),
       runGate,
+      persistGeneratedSecrets: async () => {},
     };
 
     const first = handleVpsDeploymentRunRequest(completeConfig, { dryRun: false }, runtime);
     const second = handleVpsDeploymentRunRequest(completeConfig, { dryRun: false }, runtime);
+
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(confirmCalls).toBe(1);
     expect(releaseApproval).toBeDefined();

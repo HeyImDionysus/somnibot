@@ -3,8 +3,8 @@
  *
  * V10 §7: Verifies bot heartbeat detection via Valkey key.
  * The health route checks both Valkey connectivity and bot liveness
- * (heartbeat key with 120s TTL). Always returns 200 — status field
- * differentiates healthy/degraded for monitors.
+ * (heartbeat key with 120s TTL). Healthy returns 200 and degraded returns
+ * 503 so orchestrators can act on dependency failure.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -26,7 +26,11 @@ beforeEach(() => {
 describe('GET /api/health', () => {
   it('returns healthy with bot online when heartbeat is fresh', async () => {
     mockCheckHealth.mockResolvedValue(true);
-    mockReadKey.mockResolvedValue(JSON.stringify({ timestamp: Date.now() - 30_000 }));
+    const heartbeatAt = Date.now() - 30_000;
+    mockReadKey.mockResolvedValue(JSON.stringify({
+      bootId: '11111111-1111-4111-8111-111111111111',
+      timestamp: heartbeatAt,
+    }));
 
     const res = await buildHealthResponse(probe);
     const body = await res.json();
@@ -36,6 +40,10 @@ describe('GET /api/health', () => {
     expect(body.services.config).toBe('unknown');
     expect(body.services.valkey).toBe('connected');
     expect(body.services.bot).toBe('online');
+    expect(body.botRuntime).toEqual({
+      bootId: '11111111-1111-4111-8111-111111111111',
+      heartbeatAt,
+    });
     expect(body.timestamp).toBeTruthy();
   });
 
@@ -47,6 +55,7 @@ describe('GET /api/health', () => {
     const res = await buildHealthResponse(probe);
     const body = await res.json();
 
+    expect(res.status).toBe(503);
     expect(body.status).toBe('degraded');
     expect(body.services.bot).toBe('offline');
     expect(body.services.valkey).toBe('connected');
@@ -60,6 +69,7 @@ describe('GET /api/health', () => {
     const res = await buildHealthResponse(probe);
     const body = await res.json();
 
+    expect(res.status).toBe(503);
     expect(body.services.bot).toBe('offline');
   });
 
@@ -69,6 +79,7 @@ describe('GET /api/health', () => {
     const res = await buildHealthResponse(probe);
     const body = await res.json();
 
+    expect(res.status).toBe(503);
     expect(body.status).toBe('degraded');
     expect(body.services.valkey).toBe('fallback');
     expect(body.services.bot).toBe('unknown');
@@ -82,7 +93,7 @@ describe('GET /api/health', () => {
     const res = await buildHealthResponse(probe);
     const body = await res.json();
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
     expect(body.status).toBe('degraded');
     expect(body.services.valkey).toBe('fallback');
     expect(body.services.bot).toBe('unknown');
@@ -97,16 +108,15 @@ describe('GET /api/health', () => {
     const body = await res.json();
 
     // JSON.parse throws → caught → bot: unknown
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
     expect(body.status).toBe('degraded');
     expect(body.services.bot).toBe('unknown');
   });
 
-  it('never returns non-200 — monitors should read status field not HTTP code', async () => {
-    // Even worst case (Valkey down, bot unknown) is 200
+  it('returns 503 when dependencies are degraded so orchestrators can recover', async () => {
     mockCheckHealth.mockResolvedValue(false);
     const res = await buildHealthResponse(probe);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
   });
 
   it('returns degraded when server config validation failed', async () => {
@@ -117,7 +127,7 @@ describe('GET /api/health', () => {
     const res = await buildHealthResponse(probe);
     const body = await res.json();
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
     expect(body.status).toBe('degraded');
     expect(body.services.config).toBe('invalid');
     expect(body.services.valkey).toBe('connected');
@@ -166,7 +176,7 @@ describe('GET /api/health', () => {
       const res = await GET();
       const body = await res.json();
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(503);
       expect(body.status).toBe('degraded');
       expect(body.services.config).toBe('unknown');
       expect(body.services.valkey).toBe('fallback');
@@ -192,7 +202,7 @@ describe('GET /api/health', () => {
       const res = await GET();
       const body = await res.json();
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(503);
       expect(body.status).toBe('degraded');
       expect(body.services.config).toBe('unknown');
       expect(body.services.valkey).toBe('fallback');
@@ -210,8 +220,8 @@ describe('GET /api/health', () => {
     const res = await GET();
     const body = await res.json();
 
-    expect(res.status).toBe(200);
     expect(['healthy', 'degraded']).toContain(body.status);
+    expect(res.status).toBe(body.status === 'healthy' ? 200 : 503);
     expect(['connected', 'fallback']).toContain(body.services.valkey);
     expect(['online', 'offline', 'unknown']).toContain(body.services.bot);
   });

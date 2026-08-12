@@ -54,8 +54,10 @@ export interface SubmitAppealInput {
 
 export type SubmitAppealError =
   | 'invalid_reason'
+  | 'appeals_disabled'
   | 'infraction_not_found'
   | 'not_appellant'
+  | 'cooldown'
   | 'already_pending'
   | 'db_error';
 
@@ -98,6 +100,24 @@ export class AppealsManager {
       return { ok: false, error: 'invalid_reason' };
     }
 
+    // Configuration is optional for backwards compatibility with pre-control
+    // guild rows and test doubles: a read failure keeps the safe, catalog
+    // defaults (enabled, 24-hour cooldown) rather than blocking appeals.
+    let appealsEnabled = true;
+    let cooldownHours = 24;
+    try {
+      const { data } = await this.supabase
+        .from('guild_config')
+        .select('appeals_enabled, appeal_cooldown_hours')
+        .eq('guild_id', input.guildId)
+        .maybeSingle();
+      appealsEnabled = data?.appeals_enabled ?? true;
+      cooldownHours = data?.appeal_cooldown_hours ?? 24;
+    } catch {
+      // Keep defaults when the legacy schema/mock does not expose these fields.
+    }
+    if (!appealsEnabled) return { ok: false, error: 'appeals_disabled' };
+
     // Verify the infraction belongs to this guild AND to the appellant.
     const { data: infraction, error: infErr } = await this.supabase
       .from('infractions')
@@ -115,6 +135,27 @@ export class AppealsManager {
     }
     if (infraction.member_id !== input.appellantDiscordId) {
       return { ok: false, error: 'not_appellant' };
+    }
+
+    // A pending appeal is covered by the partial unique index. Once decided,
+    // retain a respectful per-infraction cooldown to prevent immediate spam.
+    try {
+      const { data: latest } = await this.supabase
+        .from('appeals')
+        .select('created_at, status')
+        .eq('guild_id', input.guildId)
+        .eq('infraction_id', input.infractionId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (latest?.created_at && latest.status !== 'pending') {
+        const cooldownMs = Math.max(1, Math.min(168, Number(cooldownHours) || 24)) * 60 * 60 * 1000;
+        if (Date.now() - new Date(latest.created_at).getTime() < cooldownMs) {
+          return { ok: false, error: 'cooldown' };
+        }
+      }
+    } catch {
+      // Legacy schema/test doubles: the uniqueness fence still protects pending rows.
     }
 
     const expiresAt =

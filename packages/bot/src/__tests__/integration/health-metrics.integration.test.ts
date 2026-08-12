@@ -15,46 +15,8 @@
  * lockdown tests introduced with PR #265.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { requireSupabase } from './helpers.js';
-
-const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
-
-/**
- * Well-known local-dev demo JWTs (signed with the Supabase CLI default
- * secret, same issuer/expiry as the service_role key CI uses).
- * Only valid against a local `supabase start` instance — not secrets.
- *
- * NOTE: duplicated from PR #265's helpers.ts additions so this suite is
- * self-contained regardless of merge order. Once both PRs are on main,
- * dedupe by importing getAnonTestClient/getAuthenticatedTestClient
- * from ./helpers.js.
- */
-const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ??
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
-const SUPABASE_AUTHENTICATED_JWT =
-  process.env.SUPABASE_AUTHENTICATED_JWT ??
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImF1dGhlbnRpY2F0ZWQiLCJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAiLCJleHAiOjE5ODM4MTI5OTZ9.gtnsf1op2LwTIjIxCAXFhdmPR1CndDznrJ-zD8GRGIY';
-
-/** Client using the publishable (anon) key — an unauthenticated browser. */
-function makeAnonClient(): SupabaseClient {
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
-
-/**
- * Client acting as the `authenticated` Postgres role — a logged-in
- * dashboard browser session. The anon key passes the gateway; the
- * Authorization bearer switches PostgREST to role `authenticated`.
- */
-function makeAuthenticatedClient(): SupabaseClient {
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-    global: { headers: { Authorization: `Bearer ${SUPABASE_AUTHENTICATED_JWT}` } },
-  });
-}
+import { type SupabaseClient } from '@supabase/supabase-js';
+import { getAnonTestClient, getAuthenticatedTestClient, requireSupabase } from './helpers.js';
 
 let supa!: SupabaseClient;
 const GUILD_ID = `test-health-metrics-guild-${Date.now()}`;
@@ -85,13 +47,13 @@ describe('health_metrics lockdown (20260709220000_health_metrics_rls_lockdown)',
   };
 
   it('denies anon reads on health_metrics', async () => {
-    const anon = makeAnonClient();
+    const anon = getAnonTestClient();
     const { error } = await anon.from('health_metrics').select('id').limit(1);
     expectPermissionDenied(error);
   });
 
   it('denies anon inserts into health_metrics (junk sparkline injection)', async () => {
-    const anon = makeAnonClient();
+    const anon = getAnonTestClient();
     const { error } = await anon.from('health_metrics').insert({
       guild_id: GUILD_ID,
       metric_type: 'db_latency',
@@ -101,7 +63,7 @@ describe('health_metrics lockdown (20260709220000_health_metrics_rls_lockdown)',
   });
 
   it('denies anon deletes on health_metrics', async () => {
-    const anon = makeAnonClient();
+    const anon = getAnonTestClient();
     const { error } = await anon
       .from('health_metrics')
       .delete()
@@ -110,13 +72,13 @@ describe('health_metrics lockdown (20260709220000_health_metrics_rls_lockdown)',
   });
 
   it('denies authenticated reads on health_metrics', async () => {
-    const authed = makeAuthenticatedClient();
+    const authed = getAuthenticatedTestClient();
     const { error } = await authed.from('health_metrics').select('id').limit(1);
     expectPermissionDenied(error);
   });
 
   it('denies authenticated inserts into health_metrics', async () => {
-    const authed = makeAuthenticatedClient();
+    const authed = getAuthenticatedTestClient();
     const { error } = await authed.from('health_metrics').insert({
       guild_id: GUILD_ID,
       metric_type: 'ws_ping',

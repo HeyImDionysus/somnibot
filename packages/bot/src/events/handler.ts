@@ -632,7 +632,19 @@ export async function sweepExpiredTempRoleGrants(
 export async function handleGuildMemberAddEvent(member: GuildMember, client: SomniClient): Promise<void> {
   if (client.setupVerificationMode === true) return;
   try {
-    const blocked = await processAntiRaid(member.guild, member, client.supabase, client.eventBus);
+    // GuildMember.joinedTimestamp is stable across gateway redelivery of the
+    // same logical join, so anti-raid can dedupe replayed events without
+    // suppressing a genuine later rejoin.
+    const joinOccurrenceKey = member.joinedTimestamp
+      ? `${member.id}:${member.joinedTimestamp}`
+      : undefined;
+    const blocked = await processAntiRaid(
+      member.guild,
+      member,
+      client.supabase,
+      client.eventBus,
+      joinOccurrenceKey,
+    );
     if (!blocked) await handleMemberJoin(client, member);
   } catch (err) {
     log.error('guildMemberAdd handler error:', { error: String(err) });

@@ -42,6 +42,9 @@ const sampleProduct = {
   price_cents: 500,
   currency: 'USD',
   type: 'one_time',
+  // One-time products are surfaced through the enabled delivery facet. A
+  // downloadable delivery matches the default storefront type allow-list.
+  delivery_type: 'file',
   sort_order: 0,
 };
 

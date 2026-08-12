@@ -193,18 +193,18 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
     expect(body.services.bot).toBe('unknown');
   });
 
-  it('always returns HTTP 200', async () => {
+  it('returns HTTP 503 when dependency health is degraded', async () => {
     mockCheckHealth.mockResolvedValue(false);
     const res = await buildHealthResponse(probe);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
   });
 
   it('production health route returns monitor-safe JSON', async () => {
     const res = await healthGET();
     const body = await res.json();
 
-    expect(res.status).toBe(200);
     expect(['healthy', 'degraded']).toContain(body.status);
+    expect(res.status).toBe(body.status === 'healthy' ? 200 : 503);
     expect(['valid', 'invalid', 'unknown']).toContain(body.services.config);
     expect(['connected', 'fallback']).toContain(body.services.valkey);
     expect(['online', 'offline', 'unknown']).toContain(body.services.bot);

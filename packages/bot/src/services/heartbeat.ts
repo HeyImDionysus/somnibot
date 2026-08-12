@@ -98,6 +98,7 @@ export class HeartbeatService {
     try {
       const memUsage = process.memoryUsage();
       const payload = JSON.stringify({
+        bootId: BOOT_ID,
         timestamp: Date.now(),
         uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
         guildCount: this.client?.guilds.cache.size ?? 0,
@@ -150,13 +151,13 @@ export async function readHeartbeat(
   valkey: Valkey,
   /** @deprecated guildId is no longer used — kept for API compat. */
   _guildId?: string,
-): Promise<{ timestamp: number; uptimeSeconds: number; guildCount?: number; guildIds?: string[]; memoryUsageMB?: number } | null> {
+): Promise<{ bootId?: string; timestamp: number; uptimeSeconds: number; guildCount?: number; guildIds?: string[]; memoryUsageMB?: number } | null> {
   try {
     // V11 Audit M-8: Read bot-level key only — per-guild fallback removed
     // since per-guild keys are no longer written.
     const raw = await valkey.get(VALKEY_HEARTBEAT_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as { timestamp: number; uptimeSeconds: number; guildCount?: number; guildIds?: string[]; memoryUsageMB?: number };
+    return JSON.parse(raw) as { bootId?: string; timestamp: number; uptimeSeconds: number; guildCount?: number; guildIds?: string[]; memoryUsageMB?: number };
   } catch {
     return null;
   }

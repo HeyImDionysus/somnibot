@@ -8,6 +8,7 @@
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 import { useToast } from '@/components/shared/toast';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
@@ -27,6 +28,24 @@ interface Infraction {
   pardoned_at: string | null;
   expires_at: string | null;
   created_at: string;
+}
+
+function isInfraction(value: unknown): value is Infraction {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.guild_id === 'string'
+    && typeof value.member_id === 'string'
+    && typeof value.moderator_id === 'string'
+    && typeof value.type === 'string'
+    && typeof value.reason === 'string'
+    && (typeof value.automod_rule_id === 'string' || value.automod_rule_id === null)
+    && (typeof value.duration_minutes === 'number' || value.duration_minutes === null)
+    && typeof value.active === 'boolean'
+    && typeof value.pardoned === 'boolean'
+    && (typeof value.pardoned_by === 'string' || value.pardoned_by === null)
+    && (typeof value.pardoned_at === 'string' || value.pardoned_at === null)
+    && (typeof value.expires_at === 'string' || value.expires_at === null)
+    && typeof value.created_at === 'string';
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -54,7 +73,8 @@ export default function InfractionsPage() {
   const [showManualWarn, setShowManualWarn] = useState(false);
   const [manualForm, setManualForm] = useState({ member_id: '', type: 'warn', reason: '' });
   const [saving, setSaving] = useState(false);
-  const [confirmPardon, setConfirmPardon] = useState<string | null>(null);
+  const [confirmPardon, setConfirmPardon] = useState<Infraction | null>(null);
+  const [manualErrors, setManualErrors] = useState<{ readonly memberId?: string; readonly reason?: string }>({});
   const { toast } = useToast();
 
   const PAGE_SIZE = 20;
@@ -70,13 +90,15 @@ export default function InfractionsPage() {
       if (activeOnly) params.set('active', 'true');
 
       const res = await fetch(`/api/moderation/infractions?${params}`);
-      const json = await res.json();
-      if (json.success) {
-        setInfractions(json.data);
-        setTotal(json.total);
-      }
-    } catch {
-      setError('Failed to load infractions');
+      const json = await requireApiSuccess(res, 'Could not load infractions. Retry from this page.');
+      const nextInfractions = requireApiArray(json, 'data', isInfraction, 'The infraction service returned an invalid readback. Retry from this page.');
+      if (typeof json.total !== 'number') throw new Error('The infraction service returned an invalid readback. Retry from this page.');
+      setInfractions(nextInfractions);
+      setTotal(json.total);
+      return nextInfractions;
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load infractions. Retry from this page.');
+      return null;
     } finally {
       setLoading(false);
     }
@@ -89,26 +111,40 @@ export default function InfractionsPage() {
   // GAP 2: Live updates — auto-refresh when infraction data changes in DB
   useAutoRefresh('infractions', undefined, loadInfractions);
 
-  const handlePardon = async (id: string) => {
+  const handlePardon = async () => {
+    if (!confirmPardon) return;
+    setSaving(true);
+    setError(null);
     try {
       const res = await fetch('/api/moderation/infractions', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, action: 'pardon' }),
+        body: JSON.stringify({ id: confirmPardon.id, action: 'pardon' }),
       });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
+      await requireApiSuccess(res, 'Could not pardon this infraction. It remains active and still counts toward escalation.');
+      const nextInfractions = await loadInfractions();
+      requireReadback(
+        nextInfractions?.some((infraction) => infraction.id === confirmPardon.id && infraction.pardoned && !infraction.active) === true,
+        'The pardon was accepted, but the targeted infraction still has its previous state in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
       toast({ title: 'Infraction pardoned', variant: 'success' });
-      await loadInfractions();
+      setConfirmPardon(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to pardon';
       setError(msg);
       toast({ title: msg, variant: 'error' });
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleManualWarn = async () => {
-    if (!manualForm.member_id || !manualForm.reason) return;
+    const nextErrors = {
+      ...(manualForm.member_id.trim() ? {} : { memberId: 'Enter the member’s Discord ID.' }),
+      ...(manualForm.reason.trim() ? {} : { reason: 'Enter a reason for the moderation history.' }),
+    };
+    setManualErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) return;
     setSaving(true);
     setError(null);
 
@@ -118,17 +154,31 @@ export default function InfractionsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(manualForm),
       });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
+      const mutation = await requireApiSuccess(res, 'Could not record this infraction. Your member, type, and reason are still here; correct them or retry.');
+      const created = requireApiRecord(mutation, 'data', 'The infraction response was malformed. Your fields are still here; reload before retrying.');
+      if (typeof created.id !== 'string') throw new Error('The infraction response was malformed. Your fields are still here; reload before retrying.');
+      const nextInfractions = await loadInfractions();
+      requireReadback(
+        nextInfractions?.some((infraction) => infraction.id === created.id
+          && infraction.member_id === manualForm.member_id
+          && infraction.type === manualForm.type
+          && infraction.reason === manualForm.reason) === true,
+        'The infraction was accepted, but the new history entry is missing from the authoritative readback. Your fields are still here; reload before retrying.',
+      );
       toast({
         title: `${manualForm.type.charAt(0).toUpperCase() + manualForm.type.slice(1)} recorded in history`,
         variant: 'success',
       });
       setShowManualWarn(false);
       setManualForm({ member_id: '', type: 'warn', reason: '' });
-      await loadInfractions();
+      setManualErrors({});
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to create infraction';
+      const normalizedMessage = msg.toLowerCase();
+      setManualErrors({
+        ...(normalizedMessage.includes('member') || normalizedMessage.includes('snowflake') ? { memberId: msg } : {}),
+        ...(normalizedMessage.includes('reason') ? { reason: msg } : {}),
+      });
       setError(msg);
       toast({ title: msg, variant: 'error' });
     } finally {
@@ -157,7 +207,7 @@ export default function InfractionsPage() {
       </div>
 
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
           {error}
         </div>
       )}
@@ -170,20 +220,28 @@ export default function InfractionsPage() {
             History only: this records the event for staff reference. It does not warn, mute,
             kick, or ban the member in Discord.
           </p>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <div>
-              <label className="block text-xs text-discord-text-muted mb-1">Member Discord ID</label>
+              <label htmlFor="manual-infraction-member" className="block text-xs text-discord-text-muted mb-1">Member Discord ID</label>
               <input
+                id="manual-infraction-member"
                 type="text"
                 value={manualForm.member_id}
-                onChange={(e) => setManualForm({ ...manualForm, member_id: e.target.value })}
+                onChange={(e) => {
+                  setManualForm({ ...manualForm, member_id: e.target.value });
+                  setManualErrors((current) => ({ ...current, memberId: undefined }));
+                }}
                 placeholder="123456789012345678"
+                aria-invalid={manualErrors.memberId !== undefined}
+                aria-describedby={manualErrors.memberId ? 'manual-infraction-member-error' : undefined}
                 className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
               />
+              {manualErrors.memberId && <p id="manual-infraction-member-error" className="mt-1 text-xs text-red-400">{manualErrors.memberId}</p>}
             </div>
             <div>
-              <label className="block text-xs text-discord-text-muted mb-1">Type</label>
+              <label htmlFor="manual-infraction-type" className="block text-xs text-discord-text-muted mb-1">Type</label>
               <select
+                id="manual-infraction-type"
                 value={manualForm.type}
                 onChange={(e) => setManualForm({ ...manualForm, type: e.target.value })}
                 className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
@@ -195,20 +253,27 @@ export default function InfractionsPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs text-discord-text-muted mb-1">Reason</label>
+              <label htmlFor="manual-infraction-reason" className="block text-xs text-discord-text-muted mb-1">Reason</label>
               <input
+                id="manual-infraction-reason"
                 type="text"
                 value={manualForm.reason}
-                onChange={(e) => setManualForm({ ...manualForm, reason: e.target.value })}
+                onChange={(e) => {
+                  setManualForm({ ...manualForm, reason: e.target.value });
+                  setManualErrors((current) => ({ ...current, reason: undefined }));
+                }}
                 placeholder="Reason for infraction"
+                aria-invalid={manualErrors.reason !== undefined}
+                aria-describedby={manualErrors.reason ? 'manual-infraction-reason-error' : undefined}
                 className="w-full rounded border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
               />
+              {manualErrors.reason && <p id="manual-infraction-reason-error" className="mt-1 text-xs text-red-400">{manualErrors.reason}</p>}
             </div>
           </div>
           <div className="flex gap-2">
             <button
               onClick={handleManualWarn}
-              disabled={saving || !manualForm.member_id || !manualForm.reason}
+              disabled={saving}
               className="rounded bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
             >
               {saving ? 'Recording...' : 'Record in History'}
@@ -226,6 +291,7 @@ export default function InfractionsPage() {
       {/* Filters */}
       <div className="flex items-center gap-4">
         <input
+          aria-label="Filter infractions by member Discord ID"
           type="text"
           value={filterMemberId}
           onChange={(e) => {
@@ -312,7 +378,7 @@ export default function InfractionsPage() {
                   <td className="px-4 py-3">
                     {inf.active && !inf.pardoned && (
                       <button
-                        onClick={() => setConfirmPardon(inf.id)}
+                        onClick={() => setConfirmPardon(inf)}
                         className="rounded bg-green-500/20 px-2.5 py-1 text-xs font-medium text-green-400 hover:bg-green-500/30"
                       >
                         Pardon
@@ -352,14 +418,14 @@ export default function InfractionsPage() {
       <ConfirmDialog
         open={!!confirmPardon}
         title="Pardon Infraction"
-        description="Are you sure you want to pardon this infraction? This will deactivate it and it won't count toward escalation thresholds."
-        confirmLabel="Pardon"
+        description={confirmPardon ? `Pardon the ${confirmPardon.type} infraction for member ${confirmPardon.member_id}: “${confirmPardon.reason}”. This deactivates it and removes it from escalation thresholds; the history record remains.` : undefined}
+        confirmLabel="Pardon infraction"
         variant="default"
-        onConfirm={() => {
-          if (confirmPardon) handlePardon(confirmPardon);
-          setConfirmPardon(null);
+        loading={saving}
+        onConfirm={handlePardon}
+        onCancel={() => {
+          if (!saving) setConfirmPardon(null);
         }}
-        onCancel={() => setConfirmPardon(null)}
       />
     </div>
   );

@@ -7,6 +7,7 @@
 'use client';
 
 import { cn } from '@/lib/utils/cn';
+import type { ReactNode } from 'react';
 
 // ── Base Skeleton ──────────────────────────────────────────
 
@@ -17,6 +18,7 @@ interface SkeletonProps {
 export function Skeleton({ className }: SkeletonProps) {
   return (
     <div
+      aria-hidden="true"
       className={cn(
         'animate-pulse rounded-md bg-discord-bg-tertiary',
         className,
@@ -25,11 +27,21 @@ export function Skeleton({ className }: SkeletonProps) {
   );
 }
 
+function LoadingRegion({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div role="status" aria-live="polite" aria-busy="true">
+      <span className="sr-only">{label}</span>
+      {children}
+    </div>
+  );
+}
+
 // ── Page-level Skeletons ───────────────────────────────────
 
 /** Dashboard home — stat cards + activity list */
 export function DashboardSkeleton() {
   return (
+    <LoadingRegion label="Loading dashboard">
     <div className="space-y-6">
       <div>
         <Skeleton className="h-7 w-40 mb-2" />
@@ -47,12 +59,14 @@ export function DashboardSkeleton() {
       </div>
       <Skeleton className="h-64 rounded-lg" />
     </div>
+    </LoadingRegion>
   );
 }
 
 /** Table-based pages (orders, tickets, infractions, customers) */
 export function TableSkeleton({ rows = 8 }: { rows?: number }) {
   return (
+    <LoadingRegion label="Loading table">
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
@@ -82,12 +96,14 @@ export function TableSkeleton({ rows = 8 }: { rows?: number }) {
         ))}
       </div>
     </div>
+    </LoadingRegion>
   );
 }
 
 /** Card-list pages (giveaways, reaction roles, scheduled messages) */
 export function CardListSkeleton({ cards = 4 }: { cards?: number }) {
   return (
+    <LoadingRegion label="Loading list">
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
@@ -107,12 +123,14 @@ export function CardListSkeleton({ cards = 4 }: { cards?: number }) {
         ))}
       </div>
     </div>
+    </LoadingRegion>
   );
 }
 
 /** Config/settings pages (levels, music, welcome, etc.) */
 export function ConfigSkeleton() {
   return (
+    <LoadingRegion label="Loading configuration">
     <div className="space-y-6">
       <div>
         <Skeleton className="h-7 w-40 mb-2" />
@@ -127,5 +145,6 @@ export function ConfigSkeleton() {
       ))}
       <Skeleton className="h-10 w-24 rounded-md" />
     </div>
+    </LoadingRegion>
   );
 }

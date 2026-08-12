@@ -10,12 +10,22 @@ import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { getConfig, saveConfig, buildEnvVars, setKeychainFallbackListener, type LauncherConfig } from './config-store.js';
+import {
+  getConfig,
+  saveConfig,
+  buildEnvVars,
+  migrateCurrentPlaintextSecrets,
+  migrateLegacyConfig,
+  setKeychainFallbackListener,
+  type LauncherConfig,
+} from './config-store.js';
 import { writeLauncherAuditLog, resolveLauncherGuildId, type LauncherAuditEntry } from './audit-log.js';
 import {
   REGULAR_LOCAL_OPERATOR_DASHBOARD_URL,
   getLauncherLocalStartBlocker,
   normalizeBaseUrl,
+  normalizeVpsPublicAccessMode,
+  normalizeVpsTailscaleFunnelUrl,
   resolveRuntimeProfile,
 } from './runtime-profile.js';
 import {
@@ -27,6 +37,7 @@ import {
   ensurePayPalWebhook,
   type EnsurePayPalWebhookResult,
 } from './paypal-webhook-service.js';
+import { reconcileSandboxPayPalWebhookOnStartup } from './paypal-webhook-startup.js';
 import { buildSetupStatus, type PayPalWebhookProofStatus, type SetupFlowInput } from './setup-flow.js';
 import {
   SOMNIBOT_FUNNEL_TARGET,
@@ -37,8 +48,23 @@ import {
 } from './tailscale-service.js';
 import { validateAllCredentials, type FullValidationResult } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
-import { pushToSupabase } from './supabase-sync.js';
+import { maskRestoredCredentials, pushToSupabaseWithRetry } from './supabase-sync.js';
+import {
+  getSupabaseProjectCredentials,
+  getSupabaseSessionPoolerTemplate,
+  listSupabaseProjects,
+  updateSupabaseDatabasePassword,
+} from './supabase-management-api.js';
+import { importExistingSomniBotEnv } from './existing-env-import.js';
+import { restoreMissingCredentialsOnStartup } from './credential-bootstrap.js';
 import { initUpdater } from './updater.js';
+import { resolveLauncherDisplayVersion } from './launcher-version.js';
+import { shouldOpenDevTools } from './devtools-policy.js';
+import {
+  MASKED_SECRET,
+  maskConfigSecrets,
+  sanitizeConfigPatchForStorage,
+} from './config-bridge.js';
 import {
   checkJava,
   downloadLavalink,
@@ -47,20 +73,71 @@ import {
   getLavalinkStatus,
   getLavalinkError,
   isLavalinkJarPresent,
+  setLavalinkPassword,
 } from './lavalink-manager.js';
 import {
   downloadValkey,
   startValkey,
   stopValkey,
+  getValkeyPid,
   getValkeyStatus,
   getValkeyError,
   isValkeyBinaryPresent,
 } from './valkey-manager.js';
 import { createVpsCommandRunner } from './vps-command-runner.js';
 import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-executor.js';
+import {
+  buildFailedVpsQuiesceCommand,
+  buildVpsMaintenanceExitCommand,
+  buildVpsRuntimeStartCommand,
+  buildVpsRuntimeStopCommand,
+  buildVpsStateConsumersStopCommand,
+  buildVpsValkeyExportCommand,
+} from './vps-deployment-plan.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
-import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
+import {
+  buildVpsDeploymentPlanFromConfig,
+  handleVpsDeploymentRunRequest,
+  type VpsDeploymentRunRequest,
+} from './vps-deployment-request.js';
+import { ensurePersistedVpsSecrets } from './vps-env-materializer.js';
+import { handleVpsRollbackRunRequest, type VpsRollbackRunRequest } from './vps-rollback-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
+import { VPS_PREFLIGHT_SCRIPT } from './vps-bootstrap.js';
+import {
+  buildVpsTailscaleStatusCommand,
+  parseVpsTailscaleFunnelReadiness,
+} from './vps-tailscale-funnel.js';
+import {
+  runLocalToVpsHandoff,
+  shouldTransferLocalValkeyState,
+  waitForFreshLocalBotReady,
+  waitForProcessIdsToExit,
+} from './local-vps-handoff.js';
+import {
+  backupLocalValkeySnapshot,
+  discardIncomingLocalValkeySnapshot,
+  installIncomingLocalValkeySnapshot,
+  prepareIncomingLocalValkeySnapshotPath,
+  startLocalValkeyBackupSchedule,
+  stopLocalValkeyBackupSchedule,
+  validateRdbFile,
+} from './local-backup-manager.js';
+import {
+  hasSupabaseProjectOriginChanged,
+  readRuntimeLeaseStatus,
+  RuntimeLeaseStatusUnavailableError,
+  shouldStopManagedLocalStackBeforeLeaseWait,
+  validateSupabaseCredentialPairing,
+  waitForRuntimeLease,
+} from './runtime-lease-client.js';
+import { runVpsToLocalHandoff } from './vps-local-handoff.js';
+import {
+  readVpsBotBootProof,
+  waitForFreshVpsBotReady,
+  waitForVpsBotReadyAfter,
+  type VpsBotBootProof,
+} from './vps-bot-readiness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -72,14 +149,73 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
+  // Do not continue registering lifecycle handlers or starting renderer work
+  // in a losing instance. A second Electron process that keeps executing can
+  // leave a hidden process holding the profile lock after its window exits.
+  process.exit(0);
 }
 
 let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
 let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
+let launcherQuitRequested = false;
+let closeDecisionInFlight = false;
+let shutdownPromise: Promise<void> | null = null;
+let shutdownComplete = false;
+let quitRequestInFlight = false;
+let resolveStartupReady: (() => void) | null = null;
+const startupReady = new Promise<void>((resolve) => {
+  resolveStartupReady = resolve;
+});
+let startupStage = 'waiting-for-electron-ready';
 const activeVpsDeployment = new VpsDeploymentRunGate();
-const MASKED_SECRET = '••••••••';
 
+/**
+ * Quiesce every launcher-owned process before allowing Electron to exit.
+ * Electron's before-quit event is synchronous by design, so callers prevent
+ * the first quit attempt and call app.quit() again only after all child
+ * shutdown promises have settled.
+ */
+function shutdownManagedServices(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+
+  const attempt = (async () => {
+    stopLocalValkeyBackupSchedule();
+    // Drain the serialized cloud credential snapshot before Electron exits so
+    // an immediate quit cannot strand the next machine on stale state.
+    const results = await Promise.allSettled([credentialSyncTail, stopAll(), stopLavalink(), stopValkey()]);
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'One or more managed services did not stop.');
+    }
+    sessionToken = null;
+    lastStartedPayPalConfig = null;
+  })();
+  const trackedAttempt = attempt.finally(() => {
+    shutdownPromise = null;
+  });
+  shutdownPromise = trackedAttempt;
+
+  return trackedAttempt;
+}
+
+function requestQuitAfterManagedShutdown(): void {
+  if (quitRequestInFlight || shutdownComplete) return;
+  quitRequestInFlight = true;
+  void shutdownManagedServices().then(() => {
+    shutdownComplete = true;
+    app.quit();
+  }).catch((error) => {
+    console.error('[Launcher] Managed-service shutdown failed:', error);
+    quitRequestInFlight = false;
+    dialog.showErrorBox(
+      'SomniBot could not stop every managed service',
+      'The launcher is staying open because one or more managed services could not be confirmed stopped. Retry after resolving the process conflict.',
+    );
+  });
+}
 /**
  * [infrastructure-launcher] Fire-and-forget durable audit for launcher-side
  * lifecycle/security operations. Resolves the current Supabase creds + target
@@ -96,6 +232,63 @@ function recordLauncherAudit(entry: LauncherAuditEntry): void {
     entry,
   );
 }
+
+async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
+  const result = await pushToSupabaseWithRetry(config.supabaseUrl, config.supabaseSecretKey, {
+    discordToken: config.discordToken,
+    discordApplicationId: config.discordApplicationId,
+    discordClientSecret: config.discordClientSecret,
+    discordGuildId: config.discordGuildId,
+    supabaseUrl: config.supabaseUrl,
+    supabaseSecretKey: config.supabaseSecretKey,
+    supabasePublishableKey: config.supabasePublishableKey,
+    supabaseDbPassword: config.supabaseDbPassword,
+    supabaseDbUrlTemplate: config.supabaseDbUrlTemplate,
+    supabaseAccessToken: config.supabaseAccessToken,
+    supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
+    paypalClientId: config.paypalClientId,
+    paypalClientSecret: config.paypalClientSecret,
+    paypalWebhookId: config.paypalWebhookId,
+    paypalWebhookProofKey: config.paypalWebhookProofKey,
+    paypalSandbox: config.paypalSandbox,
+    lavalinkEnabled: config.lavalinkEnabled,
+    autoInstallOnQuit: config.autoInstallOnQuit,
+    keychainRequired: config.keychainRequired,
+    ownerBrandName: config.ownerBrandName,
+    updatePromptBeforeDownload: config.updatePromptBeforeDownload,
+    sdkCacheTtlMs: config.sdkCacheTtlMs,
+    publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    vpsDomain: config.vpsDomain,
+    vpsSshHost: config.vpsSshHost,
+    vpsSshUser: config.vpsSshUser,
+    vpsDeployPath: config.vpsDeployPath,
+    tailscaleAuthKey: config.tailscaleAuthKey,
+    vpsCsrfSecret: config.vpsCsrfSecret,
+    vpsNextAuthSecret: config.vpsNextAuthSecret,
+    vpsWebhookReplaySecret: config.vpsWebhookReplaySecret,
+    vpsValkeyPassword: config.vpsValkeyPassword,
+    vpsLavalinkPassword: config.vpsLavalinkPassword,
+  });
+  if (result.ok) return;
+
+  recordLauncherAudit({
+    action: 'launcher.credentials.sync_failed',
+    category: 'infrastructure',
+    targetType: 'instance_settings',
+    details: { attempts: result.attempts },
+    success: false,
+    errorMessage: result.error ?? 'unknown error',
+  });
+}
+
+let credentialSyncTail: Promise<void> = Promise.resolve();
+
+/** Serialize snapshots so a slower older write can never overwrite a newer save. */
+function queueLauncherCredentialSync(config: LauncherConfig): Promise<void> {
+  const queued = credentialSyncTail.then(() => syncLauncherCredentials(config));
+  credentialSyncTail = queued.catch(() => undefined);
+  return queued;
+}
 const DASHBOARD_SETUP_SNAPSHOT_CACHE_MS = 5_000;
 let dashboardSetupSnapshotCache: {
   loadedAt: number;
@@ -103,6 +296,15 @@ let dashboardSetupSnapshotCache: {
 } | null = null;
 
 type LauncherConfigPatch = Partial<LauncherConfig>;
+const RENDERER_WRITABLE_CONFIG_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
+  'discordToken', 'discordApplicationId', 'discordClientSecret', 'discordGuildId', 'guilds',
+  'supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey', 'supabaseDbPassword',
+  'supabaseDbUrlTemplate', 'supabaseAccessToken', 'supabaseDiscordAuthProviderConfigured',
+  'paypalClientId', 'paypalClientSecret', 'paypalWebhookId', 'paypalSandbox',
+  'runtimeMode', 'publicCallbackBaseUrl', 'vpsPublicAccessMode', 'vpsDomain', 'vpsTailscaleFunnelUrl', 'vpsSshHost', 'vpsSshUser',
+  'vpsDeployPath', 'tailscaleAuthKey', 'firstRunComplete', 'lavalinkEnabled', 'windowBounds',
+  'autoInstallOnQuit', 'keychainRequired', 'ownerBrandName', 'updatePromptBeforeDownload', 'sdkCacheTtlMs',
+]);
 type PayPalRuntimeConfig = Pick<
   LauncherConfig,
   'paypalClientId' | 'paypalClientSecret' | 'paypalWebhookId' | 'paypalSandbox'
@@ -162,21 +364,11 @@ interface SetupAutomationResult {
 }
 
 function sanitizeConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
-  const sanitized = { ...config };
-  for (const key of [
-    'supabaseSecretKey',
-    'supabaseDbPassword',
-    'supabaseAccessToken',
-    'paypalClientSecret',
-    'paypalWebhookId',
-    'discordToken',
-    'discordClientSecret',
-    'tailscaleAuthKey',
-  ] as const) {
-    if (sanitized[key] === MASKED_SECRET) {
-      delete sanitized[key];
-    }
-  }
+  const sanitized = sanitizeConfigPatchForStorage(config);
+  // This field is lifecycle evidence owned by the main process. A renderer
+  // round-trip or compromised page must never be able to declare a runtime
+  // successful and influence restart behavior.
+  delete sanitized.lastSuccessfulRuntimeMode;
   return sanitized;
 }
 
@@ -186,6 +378,31 @@ function sanitizePayPalConfigPatch(config: LauncherConfigPatch): LauncherConfigP
     if (typeof sanitized[key] === 'string') {
       sanitized[key] = sanitized[key].trim();
     }
+  }
+  return sanitized;
+}
+
+function sanitizeRendererConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
+  const allowed = Object.fromEntries(
+    Object.entries(config).filter(([key]) => RENDERER_WRITABLE_CONFIG_KEYS.has(key as keyof LauncherConfig)),
+  ) as LauncherConfigPatch;
+  const sanitized = sanitizePayPalConfigPatch(allowed);
+  const savedConfig = getConfig();
+  const publicAccessModeChanged = sanitized.vpsPublicAccessMode !== undefined
+    && normalizeVpsPublicAccessMode(sanitized.vpsPublicAccessMode) !== normalizeVpsPublicAccessMode(savedConfig.vpsPublicAccessMode);
+  const funnelUrlChanged = sanitized.vpsTailscaleFunnelUrl !== undefined
+    && normalizeVpsTailscaleFunnelUrl(sanitized.vpsTailscaleFunnelUrl) !== normalizeVpsTailscaleFunnelUrl(savedConfig.vpsTailscaleFunnelUrl);
+  if (publicAccessModeChanged || funnelUrlChanged) {
+    sanitized.vpsTailscaleFunnelVerifiedUrl = '';
+  }
+  const pairingError = validateSupabaseCredentialPairing(savedConfig.supabaseUrl, sanitized);
+  if (pairingError) throw new Error(pairingError);
+  if (
+    typeof sanitized.supabaseUrl === 'string'
+    && hasSupabaseProjectOriginChanged(savedConfig.supabaseUrl, sanitized.supabaseUrl)
+    && savedConfig.lastSuccessfulRuntimeMode === 'vps'
+  ) {
+    throw new Error('Switch the active VPS runtime to local before changing its Supabase project.');
   }
   return sanitized;
 }
@@ -604,6 +821,13 @@ async function startLocalStack(
   config: LauncherConfig,
   options: { forceRestart?: boolean } = {},
 ): Promise<{ ok: boolean; error?: string }> {
+  const cancelled = () => launcherQuitRequested;
+  const cancelAndStop = async (): Promise<{ ok: false; error: string }> => {
+    await Promise.allSettled([stopAll(), stopLavalink(), stopValkey()]);
+    return { ok: false, error: 'Launcher shutdown was requested during local startup.' };
+  };
+  if (cancelled()) return { ok: false, error: 'Launcher shutdown is already in progress.' };
+
   const running = isRunning();
   if (running && !options.forceRestart) {
     return { ok: true };
@@ -619,8 +843,9 @@ async function startLocalStack(
   }
 
   if (running) {
-    stopAll();
+    await stopAll();
     lastStartedPayPalConfig = null;
+    if (cancelled()) return cancelAndStop();
   }
 
   const portFree = running
@@ -632,36 +857,140 @@ async function startLocalStack(
       error: 'The local dashboard port is already in use. Close the application using that port, or restart your computer and try again. See diagnostics for implementation details.',
     };
   }
+  if (cancelled()) return cancelAndStop();
 
   const vkResult = await startValkey();
   if (!vkResult.ok) {
-    console.warn('[Launcher] Valkey/Redis failed to start:', vkResult.error);
+    await stopValkey();
+    return {
+      ok: false,
+      error: `Valkey/Redis is required for production-safe local operation and did not become ready: ${vkResult.error ?? 'unknown error'}`,
+    };
   }
+  if (cancelled()) return cancelAndStop();
 
-  if (config.lavalinkEnabled) {
+  const preparedSecrets = ensurePersistedVpsSecrets(config);
+  const runtimeConfig = preparedSecrets.config;
+  if (Object.keys(preparedSecrets.patch).length > 0) {
+    saveConfig(preparedSecrets.patch);
+    void queueLauncherCredentialSync(runtimeConfig);
+  }
+  setLavalinkPassword(runtimeConfig.vpsLavalinkPassword);
+  if (runtimeConfig.lavalinkEnabled) {
     const llResult = await startLavalink();
     if (!llResult.ok) {
-      console.warn('[Launcher] Lavalink failed to start:', llResult.error);
+      await stopLavalink();
+      await stopValkey();
+      return {
+        ok: false,
+        error: `Lavalink is enabled but did not become ready: ${llResult.error ?? 'unknown error'}`,
+      };
     }
+    if (cancelled()) return cancelAndStop();
   }
 
-  sessionToken = crypto.randomBytes(32).toString('hex');
-  const envVars = buildEnvVars(config, sessionToken);
-  startAll(envVars);
-  lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(config);
-
-  pushToSupabase(config.supabaseUrl, config.supabaseSecretKey, {
-    discordToken: config.discordToken,
-    discordApplicationId: config.discordApplicationId,
-    discordClientSecret: config.discordClientSecret,
-    discordGuildId: config.discordGuildId,
-    supabasePublishableKey: config.supabasePublishableKey,
-    supabaseDbPassword: config.supabaseDbPassword,
-  }).catch(() => {
-    // Sync is best-effort. Startup must not fail just because settings sync is unavailable.
+  startLocalValkeyBackupSchedule((result) => {
+    if (result.ok) return;
+    recordLauncherAudit({
+      action: 'launcher.backup.valkey_failed',
+      category: 'infrastructure',
+      targetType: 'local_valkey',
+      details: { mode: 'regular-local' },
+      success: false,
+      errorMessage: result.error ?? 'Local Valkey backup failed.',
+    });
   });
 
+  sessionToken = crypto.randomBytes(32).toString('hex');
+  const envVars = buildEnvVars(runtimeConfig);
+  if (cancelled()) return cancelAndStop();
+  await startAll(envVars, sessionToken);
+  if (cancelled()) return cancelAndStop();
+  lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(runtimeConfig);
+
+  void queueLauncherCredentialSync(runtimeConfig);
+
   return { ok: true };
+}
+
+type SupabaseBootstrapResult =
+  | { ok: true; config: LauncherConfig; hydrated: boolean }
+  | {
+    ok: false;
+    error: string;
+    projects?: Array<{ ref: string; name: string; region?: string; status?: string; url: string }>;
+  };
+
+/**
+ * The bot setup contract accepts one Supabase Personal Access Token (`sbp_…`)
+ * and derives the project/API values it needs. Keep the launcher on that same
+ * path. Existing URL/key values remain a supported advanced/manual fallback;
+ * the token is only used when one of those values is missing.
+ */
+async function bootstrapSupabaseFromManagementToken(
+  config: LauncherConfig,
+): Promise<SupabaseBootstrapResult> {
+  const token = config.supabaseAccessToken.trim();
+  const needsHydration = !config.supabaseUrl.trim()
+    || !config.supabaseSecretKey.trim()
+    || !config.supabasePublishableKey.trim()
+    || (Boolean(config.supabaseDbPassword.trim()) && !config.supabaseDbUrlTemplate?.trim());
+  if (!token || !needsHydration) return { ok: true, config, hydrated: false };
+
+  const projectRef = getSupabaseProjectRef(config.supabaseUrl);
+  let selectedProject: { ref: string; name: string; region?: string; status?: string; url: string } | undefined;
+  if (projectRef) {
+    selectedProject = {
+      ref: projectRef,
+      name: projectRef,
+      url: `https://${projectRef}.supabase.co`,
+    };
+  } else {
+    const projects = await listSupabaseProjects(token);
+    if (!projects.ok) return projects;
+    if (projects.projects.length === 0) {
+      return { ok: false, error: 'The Supabase Personal Access Token returned no projects.' };
+    }
+    if (projects.projects.length > 1) {
+      return {
+        ok: false,
+        error: 'The Supabase Personal Access Token can see multiple projects. Use Discover Supabase Projects and select the SomniBot project once.',
+        projects: projects.projects,
+      };
+    }
+    selectedProject = projects.projects[0];
+  }
+
+  const credentials = await getSupabaseProjectCredentials(token, selectedProject.ref);
+  if (!credentials.ok) return credentials;
+  if (!credentials.credentials.secretKey || !credentials.credentials.publishableKey) {
+    return {
+      ok: false,
+      error: 'The Supabase Personal Access Token could not read both project API keys. Grant project API-key read access or use the existing project keys as the manual fallback.',
+    };
+  }
+  const pooler = await getSupabaseSessionPoolerTemplate(token, selectedProject.ref);
+  if (!pooler.ok) return pooler;
+
+  const patch: Partial<LauncherConfig> = {
+    supabaseUrl: credentials.credentials.project.url,
+    supabaseSecretKey: credentials.credentials.secretKey,
+    supabasePublishableKey: credentials.credentials.publishableKey,
+    supabaseDbUrlTemplate: pooler.connectionTemplate,
+  };
+  saveConfig(patch);
+  return { ok: true, config: getConfig(), hydrated: true };
+}
+
+async function stopManagedLocalStack(): Promise<void> {
+  const status = getStatus();
+  stopLocalValkeyBackupSchedule();
+  await stopAll();
+  await stopLavalink();
+  await stopValkey();
+  sessionToken = null;
+  lastStartedPayPalConfig = null;
+  await waitForProcessIdsToExit([status.botPid, status.dashboardPid]);
 }
 
 async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
@@ -670,6 +999,17 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
   let config = getConfig();
   const warnings: string[] = [];
   let callbackBaseUrlChanged = previousPublicCallbackBaseUrl !== config.publicCallbackBaseUrl.trim();
+
+  const supabaseBootstrap = await bootstrapSupabaseFromManagementToken(config);
+  if (!supabaseBootstrap.ok) {
+    return {
+      ok: false,
+      stage: 'supabase-bootstrap',
+      message: 'Supabase project setup needs one more step.',
+      error: supabaseBootstrap.error,
+    };
+  }
+  config = supabaseBootstrap.config;
 
   if (config.runtimeMode !== 'regular-local') {
     return {
@@ -730,6 +1070,8 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     };
   }
 
+  const botBeforeStart = getStatus();
+  const localStartBeganAt = Date.now();
   const startResult = await startLocalStack(config, { forceRestart: true });
   if (!startResult.ok) {
     return {
@@ -751,6 +1093,27 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       message: 'Bot and dashboard were started, but dashboard readiness could not be verified yet.',
       error: dashboardReady.error,
       servicesStarted: true,
+      meta: validation.meta,
+      providerValidation: validation,
+      warnings,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    };
+  }
+
+  try {
+    await waitForFreshLocalBotReady({
+      readStatus: getStatus,
+      startedAfter: localStartBeganAt,
+      previousBotPid: botBeforeStart.botPid,
+    });
+  } catch (error) {
+    await stopManagedLocalStack().catch(() => undefined);
+    return {
+      ok: false,
+      stage: 'bot-ready',
+      message: 'Local services started, but the bot did not acquire ownership and reach Discord ready.',
+      error: error instanceof Error ? error.message : String(error),
+      servicesStarted: false,
       meta: validation.meta,
       providerValidation: validation,
       warnings,
@@ -832,6 +1195,8 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       };
     }
 
+    const botBeforePayPalRestart = getStatus();
+    const paypalRestartBeganAt = Date.now();
     const restartResult = await restartRunningLocalStackForPayPalChange(previousPayPalConfig);
     if (!restartResult.ok) {
       return {
@@ -849,6 +1214,28 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       };
     }
     if (restartResult.restarted) {
+      try {
+        await waitForFreshLocalBotReady({
+          readStatus: getStatus,
+          startedAfter: paypalRestartBeganAt,
+          previousBotPid: botBeforePayPalRestart.botPid,
+        });
+      } catch (error) {
+        await stopManagedLocalStack().catch(() => undefined);
+        return {
+          ok: false,
+          stage: 'bot-ready',
+          message: 'PayPal settings were applied, but the restarted local bot did not reach Discord ready.',
+          error: error instanceof Error ? error.message : String(error),
+          servicesStarted: false,
+          meta: validation.meta,
+          providerValidation: validation,
+          warnings,
+          publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+          paypalWebhook,
+          ...(callbackProbe ? { callbackProbe } : {}),
+        };
+      }
       paypalWebhook = {
         ...paypalWebhook,
         servicesRestarted: true,
@@ -871,7 +1258,323 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
   };
 }
 
-async function createWindow(): Promise<void> {
+async function restoreVpsAfterLocalHandoffFailure(
+  vpsConfig: LauncherConfig,
+  runner: ReturnType<typeof createVpsCommandRunner>,
+  vpsPlan: ReturnType<typeof buildVpsDeploymentPlanFromConfig>,
+  previousVpsBoot: VpsBotBootProof,
+  requireNewBoot: boolean,
+): Promise<{ ok: boolean; detail: string }> {
+  let paypalDetail = '';
+  if (vpsConfig.paypalClientId.trim() && vpsConfig.paypalClientSecret.trim()) {
+    const paypal = await ensureConfiguredPayPalWebhook(vpsConfig);
+    if (!paypal.ok) {
+      paypalDetail = ` PayPal callback restoration failed: ${paypal.error || paypal.message}`;
+    }
+  }
+
+  await stopManagedLocalStack().catch(() => undefined);
+  saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+  await queueLauncherCredentialSync(getConfig());
+
+  const started = await runner(buildVpsRuntimeStartCommand(vpsPlan), { index: 0, total: 1 });
+  if (!started.ok) {
+    return {
+      ok: false,
+      detail: `The local handoff failed and the previous VPS stack could not be restarted.${paypalDetail}`,
+    };
+  }
+
+  try {
+    await waitForRuntimeLease(
+      () => readRuntimeLeaseStatus(vpsConfig.supabaseUrl, vpsConfig.supabaseSecretKey),
+      (status) => status.active && status.activeMode === 'vps',
+      { timeoutMessage: 'The restarted VPS did not reacquire runtime ownership.' },
+    );
+    await waitForFreshVpsBotReady(vpsPlan.target!.publicBaseUrl, previousVpsBoot, { requireNewBoot });
+    const maintenanceEnded = await runner(buildVpsMaintenanceExitCommand(vpsPlan), { index: 0, total: 1 });
+    if (!maintenanceEnded.ok) {
+      throw new Error(maintenanceEnded.error || 'The VPS recovered, but automatic health maintenance could not be re-enabled.');
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `${error instanceof Error ? error.message : String(error)}${paypalDetail}`,
+    };
+  }
+
+  return {
+    ok: paypalDetail.length === 0,
+    detail: paypalDetail
+      ? `The VPS bot was restored, but provider callback recovery is incomplete.${paypalDetail}`
+      : 'The previous VPS stack and provider callback were restored after the local handoff failed.',
+  };
+}
+
+async function runLocalSetupWithRuntimeHandoff(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
+  const savedConfig = getConfig();
+  let sanitizedPatch: LauncherConfigPatch;
+  try {
+    sanitizedPatch = sanitizeRendererConfigPatch(configPatch);
+  } catch (error) {
+    return {
+      ok: false,
+      stage: 'runtime-ownership',
+      message: 'The Supabase project change could not be applied safely.',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const localConfig = { ...savedConfig, ...sanitizedPatch, runtimeMode: 'regular-local' as const };
+  let leaseStatus;
+  try {
+    leaseStatus = await readRuntimeLeaseStatus(localConfig.supabaseUrl, localConfig.supabaseSecretKey);
+  } catch (error) {
+    if (
+      error instanceof RuntimeLeaseStatusUnavailableError
+      && error.reason === 'not-installed'
+      && savedConfig.lastSuccessfulRuntimeMode !== 'vps'
+    ) {
+      const freshResult = await runLocalSetupAutomation(sanitizedPatch);
+      if (freshResult.ok) saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
+      return freshResult;
+    }
+    return {
+      ok: false,
+      stage: 'runtime-ownership',
+      message: 'Active runtime ownership could not be verified.',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  if (!leaseStatus.active && savedConfig.lastSuccessfulRuntimeMode !== 'vps') {
+    const localResult = await runLocalSetupAutomation(sanitizedPatch);
+    if (localResult.ok) saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
+    return localResult;
+  }
+  if (leaseStatus.activeMode === 'regular-local') {
+    if (shouldStopManagedLocalStackBeforeLeaseWait(leaseStatus, isRunning())) {
+      try {
+        await stopManagedLocalStack();
+      } catch (error) {
+        return {
+          ok: false,
+          stage: 'runtime-ownership',
+          message: 'The existing local SomniBot stack could not be stopped safely.',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+    try {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(localConfig.supabaseUrl, localConfig.supabaseSecretKey),
+        (status) => !status.active,
+        { timeoutMessage: 'Another local SomniBot runtime is still active for this installation.' },
+      );
+    } catch (error) {
+      return {
+        ok: false,
+        stage: 'runtime-ownership',
+        message: 'Local runtime ownership is still active elsewhere.',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const localResult = await runLocalSetupAutomation(sanitizedPatch);
+    if (localResult.ok) saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
+    return localResult;
+  }
+
+  const vpsConfig: LauncherConfig = { ...localConfig, runtimeMode: 'vps' };
+  const vpsPlan = buildVpsDeploymentPlanFromConfig(vpsConfig);
+  if (vpsPlan.status !== 'ready' || !vpsPlan.target) {
+    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'The active VPS cannot be transferred to local safely.',
+      error: vpsPlan.blockedReasons.join(' ') || 'Saved VPS connection details are incomplete.',
+    };
+  }
+
+  const confirmation = await dialog.showMessageBox({
+    type: 'warning',
+    buttons: ['Switch to Local', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: 'Switch SomniBot from VPS to this PC?',
+    message: 'SomniBot is currently active on the VPS.',
+    detail: 'The launcher will quiesce the VPS, transfer its validated runtime state to this PC, verify that it released ownership, start this local bot, and update provider callbacks. If transfer or local startup fails, it will restore the VPS.',
+  });
+  if (confirmation.response !== 0) {
+    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'VPS to local switch cancelled.',
+      error: 'No runtime or provider changes were made.',
+    };
+  }
+
+  const runner = createVpsCommandRunner();
+  let previousVpsBoot: VpsBotBootProof;
+  try {
+    previousVpsBoot = await readVpsBotBootProof(vpsPlan.target.publicBaseUrl);
+  } catch (error) {
+    const recoveryStartedAt = Date.now();
+    const started = await runner(buildVpsRuntimeStartCommand(vpsPlan), { index: 0, total: 1 });
+    if (!started.ok) {
+      saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The interrupted or unhealthy VPS could not be recovered before switching local.',
+        error: `${error instanceof Error ? error.message : String(error)} ${started.error || 'The VPS stack did not start.'}`,
+      };
+    }
+    try {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(vpsConfig.supabaseUrl, vpsConfig.supabaseSecretKey),
+        (status) => status.active && status.activeMode === 'vps',
+        { timeoutMessage: 'The recovered VPS did not reacquire runtime ownership.' },
+      );
+      previousVpsBoot = await waitForVpsBotReadyAfter(vpsPlan.target.publicBaseUrl, recoveryStartedAt);
+      const maintenanceEnded = await runner(buildVpsMaintenanceExitCommand(vpsPlan), { index: 0, total: 1 });
+      if (!maintenanceEnded.ok) {
+        throw new Error(maintenanceEnded.error || 'VPS self-maintenance could not be re-enabled after recovery.');
+      }
+    } catch (recoveryError) {
+      saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The interrupted or unhealthy VPS could not be proven recovered.',
+        error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+      };
+    }
+  }
+
+  let incomingValkeyPath: string | undefined;
+  try {
+    const quiesced = await runner(buildVpsStateConsumersStopCommand(vpsPlan), { index: 0, total: 1 });
+    if (!quiesced.ok) {
+      const recovery = await restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan, previousVpsBoot, true);
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The VPS could not be quiesced for a consistent state transfer.',
+        error: `${quiesced.error || 'The state-consumer stop result was ambiguous.'} ${recovery.detail}`,
+      };
+    }
+
+    incomingValkeyPath = await prepareIncomingLocalValkeySnapshotPath();
+    const exported = await runner(buildVpsValkeyExportCommand(vpsPlan, incomingValkeyPath), { index: 0, total: 1 });
+    if (!exported.ok || !await validateRdbFile(incomingValkeyPath)) {
+      await discardIncomingLocalValkeySnapshot(incomingValkeyPath);
+      const recovery = await restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan, previousVpsBoot, true);
+      return {
+        ok: false,
+        stage: 'runtime-handoff',
+        message: 'The VPS runtime state could not be transferred safely.',
+        error: `${exported.error || 'The transferred Valkey snapshot failed validation.'} ${recovery.detail}`,
+      };
+    }
+  } catch (error) {
+    if (incomingValkeyPath) await discardIncomingLocalValkeySnapshot(incomingValkeyPath);
+    const recovery = await restoreVpsAfterLocalHandoffFailure(vpsConfig, runner, vpsPlan, previousVpsBoot, true);
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'The VPS runtime state could not be prepared for local use.',
+      error: `${error instanceof Error ? error.message : String(error)} ${recovery.detail}`,
+    };
+  }
+
+  const transferredValkeyPath = incomingValkeyPath;
+  const handoff = await (async () => {
+    try {
+      return await runVpsToLocalHandoff({
+    stopVps: async () => {
+      const stopped = await runner(buildVpsRuntimeStopCommand(vpsPlan), { index: 0, total: 1 });
+      return stopped.ok;
+    },
+    waitForVpsStopped: async () => {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(vpsConfig.supabaseUrl, vpsConfig.supabaseSecretKey),
+        (status) => !status.active,
+        { timeoutMessage: 'The VPS did not release runtime ownership after its stack stopped.' },
+      );
+    },
+    startLocal: async () => {
+      const installed = await installIncomingLocalValkeySnapshot(transferredValkeyPath!);
+      if (!installed.ok) {
+        throw new Error(installed.error || 'Transferred VPS Valkey state could not be installed locally.');
+      }
+      return runLocalSetupAutomation(sanitizedPatch);
+    },
+    isLocalReady: (result) => result.ok,
+    restoreVps: (reason) => restoreVpsAfterLocalHandoffFailure(
+      vpsConfig,
+      runner,
+      vpsPlan,
+      previousVpsBoot,
+      reason === 'local-failed',
+    ),
+      });
+    } finally {
+      await discardIncomingLocalValkeySnapshot(transferredValkeyPath!);
+    }
+  })();
+
+  if (handoff.state === 'vps-stop-unproven') {
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'The VPS stop result was ambiguous, so local startup was cancelled.',
+      error: `Local SomniBot was not started. ${handoff.recovery.detail}`,
+    };
+  }
+  if (handoff.state === 'vps-release-unproven') {
+    return {
+      ok: false,
+      stage: 'runtime-handoff',
+      message: 'VPS ownership release could not be proven.',
+      error: `${handoff.error instanceof Error ? handoff.error.message : String(handoff.error)} ${handoff.recovery.detail}`,
+    };
+  }
+  if (handoff.state === 'success') {
+    saveConfig({ lastSuccessfulRuntimeMode: 'regular-local' });
+    recordLauncherAudit({
+      action: 'launcher.runtime.vps_to_local_completed',
+      category: 'infrastructure',
+      targetType: 'runtime_handoff',
+      details: { from: 'vps', to: 'regular-local' },
+      success: true,
+    });
+    return handoff.localResult;
+  }
+
+  const localResult = handoff.localResult ?? {
+    ok: false,
+    stage: 'runtime-handoff',
+    message: 'Local setup failed during the VPS handoff.',
+    error: handoff.error instanceof Error ? handoff.error.message : String(handoff.error),
+  };
+  recordLauncherAudit({
+    action: 'launcher.runtime.vps_to_local_failed',
+    category: 'infrastructure',
+    targetType: 'runtime_handoff',
+    details: { from: 'vps', to: 'regular-local', vpsRestored: handoff.recovery.ok },
+    success: false,
+    errorMessage: localResult.error || localResult.message,
+  });
+  return {
+    ...localResult,
+    servicesStarted: false,
+    error: `${localResult.error || localResult.message} ${handoff.recovery.detail}`,
+  };
+}
+
+async function createWindow(showWhenReady = true): Promise<void> {
   const config = getConfig();
   const bounds = config.windowBounds ?? { width: 760, height: 680 };
 
@@ -930,14 +1633,27 @@ async function createWindow(): Promise<void> {
     console.error('[Launcher] Failed to load renderer:', err);
   });
 
-  // Open DevTools only in development — never in packaged builds
-  if (!app.isPackaged) {
+  // DevTools are opt-in even in development. Chromium's DevTools frontend
+  // probes unsupported CDP domains (including Autofill), which otherwise
+  // appears as misleading console errors during normal launcher startup.
+  if (shouldOpenDevTools(app.isPackaged)) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
 
   // Log renderer load failures
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     console.error(`[Launcher] Renderer failed to load: ${errorCode} ${errorDescription} (${validatedURL})`);
+    if (showWhenReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
+
+  mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error(`[Launcher] Preload failed: ${preloadPath}`, error);
+    if (showWhenReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[Launcher] Renderer process exited: ${details.reason} (code ${details.exitCode})`);
+    if (showWhenReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
   });
 
   // Log renderer console messages to main process stdout for debugging
@@ -948,8 +1664,21 @@ async function createWindow(): Promise<void> {
 
   // Show when ready to avoid white flash
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
+    if (showWhenReady) mainWindow?.show();
   });
+
+  // A renderer crash or preload failure can prevent ready-to-show forever.
+  // Surface the window after a bounded delay so the operator sees the real
+  // failure state instead of a hidden Electron process holding the lock.
+  const showFallbackTimer = showWhenReady
+    ? setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+        console.error('[Launcher] Renderer did not become ready within 5s; showing the window for diagnosis.');
+        mainWindow.show();
+      }
+    }, 5_000)
+    : null;
+  showFallbackTimer?.unref?.();
 
   // Save window bounds on move/resize
   const saveBounds = () => {
@@ -963,7 +1692,42 @@ async function createWindow(): Promise<void> {
   mainWindow.on('move', saveBounds);
 
   mainWindow.on('closed', () => {
+    if (showFallbackTimer) clearTimeout(showFallbackTimer);
     mainWindow = null;
+  });
+
+  // Closing the control window must be an explicit lifecycle decision. If
+  // managed services are running, silently leaving the launcher hidden makes
+  // the process look leaked and prevents a later instance from starting.
+  mainWindow.on('close', (event) => {
+    if (launcherQuitRequested || !isRunning() || closeDecisionInFlight) return;
+
+    event.preventDefault();
+    closeDecisionInFlight = true;
+    const window = mainWindow;
+    void (async () => {
+      try {
+        if (!window || window.isDestroyed()) return;
+        const decision = await dialog.showMessageBox(window, {
+          type: 'question',
+          title: 'SomniBot is still running',
+          message: 'The bot or dashboard is still running.',
+          detail: 'Keep SomniBot running in the background, or stop the managed services and quit completely?',
+          buttons: ['Cancel', 'Keep running in background', 'Stop services and quit'],
+          cancelId: 0,
+          defaultId: 0,
+        });
+
+        if (decision.response === 1) {
+          window.hide();
+        } else if (decision.response === 2) {
+          launcherQuitRequested = true;
+          requestQuitAfterManagedShutdown();
+        }
+      } finally {
+        closeDecisionInFlight = false;
+      }
+    })();
   });
 }
 
@@ -973,37 +1737,70 @@ async function createWindow(): Promise<void> {
 
 function registerIpcHandlers(): void {
   // ── Config ──
+  ipcMain.handle('wait-for-startup-ready', async () => {
+    await startupReady;
+  });
   ipcMain.handle('get-config', () => {
     const config = getConfig();
-    return {
+    return maskConfigSecrets({
       discordToken: config.discordToken,
       discordApplicationId: config.discordApplicationId,
       discordClientSecret: config.discordClientSecret,
       discordGuildId: config.discordGuildId,
       supabaseUrl: config.supabaseUrl,
-      // V5 Audit §10.P3a: Mask secret key — renderer only needs to know if it's set,
-      // not the actual value. Supabase operations are handled in the main process.
-      supabaseSecretKey: config.supabaseSecretKey ? '••••••••' : '',
+      supabaseSecretKey: config.supabaseSecretKey,
       supabasePublishableKey: config.supabasePublishableKey,
-      supabaseDbPassword: config.supabaseDbPassword ? '••••••••' : '',
-      supabaseAccessToken: config.supabaseAccessToken ? '••••••••' : '',
+      supabaseDbPassword: config.supabaseDbPassword,
+      supabaseAccessToken: config.supabaseAccessToken,
       supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
       paypalClientId: config.paypalClientId,
-      paypalClientSecret: config.paypalClientSecret ? '••••••••' : '',
-      paypalWebhookId: config.paypalWebhookId ? '••••••••' : '',
+      paypalClientSecret: config.paypalClientSecret,
+      paypalWebhookId: config.paypalWebhookId,
       paypalSandbox: config.paypalSandbox,
       runtimeMode: config.runtimeMode,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+      vpsPublicAccessMode: config.vpsPublicAccessMode,
       vpsDomain: config.vpsDomain,
+      vpsTailscaleFunnelUrl: config.vpsTailscaleFunnelUrl,
       vpsSshHost: config.vpsSshHost,
       vpsSshUser: config.vpsSshUser,
       vpsDeployPath: config.vpsDeployPath,
-      tailscaleAuthKey: config.tailscaleAuthKey ? '••••••••' : '',
-    };
+      tailscaleAuthKey: config.tailscaleAuthKey,
+    });
   });
 
   ipcMain.handle('save-config', (_event, config: Partial<LauncherConfig>) => {
-    saveConfig(sanitizePayPalConfigPatch(config));
+    saveConfig(sanitizeRendererConfigPatch(config));
+    void queueLauncherCredentialSync(getConfig());
+  });
+
+  ipcMain.handle('import-existing-env', async () => {
+    const selection = await dialog.showOpenDialog({
+      title: 'Import an existing SomniBot setup',
+      properties: ['openFile'],
+      filters: [
+        { name: 'SomniBot environment', extensions: ['env'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (selection.canceled || selection.filePaths.length !== 1) {
+      return { ok: false, canceled: true, importedFields: [] };
+    }
+
+    const result = await importExistingSomniBotEnv(selection.filePaths[0]!, getConfig());
+    if (!result.ok) return result;
+    if (Object.keys(result.patch).length > 0) {
+      saveConfig(result.patch);
+      await queueLauncherCredentialSync(getConfig());
+    }
+    recordLauncherAudit({
+      action: 'launcher.credentials.existing_env_imported',
+      category: 'infrastructure',
+      targetType: 'credential_store',
+      details: { importedFieldCount: result.importedFields.length },
+      success: true,
+    });
+    return { ok: true, canceled: false, importedFields: result.importedFields };
   });
 
   ipcMain.handle('get-setup-status', async (_event, input: Partial<SetupFlowInput> = {}) => {
@@ -1029,7 +1826,10 @@ function registerIpcHandlers(): void {
       runtimeMode: input.runtimeMode ?? config.runtimeMode,
       publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl,
       discordGuildId: input.discordGuildId ?? config.discordGuildId,
+      vpsPublicAccessMode: input.vpsPublicAccessMode ?? config.vpsPublicAccessMode,
       vpsDomain: input.vpsDomain ?? config.vpsDomain,
+      vpsTailscaleFunnelUrl: input.vpsTailscaleFunnelUrl ?? config.vpsTailscaleFunnelUrl,
+      vpsTailscaleFunnelVerifiedUrl: config.vpsTailscaleFunnelVerifiedUrl,
       vpsSshHost: input.vpsSshHost ?? config.vpsSshHost,
       vpsSshUser: input.vpsSshUser ?? config.vpsSshUser,
       vpsDeployPath: input.vpsDeployPath ?? config.vpsDeployPath,
@@ -1071,12 +1871,12 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('run-setup-automation', async (_event, config: Partial<LauncherConfig>) => {
-    return runLocalSetupAutomation(config);
+    return runLocalSetupWithRuntimeHandoff(config);
   });
 
   ipcMain.handle('paypal:ensure-webhook', async (_event, config: Partial<LauncherConfig>) => {
     const previousConfig = getConfig();
-    saveConfig(sanitizePayPalConfigPatch(config));
+    saveConfig(sanitizeRendererConfigPatch(config));
     const cfg = getConfig();
     const rawResult = await ensureConfiguredPayPalWebhook(cfg);
     if (rawResult.ok) {
@@ -1106,7 +1906,27 @@ function registerIpcHandlers(): void {
 
   // ── Validation ──
   ipcMain.handle('validate-credentials', async (_event, config) => {
-    return validateAllCredentials(config);
+    // Renderer password fields contain a fixed mask for unchanged secrets.
+    // Validate against the main-process credential store, overlaid only with
+    // genuine edits, so startup health checks never test the mask itself.
+    const current = getConfig();
+    const supplied = sanitizeConfigPatchForStorage(config);
+    const bootstrap = await bootstrapSupabaseFromManagementToken({ ...current, ...supplied });
+    if (!bootstrap.ok) {
+      return {
+        valid: false,
+        errors: [bootstrap.error],
+        meta: {},
+        checks: [{
+          id: 'supabase-project',
+          label: 'Supabase project',
+          status: 'failed',
+          summary: 'Supabase project values could not be hydrated from the Personal Access Token.',
+          detail: bootstrap.error,
+        }],
+      } satisfies FullValidationResult;
+    }
+    return validateAllCredentials(bootstrap.config);
   });
 
   // ── Process control ──
@@ -1115,10 +1935,11 @@ function registerIpcHandlers(): void {
     return startLocalStack(config);
   });
 
-  ipcMain.handle('stop-bot', () => {
-    stopAll();
-    stopLavalink();
-    stopValkey();
+  ipcMain.handle('stop-bot', async () => {
+    stopLocalValkeyBackupSchedule();
+    await stopAll();
+    await stopLavalink();
+    await stopValkey();
     sessionToken = null;
     lastStartedPayPalConfig = null;
   });
@@ -1154,8 +1975,163 @@ function registerIpcHandlers(): void {
     const result = await pullFromSupabase(cfg.supabaseUrl, cfg.supabaseSecretKey);
     if (result.ok && result.credentials) {
       saveConfig(result.credentials);
+      return {
+        ...result,
+        credentials: maskRestoredCredentials(result.credentials, MASKED_SECRET),
+      };
     }
     return result;
+  });
+
+  // ── Supabase control-plane discovery ──
+  // The Management API token is owned by the main process. The renderer only
+  // receives project metadata and readiness flags; API key values never cross
+  // the IPC boundary in plaintext.
+  ipcMain.handle('supabase:discover-projects', async (_event, accessToken: unknown) => {
+    if (typeof accessToken !== 'string' || !accessToken.trim()) {
+      return { ok: false, error: 'Enter a Supabase personal access token first.' };
+    }
+
+    // Persist and consume the same PAT atomically. Previously the renderer
+    // swallowed save failures and discovery could silently use stale state.
+    const sanitized = sanitizeRendererConfigPatch({ supabaseAccessToken: accessToken });
+    if (sanitized.supabaseAccessToken) {
+      saveConfig(sanitized);
+      void queueLauncherCredentialSync(getConfig());
+    }
+    // A restarted renderer receives only MASKED_SECRET. Resolve that sentinel
+    // to the encrypted main-process value instead of treating it as empty.
+    const effectiveAccessToken = sanitized.supabaseAccessToken ?? getConfig().supabaseAccessToken;
+    const result = await listSupabaseProjects(effectiveAccessToken);
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      projects: result.projects,
+    };
+  });
+
+  ipcMain.handle('supabase:select-project', async (_event, ref: unknown) => {
+    if (typeof ref !== 'string' || !ref.trim()) {
+      return { ok: false, error: 'Choose a Supabase project first.' };
+    }
+
+    const current = getConfig();
+    const result = await getSupabaseProjectCredentials(current.supabaseAccessToken, ref);
+    if (!result.ok) return result;
+    if (!result.credentials.secretKey) {
+      return {
+        ok: false,
+        error: 'The selected project did not return a secret API key. Grant the token API-key read permission or enter the project key manually.',
+      };
+    }
+
+    const nextOrigin = result.credentials.project.url;
+    const pooler = await getSupabaseSessionPoolerTemplate(current.supabaseAccessToken, ref);
+    if (!pooler.ok) {
+      return {
+        ok: false,
+        error: `The selected project keys were found, but its IPv4-capable migration endpoint could not be loaded. ${pooler.error}`,
+      };
+    }
+    const currentOrigin = current.supabaseUrl.trim().replace(/\/+$/, '').toLowerCase();
+    const projectChanged = currentOrigin !== nextOrigin;
+    let generatedDatabasePassword: string | undefined;
+    let databasePasswordGenerationError: string | undefined;
+    // A first-time launcher profile has no direct database credential to
+    // preserve. Generate one as part of project selection so VPS setup does
+    // not add another manual copy/paste step. Existing saved credentials are
+    // never rotated implicitly; the separate button remains explicit for that
+    // case.
+    const firstProjectSelection = !current.supabaseUrl.trim();
+    if (firstProjectSelection && !current.supabaseDbPassword.trim()) {
+      const candidate = crypto.randomBytes(32).toString('hex');
+      const passwordResult = await updateSupabaseDatabasePassword(
+        current.supabaseAccessToken,
+        result.credentials.project.ref,
+        candidate,
+      );
+      if (passwordResult.ok) generatedDatabasePassword = candidate;
+      else databasePasswordGenerationError = passwordResult.error;
+    }
+
+    const patch: Partial<LauncherConfig> = {
+      supabaseUrl: nextOrigin,
+      supabaseSecretKey: result.credentials.secretKey,
+      // Never carry API/database credentials from a different Supabase
+      // project into the selected project. A missing publishable key can be
+      // entered manually after discovery without leaking the old key.
+      supabasePublishableKey: result.credentials.publishableKey
+        ?? (projectChanged ? '' : current.supabasePublishableKey),
+      supabaseDbPassword: generatedDatabasePassword
+        ?? (projectChanged ? '' : current.supabaseDbPassword),
+      supabaseDbUrlTemplate: pooler.connectionTemplate,
+    };
+
+    try {
+      saveConfig(sanitizeRendererConfigPatch(patch));
+      await queueLauncherCredentialSync(getConfig());
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'The selected Supabase project could not be saved safely.',
+      };
+    }
+
+    return {
+      ok: true,
+      project: result.credentials.project,
+      secretKeyReady: Boolean(result.credentials.secretKey),
+      publishableKeyReady: Boolean(result.credentials.publishableKey),
+      databasePasswordReady: Boolean(generatedDatabasePassword || patch.supabaseDbPassword),
+      databaseConnectionReady: true,
+      ...(databasePasswordGenerationError ? { databasePasswordGenerationError } : {}),
+    };
+  });
+
+  ipcMain.handle('supabase:generate-db-password', async () => {
+    const current = getConfig();
+    const ref = getSupabaseProjectRef(current.supabaseUrl);
+    if (!ref) return { ok: false, error: 'Select a valid Supabase project before generating its database password.' };
+    if (!current.supabaseAccessToken.trim()) {
+      return { ok: false, error: 'Save a Supabase Management API token before generating a database password.' };
+    }
+
+    const confirmation = await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Generate a new Supabase database password?',
+      message: 'This changes the password on the selected Supabase project.',
+      detail: [
+        'Any existing direct Postgres connection using the old password will stop working immediately.',
+        'SomniBot will save the new password locally and in its shared instance settings so a later local/VPS setup can use it.',
+        'Continue only if you control the project and are ready to restart or redeploy any existing installation.',
+      ].join('\n\n'),
+      buttons: ['Cancel', 'Generate and save'],
+      cancelId: 0,
+      defaultId: 0,
+    });
+    if (confirmation.response !== 1) return { ok: false, canceled: true };
+
+    const newPassword = crypto.randomBytes(32).toString('hex');
+    const result = await updateSupabaseDatabasePassword(
+      current.supabaseAccessToken,
+      ref,
+      newPassword,
+    );
+    if (!result.ok) return result;
+
+    try {
+      saveConfig({ supabaseDbPassword: newPassword });
+      await queueLauncherCredentialSync(getConfig());
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error
+          ? `Supabase accepted the new password, but SomniBot could not persist it locally: ${error.message}`
+          : 'Supabase accepted the new password, but SomniBot could not persist it locally.',
+      };
+    }
+
+    return { ok: true, databasePasswordReady: true };
   });
 
   // ── Tailscale / public callback readiness ──
@@ -1199,11 +2175,104 @@ function registerIpcHandlers(): void {
   });
 
   // ── App info ──
-  ipcMain.handle('get-version', () => app.getVersion());
+  ipcMain.handle('get-version', () => resolveLauncherDisplayVersion({
+    appVersion: app.getVersion(),
+  }));
 
   ipcMain.handle('vps:run-deployment', async (_event, request: VpsDeploymentRunRequest) => {
     const cfg = getConfig();
     return handleVpsDeploymentRunRequest(cfg, request, {
+      confirmApproval: (plan) => confirmVpsDeploymentApproval(plan, {
+        showMessageBox: (options) => dialog.showMessageBox(options),
+      }),
+      createCommandRunner: createVpsCommandRunner,
+      runGate: activeVpsDeployment,
+      recordAudit: recordLauncherAudit,
+      persistGeneratedSecrets: async (patch) => {
+        saveConfig(patch);
+        await queueLauncherCredentialSync(getConfig());
+      },
+      runApprovedDeployment: (executeDeployment, plan) => {
+        const localWasRunning = isRunning();
+        const transferLocalValkeyState = shouldTransferLocalValkeyState(
+          localWasRunning,
+          cfg.lastSuccessfulRuntimeMode,
+        );
+        const localProcessIds = getStatus();
+        const localValkeyPid = getValkeyPid() ?? undefined;
+        let localStopCompleted = false;
+        const cleanupRunner = createVpsCommandRunner();
+        return runLocalToVpsHandoff({
+          localWasRunning,
+          stopLocal: async () => {
+            stopLocalValkeyBackupSchedule();
+            await stopAll();
+            await stopLavalink();
+            await stopValkey();
+            sessionToken = null;
+            lastStartedPayPalConfig = null;
+            await waitForProcessIdsToExit([
+              localProcessIds.botPid,
+              localProcessIds.dashboardPid,
+              localValkeyPid,
+            ]);
+            localStopCompleted = true;
+          },
+          prepareVpsState: async () => {
+            if (!transferLocalValkeyState) return;
+            const backup = await backupLocalValkeySnapshot();
+            if (!backup.ok || !backup.path) {
+              throw new Error(backup.error || 'Local Valkey state could not be snapshotted for VPS transfer.');
+            }
+            const stageCommand = plan.commands.find((command) => command.id === 'stage-local-valkey-state');
+            if (!stageCommand) throw new Error('The approved VPS plan is missing the runtime-state transfer step.');
+            stageCommand.sensitiveStdinFile = backup.path;
+          },
+          quiesceVpsAfterFailure: async (result) => {
+            const startAttempted = !result || result.commandStates.some((command) => (
+              ['stage-local-valkey-state', 'quiesce-vps-state-consumers', 'start-vps-valkey', 'restore-transferred-valkey', 'start-stack']
+                .includes(command.commandId)
+              && ['running', 'success', 'failed'].includes(command.status)
+            ));
+            if (!startAttempted) return true;
+            const stopped = await cleanupRunner(buildFailedVpsQuiesceCommand(plan), { index: 0, total: 1 });
+            recordLauncherAudit({
+              action: 'launcher.vps_handoff.failed_stack_quiesced',
+              category: 'infrastructure',
+              targetType: 'vps_deployment',
+              targetId: plan.target?.sshTarget,
+              details: { deploymentState: result?.state ?? 'execution-error' },
+              success: stopped.ok,
+            });
+            return stopped.ok;
+          },
+          restoreLocal: async () => {
+            const restoreStartedAt = Date.now();
+            const restored = await runLocalSetupAutomation({
+              runtimeMode: 'regular-local',
+              publicCallbackBaseUrl: cfg.publicCallbackBaseUrl,
+            });
+            if (!restored.ok) throw new Error(restored.error || 'Local SomniBot and its provider callbacks could not be restored.');
+            await waitForFreshLocalBotReady({
+              readStatus: getStatus,
+              startedAfter: restoreStartedAt,
+              previousBotPid: localStopCompleted ? localProcessIds.botPid : undefined,
+            });
+          },
+          executeDeployment,
+        }).then((result) => {
+          if (result.state === 'success') {
+            saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+          }
+          return result;
+        });
+      },
+    });
+  });
+
+  ipcMain.handle('vps:run-rollback', async (_event, request: VpsRollbackRunRequest) => {
+    const cfg = getConfig();
+    return handleVpsRollbackRunRequest(cfg, request, {
       confirmApproval: (plan) => confirmVpsDeploymentApproval(plan, {
         showMessageBox: (options) => dialog.showMessageBox(options),
       }),
@@ -1251,7 +2320,7 @@ function registerIpcHandlers(): void {
     const runner = createVpsCommandRunner();
     const command = {
       id: 'ssh-preflight',
-      label: 'Verify deployment directory',
+      label: 'Verify writable target and VPS prerequisites',
       executable: plan.command.executable,
       args: plan.command.args,
       redactedArgs: plan.command.redactedArgs,
@@ -1259,27 +2328,49 @@ function registerIpcHandlers(): void {
       changesRemote: false,
       approvalRequired: false,
       commandCategory: 'probe' as const,
+      sensitiveStdin: VPS_PREFLIGHT_SCRIPT,
     };
     const result = await runner(command, { index: 0, total: 1 });
-    const state = result.ok ? 'success' : result.retriable ? 'retry' : 'failure';
+    const tailscaleFunnel = cfg.vpsPublicAccessMode === 'tailscale-funnel'
+      ? await runner(buildVpsTailscaleStatusCommand(`${cfg.vpsSshUser}@${cfg.vpsSshHost}`), { index: 1, total: 2 })
+        .then(statusResult => parseVpsTailscaleFunnelReadiness(statusResult.output ?? statusResult.error ?? '', cfg.vpsTailscaleFunnelUrl))
+      : undefined;
+    if (tailscaleFunnel) {
+      saveConfig({
+        vpsTailscaleFunnelVerifiedUrl: tailscaleFunnel.state === 'verified'
+          ? normalizeVpsTailscaleFunnelUrl(tailscaleFunnel.publicUrl)
+          : '',
+      });
+    }
+    const publicAccessReady = !tailscaleFunnel || tailscaleFunnel.state === 'verified';
+    const state = result.ok && publicAccessReady ? 'success' : result.retriable ? 'retry' : 'failure';
     const redactedError = result.error ? redactVpsDeploymentText(result.error) : undefined;
 
     return {
       state,
-      canRetry: !result.ok,
+      canRetry: !result.ok || !publicAccessReady,
       command: {
         redactedDisplay: plan.command.redactedDisplay,
       },
       blockedReasons: [],
       warnings: plan.warnings,
+      ...(tailscaleFunnel ? { tailscaleFunnel } : {}),
       logs: [
         ...plan.logEvents,
         {
           level: result.ok ? 'info' : 'error',
           code: result.ok ? 'vps-preflight-success' : 'vps-preflight-failure',
-          message: result.ok ? 'Read-only SSH preflight passed.' : 'Read-only SSH preflight failed.',
-          detail: result.ok ? 'The deployment directory exists and SSH returned success.' : redactedError,
+          message: result.ok ? 'Read-only SSH/prerequisite preflight passed.' : 'Read-only SSH/prerequisite preflight failed.',
+          detail: result.ok
+            ? 'The target is writable (or can be created) and git/Docker Compose are available.'
+            : `${redactedError ?? 'The VPS prerequisite preflight failed.'} The approved deployment plan includes a supported runtime-bootstrap step when Docker is missing.`,
         },
+        ...(tailscaleFunnel ? [{
+          level: tailscaleFunnel.state === 'verified' ? 'info' as const : 'warn' as const,
+          code: `vps-tailscale-${tailscaleFunnel.state}`,
+          message: tailscaleFunnel.message,
+          detail: tailscaleFunnel.nextAction,
+        }] : []),
       ],
     };
   });
@@ -1353,24 +2444,195 @@ function registerIpcHandlers(): void {
 /* ------------------------------------------------------------------ */
 
 app.whenReady().then(async () => {
-  // Phase 6: Clean up stale processes from a previous crash
-  cleanupStaleProcesses();
-
-  // [infrastructure-launcher] Persist a durable audit row if the OS keychain is
-  // unavailable and credentials fall back to plaintext storage.
+  startupStage = 'credential-store-initialization';
+  // Register the failure sensor before the first credential read. Linux
+  // safeStorage is only reliable after app readiness, so legacy migration is
+  // deliberately deferred from module initialization to this point.
   setKeychainFallbackListener(() => {
     recordLauncherAudit({
       action: 'launcher.keychain.unavailable',
       category: 'security',
       targetType: 'credential_store',
-      details: { fallback: 'plaintext', platform: process.platform },
+      details: { fallback: 'refused', platform: process.platform },
       success: false,
-      errorMessage: 'OS keychain (safeStorage) unavailable — sensitive credentials stored in plaintext.',
+      errorMessage: 'OS keychain (safeStorage) unavailable — credential access was refused.',
     });
   });
+  migrateCurrentPlaintextSecrets();
+  migrateLegacyConfig();
+
+  // Phase 6: Clean up stale processes from a previous crash
+  const staleCleanup = await cleanupStaleProcesses();
+  if (!staleCleanup.ok) {
+    dialog.showErrorBox(
+      'SomniBot could not reclaim a previous service',
+      `Startup was stopped because these persisted service processes could not be safely identified or terminated: ${staleCleanup.unresolved.join(', ')}. Close the conflicting process and retry.`,
+    );
+    // Release the single-instance lock instead of leaving a hidden launcher
+    // that prevents the owner from retrying after resolving the conflict.
+    app.quit();
+    return;
+  }
 
   registerIpcHandlers();
-  await createWindow();
+  let config = getConfig();
+  const requestedBackgroundLaunch = process.argv.includes('--background');
+  // Put the real operator surface on screen before any network-bound recovery,
+  // PayPal, or runtime-lease work. A background autostart remains hidden while
+  // those checks determine whether local auto-run is still safe.
+  await createWindow(!requestedBackgroundLaunch);
+  startupStage = 'credential-recovery';
+  const credentialBootstrap = await restoreMissingCredentialsOnStartup(config);
+  if (credentialBootstrap.restoredFields.length > 0) {
+    saveConfig(credentialBootstrap.patch);
+    config = getConfig();
+    recordLauncherAudit({
+      action: 'launcher.credentials.cloud_restored_on_startup',
+      category: 'infrastructure',
+      targetType: 'credential_store',
+      details: { restoredFieldCount: credentialBootstrap.restoredFields.length },
+      success: true,
+    });
+  }
+  if (credentialBootstrap.attempted && credentialBootstrap.error) {
+    recordLauncherAudit({
+      action: 'launcher.credentials.cloud_restore_failed_on_startup',
+      category: 'infrastructure',
+      targetType: 'instance_settings',
+      details: {},
+      success: false,
+      errorMessage: credentialBootstrap.error,
+    });
+  }
+  startupStage = 'paypal-webhook-reconciliation';
+  const startupPayPalWebhook = await reconcileSandboxPayPalWebhookOnStartup(
+    config,
+    resolvePayPalWebhookUrl(config),
+    () => ensureConfiguredPayPalWebhook(config),
+  );
+  if (startupPayPalWebhook.attempted) {
+    const result = startupPayPalWebhook.result;
+    if (result?.ok) {
+      config = getConfig();
+      await queueLauncherCredentialSync(config);
+      recordLauncherAudit({
+        action: 'launcher.paypal_webhook.reconciled_on_startup',
+        category: 'commerce',
+        targetType: 'paypal_webhook',
+        targetId: result.webhookId,
+        details: { status: result.status, sandbox: true },
+        success: true,
+      });
+    } else {
+      recordLauncherAudit({
+        action: 'launcher.paypal_webhook.reconcile_failed_on_startup',
+        category: 'commerce',
+        targetType: 'paypal_webhook',
+        details: { sandbox: true },
+        success: false,
+        errorMessage: result?.error ?? result?.message ?? 'PayPal sandbox webhook reconciliation failed.',
+      });
+    }
+  }
+  let startupLeaseStatus: Awaited<ReturnType<typeof readRuntimeLeaseStatus>> | undefined;
+  let runtimeStatusNotInstalled = false;
+  if (config.supabaseUrl.trim() && config.supabaseSecretKey.trim()) {
+    startupStage = 'runtime-ownership-check';
+    try {
+      startupLeaseStatus = await readRuntimeLeaseStatus(config.supabaseUrl, config.supabaseSecretKey);
+    } catch (error) {
+      runtimeStatusNotInstalled = error instanceof RuntimeLeaseStatusUnavailableError
+        && error.reason === 'not-installed';
+      if (!runtimeStatusNotInstalled) {
+        recordLauncherAudit({
+          action: 'launcher.runtime.startup_ownership_check_failed',
+          category: 'infrastructure',
+          targetType: 'runtime_lease',
+          details: {},
+          success: false,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  if (!config.lastSuccessfulRuntimeMode && config.firstRunComplete) {
+    saveConfig({
+      lastSuccessfulRuntimeMode: startupLeaseStatus?.active
+        ? startupLeaseStatus.activeMode
+        : config.runtimeMode,
+    });
+    config = getConfig();
+  }
+  if (startupLeaseStatus?.active && startupLeaseStatus.activeMode === 'vps') {
+    saveConfig({ runtimeMode: 'vps', lastSuccessfulRuntimeMode: 'vps' });
+    config = getConfig();
+  }
+
+  const wantsLocalAutoStart = config.firstRunComplete
+    && config.lastSuccessfulRuntimeMode === 'regular-local';
+  let shouldAutoRunLocal = wantsLocalAutoStart
+    && (startupLeaseStatus?.active !== true)
+    && (startupLeaseStatus !== undefined || runtimeStatusNotInstalled);
+
+  if (wantsLocalAutoStart && startupLeaseStatus?.activeMode === 'regular-local') {
+    startupStage = 'runtime-lease-wait';
+    try {
+      await waitForRuntimeLease(
+        () => readRuntimeLeaseStatus(config.supabaseUrl, config.supabaseSecretKey),
+        (status) => !status.active,
+        { timeoutMessage: 'The prior local runtime lease did not expire before automatic restart.' },
+      );
+      shouldAutoRunLocal = true;
+    } catch (error) {
+      recordLauncherAudit({
+        action: 'launcher.autostart.runtime_ownership_blocked',
+        category: 'infrastructure',
+        targetType: 'runtime_lease',
+        details: { expectedMode: 'regular-local' },
+        success: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (app.isPackaged && (process.platform === 'win32' || process.platform === 'darwin')) {
+    app.setLoginItemSettings({
+      openAtLogin: wantsLocalAutoStart,
+      args: ['--background'],
+    });
+  }
+  const backgroundLaunch = shouldAutoRunLocal && requestedBackgroundLaunch;
+  if (requestedBackgroundLaunch && !backgroundLaunch) mainWindow?.show();
+
+  // The operator may close the newly visible window while a network-bound
+  // startup check is still pending. Never start children after shutdown has
+  // begun, and release the renderer gate only for a live launcher instance.
+  if (launcherQuitRequested) return;
+  if (shouldAutoRunLocal) {
+    if (launcherQuitRequested) return;
+    startupStage = 'local-autostart';
+    const autoStartResult = await startLocalStack(config);
+    if (!autoStartResult.ok) {
+      recordLauncherAudit({
+        action: 'launcher.autostart.failed',
+        category: 'infrastructure',
+        targetType: 'local_stack',
+        details: { runtimeMode: config.runtimeMode },
+        success: false,
+        errorMessage: autoStartResult.error ?? 'Local stack auto-start failed.',
+      });
+      mainWindow?.show();
+      mainWindow?.webContents.send('status-update', {
+        ...getStatus(),
+        error: `Automatic restart failed: ${autoStartResult.error ?? 'unknown error'}`,
+      });
+    }
+  }
+
+  if (launcherQuitRequested) return;
+  startupStage = 'ready';
+  resolveStartupReady?.();
+  resolveStartupReady = null;
 
   // macOS: re-create window when dock icon is clicked
   app.on('activate', () => {
@@ -1380,33 +2642,47 @@ app.whenReady().then(async () => {
   });
 
   // Auto-updater — must await so IPC handlers are registered before renderer calls them
-  await initUpdater({ recordAudit: recordLauncherAudit });
+  if (launcherQuitRequested) return;
+  startupStage = 'updater-initialization';
+  const updaterConfig = getConfig();
+  await initUpdater({
+    recordAudit: recordLauncherAudit,
+    autoInstallOnQuit: updaterConfig.autoInstallOnQuit,
+    updatePromptBeforeDownload: updaterConfig.updatePromptBeforeDownload,
+  });
+}).catch(() => {
+  console.error(`[Launcher] Fatal startup error during ${startupStage}.`);
+  dialog.showErrorBox(
+    'SomniBot could not start',
+    'The launcher stopped during startup before its control surface was ready. Close any conflicting process and retry.',
+  );
+  app.quit();
 });
 
 // Second instance: focus the existing window
 app.on('second-instance', () => {
-  if (mainWindow) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    void createWindow(true);
+  } else {
     if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
     mainWindow.focus();
   }
 });
 
-// Clean shutdown — kill child processes before quitting
-app.on('before-quit', () => {
-  if (isRunning()) {
-    stopAll();
-  }
-  stopLavalink();
-  stopValkey();
+// Clean shutdown — prevent Electron from exiting until every managed child
+// has closed. A second app.quit() is allowed once shutdownComplete is true.
+app.on('before-quit', (event) => {
+  launcherQuitRequested = true;
+  if (shutdownComplete) return;
+  event.preventDefault();
+  requestQuitAfterManagedShutdown();
 });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    if (isRunning()) {
-      stopAll();
-    }
-    stopLavalink();
-    stopValkey();
-    app.quit();
+    // Closing the control window must not take a production bot offline.
+    // Use the explicit Stop action before closing when shutdown is intended.
+    if (!isRunning()) app.quit();
   }
 });

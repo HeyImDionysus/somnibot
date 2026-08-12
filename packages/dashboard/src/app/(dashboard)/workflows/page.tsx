@@ -5,6 +5,8 @@
 'use client';
 
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
@@ -51,6 +53,39 @@ interface DLQSummary {
   discarded: number;
 }
 
+function isDeadLetterItem(value: unknown): value is DeadLetterItem {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.event_type === 'string'
+    && typeof value.source === 'string'
+    && isApiRecord(value.payload)
+    && (typeof value.error_message === 'string' || value.error_message === null)
+    && (typeof value.error_stack === 'string' || value.error_stack === null)
+    && typeof value.retry_count === 'number'
+    && typeof value.max_retries === 'number'
+    && typeof value.status === 'string'
+    && typeof value.first_failed_at === 'string'
+    && (typeof value.last_retry_at === 'string' || value.last_retry_at === null)
+    && (typeof value.resolved_at === 'string' || value.resolved_at === null)
+    && (typeof value.resolved_by === 'string' || value.resolved_by === null)
+    && (typeof value.resolution_note === 'string' || value.resolution_note === null)
+    && typeof value.created_at === 'string';
+}
+
+function isWorkflowEvent(value: unknown): value is WorkflowEvent {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.event_type === 'string'
+    && typeof value.source === 'string'
+    && (typeof value.correlation_id === 'string' || value.correlation_id === null)
+    && isApiRecord(value.payload)
+    && (typeof value.result === 'string' || value.result === null)
+    && (typeof value.error_message === 'string' || value.error_message === null)
+    && (typeof value.duration_ms === 'number' || value.duration_ms === null)
+    && (typeof value.parent_event_id === 'string' || value.parent_event_id === null)
+    && typeof value.created_at === 'string';
+}
+
 // ── Helpers ───────────────────────────────────────────────
 
 const RESULT_STYLES: Record<string, string> = {
@@ -86,6 +121,13 @@ export default function WorkflowsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [resultFilter, setResultFilter] = useState('');
   const [dlqStatusFilter, setDlqStatusFilter] = useState('');
+  const [pendingAction, setPendingAction] = useState<{
+    item: DeadLetterItem;
+    action: 'retry' | 'discard' | 'resolve';
+    note?: string;
+  } | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const loadEvents = useCallback(async () => {
     setLoading(true);
@@ -93,8 +135,10 @@ export default function WorkflowsPage() {
       const params = new URLSearchParams();
       if (resultFilter) params.set('result', resultFilter);
       const res = await fetch(`/api/workflows/events?${params}`);
-      const json = await res.json();
-      if (json.success) setEvents(json.data);
+      const json = await requireApiSuccess(res, 'Could not load workflow events. Retry from this page.');
+      setEvents(requireApiArray(json, 'data', isWorkflowEvent, 'The workflow event readback was invalid. Retry from this page.'));
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not load workflow events. Retry from this page.');
     } finally {
       setLoading(false);
     }
@@ -106,11 +150,19 @@ export default function WorkflowsPage() {
       const params = new URLSearchParams();
       if (dlqStatusFilter) params.set('status', dlqStatusFilter);
       const res = await fetch(`/api/workflows/dead-letter?${params}`);
-      const json = await res.json();
-      if (json.success) {
-        setDlqItems(json.data);
-        setDlqSummary(json.summary);
+      const json = await requireApiSuccess(res, 'Could not load the dead-letter queue. Retry from this page.');
+      const nextItems = requireApiArray(json, 'data', isDeadLetterItem, 'The dead-letter queue readback was invalid. Retry from this page.');
+      const summary = requireApiRecord(json, 'summary', 'The dead-letter queue summary was invalid. Retry from this page.');
+      if (typeof summary.total !== 'number' || typeof summary.pending !== 'number' || typeof summary.retrying !== 'number'
+        || typeof summary.exhausted !== 'number' || typeof summary.resolved !== 'number' || typeof summary.discarded !== 'number') {
+        throw new Error('The dead-letter queue summary was invalid. Retry from this page.');
       }
+      setDlqItems(nextItems);
+      setDlqSummary({ total: summary.total, pending: summary.pending, retrying: summary.retrying, exhausted: summary.exhausted, resolved: summary.resolved, discarded: summary.discarded });
+      return nextItems;
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not load the dead-letter queue. Retry from this page.');
+      return null;
     } finally {
       setLoading(false);
     }
@@ -121,19 +173,41 @@ export default function WorkflowsPage() {
     else loadDLQ();
   }, [tab, loadEvents, loadDLQ]);
 
-  const handleDLQAction = async (id: string, action: 'retry' | 'discard' | 'resolve', note?: string) => {
-    const res = await fetch('/api/workflows/dead-letter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, action, note }),
-    });
-    if (!res.ok) {
-      const json = await res.json().catch(() => ({}));
-      toast({ title: `Failed to ${action} item`, description: json.error || 'Unknown error', variant: 'error' });
-      return;
+  const handleDLQAction = async () => {
+    if (!pendingAction) return;
+    setActionLoading(true);
+    setActionError(null);
+    try {
+      const res = await fetch('/api/workflows/dead-letter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: pendingAction.item.id,
+          action: pendingAction.action,
+          note: pendingAction.note,
+        }),
+      });
+      await requireApiSuccess(res, `Could not ${pendingAction.action} this queue item. It has not been changed.`);
+      const nextItems = await loadDLQ();
+      const updated = nextItems?.find((item) => item.id === pendingAction.item.id);
+      requireReadback(
+        nextItems !== null && (
+          !updated
+          || (pendingAction.action === 'retry' && (updated.status === 'retrying' || updated.retry_count > pendingAction.item.retry_count))
+          || (pendingAction.action === 'resolve' && updated.status === 'resolved')
+          || (pendingAction.action === 'discard' && updated.status === 'discarded')
+        ),
+        'The queue accepted the action, but the targeted item still has its previous state in the authoritative readback. Keep this dialog open and reload before retrying.',
+      );
+      toast({ title: `Queue item ${pendingAction.action === 'retry' ? 'replayed' : pendingAction.action === 'discard' ? 'discarded' : 'resolved'}`, variant: 'success' });
+      setPendingAction(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Could not ${pendingAction.action} this queue item. It has not been changed.`;
+      setActionError(message);
+      toast({ title: `Failed to ${pendingAction.action} queue item`, description: message, variant: 'error' });
+    } finally {
+      setActionLoading(false);
     }
-    toast({ title: `Item ${action === 'retry' ? 'retried' : action === 'discard' ? 'discarded' : 'resolved'}`, variant: 'success' });
-    loadDLQ();
   };
 
   return (
@@ -143,6 +217,12 @@ export default function WorkflowsPage() {
         <h1 className="text-2xl font-bold text-discord-text-primary">Workflows</h1>
         <p className="mt-1 text-sm text-discord-text-muted">Event log and dead-letter queue for durable workflow operations</p>
       </div>
+
+      {actionError && (
+        <div role="alert" className="rounded-card border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+          {actionError}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-discord-border-subtle">
@@ -327,19 +407,19 @@ export default function WorkflowsPage() {
                     {(item.status === 'pending' || item.status === 'exhausted') && (
                       <div className="flex gap-2">
                         <button
-                          onClick={() => handleDLQAction(item.id, 'retry')}
+                          onClick={() => setPendingAction({ item, action: 'retry' })}
                           className="rounded-md bg-blue-500/20 px-3 py-1.5 text-xs font-medium text-blue-400 hover:bg-blue-500/30 transition-colors"
                         >
                           Retry
                         </button>
                         <button
-                          onClick={() => handleDLQAction(item.id, 'resolve', 'Manually resolved')}
+                          onClick={() => setPendingAction({ item, action: 'resolve', note: 'Manually resolved' })}
                           className="rounded-md bg-discord-success/20 px-3 py-1.5 text-xs font-medium text-discord-success hover:bg-discord-success/30 transition-colors"
                         >
                           Resolve
                         </button>
                         <button
-                          onClick={() => handleDLQAction(item.id, 'discard', 'Manually discarded')}
+                          onClick={() => setPendingAction({ item, action: 'discard', note: 'Manually discarded' })}
                           className="rounded-md bg-discord-bg-tertiary px-3 py-1.5 text-xs font-medium text-discord-text-muted hover:text-discord-text-primary transition-colors"
                         >
                           Discard
@@ -353,6 +433,19 @@ export default function WorkflowsPage() {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.action === 'retry' ? 'Replay failed workflow' : pendingAction?.action === 'discard' ? 'Discard failed workflow' : 'Resolve failed workflow'}
+        description={pendingAction ? `${pendingAction.action === 'retry' ? 'Replay' : pendingAction.action === 'discard' ? 'Permanently discard' : 'Mark resolved without replaying'} “${pendingAction.item.event_type}” from ${pendingAction.item.source} (queue item ${pendingAction.item.id}). ${pendingAction.action === 'retry' ? 'This can repeat the workflow side effects.' : pendingAction.action === 'discard' ? 'It will leave the retry queue and cannot be replayed from here.' : 'No workflow side effects will run.'}` : undefined}
+        confirmLabel={pendingAction?.action === 'retry' ? 'Replay workflow' : pendingAction?.action === 'discard' ? 'Discard workflow' : 'Mark resolved'}
+        variant={pendingAction?.action === 'discard' ? 'danger' : 'warning'}
+        loading={actionLoading}
+        onConfirm={handleDLQAction}
+        onCancel={() => {
+          if (!actionLoading) setPendingAction(null);
+        }}
+      />
     </div>
   );
 }

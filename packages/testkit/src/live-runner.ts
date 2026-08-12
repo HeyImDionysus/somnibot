@@ -62,6 +62,7 @@ import { SomniClient } from '@somnibot/bot/dist/client.js';
 import { loadConfig } from '@somnibot/bot/dist/config.js';
 import { GuildRouter } from '@somnibot/bot/dist/guild-router.js';
 import { initGuildFeatures } from '@somnibot/bot/dist/guild-init.js';
+import * as guildInitModule from '@somnibot/bot/dist/guild-init.js';
 import type { GuildContext } from '@somnibot/bot/dist/guild-context.js';
 import { Collection, type Guild } from 'discord.js';
 
@@ -165,10 +166,28 @@ export interface LiveClientHandle {
    * pushed nothing (which never happens: several commands are unconditional).
    */
   readonly commands: readonly ExposedCommand[];
+  /**
+   * Stop all background producers and drain audit, but retain the real
+   * action-queue listener until a production privacy purge settles its work.
+   */
+  quiesceForDataPurge(): Promise<void>;
   /** Dispose all resources: real per-guild teardown, router timers, Realtime
    *  channel, discord.js client, Valkey socket. */
   cleanup(): Promise<void>;
 }
+
+// `@somnibot/bot` deliberately does not emit declaration files. Its workspace
+// resolver therefore exposes only the original narrow type view of this
+// internal module even after a local bot rebuild. Keep the runtime dependency
+// checked here rather than weakening the lifecycle call to an untyped import.
+const destroyGuildServices = (
+  guildInitModule as typeof guildInitModule & {
+    destroyGuildServices?: (
+      context: GuildContext,
+      options: { preserveActionQueue: boolean; preserveRegistries: boolean },
+    ) => Promise<void>;
+  }
+).destroyGuildServices;
 
 /**
  * Run the real `loadConfig()` (BotEnvSchema validation + memoization) but turn
@@ -236,6 +255,20 @@ function makeMinimalGuild(guildId: string, guildName: string): Guild {
     id: guildId,
     name: guildName,
     ownerId: 'e2e-live-owner',
+    // Action-queue receipt delivery resolves users through guild.client and
+    // prepares a DM channel before binding its durable outward generation.
+    // The gateway-less harness supplies that final Discord boundary locally:
+    // production payload construction, generation fencing, and settlement all
+    // still run unchanged; only the external Discord send is a deterministic
+    // synthetic success (live Discord readback remains separately gated).
+    client: {
+      users: {
+        fetch: async (userId: string) => ({
+          id: userId,
+          createDM: async () => ({ send: async () => undefined }),
+        }),
+      },
+    },
     members: { me: null, cache: empty(), fetch: async () => empty() },
     channels: { cache: empty(), fetch: async () => empty() },
     roles: { cache: empty(), fetch: async () => empty() },
@@ -392,6 +425,17 @@ export async function bootstrapLiveClient(
     economyEnabled,
     economy,
     commands: capturedCommands,
+    async quiesceForDataPurge(): Promise<void> {
+      const context = router.getContextSync(guildId);
+      if (!context) return;
+      if (typeof destroyGuildServices !== 'function') {
+        throw new LiveRunnerError('built bot does not expose destroyGuildServices for purge quiescence');
+      }
+      await destroyGuildServices(context, {
+        preserveActionQueue: true,
+        preserveRegistries: true,
+      });
+    },
     async cleanup(): Promise<void> {
       if (cleaned) return;
       cleaned = true;

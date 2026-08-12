@@ -1,6 +1,15 @@
 appId: com.somnibot.launcher
 productName: SomniBot
+executableName: SomniBot
 copyright: Copyright © 2026 SomniBot
+
+# Keep the pnpm workspace package scoped while giving installer/updater paths a
+# filesystem-safe package identity on Windows and Linux.
+extraMetadata:
+  name: somnibot-launcher
+  desktopName: SomniBot
+  author:
+    name: SomniBot
 
 directories:
   output: release
@@ -21,6 +30,11 @@ extraResources:
     to: bot
     filter:
       - "**/*"
+      - "!runtime_modules/**/*"
+  - from: .resources/bot/runtime_modules
+    to: bot/node_modules
+    filter:
+      - "**/*"
   - from: .resources/dashboard
     to: dashboard
     filter:
@@ -31,24 +45,23 @@ extraResources:
       - "**/*"
 
 win:
+  artifactName: "${productName}-Setup-${version}.${ext}"
+  # Windows signing is intentionally optional for this release. Keep resource
+  # editing/metadata enabled while producing a verifiably unsigned artifact.
+  signExecutable: false
   target:
     - target: nsis
       arch: [x64]
   icon: build/icon.ico
 
-mac:
-  target:
-    - target: dmg
-      arch: [x64, arm64]
-  icon: build/icon.icns
-  category: public.app-category.utilities
-
 linux:
+  artifactName: "${productName}-${version}.${ext}"
   target:
     - target: AppImage
       arch: [x64]
   icon: build/icon.png
   category: Utility
+  syncDesktopName: true
 
 nsis:
   oneClick: true

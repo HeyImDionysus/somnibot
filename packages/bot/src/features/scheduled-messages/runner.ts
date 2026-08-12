@@ -166,6 +166,9 @@ function replaceVariables(text: string, guild: Guild): string {
 export class ScheduledMessageRunner {
   private schedules: ScheduledMessage[] = [];
   private timer: NodeJS.Timeout | null = null;
+  private allowEmbeds = true;
+  private variablesEnabled = true;
+  private defaultMissedPolicy: 'skip-missed' | 'send-latest' = 'skip-missed';
 
   constructor(
     private guild: Guild,
@@ -220,6 +223,14 @@ export class ScheduledMessageRunner {
   private schedulesLoadAuthoritative = false;
 
   private async loadSchedules(): Promise<void> {
+    const { data: config } = await this.supabase
+      .from('guild_config')
+      .select('allow_embeds, variables_enabled, missed_run_policy')
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+    this.allowEmbeds = config?.allow_embeds !== false;
+    this.variablesEnabled = config?.variables_enabled !== false;
+    this.defaultMissedPolicy = config?.missed_run_policy === 'send-latest' ? 'send-latest' : 'skip-missed';
     const { data, error } = await this.supabase
       .from('scheduled_messages')
       .select('*')
@@ -229,7 +240,10 @@ export class ScheduledMessageRunner {
       .limit(1000);
 
     this.schedulesLoadAuthoritative = !error;
-    this.schedules = (data ?? []) as ScheduledMessage[];
+    this.schedules = (data ?? []).map((row) => ({
+      ...(row as ScheduledMessage),
+      missed_run_policy: (row as ScheduledMessage).missed_run_policy ?? this.defaultMissedPolicy,
+    }));
   }
 
   private async tick(): Promise<void> {
@@ -363,6 +377,13 @@ export class ScheduledMessageRunner {
       // owner once, and stop it re-firing every minute (loadSchedules filters on
       // status='active'). Previously this only log.warn()'d forever, silently.
       log.warn(`Channel ${schedule.channel_id} not found`);
+      this.eventBus.emit('scheduled_message.channel_missing', this.guild.id, {
+        scheduleId: schedule.id,
+        name: schedule.name,
+        channelId: schedule.channel_id,
+        occurrenceId: `${schedule.id}:channel-missing`,
+        correlationId: `schedule:${schedule.id}`,
+      });
       await this.markFailed(schedule, `channel_missing:${schedule.channel_id}`);
       return;
     }
@@ -602,7 +623,7 @@ export class ScheduledMessageRunner {
     let embed: EmbedBuilder | null = null;
 
     // Load embed config if referenced
-    if (schedule.embed_config_id) {
+    if (schedule.embed_config_id && this.allowEmbeds) {
       const { data } = await this.supabase
         .from('embed_configs')
         .select('*')
@@ -613,19 +634,19 @@ export class ScheduledMessageRunner {
       if (data) {
         const cfg = data as EmbedConfig;
         embed = new EmbedBuilder();
-        if (cfg.title) embed.setTitle(replaceVariables(cfg.title, this.guild));
-        if (cfg.description) embed.setDescription(replaceVariables(cfg.description, this.guild));
+        if (cfg.title) embed.setTitle(this.variablesEnabled ? replaceVariables(cfg.title, this.guild) : cfg.title);
+        if (cfg.description) embed.setDescription(this.variablesEnabled ? replaceVariables(cfg.description, this.guild) : cfg.description);
         if (cfg.color != null) embed.setColor(cfg.color);
         if (cfg.image_url) embed.setImage(cfg.image_url);
         if (cfg.thumbnail_url) embed.setThumbnail(cfg.thumbnail_url);
-        if (cfg.footer_text) embed.setFooter({ text: replaceVariables(cfg.footer_text, this.guild), iconURL: cfg.footer_icon_url ?? undefined });
-        if (cfg.author_name) embed.setAuthor({ name: replaceVariables(cfg.author_name, this.guild), url: cfg.author_url ?? undefined, iconURL: cfg.author_icon_url ?? undefined });
+        if (cfg.footer_text) embed.setFooter({ text: this.variablesEnabled ? replaceVariables(cfg.footer_text, this.guild) : cfg.footer_text, iconURL: cfg.footer_icon_url ?? undefined });
+        if (cfg.author_name) embed.setAuthor({ name: this.variablesEnabled ? replaceVariables(cfg.author_name, this.guild) : cfg.author_name, url: cfg.author_url ?? undefined, iconURL: cfg.author_icon_url ?? undefined });
         if (cfg.include_timestamp) embed.setTimestamp();
         if (cfg.fields?.length) {
           for (const field of cfg.fields) {
             embed.addFields({
-              name: replaceVariables(field.name, this.guild),
-              value: replaceVariables(field.value, this.guild),
+              name: this.variablesEnabled ? replaceVariables(field.name, this.guild) : field.name,
+              value: this.variablesEnabled ? replaceVariables(field.value, this.guild) : field.value,
               inline: field.inline ?? false,
             });
           }
@@ -633,7 +654,9 @@ export class ScheduledMessageRunner {
       }
     }
 
-    const content = schedule.message ? replaceVariables(schedule.message, this.guild) : undefined;
+    const content = schedule.message
+      ? (this.variablesEnabled ? replaceVariables(schedule.message, this.guild) : schedule.message)
+      : undefined;
 
     // Send-boundary ownership recheck: reserving can predate the send by an
     // arbitrary stall (the embed-config query above, an event-loop pause).
@@ -671,11 +694,21 @@ export class ScheduledMessageRunner {
     const sent = await this.trySend(channel, {
       content: content || undefined,
       embeds: embed ? [embed] : undefined,
+    }, (attempt, backoffMs) => {
+      this.eventBus.emit('scheduled_message.send_retried', this.guild.id, {
+        scheduleId: schedule.id,
+        name: schedule.name,
+        channelId: schedule.channel_id,
+        attempt,
+        backoffMs,
+        occurrenceId: `${occurrenceId}:send-retry:${attempt}`,
+        correlationId: `schedule:${schedule.id}`,
+      });
     });
     if (!sent.ok) {
       log.error(`Failed to send "${schedule.name}" after retries:`, sent.error);
       await failDiscordOccurrence(this.supabase, occurrenceId, sent.error).catch(() => {});
-      await this.markFailed(schedule, `send_failed:${sent.error}`);
+      await this.markFailed(schedule, `send_failed:${sent.error}`, occurrenceId);
       return;
     }
     await completeDiscordOccurrence(
@@ -690,6 +723,8 @@ export class ScheduledMessageRunner {
       name: schedule.name,
       channelId: schedule.channel_id,
       currentSends: claimedSendCount,
+      occurrenceId,
+      correlationId: `schedule:${schedule.id}`,
     });
 
     log.info(`Sent "${schedule.name}" to #${channel.name}`);
@@ -702,6 +737,7 @@ export class ScheduledMessageRunner {
   private async trySend(
     channel: TextChannel,
     payload: { content?: string; embeds?: EmbedBuilder[] },
+    onRetry?: (attempt: number, backoffMs: number) => void,
   ): Promise<{ ok: true; messageId: string } | { ok: false; error: string }> {
     const maxAttempts = 3;
     let lastErr: unknown;
@@ -714,6 +750,7 @@ export class ScheduledMessageRunner {
         if (attempt < maxAttempts) {
           const backoffMs = 500 * 2 ** (attempt - 1);
           log.warn(`Send attempt ${attempt} failed, retrying in ${backoffMs}ms:`, { error: String(err) });
+          onRetry?.(attempt + 1, backoffMs);
           await new Promise((resolve) => setTimeout(resolve, backoffMs));
         }
       }
@@ -726,7 +763,7 @@ export class ScheduledMessageRunner {
    * The status transition is conditional (only from 'active') so concurrent
    * runner instances do not double-alert for the same failure.
    */
-  private async markFailed(schedule: ScheduledMessage, reason: string): Promise<void> {
+  private async markFailed(schedule: ScheduledMessage, reason: string, occurrenceId?: string): Promise<void> {
     const { data: transitioned, error } = await this.supabase
       .from('scheduled_messages')
       .update({ status: 'failed', last_error: reason, failed_at: new Date().toISOString() })
@@ -747,6 +784,8 @@ export class ScheduledMessageRunner {
       name: schedule.name,
       channelId: schedule.channel_id,
       reason,
+      occurrenceId: occurrenceId ?? `${schedule.id}:failed`,
+      correlationId: `schedule:${schedule.id}`,
     });
 
     const channel = this.guild.channels.cache.get(schedule.channel_id);
@@ -792,7 +831,7 @@ export class ScheduledMessageRunner {
         const lastOcc = this.lastOccurrenceBefore(schedule, now);
         if (!lastOcc || lastOcc.getTime() <= baseline.getTime()) continue;
 
-        if (schedule.missed_run_policy === 'send-latest') {
+        if ((schedule.missed_run_policy ?? this.defaultMissedPolicy) === 'send-latest') {
           // Fire exactly one catch-up now; sendMessage's atomic claim prevents a
           // double-post if another instance also recovers.
           await this.sendMessage(schedule, lastOcc);
@@ -830,6 +869,18 @@ export class ScheduledMessageRunner {
     if (error || !won || won.length === 0) return;
 
     const missedCount = this.countOccurrences(schedule, baseline, now);
+    // Persisted cursor advancement is the occurrence transition.  Audit it
+    // before the owner alert so a notification outage cannot erase the fact
+    // that recovery dropped these occurrences.
+    this.eventBus.emit('scheduled_message.missed', this.guild.id, {
+      scheduleId: schedule.id,
+      name: schedule.name,
+      channelId: schedule.channel_id,
+      missedCount,
+      lastOccurrenceAt: lastOcc.toISOString(),
+      occurrenceId: `${schedule.id}:missed:${lastOcc.toISOString()}`,
+      correlationId: `schedule:${schedule.id}`,
+    });
     try {
       const noticeResult = await raiseOwnerAlert(this.supabase, this.guild.id, {
         alertType: 'scheduled_message_missed_occurrence',

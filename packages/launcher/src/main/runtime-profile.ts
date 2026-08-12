@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const REGULAR_LOCAL_DASHBOARD_PORT = 3456;
 export const REGULAR_LOCAL_DASHBOARD_HOSTNAME = '127.0.0.1';
 export const REGULAR_LOCAL_OPERATOR_DASHBOARD_URL = `http://localhost:${REGULAR_LOCAL_DASHBOARD_PORT}`;
@@ -7,11 +9,20 @@ export const VPS_DASHBOARD_HOSTNAME = '0.0.0.0';
 export const VPS_FALLBACK_OPERATOR_DASHBOARD_URL = `http://localhost:${VPS_DASHBOARD_PORT}`;
 
 export type RuntimeMode = 'regular-local' | 'vps';
+export type VpsPublicAccessMode = 'domain' | 'tailscale-funnel';
+
+export function getRuntimeHolderId(mode: RuntimeMode, portableSecret: string): string {
+  if (!portableSecret) throw new Error('Runtime ownership needs a persisted portable secret.');
+  return createHash('sha256').update(`somnibot-runtime:${mode}:${portableSecret}`).digest('hex');
+}
 
 export interface RuntimeNetworkingConfig {
   runtimeMode?: RuntimeMode | string;
   publicCallbackBaseUrl?: string;
   vpsDomain?: string;
+  vpsPublicAccessMode?: VpsPublicAccessMode | string;
+  vpsTailscaleFunnelUrl?: string;
+  vpsTailscaleFunnelVerifiedUrl?: string;
   vpsSshHost?: string;
   vpsSshUser?: string;
   vpsDeployPath?: string;
@@ -36,6 +47,10 @@ export interface RuntimeValidationOptions {
 
 export function normalizeRuntimeMode(value: unknown): RuntimeMode {
   return value === 'vps' ? 'vps' : 'regular-local';
+}
+
+export function normalizeVpsPublicAccessMode(value: unknown): VpsPublicAccessMode {
+  return value === 'tailscale-funnel' ? 'tailscale-funnel' : 'domain';
 }
 
 function stripTrailingSlashes(value: string): string {
@@ -71,6 +86,10 @@ export function normalizeBaseUrl(
 }
 
 export function normalizeVpsDomain(value: string | undefined): string {
+  return normalizeBaseUrl(value, { addHttpsForBareDomain: true });
+}
+
+export function normalizeVpsTailscaleFunnelUrl(value: string | undefined): string {
   return normalizeBaseUrl(value, { addHttpsForBareDomain: true });
 }
 
@@ -137,6 +156,35 @@ export function validateVpsDomain(value: string | undefined): string[] {
   return errors;
 }
 
+export function validateVpsTailscaleFunnelUrl(value: string | undefined): string[] {
+  const raw = value?.trim() ?? '';
+  if (!raw) return ['Tailscale Funnel mode needs the VPS HTTPS *.ts.net URL.'];
+
+  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const parsedInput = new URL(candidate);
+    if (parsedInput.search || parsedInput.hash) {
+      return ['Tailscale Funnel URL must be a base URL without a query or fragment.'];
+    }
+  } catch {
+    return ['Tailscale Funnel URL must be a valid HTTPS *.ts.net URL or hostname.'];
+  }
+
+  const normalized = normalizeVpsTailscaleFunnelUrl(raw);
+  if (!normalized) return ['Tailscale Funnel URL must be a valid HTTPS *.ts.net URL or hostname.'];
+
+  const parsed = new URL(normalized);
+  const errors: string[] = [];
+  if (parsed.protocol !== 'https:') errors.push('Tailscale Funnel URL must use HTTPS.');
+  if (!parsed.hostname.endsWith('.ts.net') || parsed.hostname === 'ts.net') {
+    errors.push('Tailscale Funnel URL must use a *.ts.net hostname.');
+  }
+  if (parsed.port) errors.push('Tailscale Funnel URL must use the standard HTTPS port.');
+  if (parsed.pathname && parsed.pathname !== '/') errors.push('Tailscale Funnel URL must be a base URL without a path.');
+  if (parsed.username || parsed.password) errors.push('Tailscale Funnel URL must not contain credentials.');
+  return errors;
+}
+
 export function validateRuntimeNetworkingConfig(
   config: RuntimeNetworkingConfig,
   options: RuntimeValidationOptions = {},
@@ -153,6 +201,18 @@ export function validateRuntimeNetworkingConfig(
     return errors;
   }
 
+  if (normalizeVpsPublicAccessMode(config.vpsPublicAccessMode) === 'tailscale-funnel') {
+    const errors = validateVpsTailscaleFunnelUrl(config.vpsTailscaleFunnelUrl);
+    const currentUrl = normalizeVpsTailscaleFunnelUrl(config.vpsTailscaleFunnelUrl);
+    const verifiedUrl = normalizeVpsTailscaleFunnelUrl(config.vpsTailscaleFunnelVerifiedUrl);
+    if (errors.length === 0 && !verifiedUrl) {
+      errors.push('Run SSH preflight so the launcher can verify remote Tailscale Funnel status before deployment.');
+    } else if (errors.length === 0 && currentUrl !== verifiedUrl) {
+      errors.push('Run SSH preflight again to verify the current Funnel URL before deployment.');
+    }
+    return errors;
+  }
+
   return validateVpsDomain(config.vpsDomain);
 }
 
@@ -164,7 +224,9 @@ export function resolveRuntimeProfile(config: RuntimeNetworkingConfig): RuntimeP
   }
 
   if (runtimeMode === 'vps') {
-    const publicCallbackBaseUrl = normalizeVpsDomain(config.vpsDomain) || '';
+    const publicCallbackBaseUrl = normalizeVpsPublicAccessMode(config.vpsPublicAccessMode) === 'tailscale-funnel'
+      ? normalizeVpsTailscaleFunnelUrl(config.vpsTailscaleFunnelUrl)
+      : normalizeVpsDomain(config.vpsDomain);
     const callbacks = getProviderCallbackUrls(publicCallbackBaseUrl);
 
     return {
@@ -207,6 +269,7 @@ export function buildRuntimeEnvVars(config: RuntimeNetworkingConfig): Record<str
     NEXT_PUBLIC_APP_URL: profile.publicCallbackBaseUrl,
     PAYPAL_WEBHOOK_URL: profile.paypalWebhookUrl,
     PORT: profile.dashboardPort,
+    HEALTH_PORT: '3001',
     HOSTNAME: profile.dashboardHostname,
     LAVALINK_HOST: profile.lavalinkHost,
     LAVALINK_PORT: profile.lavalinkPort,

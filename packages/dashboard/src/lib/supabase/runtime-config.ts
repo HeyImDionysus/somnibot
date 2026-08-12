@@ -31,6 +31,21 @@ export const SUPABASE_RUNTIME_SETTING_KEYS = [
 const RUNTIME_PUBLIC_SUPABASE_URL_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'URL'].join('_');
 const RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'PUBLISHABLE', 'KEY'].join('_');
 
+// The packaged launcher supplies the public Supabase values when it starts the
+// server, after the dashboard bundle has already been built.  These values are
+// rendered into the document by the root layout so browser code can consume
+// the runtime configuration without requiring a rebuild.  Keep this bridge
+// limited to the URL and publishable key; server secrets never belong in the
+// document.
+export const PUBLIC_SUPABASE_URL_META_NAME = 'somnibot-supabase-url';
+export const PUBLIC_SUPABASE_PUBLISHABLE_KEY_META_NAME = 'somnibot-supabase-publishable-key';
+
+type BrowserMetadataRoot = {
+  querySelector(selector: string): {
+    getAttribute(name: string): string | null;
+  } | null;
+};
+
 export function readRuntimePublicSupabaseConfig(env: NodeJS.ProcessEnv = process.env): SupabaseRuntimeConfig {
   const url = env[RUNTIME_PUBLIC_SUPABASE_URL_ENV] || '';
   const publishableKey = env[RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV] || '';
@@ -65,8 +80,36 @@ export function readBrowserSupabaseConfig(): SupabaseRuntimeConfig {
   // referenced directly as process.env.NEXT_PUBLIC_*. Do not route this
   // through readEnvSupabaseConfig(process.env), because dynamic env object
   // property reads compile to an empty browser env and break Discord login.
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+  const envUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const envPublishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+  const injected = readInjectedBrowserSupabaseConfig();
+  const url = envUrl || injected.url;
+  const publishableKey = envPublishableKey || injected.publishableKey;
+
+  return {
+    url,
+    publishableKey,
+    secretKey: '',
+    sources: {
+      url: url ? 'env' : 'missing',
+      publishableKey: publishableKey ? 'env' : 'missing',
+      secretKey: 'missing',
+    },
+  };
+}
+
+/**
+ * Read the public Supabase values materialized by the server-rendered layout.
+ * This is deliberately metadata-only so it remains synchronous for the many
+ * browser callers that create a Supabase client in event handlers.
+ */
+export function readInjectedBrowserSupabaseConfig(
+  root?: BrowserMetadataRoot,
+): SupabaseRuntimeConfig {
+  const metadataRoot = root ?? (typeof document === 'undefined' ? undefined : document);
+  const readMeta = (name: string) => metadataRoot?.querySelector(`meta[name="${name}"]`)?.getAttribute('content') || '';
+  const url = readMeta(PUBLIC_SUPABASE_URL_META_NAME);
+  const publishableKey = readMeta(PUBLIC_SUPABASE_PUBLISHABLE_KEY_META_NAME);
 
   return {
     url,

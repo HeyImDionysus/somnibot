@@ -15,6 +15,11 @@ import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { recordAdminChange } from '@/lib/admin-changes';
+import {
+  isSupportedStaticFile,
+  MAX_STATIC_SOURCE_BYTES,
+} from '@/lib/store/static-delivery';
+import { STATIC_FORMAT_SUMMARY } from '@/lib/store/static-format-contract';
 
 /** The owner-facing name of a product file, whichever column carries it. */
 function fileLabel(row: Record<string, unknown> | null | undefined): string {
@@ -90,16 +95,6 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminSupabase();
 
-  // Ensure storage bucket exists
-  const { error: bucketError } = await supabase.storage.getBucket(STORAGE_BUCKET);
-  if (bucketError) {
-    await supabase.storage.createBucket(STORAGE_BUCKET, {
-      public: false,
-      fileSizeLimit: MAX_FILE_SIZE,
-      allowedMimeTypes: undefined, // Bucket-level: allow all; blocked types checked at route level
-    });
-  }
-
   const formData = await req.formData();
   const file = formData.get('file') as File | null;
 
@@ -152,7 +147,7 @@ export async function POST(req: NextRequest) {
   // Verify product exists and belongs to this guild
   const { data: product } = await supabase
     .from('products')
-    .select('id, name')
+    .select('id, name, delivery_type')
     .eq('id', productId)
     .eq('guild_id', guildId)
     .single();
@@ -169,6 +164,36 @@ export async function POST(req: NextRequest) {
       { success: false, error: `File too large (max ${MAX_FILE_SIZE / 1024 / 1024}MB)` },
       { status: 413 },
     );
+  }
+
+  if (product.delivery_type !== 'license_key') {
+    if (!isSupportedStaticFile(file.type, file.name)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `This file format has no verified Static buyer-derivative transformer. Current transformers: ${STATIC_FORMAT_SUMMARY}. Add and attack-test a transformer for this format, or use Dynamic licensing.`,
+        },
+        { status: 400 },
+      );
+    }
+    if (file.size > MAX_STATIC_SOURCE_BYTES) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Static masters are limited to ${MAX_STATIC_SOURCE_BYTES / 1024 / 1024}MB so buyer-specific delivery can fail closed safely.`,
+        },
+        { status: 413 },
+      );
+    }
+  }
+
+  const { error: bucketError } = await supabase.storage.getBucket(STORAGE_BUCKET);
+  if (bucketError) {
+    await supabase.storage.createBucket(STORAGE_BUCKET, {
+      public: false,
+      fileSizeLimit: MAX_FILE_SIZE,
+      allowedMimeTypes: undefined,
+    });
   }
 
   // Generate unique storage path

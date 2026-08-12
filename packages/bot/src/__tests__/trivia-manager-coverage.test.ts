@@ -206,6 +206,26 @@ describe('TriviaManager', () => {
       );
     });
 
+    it('uses uniform plain A/B/C/D markers for buttons and the question embed', async () => {
+      const interaction = makeInteraction({ channelId: 'labels' });
+      await mgr.startRound(
+        interaction as unknown as Parameters<TriviaManager['startRound']>[0],
+      );
+
+      const payload = interaction.reply.mock.calls[0]?.[0] as {
+        embeds: Array<{ data: { description: string } }>;
+        components: Array<{ components: Array<{ data: { label: string } }> }>;
+      };
+      const markers = ['A', 'B', 'C', 'D'];
+
+      expect(
+        payload.components[0]?.components.map((button) => button.data.label),
+      ).toEqual(markers);
+      expect(payload.embeds[0]?.data.description).toContain(
+        'A Mars\nB Venus\nC Jupiter\nD Saturn',
+      );
+    });
+
     it('filters by category', async () => {
       const interaction = makeInteraction({ channelId: 'ch2' });
       await mgr.startRound(interaction as any, 'science');

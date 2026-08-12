@@ -8,7 +8,8 @@
  * and slash commands (via command-registry + inline feature-gated dispatch).
  */
 
-import { EmbedBuilder } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+import { randomUUID } from 'node:crypto';
 import type { Interaction } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../client.js';
@@ -33,8 +34,8 @@ import {
 // Feature handler imports — buttons & UI
 import { handleTicketInteraction } from '../features/tickets/index.js';
 import { handleSetupButton, handleSetupModal, handleReconfigureSelect } from '../features/setup-wizard/index.js';
-import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
-import { handleBuyButton } from '../features/commerce/payment-handler.js';
+import { handleButtonRoleInteraction, handleSelectMenuRoleInteraction } from '../features/reaction-roles/button-roles.js';
+import { handleBuyButton, handleFreeClaimButton } from '../features/commerce/payment-handler.js';
 import { handleAdventureButton } from '../features/adventures/adventure-buttons.js';
 
 // Feature handler imports — context menus & modals
@@ -47,6 +48,7 @@ import { applyBrand, brandedEmbed, resolveBrandKit } from '../features/branding/
 // Feature handler imports — slash commands
 import { handleStoreCommand } from '../features/commerce/store-command.js';
 import { handleLicenseCommand } from '../features/commerce/license-commands.js';
+import { resolveGuildPayPalRuntime } from '../services/paypal-runtime.js';
 import { handleMusicCommand } from '../features/music/commands.js';
 import { handleTempChannelCommand } from '../features/temp-channels/commands.js';
 import { handleGiveawayCommand } from '../features/giveaways/commands.js';
@@ -184,8 +186,66 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.buttonRole)) {
         if (await handleButtonRoleInteraction(interaction, client.supabase)) return;
       }
+      if (interaction.isStringSelectMenu() && interaction.customId.startsWith('selrole:')) {
+        if (await handleSelectMenuRoleInteraction(interaction, client.supabase)) return;
+      }
 
       // Commerce buy buttons — gated by store_enabled
+      if (interaction.isButton() && interaction.customId.startsWith('store:claim:')) {
+        const { data: storeCfg } = await client.supabase
+          .from('guild_config')
+          .select('store_enabled')
+          .eq('guild_id', guildId)
+          .maybeSingle();
+        if (storeCfg?.store_enabled === false) {
+          await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+          return;
+        }
+        await handleFreeClaimButton(interaction, client.supabase, guildId);
+        return;
+      }
+
+      if (interaction.isButton() && interaction.customId.startsWith('store:gift:')) {
+        const { data: storeCfg } = await client.supabase.from('guild_config').select('store_enabled').eq('guild_id', guildId).maybeSingle();
+        if (storeCfg?.store_enabled === false) {
+          await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+          return;
+        }
+        const productId = interaction.customId.replace('store:gift:', '');
+        const modal = new ModalBuilder()
+          .setCustomId(`store:gift-submit:${productId}`)
+          .setTitle('Gift this product');
+        const recipient = new TextInputBuilder()
+          .setCustomId('recipient_discord_id')
+          .setLabel('Recipient Discord user ID')
+          .setPlaceholder('17–20 digit user ID')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(20);
+        modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(recipient));
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (interaction.isButton() && interaction.customId.startsWith('store:gift-buy:')) {
+        const [, , productId, checkoutToken] = interaction.customId.split(':');
+        if (!productId || !checkoutToken) return;
+        const { data: storeCfg } = await client.supabase
+          .from('guild_config').select('store_enabled').eq('guild_id', guildId).maybeSingle();
+        if (storeCfg?.store_enabled === false) {
+          await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+          return;
+        }
+        const paypalRuntime = await resolveGuildPayPalRuntime(client.supabase, guildId);
+        const dashboardUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.DASHBOARD_URL || 'https://dashboard.somnibot.com';
+        if (paypalRuntime.configured) {
+          await handleBuyButton(interaction, client.supabase, guildId, paypalRuntime.apiBase, paypalRuntime.clientId, paypalRuntime.clientSecret, dashboardUrl, checkoutToken);
+          return;
+        }
+        await interaction.reply({ content: '❌ Payment service is not configured for this server.', ephemeral: true });
+        return;
+      }
+
       if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.storeBuy)) {
         const { data: storeCfg } = await client.supabase
           .from('guild_config')
@@ -196,14 +256,14 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
           await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
           return;
         }
-        const paypalApiBase = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
-        const paypalClientId = process.env.PAYPAL_CLIENT_ID || '';
-        const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET || '';
+        const paypalRuntime = await resolveGuildPayPalRuntime(client.supabase, guildId);
         const dashboardUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.DASHBOARD_URL || 'https://dashboard.somnibot.com';
-        if (paypalClientId) {
-          await handleBuyButton(interaction, client.supabase, guildId, paypalApiBase, paypalClientId, paypalClientSecret, dashboardUrl);
+        if (paypalRuntime.configured) {
+          await handleBuyButton(interaction, client.supabase, guildId, paypalRuntime.apiBase, paypalRuntime.clientId, paypalRuntime.clientSecret, dashboardUrl);
           return;
         }
+        await interaction.reply({ content: '❌ Payment service is not configured for this server.', ephemeral: true });
+        return;
       }
 
       // Music buttons
@@ -297,6 +357,50 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith(MODAL_PREFIX.setup)) {
         await handleSetupModal(interaction, client);
+        return;
+      }
+      if (interaction.customId.startsWith('store:gift-submit:')) {
+        const { data: storeCfg } = await client.supabase.from('guild_config').select('store_enabled').eq('guild_id', guildId).maybeSingle();
+        if (storeCfg?.store_enabled === false) {
+          await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+          return;
+        }
+        const productId = interaction.customId.replace('store:gift-submit:', '');
+        const recipientId = interaction.fields.getTextInputValue('recipient_discord_id').trim();
+        if (!/^\d{17,20}$/.test(recipientId) || recipientId === interaction.user.id) {
+          await interaction.reply({ content: '❌ Enter a different valid Discord user ID.', ephemeral: true });
+          return;
+        }
+        if (!interaction.guild) {
+          await interaction.reply({ content: '❌ Gifts can only be sent inside the server.', ephemeral: true });
+          return;
+        }
+        try {
+          await interaction.guild.members.fetch(recipientId);
+        } catch {
+          await interaction.reply({ content: '❌ That recipient is not a member of this server.', ephemeral: true });
+          return;
+        }
+        const customer = await client.supabase
+          .from('customers')
+          .upsert({ guild_id: guildId, discord_id: interaction.user.id, discord_username: interaction.user.username }, { onConflict: 'discord_id,guild_id' })
+          .select('id')
+          .single();
+        if (customer.error || !customer.data?.id) {
+          await interaction.reply({ content: '❌ Your buyer account could not be verified. Please try again.', ephemeral: true });
+          return;
+        }
+        const giftId = randomUUID();
+        const { error } = await client.supabase.rpc('commerce_create_gift_intent', { p_id: giftId, p_guild_id: guildId, p_buyer_customer_id: customer.data.id, p_product_id: productId, p_recipient_discord_id: recipientId });
+        const { data: giftRow } = !error ? await client.supabase.from('commerce_gift_intents').select('checkout_token').eq('id', giftId).eq('guild_id', guildId).eq('buyer_customer_id', customer.data.id).maybeSingle() : { data: null };
+        const checkoutToken = typeof giftRow?.checkout_token === 'string' ? giftRow.checkout_token : null;
+        await interaction.reply({
+          content: error || !checkoutToken ? '❌ Gifting is unavailable for this product.' : '✅ Gift recipient verified. Start the checkout below to deliver it.',
+          components: !error && checkoutToken ? [new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`store:gift-buy:${productId}:${checkoutToken}`).setLabel('Checkout Gift').setStyle(ButtonStyle.Primary).setEmoji('💳'),
+          )] : [],
+          ephemeral: true,
+        });
         return;
       }
       const guild = interaction.guild;
@@ -447,7 +551,8 @@ async function handleSlashCommand(
       return;
     }
     if (interaction.commandName === SLASH.store) {
-      await handleStoreCommand(interaction, client.supabase, guildId, process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com');
+      const paypalRuntime = await resolveGuildPayPalRuntime(client.supabase, guildId);
+      await handleStoreCommand(interaction, client.supabase, guildId, paypalRuntime.apiBase);
       return;
     }
     await handleLicenseCommand(interaction, client.supabase, guildId);

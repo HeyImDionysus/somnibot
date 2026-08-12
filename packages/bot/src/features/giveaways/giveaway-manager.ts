@@ -34,7 +34,7 @@ interface GiveawayRow {
   required_level: number | null;
   required_entitlement_product_id: string | null;
   entries: string[];
-  winners: string[];
+  winners: string[] | null;
   status: 'active' | 'ended' | 'cancelled' | 'paused';
   created_by: string;
   created_at: string;
@@ -175,6 +175,8 @@ export class GiveawayManager {
         stage: 'create',
         actorId: options.creatorId,
         error: error?.message ?? 'unknown',
+        occurrenceId: `create:${options.channelId}:${options.prize}`,
+        correlationId: `giveaway:create:${options.creatorId}`,
       });
       await this.raiseGiveawayAlert(
         'create',
@@ -211,6 +213,8 @@ export class GiveawayManager {
       endsAt: giveaway.ends_at,
       requiredRoleId: giveaway.required_role_id,
       requiredLevel: giveaway.required_level,
+      occurrenceId: giveaway.id,
+      correlationId: `giveaway:${giveaway.id}`,
     });
 
     return giveaway;
@@ -264,6 +268,8 @@ export class GiveawayManager {
         giveawayId,
         userId,
         reason: 'not_active',
+        occurrenceId: `${giveawayId}:${userId}:not_active`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({ content: '❌ This giveaway has ended.', ephemeral: true });
       return true;
@@ -278,6 +284,8 @@ export class GiveawayManager {
         giveawayId,
         userId,
         reason: 'member_not_found',
+        occurrenceId: `${giveawayId}:${userId}:member_not_found`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({ content: '❌ Could not find your member data.', ephemeral: true });
       return true;
@@ -291,6 +299,8 @@ export class GiveawayManager {
         userId,
         reason: 'role_gate',
         requiredRoleId: giveaway.required_role_id,
+        occurrenceId: `${giveawayId}:${userId}:role_gate`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({
         content: `❌ You need the <@&${giveaway.required_role_id}> role to enter this giveaway.`,
@@ -315,6 +325,8 @@ export class GiveawayManager {
           reason: 'level_gate',
           requiredLevel: giveaway.required_level,
           userLevel,
+          occurrenceId: `${giveawayId}:${userId}:level_gate`,
+          correlationId: `giveaway:${giveawayId}`,
         });
         await interaction.reply({
           content: `❌ You need to be level ${giveaway.required_level} or higher to enter. Your current level: ${userLevel}.`,
@@ -339,6 +351,8 @@ export class GiveawayManager {
           stage: 'entry',
           actorId: userId,
           error: 'giveaway_remove_entry RPC not found or no match',
+          occurrenceId: `${giveawayId}:${userId}:withdraw_failed`,
+          correlationId: `giveaway:${giveawayId}`,
         });
         await this.raiseGiveawayAlert(
           'entry',
@@ -356,6 +370,8 @@ export class GiveawayManager {
         userId,
         withdrawn: true,
         entryCount: newEntries.length,
+        occurrenceId: `${giveawayId}:${userId}:withdraw`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await interaction.reply({ content: '🚪 You have withdrawn from the giveaway.', ephemeral: true });
       return true;
@@ -375,6 +391,8 @@ export class GiveawayManager {
         stage: 'entry',
         actorId: userId,
         error: 'giveaway_add_entry RPC not found or no match',
+        occurrenceId: `${giveawayId}:${userId}:entry_failed`,
+        correlationId: `giveaway:${giveawayId}`,
       });
       await this.raiseGiveawayAlert(
         'entry',
@@ -392,6 +410,8 @@ export class GiveawayManager {
       userId,
       withdrawn: false,
       entryCount: newEntries.length,
+      occurrenceId: `${giveawayId}:${userId}:enter`,
+      correlationId: `giveaway:${giveawayId}`,
     });
     await interaction.reply({ content: '🎉 You have entered the giveaway! Click again to withdraw.', ephemeral: true });
     return true;
@@ -451,6 +471,8 @@ export class GiveawayManager {
       giveawayId,
       prize: giveaway.prize,
       actorId: actorId ?? null,
+      occurrenceId: `${giveawayId}:pause`,
+      correlationId: `giveaway:${giveawayId}`,
     });
 
     log.info(`Paused "${giveaway.prize}"`);
@@ -497,6 +519,8 @@ export class GiveawayManager {
       prize: giveaway.prize,
       actorId: actorId ?? null,
       endsAt: resumedGiveaway.ends_at,
+      occurrenceId: `${giveawayId}:resume`,
+      correlationId: `giveaway:${giveawayId}`,
     });
 
     log.info(`Resumed "${giveaway.prize}"`);
@@ -519,8 +543,9 @@ export class GiveawayManager {
     if (giveaway.status !== 'ended') return [];
 
     const winnerCount = count ?? giveaway.winner_count;
+    const existingWinners = giveaway.winners ?? [];
     const eligibleEntries = giveaway.entries.filter(
-      (e: string) => !giveaway.winners.includes(e),
+      (e: string) => !existingWinners.includes(e),
     );
 
     const newWinners = this.pickRandom(eligibleEntries, winnerCount);
@@ -564,6 +589,8 @@ export class GiveawayManager {
       prize: giveaway.prize,
       winnerIds: newWinners,
       actorId: actorId ?? null,
+      occurrenceId: `${giveawayId}:reroll:${newWinners.join(',')}`,
+      correlationId: `giveaway:${giveawayId}`,
     });
 
     return newWinners;
@@ -582,7 +609,8 @@ export class GiveawayManager {
 
     for (const row of data) {
       try {
-        await this.selectWinnersAndEnd(row as GiveawayRow);
+        const giveaway = row as GiveawayRow;
+        await this.selectWinnersAndEnd(giveaway);
       } catch (err) {
         log.error(`Error ending giveaway ${row.id}:`, err);
       }
@@ -591,7 +619,25 @@ export class GiveawayManager {
 
   private async selectWinnersAndEnd(giveaway: GiveawayRow): Promise<string[] | null> {
     await this.loadConfig();
-    const winners = this.pickRandom(giveaway.entries, giveaway.winner_count);
+    // If a prior worker persisted winners before crashing, resume from that
+    // durable set. Sampling again would violate exactly-once winner selection.
+    const durableWinners = giveaway.winners ?? [];
+    if (durableWinners.length > 0) {
+      this.eventBus.emit('giveaway.draw_resumed', this.guild.id, {
+        giveawayId: giveaway.id,
+        winnerIds: [...durableWinners],
+        occurrenceId: `${giveaway.id}:draw-resumed`,
+        correlationId: `giveaway:${giveaway.id}`,
+      });
+      await this.raiseGiveawayAlert(
+        'draw_resumed',
+        `Giveaway "${giveaway.prize}" resumed from its durable draw record with ${durableWinners.length} winner(s).`,
+        { giveaway_id: giveaway.id, winner_count: durableWinners.length },
+      );
+    }
+    const winners = durableWinners.length > 0
+      ? [...durableWinners]
+      : this.pickRandom(giveaway.entries, giveaway.winner_count);
 
     // V50-M2: use giveaway_atomic_end RPC — gates the status flip on
     // status='active' so concurrent checkExpired + manual endGiveaway
@@ -612,7 +658,7 @@ export class GiveawayManager {
     if (!endedRows || (Array.isArray(endedRows) && endedRows.length === 0)) {
       // Another call already ended this giveaway — bail out
       log.info(`giveaway_atomic_end returned empty for "${giveaway.prize}" — already ended`);
-      return giveaway.winners;
+      return durableWinners;
     }
 
     // Update the giveaway message
@@ -668,6 +714,8 @@ export class GiveawayManager {
       title: giveaway.prize,
       winnerIds: winners,
       prizeProductId: giveaway.prize_product_id,
+      occurrenceId: `${giveaway.id}:end`,
+      correlationId: `giveaway:${giveaway.id}`,
     });
 
     log.info(`Ended "${giveaway.prize}" — ${winners.length} winner(s)`);
@@ -680,18 +728,33 @@ export class GiveawayManager {
     const channel = this.guild.channels.cache.get(giveaway.channel_id) as TextChannel | undefined;
     if (!channel) return;
 
-    try {
-      const msg = await channel.messages.fetch(giveaway.message_id);
-      const embed = await this.buildGiveawayEmbed(giveaway);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const msg = await channel.messages.fetch(giveaway.message_id);
+        const embed = await this.buildGiveawayEmbed(giveaway);
 
-      if (giveaway.status === 'ended' || giveaway.status === 'cancelled') {
-        await msg.edit({ embeds: [embed], components: [] });
-      } else {
-        const row = this.buildEntryButton(giveaway);
-        await msg.edit({ embeds: [embed], components: [row] });
+        if (giveaway.status === 'ended' || giveaway.status === 'cancelled') {
+          await msg.edit({ embeds: [embed], components: [] });
+        } else {
+          const row = this.buildEntryButton(giveaway);
+          await msg.edit({ embeds: [embed], components: [row] });
+        }
+        return;
+      } catch {
+        // Message edits are best-effort, but a transient Discord failure gets
+        // a bounded retry under the same giveaway/message occurrence.  The
+        // state row remains authoritative throughout.
+        if (attempt === 3) return;
+        this.eventBus.emit('giveaway.embed_update_retried', this.guild.id, {
+          giveawayId: giveaway.id,
+          channelId: giveaway.channel_id,
+          messageId: giveaway.message_id,
+          attempt: attempt + 1,
+          occurrenceId: `${giveaway.id}:embed-update-retry:${attempt + 1}`,
+          correlationId: `giveaway:${giveaway.id}`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
       }
-    } catch {
-      // Message may have been deleted
     }
   }
 
@@ -703,6 +766,7 @@ export class GiveawayManager {
   private async buildGiveawayEmbed(giveaway: GiveawayRow): Promise<EmbedBuilder> {
     const isEnded = giveaway.status === 'ended';
     const isPaused = giveaway.status === 'paused';
+    const winners = giveaway.winners ?? [];
     const title = isEnded ? '🎉 Giveaway Ended' : isPaused ? '⏸️ Giveaway Paused' : '🎉 Giveaway';
     const kit = await this.brandKit();
     const embed = new EmbedBuilder()
@@ -729,7 +793,9 @@ export class GiveawayManager {
     fields.push({
       name: '🏆 Winners',
       value: isEnded
-        ? (giveaway.winners.length > 0 ? giveaway.winners.map((id) => `<@${id}>`).join('\n') : 'None')
+        ? (winners.length > 0
+          ? winners.map((id) => `<@${id}>`).join('\n')
+          : 'None')
         : String(giveaway.winner_count),
       inline: true,
     });

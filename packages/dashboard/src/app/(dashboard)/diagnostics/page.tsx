@@ -7,8 +7,10 @@
 'use client';
 
 import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requireReadback } from '@/lib/client-api-result';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { DIAGNOSTICS_GUIDANCE, type GuidedMetric } from '@/lib/diagnostics-guidance';
 
 // ── Types ─────────────────────────────────────────────────
@@ -33,6 +35,7 @@ interface DiagnosticsData {
     wsPingMs: number;
     webhookErrorRate: number;
   };
+  snapshotIntervalMs?: number;
   bot: {
     online: boolean;
     uptimeSeconds: number;
@@ -91,6 +94,89 @@ interface WebhookPagination {
   totalPages: number;
 }
 
+function isAlert(value: unknown): value is Alert {
+  return isApiRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.alert_type === 'string'
+    && (value.severity === 'info' || value.severity === 'warning' || value.severity === 'critical')
+    && typeof value.title === 'string'
+    && typeof value.message === 'string'
+    && typeof value.acknowledged === 'boolean'
+    && typeof value.resolved === 'boolean'
+    && typeof value.created_at === 'string';
+}
+
+function isWebhookEvent(value: unknown): value is WebhookEvent {
+  return isApiRecord(value)
+    && typeof value.event_id === 'string'
+    && typeof value.event_type === 'string'
+    && typeof value.processed_at === 'string'
+    && isApiRecord(value.payload)
+    && (value.result === 'success' || value.result === 'error' || value.result === 'duplicate' || value.result === null)
+    && (typeof value.error_details === 'string' || value.error_details === null)
+    && (typeof value.replayed_at === 'string' || value.replayed_at === null)
+    && typeof value.replay_count === 'number';
+}
+
+function hasNumericKeys(value: unknown, keys: readonly string[]): boolean {
+  return isApiRecord(value) && keys.every((key) => typeof value[key] === 'number');
+}
+
+function isDiagnosticsData(value: unknown): value is DiagnosticsData {
+  return isApiRecord(value)
+    && isApiRecord(value.bot)
+    && typeof value.bot.online === 'boolean'
+    && typeof value.bot.uptimeSeconds === 'number'
+    && typeof value.bot.memoryRssMb === 'number'
+    && typeof value.bot.memoryHeapMb === 'number'
+    && typeof value.bot.wsPing === 'number'
+    && typeof value.bot.guildMemberCount === 'number'
+    && typeof value.bot.activeVoiceConnections === 'number'
+    && (typeof value.bot.snapshotAt === 'string' || value.bot.snapshotAt === null)
+    && (typeof value.bot.staleSecs === 'number' || value.bot.staleSecs === null)
+    && isApiRecord(value.lavalink)
+    && Array.isArray(value.lavalink.nodes)
+    && value.lavalink.nodes.every((node) => isApiRecord(node)
+      && typeof node.name === 'string' && typeof node.connected === 'boolean' && typeof node.players === 'number')
+    && isApiRecord(value.valkey)
+    && typeof value.valkey.connected === 'boolean'
+    && typeof value.valkey.memoryMb === 'number'
+    && isApiRecord(value.supabase)
+    && typeof value.supabase.healthy === 'boolean'
+    && hasNumericKeys(value.webhooks, ['total', 'success', 'error', 'duplicate', 'pending'])
+    && isApiRecord(value.sync)
+    && (typeof value.sync.lastSync === 'string' || value.sync.lastSync === null)
+    && (isApiRecord(value.sync.lastSyncDetails) || value.sync.lastSyncDetails === null)
+    && (typeof value.sync.lastDrift === 'string' || value.sync.lastDrift === null)
+    && (isApiRecord(value.sync.lastDriftDetails) || value.sync.lastDriftDetails === null)
+    && isApiRecord(value.automations)
+    && typeof value.automations.activeCount === 'number'
+    && isApiRecord(value.scheduledMessages)
+    && typeof value.scheduledMessages.activeCount === 'number'
+    && isApiRecord(value.dlq)
+    && typeof value.dlq.pendingCount === 'number'
+    && isApiRecord(value.healthMetrics)
+    && Object.values(value.healthMetrics).every((series) => Array.isArray(series)
+      && series.every((point) => isApiRecord(point) && typeof point.value === 'number' && typeof point.time === 'string'))
+    && (value.thresholds === undefined || (isApiRecord(value.thresholds)
+      && typeof value.thresholds.memoryRssMb === 'number'
+      && typeof value.thresholds.wsPingMs === 'number'
+      && typeof value.thresholds.webhookErrorRate === 'number'))
+    && (value.snapshotIntervalMs === undefined || typeof value.snapshotIntervalMs === 'number')
+    && (value.guidedMode === undefined || typeof value.guidedMode === 'boolean');
+}
+
+function diagnosticsReflectsPatch(data: DiagnosticsData, patch: Record<string, number | boolean>): boolean {
+  return Object.entries(patch).every(([key, value]) => {
+    if (key === 'diagnostics_guided_mode') return data.guidedMode === value;
+    if (key === 'memory_alert_threshold_mb') return data.thresholds?.memoryRssMb === value;
+    if (key === 'diagnostics_snapshot_interval_ms') return data.snapshotIntervalMs === value;
+    if (key === 'ws_ping_alert_threshold_ms') return data.thresholds?.wsPingMs === value;
+    if (key === 'webhook_error_rate_threshold') return data.thresholds?.webhookErrorRate === value;
+    return false;
+  });
+}
+
 // ── Helpers ───────────────────────────────────────────────
 
 function formatUptime(seconds: number): string {
@@ -129,6 +215,16 @@ function Guidance({ metric, on }: { metric: GuidedMetric; on: boolean }) {
       </p>
     </div>
   );
+}
+
+function alertGuidanceMetric(alertType: string): GuidedMetric | null {
+  switch (alertType) {
+    case 'memory_high': return 'memory';
+    case 'ws_ping_high': return 'wsPing';
+    case 'valkey_disconnected': return 'valkey';
+    case 'lavalink_down': return 'lavalink';
+    default: return null;
+  }
 }
 
 function StatusDot({ ok, muted = false }: { ok: boolean; muted?: boolean }) {
@@ -173,8 +269,13 @@ function Sparkline({
   const latest = data[data.length - 1];
 
   return (
-    <div className="flex items-center gap-3">
-      <svg width={width} height={height} className="shrink-0">
+    <div className="grid min-w-0 grid-cols-1 items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(4rem,6rem)]">
+      <svg
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-10 w-full min-w-0"
+      >
         <polyline
           points={points.join(' ')}
           fill="none"
@@ -184,7 +285,7 @@ function Sparkline({
           strokeLinejoin="round"
         />
       </svg>
-      <div className="text-xs text-discord-text-muted whitespace-nowrap">
+      <div className="min-w-0 max-w-24 break-words text-right text-xs leading-4 text-discord-text-muted">
         <span className="text-discord-text-secondary font-medium">{latest?.toFixed(1)}ms</span>
         {' '}(avg {avg}ms)
       </div>
@@ -197,6 +298,7 @@ function Sparkline({
 export default function DiagnosticsPage() {
   const [diag, setDiag] = useState<DiagnosticsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Webhook log state
   const [webhooks, setWebhooks] = useState<WebhookEvent[]>([]);
@@ -215,16 +317,29 @@ export default function DiagnosticsPage() {
   // Alert state
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(true);
+  const [alertActionError, setAlertActionError] = useState<string | null>(null);
+  const [alertActionLoading, setAlertActionLoading] = useState(false);
+  const alertActionInFlightRef = useRef(false);
+  const [pendingAlertAction, setPendingAlertAction] = useState<{
+    readonly alert: Alert;
+    readonly action: 'acknowledge' | 'resolve';
+  } | null>(null);
+  const [pendingWebhookAction, setPendingWebhookAction] = useState<{
+    readonly event: WebhookEvent;
+    readonly action: 'replay' | 'recover';
+  } | null>(null);
 
   const fetchAlerts = useCallback(async () => {
     try {
       const res = await fetch('/api/alerts?status=active');
-      const json = await res.json();
-      if (json.success) {
-        setAlerts(json.data.alerts ?? []);
-      }
+      const json = await requireApiSuccess(res, 'Could not load active alerts. Retry from this page.');
+      const data = requireApiRecord(json, 'data', 'The active-alert readback was invalid. Retry from this page.');
+      const nextAlerts = requireApiArray(data, 'alerts', isAlert, 'The active-alert readback was invalid. Retry from this page.');
+      setAlerts(nextAlerts);
+      return nextAlerts;
     } catch (err) {
-      console.error('Failed to fetch alerts:', err);
+      setAlertActionError(err instanceof Error ? err.message : 'Could not load active alerts. Retry from this page.');
+      return null;
     } finally {
       setAlertsLoading(false);
     }
@@ -244,57 +359,59 @@ export default function DiagnosticsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setThresholdError(
-          (body as { error?: string }).error
-          ?? 'Could not save that value. Check it is inside the allowed range.',
-        );
-        return;
-      }
-      await fetchDiagnostics();
-    } catch {
-      setThresholdError('Could not reach the server to save that setting.');
+      await requireApiSuccess(
+        res,
+        'Could not save that value. Your entry is still shown; check the allowed range or retry.',
+      );
+      const readback = await fetchDiagnostics();
+      requireReadback(
+        readback !== null && diagnosticsReflectsPatch(readback, patch),
+        'The setting was accepted, but the authoritative readback still has the previous value. Your entry is still shown; reload before retrying.',
+      );
+    } catch (saveError) {
+      setThresholdError(saveError instanceof Error ? saveError.message : 'Could not reach the server to save that setting.');
     } finally {
       setSavingThresholds(false);
     }
   };
 
-  const handleAcknowledgeAlert = async (alertId: string) => {
+  const handleAlertAction = async () => {
+    if (!pendingAlertAction || alertActionInFlightRef.current) return;
+    alertActionInFlightRef.current = true;
+    setAlertActionLoading(true);
+    setAlertActionError(null);
     try {
-      await fetch('/api/alerts', {
+      const response = await fetch('/api/alerts', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: alertId, action: 'acknowledge' }),
+        body: JSON.stringify({ id: pendingAlertAction.alert.id, action: pendingAlertAction.action }),
       });
-      await fetchAlerts();
-    } catch (err) {
-      console.error('Failed to acknowledge alert:', err);
-    }
-  };
-
-  const handleResolveAlert = async (alertId: string) => {
-    try {
-      await fetch('/api/alerts', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: alertId, action: 'resolve' }),
-      });
-      await fetchAlerts();
-    } catch (err) {
-      console.error('Failed to resolve alert:', err);
+      await requireApiSuccess(response, `Could not ${pendingAlertAction.action} this alert. It remains active.`);
+      const nextAlerts = await fetchAlerts();
+      requireReadback(
+        nextAlerts !== null && !nextAlerts.some((alert) => alert.id === pendingAlertAction.alert.id),
+        'The alert action was accepted, but the alert remains in the authoritative active list. Keep this dialog open and reload before retrying.',
+      );
+      setPendingAlertAction(null);
+    } catch (alertError) {
+      setAlertActionError(alertError instanceof Error ? alertError.message : 'Could not update this alert. It remains active.');
+    } finally {
+      alertActionInFlightRef.current = false;
+      setAlertActionLoading(false);
     }
   };
 
   const fetchDiagnostics = useCallback(async () => {
     try {
       const res = await fetch('/api/diagnostics');
-      const json = await res.json();
-      if (json.success) {
-        setDiag(json.data);
-      }
+      const json = await requireApiSuccess(res, 'Could not load diagnostics. Retry from this page.');
+      if (!isDiagnosticsData(json.data)) throw new Error('The diagnostics readback was invalid. Retry from this page.');
+      setDiag(json.data);
+      setLoadError(null);
+      return json.data;
     } catch (err) {
-      console.error('Failed to fetch diagnostics:', err);
+      setLoadError(err instanceof Error ? err.message : 'Could not load diagnostics. Retry from this page.');
+      return null;
     } finally {
       setLoading(false);
     }
@@ -306,13 +423,21 @@ export default function DiagnosticsPage() {
       const params = new URLSearchParams({ page: String(page), pageSize: '25' });
       if (whFilter) params.set('result', whFilter);
       const res = await fetch(`/api/webhooks?${params}`);
-      const json = await res.json();
-      if (json.success) {
-        setWebhooks(json.data);
-        setWhPagination(json.pagination);
+      const json = await requireApiSuccess(res, 'Could not load webhook events. Retry from this page.');
+      const nextWebhooks = requireApiArray(json, 'data', isWebhookEvent, 'The webhook-event readback was invalid. Retry from this page.');
+      if (!isApiRecord(json.pagination)
+        || typeof json.pagination.page !== 'number'
+        || typeof json.pagination.pageSize !== 'number'
+        || typeof json.pagination.total !== 'number'
+        || typeof json.pagination.totalPages !== 'number') {
+        throw new Error('The webhook-event readback was invalid. Retry from this page.');
       }
+      setWebhooks(nextWebhooks);
+      setWhPagination({ page: json.pagination.page, pageSize: json.pagination.pageSize, total: json.pagination.total, totalPages: json.pagination.totalPages });
+      return nextWebhooks;
     } catch (err) {
-      console.error('Failed to fetch webhooks:', err);
+      setWebhookActionError(err instanceof Error ? err.message : 'Could not load webhook events. Retry from this page.');
+      return null;
     } finally {
       setWhLoading(false);
     }
@@ -333,50 +458,39 @@ export default function DiagnosticsPage() {
     fetchWebhooks(1);
   }, [fetchWebhooks]);
 
-  const handleReplay = async (eventId: string) => {
-    setReplayingId(eventId);
+  const handleWebhookAction = async () => {
+    if (!pendingWebhookAction) return;
+    setReplayingId(pendingWebhookAction.event.event_id);
     setWebhookActionError(null);
     try {
-      const res = await fetch(`/api/webhooks/${eventId}/replay`, { method: 'POST' });
-      const json = await res.json();
-      if (json.success) {
-        // Refresh webhook list
-        await fetchWebhooks(whPagination.page);
-      } else {
-        setWebhookActionError(json.error ?? 'Replay failed.');
-      }
-    } catch (err) {
-      console.error('Replay failed:', err);
-      setWebhookActionError('Could not reach the server to replay that webhook.');
-    } finally {
-      setReplayingId(null);
-    }
-  };
-
-  const handleRecoverStaleReplay = async (eventId: string) => {
-    const confirmed = window.confirm(
-      'Only recover this claim after confirming the original replay worker has stopped. '
-      + 'Recovering it allows a new payment replay. Continue?',
-    );
-    if (!confirmed) return;
-
-    setReplayingId(eventId);
-    setWebhookActionError(null);
-    try {
-      const res = await fetch(`/api/webhooks/${eventId}/replay`, {
+      const res = await fetch(`/api/webhooks/${pendingWebhookAction.event.event_id}/replay`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'abandon_stale_claim' }),
+        ...(pendingWebhookAction.action === 'recover'
+          ? {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'abandon_stale_claim' }),
+            }
+          : {}),
       });
-      const json = await res.json();
-      if (json.success) {
-        await fetchWebhooks(whPagination.page);
-      } else {
-        setWebhookActionError(json.error ?? 'Could not recover that stale replay claim.');
-      }
-    } catch (err) {
-      console.error('Stale replay recovery failed:', err);
-      setWebhookActionError('Could not reach the server to recover that replay claim.');
+      await requireApiSuccess(
+        res,
+        pendingWebhookAction.action === 'recover'
+          ? 'Could not recover that stale replay claim. Confirm the original worker is stopped, then retry.'
+          : 'Could not replay that webhook. It has not been marked replayed.',
+      );
+      const nextWebhooks = await fetchWebhooks(whPagination.page);
+      const updatedWebhook = nextWebhooks?.find((event) => event.event_id === pendingWebhookAction.event.event_id);
+      requireReadback(
+        !!updatedWebhook && (
+          pendingWebhookAction.action === 'recover'
+            ? updatedWebhook.replay_count === 0 || updatedWebhook.result !== null
+            : updatedWebhook.replay_count > pendingWebhookAction.event.replay_count || updatedWebhook.replayed_at !== pendingWebhookAction.event.replayed_at
+        ),
+        'The webhook action was accepted, but its authoritative readback is unchanged. Keep this dialog open and reload before retrying.',
+      );
+      setPendingWebhookAction(null);
+    } catch (replayError) {
+      setWebhookActionError(replayError instanceof Error ? replayError.message : 'Could not update this webhook. Retry from this page.');
     } finally {
       setReplayingId(null);
     }
@@ -410,6 +524,18 @@ export default function DiagnosticsPage() {
         </p>
       </div>
 
+      {alertActionError && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {alertActionError}
+        </div>
+      )}
+
+      {loadError && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {loadError}
+        </div>
+      )}
+
       {/* Active Alerts Banner */}
       {!alertsLoading && alerts.length > 0 && (
         <div className="space-y-2">
@@ -432,10 +558,10 @@ export default function DiagnosticsPage() {
             return (
               <div
                 key={alert.id}
-                className={`flex items-start justify-between gap-4 rounded-lg border p-4 ${severityStyles[alert.severity]}`}
+                className={`flex flex-col items-stretch gap-4 rounded-lg border p-4 sm:flex-row sm:items-start sm:justify-between ${severityStyles[alert.severity]}`}
               >
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
                     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${severityBadge[alert.severity]}`}>
                       {alert.severity.toUpperCase()}
                     </span>
@@ -444,21 +570,27 @@ export default function DiagnosticsPage() {
                     </h4>
                   </div>
                   <p className="text-sm text-discord-text-muted">{alert.message}</p>
+                  {alertGuidanceMetric(alert.alert_type) && (
+                    <Guidance
+                      metric={alertGuidanceMetric(alert.alert_type)!}
+                      on={diag?.guidedMode !== false}
+                    />
+                  )}
                   <p className="text-xs text-discord-text-muted mt-1">
                     Since {formatDate(alert.created_at)}
                   </p>
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex flex-wrap gap-2 sm:shrink-0">
                   {!alert.acknowledged && (
                     <button
-                      onClick={() => handleAcknowledgeAlert(alert.id)}
+                      onClick={() => setPendingAlertAction({ alert, action: 'acknowledge' })}
                       className="rounded-md bg-discord-bg-secondary px-2 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary transition-colors"
                     >
                       Acknowledge
                     </button>
                   )}
                   <button
-                    onClick={() => handleResolveAlert(alert.id)}
+                    onClick={() => setPendingAlertAction({ alert, action: 'resolve' })}
                     className="rounded-md bg-discord-bg-secondary px-2 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary transition-colors"
                   >
                     Resolve
@@ -546,6 +678,7 @@ export default function DiagnosticsPage() {
               </span>
             </div>
           </div>
+          <Guidance metric="supabase" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Valkey */}
@@ -566,6 +699,7 @@ export default function DiagnosticsPage() {
               <span className="text-discord-text-secondary">{diag?.valkey.memoryMb ?? 0} MB</span>
             </div>
           </div>
+          <Guidance metric="valkey" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Lavalink */}
@@ -598,6 +732,7 @@ export default function DiagnosticsPage() {
               ))
             )}
           </div>
+          <Guidance metric="lavalink" on={diag?.guidedMode !== false} />
         </div>
 
         {/* Sync */}
@@ -643,11 +778,12 @@ export default function DiagnosticsPage() {
           </div>
         </div>
 
-        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block text-sm">
             <span className="text-discord-text-muted">Memory warning above (MB)</span>
             <input
-              type="number" min={64} max={16384}
+              key={`memory-threshold-${diag?.thresholds?.memoryRssMb ?? 512}`}
+              type="number" min={128} max={8192}
               defaultValue={diag?.thresholds?.memoryRssMb ?? 512}
               onBlur={(e) => void saveThresholds({ memory_alert_threshold_mb: Number(e.target.value) })}
               disabled={savingThresholds}
@@ -655,8 +791,21 @@ export default function DiagnosticsPage() {
             />
           </label>
           <label className="block text-sm">
+            <span className="text-discord-text-muted">Health snapshot interval (ms)</span>
+            <input
+              key={`snapshot-interval-${diag?.snapshotIntervalMs ?? 60_000}`}
+              type="number" min={15_000} max={600_000} step={1_000}
+              defaultValue={diag?.snapshotIntervalMs ?? 60_000}
+              onBlur={(e) => void saveThresholds({ diagnostics_snapshot_interval_ms: Number(e.target.value) })}
+              disabled={savingThresholds}
+              className="mt-1 w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-discord-text-primary"
+            />
+            <span className="mt-1 block text-xs text-discord-text-muted">15,000–600,000 ms</span>
+          </label>
+          <label className="block text-sm">
             <span className="text-discord-text-muted">Gateway ping warning above (ms)</span>
             <input
+              key={`ping-threshold-${diag?.thresholds?.wsPingMs ?? 500}`}
               type="number" min={50} max={10000}
               defaultValue={diag?.thresholds?.wsPingMs ?? 500}
               onBlur={(e) => void saveThresholds({ ws_ping_alert_threshold_ms: Number(e.target.value) })}
@@ -667,6 +816,7 @@ export default function DiagnosticsPage() {
           <label className="block text-sm">
             <span className="text-discord-text-muted">Webhook failure rate above (0–1)</span>
             <input
+              key={`webhook-threshold-${diag?.thresholds?.webhookErrorRate ?? 0.25}`}
               type="number" min={0} max={1} step={0.01}
               defaultValue={diag?.thresholds?.webhookErrorRate ?? 0.25}
               onBlur={(e) => void saveThresholds({ webhook_error_rate_threshold: Number(e.target.value) })}
@@ -742,6 +892,7 @@ export default function DiagnosticsPage() {
             {diag?.dlq?.pendingCount ?? 0}
           </p>
           <p className="text-sm text-discord-text-muted">DLQ Pending</p>
+          <Guidance metric="deadLetter" on={diag?.guidedMode !== false} />
         </div>
       </div>
 
@@ -752,6 +903,7 @@ export default function DiagnosticsPage() {
           <select
             value={whFilter}
             onChange={(e) => setWhFilter(e.target.value)}
+            aria-label="Filter webhook results"
             className="rounded-md bg-discord-bg-secondary px-3 py-1.5 text-sm text-discord-text-primary outline-none focus:ring-2 focus:ring-discord-accent"
           >
             <option value="">All Results</option>
@@ -763,7 +915,7 @@ export default function DiagnosticsPage() {
 
         <div className="rounded-lg bg-discord-bg-secondary overflow-hidden">
           {webhookActionError && (
-            <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
+            <div role="alert" className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
               {webhookActionError}
             </div>
           )}
@@ -809,8 +961,9 @@ export default function DiagnosticsPage() {
                     <td className="px-4 py-2 text-right">
                       {wh.result === 'error' && (
                         <button
-                          onClick={() => handleReplay(wh.event_id)}
+                          onClick={() => setPendingWebhookAction({ event: wh, action: 'replay' })}
                           disabled={replayingId === wh.event_id}
+                          aria-label={`Replay ${wh.event_type} webhook ${wh.event_id}`}
                           className="rounded-md bg-discord-accent/20 px-2 py-1 text-xs font-medium text-discord-accent hover:bg-discord-accent/30 disabled:opacity-50 transition-colors"
                         >
                           {replayingId === wh.event_id ? 'Replaying…' : 'Replay'}
@@ -818,8 +971,9 @@ export default function DiagnosticsPage() {
                       )}
                       {isRecoverableStaleReplay(wh) && (
                         <button
-                          onClick={() => handleRecoverStaleReplay(wh.event_id)}
+                          onClick={() => setPendingWebhookAction({ event: wh, action: 'recover' })}
                           disabled={replayingId === wh.event_id}
+                          aria-label={`Recover stale replay claim for ${wh.event_type} webhook ${wh.event_id}`}
                           className="rounded-md bg-amber-500/20 px-2 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/30 disabled:opacity-50 transition-colors"
                           title="Use only after confirming the original replay worker stopped"
                         >
@@ -859,6 +1013,34 @@ export default function DiagnosticsPage() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingAlertAction !== null}
+        title={pendingAlertAction?.action === 'resolve' ? 'Resolve active alert' : 'Acknowledge active alert'}
+        description={pendingAlertAction ? `${pendingAlertAction.action === 'resolve' ? 'Resolve' : 'Acknowledge'} “${pendingAlertAction.alert.title}” (alert ${pendingAlertAction.alert.id}). ${pendingAlertAction.action === 'resolve' ? 'This removes it from the active alert list as resolved.' : 'This records that an operator has seen it; the underlying condition is not repaired.'}` : undefined}
+        confirmLabel={pendingAlertAction?.action === 'resolve' ? 'Resolve alert' : 'Acknowledge alert'}
+        variant="warning"
+        loading={alertActionLoading}
+        onConfirm={handleAlertAction}
+        onCancel={() => {
+          if (!alertActionLoading) setPendingAlertAction(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingWebhookAction !== null}
+        title={pendingWebhookAction?.action === 'recover' ? 'Recover stale replay claim' : 'Replay webhook event'}
+        description={pendingWebhookAction ? pendingWebhookAction.action === 'recover'
+          ? `Recover claim for webhook ${pendingWebhookAction.event.event_id} only after confirming the original replay worker has stopped. Recovery allows a new payment replay and can repeat external side effects if the worker is still running.`
+          : `Replay webhook ${pendingWebhookAction.event.event_id}. This runs its handler again and can repeat external side effects; existing idempotency protections still apply.` : undefined}
+        confirmLabel={pendingWebhookAction?.action === 'recover' ? 'Recover replay claim' : 'Replay webhook'}
+        variant="warning"
+        loading={replayingId !== null}
+        onConfirm={handleWebhookAction}
+        onCancel={() => {
+          if (!replayingId) setPendingWebhookAction(null);
+        }}
+      />
     </div>
   );
 }

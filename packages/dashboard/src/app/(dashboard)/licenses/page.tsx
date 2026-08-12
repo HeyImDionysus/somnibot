@@ -6,8 +6,10 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { KeyRound } from 'lucide-react';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
+import { LicensingProductOverview } from '@/components/licensing/licensing-product-overview';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -212,11 +214,13 @@ export default function LicensesPage() {
   return (
     <div className="space-y-6 p-6">
       <div>
-        <h1 className="text-2xl font-bold text-discord-text-primary">License Keys</h1>
+        <h1 className="text-2xl font-bold text-discord-text-primary">Licensing</h1>
         <p className="text-sm text-discord-text-muted">
-          Look up, manage, and revoke license keys
+          Monitor Static delivery products and manage Dynamic license keys and sessions
         </p>
       </div>
+
+      <LicensingProductOverview />
 
       <section
         aria-labelledby="license-health-heading"
@@ -321,7 +325,7 @@ export default function LicensesPage() {
         <button
           onClick={lookupKey}
           disabled={searchLoading || !search.trim()}
-          className="rounded-input bg-[#FF1493] px-4 py-2 text-sm font-medium text-white hover:bg-[#FF1493]/80 transition-standard disabled:opacity-50"
+          className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white transition-standard hover:bg-discord-accent-hover disabled:opacity-50"
         >
           {searchLoading ? 'Searching…' : 'Look Up'}
         </button>
@@ -485,7 +489,7 @@ export default function LicensesPage() {
       {/* Empty state */}
       {!selectedKey && !searchError && (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
-          <div className="text-4xl mb-3">🔑</div>
+          <KeyRound size={36} aria-hidden="true" className="mx-auto mb-3 text-discord-text-muted" />
           <p className="text-discord-text-muted">
             Enter a license key or key ID above to view details and manage sessions.
           </p>

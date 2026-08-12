@@ -387,7 +387,7 @@ describe('owner setup readiness path', () => {
       paypal_plan_id: 'PLAN-123',
       product_id: 'product-123',
     }));
-    expect(notifyBot).toHaveBeenCalledWith('commerce', { product_created: 'product-123' });
+    expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
   it('keeps the owner path blocked when public callback and PayPal webhook readiness are not proven', async () => {

@@ -238,7 +238,7 @@ export default function OrdersPage() {
   );
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-0 sm:p-6">
       <div>
         <h1 className="text-2xl font-bold text-discord-text-primary">Orders</h1>
         <p className="text-sm text-discord-text-muted">View and manage customer orders</p>
@@ -268,7 +268,7 @@ export default function OrdersPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search orders…"
-          className="rounded-input bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none border border-discord-border-subtle w-64"
+          className="w-full rounded-input border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none sm:w-64"
         />
         <select
           value={filterStatus}
@@ -299,12 +299,12 @@ export default function OrdersPage() {
             return (
               <div
                 key={order.id}
-                className="flex items-center justify-between rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4"
+                className="flex flex-col items-stretch gap-3 rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between"
               >
-                <div className="flex items-center gap-4">
+                <div className="flex min-w-0 items-start gap-3 sm:items-center sm:gap-4">
                   <span className="text-lg">{sourceBadge(order.source)}</span>
-                  <div>
-                    <div className="flex items-center gap-2">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-mono font-medium text-discord-text-primary">
                         {order.order_number}
                       </span>
@@ -312,8 +312,8 @@ export default function OrdersPage() {
                         {badge.label}
                       </span>
                     </div>
-                    <div className="mt-1 flex items-center gap-3 text-xs text-discord-text-muted">
-                      <span>{order.products?.name ?? 'Unknown Product'}</span>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-discord-text-muted">
+                      <span className="break-words">{order.products?.name ?? 'Unknown Product'}</span>
                       <span>•</span>
                       <span>{order.customers?.discord_username ?? 'Unknown'}</span>
                       <span>•</span>
@@ -322,8 +322,8 @@ export default function OrdersPage() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <span className="font-semibold text-discord-text-primary">
+                <div className="flex flex-wrap items-center justify-between gap-3 sm:justify-end">
+                  <span className="whitespace-nowrap font-semibold text-discord-text-primary">
                     {formatPrice(order.amount_cents, order.currency)}
                   </span>
                   {canOfferOwnerRefund(order) && (

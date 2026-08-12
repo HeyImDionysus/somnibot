@@ -130,13 +130,13 @@ export default function AnalyticsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Analytics</h1>
           <p className="mt-1 text-sm text-discord-text-muted">Commerce, engagement, and moderation insights</p>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="flex rounded-md bg-discord-bg-tertiary p-0.5">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap rounded-md bg-discord-bg-tertiary p-0.5">
             <button
               onClick={() => setActiveTab('commerce')}
               className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${

@@ -278,8 +278,15 @@ the proxy boundary must be corrected.
 Manual fallback: start the production stack on the VPS:
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+deploy_path=/opt/somnibot
+. "$deploy_path/scripts/lib/production-compose.sh"
+production_compose up -d --build
 ```
+
+The helper always uses Compose project `somnibot-prod` and automatically includes
+the launcher-managed Funnel override when it is active. Do not replace it with a
+bare `docker compose -f` command on a shared VPS: that can select a different
+project or start bundled Caddy alongside the host's existing HTTPS edge.
 
 ## 5. PayPal Webhooks
 
@@ -326,7 +333,19 @@ Run the applicable checklist before calling an environment ready.
 - [ ] Lavalink is reachable from the bot only on the private network.
 - [ ] Valkey is reachable from bot/dashboard only on the private network.
 
-## 7. Monitoring
+## 7. Scaling limits
+
+The v1 launch cohort is capped at ten independently hosted owner installations.
+Each installation keeps its own credentials, database, and Valkey state; never
+point two owners at the same environment file or Supabase project.
+
+Keep one bot process per Discord token. Dashboard replicas are an operator
+scaling option only after they share Valkey and the same `NEXTAUTH_SECRET`,
+`CSRF_SECRET`, and `DOWNLOAD_SIGNING_SECRET`; use Supabase connection pooling
+when direct database clients become the connection bottleneck. Discord sharding
+and multi-node Valkey require their own load and recovery proof before use.
+
+## 8. Monitoring
 
 - **Dashboard health**: `GET /api/health` returns JSON. Alert on JSON
   `status: "degraded"` even though the route intentionally returns HTTP 200
@@ -338,7 +357,7 @@ Run the applicable checklist before calling an environment ready.
 - **DLQ**: Dashboard dead-letter queue for failed actions with retry/purge.
 - **Audit log**: `audit_log` table tracks admin actions and bot errors.
 
-## 8. Updating
+## 9. Updating
 
 ```bash
 git pull origin main

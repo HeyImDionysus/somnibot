@@ -494,14 +494,23 @@ describe('automod-engine', () => {
     });
 
     it('evaluates all words normally when the budget is not exceeded', async () => {
-      const rule = makeRule('word_filter', {
-        words: ['zzz\\d+', 'bad'],
-        matchMode: 'regex',
-        caseSensitive: false,
-      });
-      const msg = makeMessage('this is bad content');
-      const result = await processMessage(makeClient([rule]) as any, msg as any, modConfig);
-      expect(result).toBe(true);
+      // The branch being proved is "within the configured budget", not host
+      // scheduling. Under the coverage suite's parallel CPU load, vm context
+      // setup for the first harmless regex can consume the default wall-clock
+      // budget and make this otherwise-normal case nondeterministic.
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(0);
+      try {
+        const rule = makeRule('word_filter', {
+          words: ['zzz\\d+', 'bad'],
+          matchMode: 'regex',
+          caseSensitive: false,
+        });
+        const msg = makeMessage('this is bad content');
+        const result = await processMessage(makeClient([rule]) as any, msg as any, modConfig);
+        expect(result).toBe(true);
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
   });
 });

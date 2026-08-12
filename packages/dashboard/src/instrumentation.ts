@@ -1,3 +1,5 @@
+import type { ZodIssue } from 'zod';
+
 /**
  * Next.js Instrumentation — runs once when the server starts.
  *
@@ -38,7 +40,7 @@ export async function register() {
     if (!result.success) {
       process.env.DASHBOARD_ENV_VALID = 'false';
       const issues = result.error.issues
-        .map((i) => `  ✗ ${i.path.join('.')}: ${i.message}`)
+        .map((i: ZodIssue) => `  ✗ ${i.path.join('.')}: ${i.message}`)
         .join('\n');
 
       console.error(

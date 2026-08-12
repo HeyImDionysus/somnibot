@@ -1,11 +1,17 @@
 import {
   normalizeVpsDomain,
   normalizeRuntimeMode,
+  normalizeVpsPublicAccessMode,
   resolveRuntimeProfile,
   validateRuntimeNetworkingConfig,
   type RuntimeNetworkingConfig,
 } from './runtime-profile.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
+import {
+  SOMNIBOT_REPOSITORY_REF,
+  SOMNIBOT_REPOSITORY_URL,
+} from './vps-bootstrap.js';
+import { isImmutableRepositoryRef } from './release-source.js';
 
 export type VpsDeploymentPlanStatus = 'blocked' | 'ready';
 export const VPS_DEPLOYMENT_BUILD_TIMEOUT_MS = 45 * 60 * 1000;
@@ -15,6 +21,7 @@ export interface VpsDeploymentPlanInput extends RuntimeNetworkingConfig {
   paypalReady?: boolean;
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
+  lastGoodCommit?: string;
 }
 
 export interface VpsDeploymentEnvVar {
@@ -37,6 +44,12 @@ export interface VpsDeploymentCommand {
   commandCategory: 'env' | 'service' | 'probe' | 'rollback';
   executionTimeoutMs?: number;
   expectedHealthStatus?: 'healthy';
+  /** Main-process-only input. Never included in displays, logs, or renderer payloads. */
+  sensitiveStdin?: string;
+  /** Main-process-only binary/file input streamed over stdin. Never exposed to the renderer. */
+  sensitiveStdinFile?: string;
+  /** Main-process-only binary output destination. Contents never enter logs or renderer payloads. */
+  sensitiveStdoutFile?: string;
 }
 
 export interface VpsDeploymentApprovalGate {
@@ -52,8 +65,11 @@ export interface VpsDeploymentPlan {
   blockedReasons: string[];
   warnings: string[];
   target: {
+    publicAccessMode: 'domain' | 'tailscale-funnel';
     domain: string;
     publicBaseUrl: string;
+    repositoryUrl: string;
+    repositoryRef: string;
     sshHost: string;
     sshUser: string;
     sshTarget: string;
@@ -61,6 +77,8 @@ export interface VpsDeploymentPlan {
     envFilePath: string;
     envFilePermissions: '0600';
     composeFilePath: string;
+    composeProjectName: string;
+    composeOverrideFilePath: string | null;
   } | null;
   environment: {
     filePath: string;
@@ -96,10 +114,13 @@ const SSH_BASE_ARGS = [
   '-o',
   'ConnectTimeout=10',
   '-o',
-  'StrictHostKeyChecking=accept-new',
+  'StrictHostKeyChecking=yes',
 ] as const;
 const COMPOSE_FILE = 'docker-compose.prod.yml';
 const CADDY_FILE = 'services/caddy/Caddyfile';
+const FUNNEL_COMPOSE_OVERRIDE_FILE = '.somnibot/launcher-tailscale-funnel.compose.yml';
+const COMPOSE_PROJECT_NAME = 'somnibot-prod';
+const FUNNEL_DISABLED_CADDY_DOMAIN = 'funnel-disabled.invalid';
 
 function trim(value: string | undefined): string {
   return value?.trim() ?? '';
@@ -124,6 +145,20 @@ function hostnameFromUrl(value: string): string {
   }
 }
 
+export function buildVpsFunnelComposeOverride(): string {
+  return [
+    'services:',
+    '  dashboard:',
+    '    ports:',
+    '      - "127.0.0.1:3456:3000"',
+    '    environment:',
+    '      SOMNIBOT_TRUSTED_PROXY_HOPS: "0"',
+    '  caddy:',
+    '    profiles: ["somnibot-domain-edge"]',
+    '',
+  ].join('\n');
+}
+
 function envVar(
   name: string,
   value: string,
@@ -143,12 +178,16 @@ function hasAuthProviderSetupPath(input: Pick<VpsDeploymentPlanInput, 'supabaseA
 function buildEnvironmentVariables(
   publicBaseUrl: string,
   domain: string,
+  projectName: string,
+  publicAccessMode: 'domain' | 'tailscale-funnel',
   authProvider: Pick<VpsDeploymentPlanInput, 'supabaseAccessTokenReady' | 'supabaseDiscordAuthProviderConfigured'>,
 ): VpsDeploymentEnvVar[] {
   return [
-    envVar('DOMAIN', domain, { secret: false, required: true, source: 'derived' }),
+    envVar('DOMAIN', publicAccessMode === 'domain' ? domain : FUNNEL_DISABLED_CADDY_DOMAIN, { secret: false, required: publicAccessMode === 'domain', source: 'derived' }),
+    envVar('COMPOSE_PROJECT_NAME', projectName, { secret: false, required: true, source: 'derived' }),
     envVar('NODE_ENV', 'production', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_RUNTIME_MODE', 'vps', { secret: false, required: true, source: 'derived' }),
+    envVar('SOMNIBOT_RUNTIME_HOLDER_ID', '<SOMNIBOT_RUNTIME_HOLDER_ID>', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', publicBaseUrl, { secret: false, required: true, source: 'derived' }),
     envVar('DASHBOARD_URL', publicBaseUrl, { secret: false, required: true, source: 'derived' }),
@@ -163,6 +202,7 @@ function buildEnvironmentVariables(
     envVar('DISCORD_GUILD_ID', '<optional-discord-guild-id>', { secret: false, required: false, source: 'placeholder' }),
     envVar('SUPABASE_URL', '<SUPABASE_PROJECT_URL>', { secret: false, required: true, source: 'placeholder' }),
     envVar('SUPABASE_SECRET_KEY', '<SUPABASE_SECRET_KEY>', { secret: true, required: true, source: 'placeholder' }),
+    envVar('SUPABASE_DB_URL', '<SUPABASE_DB_URL>', { secret: true, required: true, source: 'placeholder' }),
     envVar('SUPABASE_ACCESS_TOKEN', authProvider.supabaseAccessTokenReady ? '<SUPABASE_ACCESS_TOKEN>' : '', {
       secret: true,
       required: !authProvider.supabaseDiscordAuthProviderConfigured,
@@ -232,14 +272,43 @@ function buildRemoteCommand(
   return buildCommand('ssh', [...SSH_BASE_ARGS, '--', sshTarget, remoteExecutable, ...remoteArgs], options);
 }
 
-function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: string): VpsDeploymentCommand[] {
+function buildComposeFileArgs(
+  deployPath: string,
+  projectName: string,
+  composeFilePath: string,
+  composeOverrideFilePath: string | null,
+): string[] {
+  return [
+    '--project-name',
+    projectName,
+    '--project-directory',
+    deployPath,
+    '-f',
+    composeFilePath,
+    ...(composeOverrideFilePath ? ['-f', composeOverrideFilePath] : []),
+  ];
+}
+
+function buildCommands(
+  sshTarget: string,
+  sshUser: string,
+  deployPath: string,
+  publicBaseUrl: string,
+  publicAccessMode: 'domain' | 'tailscale-funnel',
+): VpsDeploymentCommand[] {
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
+  const composeOverrideFilePath = joinPath(deployPath, FUNNEL_COMPOSE_OVERRIDE_FILE);
   const envFilePath = joinPath(deployPath, '.env');
+  const composeFileArgs = buildComposeFileArgs(
+    deployPath,
+    COMPOSE_PROJECT_NAME,
+    composeFilePath,
+    publicAccessMode === 'tailscale-funnel' ? composeOverrideFilePath : null,
+  );
   const lavalinkProbeScript = [
     'docker',
     'compose',
-    '-f',
-    composeFilePath,
+    ...composeFileArgs,
     'exec',
     '-T',
     'bot',
@@ -249,12 +318,41 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
   ].map(shellDisplayArg).join(' ');
 
   return [
-    buildRemoteCommand(sshTarget, 'test', ['-d', deployPath], {
-      id: 'enter-deploy-path',
-      label: 'Verify deployment directory',
-      changesRemote: false,
-      approvalRequired: false,
+    buildRemoteCommand(sshTarget, 'sh', [
+      '-s',
+      '--',
+      sshUser,
+    ], {
+      id: 'ensure-vps-runtime',
+      label: 'Install or verify the supported VPS Docker runtime',
+      changesRemote: true,
+      approvalRequired: true,
       commandCategory: 'service',
+      executionTimeoutMs: 15 * 60 * 1000,
+    }),
+    buildRemoteCommand(sshTarget, 'sh', [
+      '-s',
+      '--',
+      deployPath,
+      SOMNIBOT_REPOSITORY_URL,
+      SOMNIBOT_REPOSITORY_REF,
+    ], {
+      id: 'prepare-vps-checkout',
+      label: 'Provision or update the VPS checkout from the authoritative GitHub source',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+      executionTimeoutMs: 10 * 60 * 1000,
+    }),
+    buildRemoteCommand(sshTarget, 'sh', [
+      joinPath(deployPath, 'scripts/write-production-env.sh'),
+      envFilePath,
+    ], {
+      id: 'write-env-file',
+      label: 'Write protected VPS environment from saved launcher credentials',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'env',
     }),
     buildRemoteCommand(sshTarget, 'chmod', [ENV_FILE_PERMISSIONS, envFilePath], {
       id: 'protect-env-file',
@@ -263,7 +361,87 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       approvalRequired: true,
       commandCategory: 'env',
     }),
-    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
+    ...(publicAccessMode === 'tailscale-funnel' ? [buildRemoteCommand(sshTarget, 'sh', [
+      '-c',
+      'set -eu; umask 077; temp_path="$1.partial.$$"; cleanup() { rm -f -- "$temp_path"; }; trap cleanup EXIT; trap \'exit 1\' HUP INT TERM; mkdir -p -- "$(dirname -- "$1")"; cat > "$temp_path"; chmod 0600 "$temp_path"; mv -f -- "$temp_path" "$1"; trap - EXIT HUP INT TERM',
+      'sh',
+      composeOverrideFilePath,
+    ], {
+      id: 'write-funnel-compose-override',
+      label: 'Write the loopback-only Tailscale Funnel Compose override',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    })] : []),
+    buildRemoteCommand(sshTarget, 'sh', [
+      joinPath(deployPath, 'scripts/stage-handoff-valkey.sh'),
+      deployPath,
+    ], {
+      id: 'stage-local-valkey-state',
+      label: 'Transfer a protected local Valkey snapshot when switching from local runtime',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/enter-runtime-maintenance.sh'),
+      deployPath,
+      'consumers',
+    ], {
+      id: 'quiesce-vps-state-consumers',
+      label: 'Stop VPS state consumers before restoring transferred runtime state',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'docker', ['compose', ...composeFileArgs, 'up', '-d', 'valkey'], {
+      id: 'start-vps-valkey',
+      label: 'Start private VPS Valkey for state validation',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/restore-handoff-valkey.sh'),
+      deployPath,
+    ], {
+      id: 'restore-transferred-valkey',
+      label: 'Validate and restore transferred local runtime state before bot startup',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    ...(publicAccessMode === 'domain' ? [buildRemoteCommand(
+      sshTarget,
+      'rm',
+      ['-f', '--', composeOverrideFilePath],
+      {
+        id: 'remove-funnel-compose-override',
+        label: 'Remove the inactive Tailscale Funnel Compose override',
+        changesRemote: true,
+        approvalRequired: true,
+        commandCategory: 'service',
+      },
+    )] : []),
+    ...(publicAccessMode === 'tailscale-funnel' ? [buildRemoteCommand(sshTarget, 'docker', ['compose', ...composeFileArgs, 'stop', 'caddy'], {
+      id: 'stop-bundled-caddy',
+      label: 'Keep SomniBot bundled Caddy stopped for Tailscale Funnel mode',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    })] : []),
+    buildRemoteCommand(sshTarget, 'docker', [
+      'compose',
+      ...composeFileArgs,
+      'up',
+      '-d',
+      '--build',
+      ...(publicAccessMode === 'tailscale-funnel' ? ['bot', 'dashboard', 'valkey', 'lavalink'] : []),
+    ], {
       id: 'start-stack',
       label: 'Build and start production stack',
       changesRemote: true,
@@ -271,7 +449,19 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       commandCategory: 'service',
       executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
     }),
-    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'ps'], {
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/install-production-health-recovery.sh'),
+      deployPath,
+    ], {
+      id: 'install-health-recovery',
+      label: 'Install boot recovery and validated daily Valkey backups',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
+    buildRemoteCommand(sshTarget, 'docker', ['compose', ...composeFileArgs, 'ps'], {
       id: 'check-stack',
       label: 'Check container status',
       changesRemote: false,
@@ -300,10 +490,35 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       approvalRequired: false,
       commandCategory: 'probe',
     }),
+    buildRemoteCommand(sshTarget, 'sudo', [
+      '-n',
+      'sh',
+      joinPath(deployPath, 'scripts/exit-runtime-maintenance.sh'),
+      deployPath,
+    ], {
+      id: 'end-vps-maintenance',
+      label: 'Re-enable VPS self-maintenance after all startup checks pass',
+      changesRemote: true,
+      approvalRequired: true,
+      commandCategory: 'service',
+    }),
   ];
 }
 
-function buildRollback(sshTarget: string, deployPath: string, composeFilePath: string, publicBaseUrl: string): VpsDeploymentPlan['rollback'] {
+function buildRollback(
+  sshTarget: string,
+  deployPath: string,
+  composeFilePath: string,
+  publicBaseUrl: string,
+  lastGoodCommit: string,
+  composeOverrideFilePath: string | null,
+): VpsDeploymentPlan['rollback'] {
+  const composeFileArgs = buildComposeFileArgs(
+    deployPath,
+    COMPOSE_PROJECT_NAME,
+    composeFilePath,
+    composeOverrideFilePath,
+  );
   return {
     summary: 'Return the VPS checkout to a last known-good commit, rebuild containers, and verify dashboard health before calling rollback complete.',
     commands: [
@@ -314,14 +529,31 @@ function buildRollback(sshTarget: string, deployPath: string, composeFilePath: s
         approvalRequired: false,
         commandCategory: 'service',
       }),
-      buildRemoteCommand(sshTarget, 'git', ['-C', deployPath, 'checkout', '<last-good-commit>'], {
+      buildRemoteCommand(sshTarget, 'sh', [
+        joinPath(deployPath, 'scripts/restore-production-env.sh'),
+        joinPath(deployPath, '.env'),
+      ], {
+        id: 'rollback-restore-env',
+        label: 'Restore the protected pre-deployment environment',
+        changesRemote: true,
+        approvalRequired: true,
+        commandCategory: 'rollback',
+      }),
+      buildRemoteCommand(sshTarget, 'git', ['-C', deployPath, 'checkout', lastGoodCommit], {
         id: 'rollback-checkout',
         label: 'Checkout approved known-good commit',
         changesRemote: true,
         approvalRequired: true,
         commandCategory: 'service',
       }),
-      buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
+      buildRemoteCommand(sshTarget, 'docker', [
+        'compose',
+        ...composeFileArgs,
+        'up',
+        '-d',
+        '--build',
+        ...(composeOverrideFilePath ? ['bot', 'dashboard', 'valkey', 'lavalink'] : []),
+      ], {
         id: 'rollback-rebuild',
         label: 'Rebuild containers from known-good commit',
         changesRemote: true,
@@ -348,6 +580,7 @@ function buildRollback(sshTarget: string, deployPath: string, composeFilePath: s
 
 export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsDeploymentPlan {
   const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
+  const publicAccessMode = normalizeVpsPublicAccessMode(input.vpsPublicAccessMode);
   const blockedReasons: string[] = [];
   const warnings: string[] = [];
 
@@ -357,10 +590,13 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
 
   blockedReasons.push(...validateRuntimeNetworkingConfig({
     runtimeMode,
+    vpsPublicAccessMode: publicAccessMode,
     vpsDomain: input.vpsDomain,
+    vpsTailscaleFunnelUrl: input.vpsTailscaleFunnelUrl,
+    vpsTailscaleFunnelVerifiedUrl: input.vpsTailscaleFunnelVerifiedUrl,
   }));
   const normalizedDomain = normalizeVpsDomain(input.vpsDomain);
-  if (runtimeMode === 'vps' && normalizedDomain) {
+  if (runtimeMode === 'vps' && publicAccessMode === 'domain' && normalizedDomain) {
     const parsedDomain = new URL(normalizedDomain);
     if (parsedDomain.port) {
       blockedReasons.push('VPS deployment plan requires the public domain without an explicit port because Caddy owns ports 80 and 443.');
@@ -387,6 +623,14 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
     blockedReasons.push('Supabase Discord auth provider setup requires a Management API token or manual provider confirmation before VPS deployment.');
   }
 
+  if (!isImmutableRepositoryRef(SOMNIBOT_REPOSITORY_REF)) {
+    blockedReasons.push('This launcher build has no embedded approved release commit SHA; rebuild it from the exact release candidate before VPS deployment.');
+  }
+
+  if (input.lastGoodCommit !== undefined && !/^[0-9a-f]{40}$/i.test(input.lastGoodCommit)) {
+    blockedReasons.push('Rollback requires an exact 40-character hexadecimal last-good commit SHA.');
+  }
+
   if (blockedReasons.length > 0) {
     return {
       status: 'blocked',
@@ -405,15 +649,23 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
 
   const profile = resolveRuntimeProfile({
     runtimeMode: 'vps',
+    vpsPublicAccessMode: publicAccessMode,
     vpsDomain: input.vpsDomain,
+    vpsTailscaleFunnelUrl: input.vpsTailscaleFunnelUrl,
+    vpsTailscaleFunnelVerifiedUrl: input.vpsTailscaleFunnelVerifiedUrl,
   });
   const domain = hostnameFromUrl(profile.publicCallbackBaseUrl);
   const sshHost = trim(input.vpsSshHost);
   const sshUser = trim(input.vpsSshUser);
   const deployPath = trim(input.vpsDeployPath);
+  const sshTarget = `${sshUser}@${sshHost}`;
+  const projectName = COMPOSE_PROJECT_NAME;
   const envFilePath = joinPath(deployPath, '.env');
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
-  const variables = buildEnvironmentVariables(profile.publicCallbackBaseUrl, domain, input);
+  const composeOverrideFilePath = publicAccessMode === 'tailscale-funnel'
+    ? joinPath(deployPath, FUNNEL_COMPOSE_OVERRIDE_FILE)
+    : null;
+  const variables = buildEnvironmentVariables(profile.publicCallbackBaseUrl, domain, projectName, publicAccessMode, input);
 
   return {
     status: 'ready',
@@ -421,15 +673,20 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
     blockedReasons: [],
     warnings,
     target: {
+      publicAccessMode,
       domain,
       publicBaseUrl: profile.publicCallbackBaseUrl,
+      repositoryUrl: SOMNIBOT_REPOSITORY_URL,
+      repositoryRef: SOMNIBOT_REPOSITORY_REF,
       sshHost,
       sshUser,
-      sshTarget: `${sshUser}@${sshHost}`,
+      sshTarget,
       deployPath,
       envFilePath,
       envFilePermissions: ENV_FILE_PERMISSIONS,
       composeFilePath,
+      composeProjectName: projectName,
+      composeOverrideFilePath,
     },
     environment: {
       filePath: envFilePath,
@@ -441,8 +698,8 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
       {
         name: 'dashboard',
         role: 'Next.js operator dashboard and provider callback receiver',
-        exposure: 'public',
-        endpoint: 'dashboard:3000 behind Caddy',
+        exposure: publicAccessMode === 'domain' ? 'public' : 'private',
+        endpoint: publicAccessMode === 'domain' ? 'dashboard:3000 behind Caddy' : '127.0.0.1:3456 -> dashboard:3000',
       },
       {
         name: 'bot',
@@ -450,12 +707,12 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         exposure: 'private',
         endpoint: 'internal Docker network',
       },
-      {
+      ...(publicAccessMode === 'domain' ? [{
         name: 'caddy',
         role: 'Public HTTPS reverse proxy',
-        exposure: 'public',
+        exposure: 'public' as const,
         endpoint: `${domain}:80/443 -> dashboard:3000`,
-      },
+      }] : []),
       {
         name: 'lavalink',
         role: 'Private music service',
@@ -469,7 +726,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         endpoint: 'redis://:<VALKEY_PASSWORD>@valkey:6379',
       },
     ],
-    reverseProxy: {
+    reverseProxy: publicAccessMode === 'domain' ? {
       filePath: CADDY_FILE,
       publicPorts: ['80/tcp', '443/tcp'],
       upstream: 'dashboard:3000',
@@ -478,19 +735,30 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         'Caddy terminates public HTTPS and proxies requests to dashboard:3000.',
         'Valkey and Lavalink stay on the private Docker network and are never exposed publicly.',
       ],
-    },
-    commands: buildCommands(`${sshUser}@${sshHost}`, deployPath, profile.publicCallbackBaseUrl),
+    } : null,
+    commands: buildCommands(sshTarget, sshUser, deployPath, profile.publicCallbackBaseUrl, publicAccessMode),
     approvalGates: [
       {
+        id: 'ssh-host-key',
+        label: 'Verified SSH host key',
+        detail: 'Verify and pin the VPS SSH host key before any preflight or credential transfer; live commands refuse unknown or changed hosts.',
+        requiredBefore: 'Any SSH connection to the VPS.',
+      },
+      ...(publicAccessMode === 'domain' ? [{
         id: 'dns-domain',
         label: 'DNS and domain approval',
         detail: 'Confirm the public domain points at the VPS before relying on Caddy HTTPS.',
         requiredBefore: 'Public health or callback verification.',
-      },
+      }] : [{
+        id: 'tailscale-funnel',
+        label: 'Verified Tailscale Funnel edge',
+        detail: 'Confirm remote Funnel status maps the exact *.ts.net HTTPS origin to 127.0.0.1:3456; no Tailscale auth key is stored or passed by the launcher.',
+        requiredBefore: 'Deployment approval and public HTTPS health verification.',
+      }]),
       {
         id: 'env-file',
         label: 'Environment file approval',
-        detail: `Create or update ${envFilePath} with the redacted shape, then chmod ${ENV_FILE_PERMISSIONS}.`,
+        detail: `Allow the launcher to atomically back up and replace ${envFilePath} from saved credentials with mode ${ENV_FILE_PERMISSIONS}.`,
         requiredBefore: 'Starting or rebuilding containers.',
       },
       {
@@ -512,6 +780,145 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         requiredBefore: 'Any remote process change.',
       },
     ],
-    rollback: buildRollback(`${sshUser}@${sshHost}`, deployPath, composeFilePath, profile.publicCallbackBaseUrl),
+    rollback: input.lastGoodCommit
+      ? buildRollback(sshTarget, deployPath, composeFilePath, profile.publicCallbackBaseUrl, input.lastGoodCommit, composeOverrideFilePath)
+      : {
+        summary: 'Rollback requires an operator-supplied exact 40-character last-good commit before any rollback commands can be approved.',
+        commands: [],
+        notes: [
+          'No rollback command is executable until the launcher receives a validated exact commit SHA.',
+          'The protected environment must be restored before an older checkout is selected.',
+        ],
+      },
+  };
+}
+
+export function buildVpsRuntimeStopCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before failed-stack cleanup can run.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/enter-runtime-maintenance.sh'), plan.target.deployPath, 'all'],
+    {
+      id: 'quiesce-failed-stack',
+      label: 'Stop the VPS stack before transferring runtime ownership to local',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'rollback',
+    },
+  );
+}
+
+export const buildFailedVpsQuiesceCommand = buildVpsRuntimeStopCommand;
+
+export function buildVpsStateConsumersStopCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime state can be quiesced.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/enter-runtime-maintenance.sh'), plan.target.deployPath, 'consumers'],
+    {
+      id: 'quiesce-vps-state-consumers-for-local',
+      label: 'Stop VPS state consumers before exporting runtime state',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'service',
+    },
+  );
+}
+
+export function buildVpsMaintenanceExitCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime maintenance can end.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/exit-runtime-maintenance.sh'), plan.target.deployPath],
+    {
+      id: 'end-vps-maintenance',
+      label: 'Re-enable VPS self-maintenance after verified runtime recovery',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'rollback',
+    },
+  );
+}
+
+export function buildVpsRuntimeStartCommand(plan: VpsDeploymentPlan): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime recovery can run.');
+  return buildRemoteCommand(
+    plan.target.sshTarget,
+    'docker',
+    [
+      'compose',
+      ...buildComposeFileArgs(
+        plan.target.deployPath,
+        plan.target.composeProjectName,
+        plan.target.composeFilePath,
+        plan.target.composeOverrideFilePath,
+      ),
+      'start',
+    ],
+    {
+      id: 'restore-vps-stack',
+      label: 'Restore the previously stopped VPS stack after a failed local handoff',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'rollback',
+    },
+  );
+}
+
+export function buildVpsValkeyExportCommand(
+  plan: VpsDeploymentPlan,
+  sensitiveStdoutFile: string,
+): VpsDeploymentCommand {
+  if (!plan.target) throw new Error('A ready VPS target is required before runtime state can be exported.');
+  const command = buildRemoteCommand(
+    plan.target.sshTarget,
+    'sudo',
+    ['-n', 'sh', joinPath(plan.target.deployPath, 'scripts/export-handoff-valkey.sh'), plan.target.deployPath],
+    {
+      id: 'export-vps-valkey-state',
+      label: 'Create and securely transfer a validated VPS Valkey snapshot',
+      changesRemote: true,
+      approvalRequired: false,
+      commandCategory: 'service',
+    },
+  );
+  command.sensitiveStdoutFile = sensitiveStdoutFile;
+  return command;
+}
+
+export function buildVpsRollbackPlan(input: VpsDeploymentPlanInput & { lastGoodCommit: string }): VpsDeploymentPlan {
+  const basePlan = buildVpsDeploymentPlan({ ...input, lastGoodCommit: undefined });
+  if (!/^[0-9a-f]{40}$/i.test(input.lastGoodCommit)) {
+    return {
+      ...basePlan,
+      status: 'blocked',
+      canApprove: false,
+      blockedReasons: [...basePlan.blockedReasons, 'Rollback requires an exact 40-character hexadecimal last-good commit SHA.'],
+      target: null,
+      environment: null,
+      serviceLayout: [],
+      reverseProxy: null,
+      commands: [],
+      approvalGates: [],
+      rollback: null,
+    };
+  }
+
+  const plan = buildVpsDeploymentPlan(input);
+  if (plan.status !== 'ready' || !plan.rollback) {
+    return plan;
+  }
+
+  return {
+    ...plan,
+    environment: null,
+    serviceLayout: [],
+    reverseProxy: null,
+    commands: plan.rollback.commands,
+    approvalGates: [],
+    rollback: null,
   };
 }

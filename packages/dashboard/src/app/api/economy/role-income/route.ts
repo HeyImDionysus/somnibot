@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
       return dbError(error, 'economy/role-income');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,
@@ -106,7 +106,7 @@ export async function DELETE(request: NextRequest) {
       return dbError(error, 'economy/role-income');
     }
 
-    await notifyBot('economy');
+    await notifyBot(ctx.guildId, 'economy');
 
     await recordCrudChange({
       guildId: ctx.guildId,

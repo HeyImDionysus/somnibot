@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 
 import { getPayPalRuntimeConfig, getPayPalToken, type PayPalRuntimeConfig } from '@/lib/paypal';
+import { applyPayPalPolicyEnvironment, loadPayPalPolicy } from '@/lib/paypal-policy';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError, apiServerError } from '@/lib/api/response';
@@ -35,6 +36,19 @@ import {
   requiresLicenseConfig,
 } from '@/lib/api/license-delivery-rail';
 import { validateAssignableDiscordTargets } from '@/lib/api/live-discord-facts';
+import {
+  defaultStoreProductFacets,
+  evaluateStoreProductPolicy,
+  storeProductFacetsSchema,
+  validateStoreProductChoice,
+  type StoreProductPolicy,
+} from '@/lib/store/store-product-policy';
+import {
+  metadataWithPlanRecovery,
+  readPlanRecovery,
+  type CommercePlanRecovery,
+} from '@/lib/store/commerce-plan-recovery';
+import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
 
 // ── PayPal Helpers ─────────────────────────────────────
 
@@ -45,11 +59,24 @@ type PayPalSyncResult =
 interface PreparedPlan {
   id: string;
   name: string;
-  intervalUnit: string;
+  intervalUnit: 'DAY' | 'WEEK' | 'MONTH' | 'YEAR';
   intervalCount: number;
   priceCents: number;
+  trialDays: number;
+  active: boolean;
   paypalPlanId: string | null;
 }
+
+type PayPalPlanCreation = {
+  readonly paypalProductId: string;
+  readonly name: string;
+  readonly priceCents: number;
+  readonly currency: string;
+  readonly intervalUnit: 'DAY' | 'WEEK' | 'MONTH' | 'YEAR';
+  readonly intervalCount: number;
+  readonly trialDays: number;
+  readonly active: boolean;
+};
 
 function commerceWriteError(error: { message: string; code?: string }) {
   if (isCommerceIncomeWallConflictError(error)) {
@@ -123,6 +150,25 @@ function paypalReadinessError(config: PayPalRuntimeConfig, target: 'paid product
   return `PayPal is not ready. Configure PayPal ${missing.join(', ')} before creating ${target}.`;
 }
 
+async function loadStoreProductPolicy(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+): Promise<StoreProductPolicy | NextResponse> {
+  const { data, error } = await supabase
+    .from('guild_config')
+    .select('product_types_enabled')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  if (error) return dbError(error, 'store/products/policy');
+  if (!data) return evaluateStoreProductPolicy(defaultStoreProductFacets);
+  const parsedFacets = storeProductFacetsSchema.safeParse(data.product_types_enabled);
+  if (!parsedFacets.success) {
+    return apiServerError(new Error('stored Storefront product policy is invalid'), 'store/products/policy');
+  }
+  const facets = parsedFacets.data;
+  return evaluateStoreProductPolicy(facets);
+}
+
 /**
  * Create a PayPal Catalog Product.
  * Returns the PayPal product ID.
@@ -131,8 +177,8 @@ async function createPayPalCatalogProduct(
   name: string,
   description: string | null,
   type: 'one_time' | 'subscription',
+  paypalConfig: PayPalRuntimeConfig,
 ): Promise<PayPalSyncResult> {
-  const paypalConfig = await getPayPalRuntimeConfig();
   const readinessError = paypalReadinessError(paypalConfig, 'paid products');
   if (readinessError) {
     return { ok: false, error: readinessError };
@@ -193,14 +239,9 @@ async function createPayPalCatalogProduct(
  * Create a PayPal Billing Plan for a subscription product.
  */
 async function createPayPalBillingPlan(
-  paypalProductId: string,
-  planName: string,
-  priceCents: number,
-  currency: string,
-  intervalUnit: string,
-  intervalCount: number,
+  input: PayPalPlanCreation,
+  paypalConfig: PayPalRuntimeConfig,
 ): Promise<PayPalSyncResult> {
-  const paypalConfig = await getPayPalRuntimeConfig();
   const readinessError = paypalReadinessError(paypalConfig, 'subscription plans');
   if (readinessError) {
     return { ok: false, error: readinessError };
@@ -223,22 +264,31 @@ async function createPayPalBillingPlan(
         'PayPal-Request-Id': `plan-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
       },
       body: JSON.stringify({
-        product_id: paypalProductId,
-        name: planName.slice(0, 127),
-        status: 'ACTIVE',
+        product_id: input.paypalProductId,
+        name: input.name.slice(0, 127),
+        status: input.active ? 'ACTIVE' : 'INACTIVE',
         billing_cycles: [
+          ...(input.trialDays > 0 ? [{
+            frequency: { interval_unit: 'DAY', interval_count: 1 },
+            tenure_type: 'TRIAL',
+            sequence: 1,
+            total_cycles: input.trialDays,
+            pricing_scheme: {
+              fixed_price: { value: '0.00', currency_code: input.currency.toUpperCase() },
+            },
+          }] : []),
           {
             frequency: {
-              interval_unit: intervalUnit.toUpperCase(), // DAY, WEEK, MONTH, YEAR
-              interval_count: intervalCount,
+              interval_unit: input.intervalUnit.toUpperCase(), // DAY, WEEK, MONTH, YEAR
+              interval_count: input.intervalCount,
             },
             tenure_type: 'REGULAR',
-            sequence: 1,
+            sequence: input.trialDays > 0 ? 2 : 1,
             total_cycles: 0, // Infinite
             pricing_scheme: {
               fixed_price: {
-                value: (priceCents / 100).toFixed(2),
-                currency_code: currency.toUpperCase(),
+                value: (input.priceCents / 100).toFixed(2),
+                currency_code: input.currency.toUpperCase(),
               },
             },
           },
@@ -334,12 +384,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const storePolicy = await loadStoreProductPolicy(supabase, guildId);
+  if (storePolicy instanceof NextResponse) return storePolicy;
+  const productChoice = validateStoreProductChoice(storePolicy, {
+    type,
+    deliveryType: delivery_type,
+    grantedRoleIds: granted_role_ids ?? [],
+    grantedChannelIds: granted_channel_ids ?? [],
+  });
+  if (!productChoice.ok) return apiError(productChoice.error, 409);
+
   const normalizedPlanDefs = (type === 'subscription' ? (planDefs ?? []) : []).map(
     (planDef) => ({
       name: planDef.name,
       intervalUnit: planDef.interval_unit ?? 'MONTH',
       intervalCount: planDef.interval_count ?? 1,
       priceCents: planDef.price_cents ?? price_cents,
+      trialDays: planDef.trial_days ?? 0,
+      active: planDef.active ?? true,
     }),
   );
   const hasPaidSubscriptionPlan = type === 'subscription'
@@ -352,6 +414,8 @@ export async function POST(req: NextRequest) {
       intervalUnit: 'MONTH',
       intervalCount: 1,
       priceCents: price_cents,
+      trialDays: 0,
+      active: true,
     });
   }
 
@@ -367,6 +431,8 @@ export async function POST(req: NextRequest) {
       intervalUnit: planDef.intervalUnit,
       intervalCount: planDef.intervalCount,
       priceCents: planDef.priceCents,
+      trialDays: planDef.trialDays,
+      active: planDef.active,
       paypalPlanId: requiresPayPal ? `pending-paypal-plan:${id}` : null,
     };
   });
@@ -381,7 +447,7 @@ export async function POST(req: NextRequest) {
       },
       preparedPlans.map<PlanWallFields>((plan) => ({
         id: plan.id,
-        active: true,
+        active: plan.active,
         price_cents: plan.priceCents,
         paypal_plan_id: plan.paypalPlanId,
       })),
@@ -414,11 +480,16 @@ export async function POST(req: NextRequest) {
   }
 
   let paypalProductId: string | null = null;
+  let tenantPayPalConfig: PayPalRuntimeConfig | null = null;
   if (requiresPayPal) {
+    const runtimeConfig = await getPayPalRuntimeConfig();
+    const paypalPolicy = await loadPayPalPolicy(supabase, guildId);
+    tenantPayPalConfig = applyPayPalPolicyEnvironment(runtimeConfig, paypalPolicy.environment);
     const paypalProduct = await createPayPalCatalogProduct(
       name,
       description ?? null,
       type === 'subscription' ? 'subscription' : 'one_time',
+      tenantPayPalConfig,
     );
     if (!paypalProduct.ok) {
       return paypalNotReadyResponse(paypalProduct.error);
@@ -426,16 +497,18 @@ export async function POST(req: NextRequest) {
     paypalProductId = paypalProduct.id;
   }
 
-  if (type === 'subscription' && requiresPayPal && paypalProductId) {
+  if (type === 'subscription' && requiresPayPal && paypalProductId && tenantPayPalConfig) {
     for (const plan of preparedPlans) {
-      const paypalPlan = await createPayPalBillingPlan(
+      const paypalPlan = await createPayPalBillingPlan({
         paypalProductId,
-        plan.name,
-        plan.priceCents,
-        currency ?? 'USD',
-        plan.intervalUnit,
-        plan.intervalCount,
-      );
+        name: plan.name,
+        priceCents: plan.priceCents,
+        currency: currency ?? 'USD',
+        intervalUnit: plan.intervalUnit,
+        intervalCount: plan.intervalCount,
+        trialDays: plan.trialDays,
+        active: plan.active,
+      }, tenantPayPalConfig);
       if (!paypalPlan.ok) {
         return paypalNotReadyResponse(paypalPlan.error);
       }
@@ -477,7 +550,18 @@ export async function POST(req: NextRequest) {
   // actually held for THIS product before reporting the product as created.
   if (requiresLicenseConfig(delivery_type)) {
     const rail = await ensureLicenseDeliveryConfigOrDisable(supabase, guildId, data.id);
-    if (!rail.ok) return apiError(rail.message, 500);
+    if (!rail.ok) {
+      return NextResponse.json({
+        success: false,
+        code: 'PRODUCT_CREATED_LICENSE_POLICY_FAILED',
+        error: rail.message,
+        data: {
+          id: data.id,
+          name: data.name,
+          paypal_product_id: data.paypal_product_id,
+        },
+      }, { status: 500 });
+    }
   }
 
   // Persist the exact local IDs and PayPal-backed plan set evaluated above.
@@ -497,13 +581,74 @@ export async function POST(req: NextRequest) {
           interval_count: planDef.intervalCount,
           price_cents: planDef.priceCents,
           currency: currency ?? 'USD',
-          active: true,
+          trial_days: planDef.trialDays,
+          active: planDef.active,
         })
         .select('id')
         .single();
 
       if (planError) {
-        return commerceWriteError(planError);
+        const base = commerceWriteError(planError);
+        if (!planDef.paypalPlanId || !tenantPayPalConfig) {
+          return apiServerError(new Error('plan recovery identity was missing'), 'store/products');
+        }
+        const recovery: CommercePlanRecovery = {
+          id: planDef.id,
+          product_id: data.id,
+          product_active: active ?? true,
+          name: planDef.name,
+          paypal_plan_id: planDef.paypalPlanId,
+          interval_unit: planDef.intervalUnit,
+          interval_count: planDef.intervalCount,
+          price_cents: planDef.priceCents,
+          currency: currency ?? 'USD',
+          trial_days: planDef.trialDays,
+          active: planDef.active,
+        };
+        const recoveryMetadata = metadataWithPlanRecovery(data.metadata ?? metadata, recovery);
+        const { data: disabledProduct, error: deactivateError } = await supabase
+          .from('products')
+          .update({
+            active: false,
+            metadata: recoveryMetadata,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', data.id)
+          .eq('guild_id', guildId)
+          .select('id, active, metadata')
+          .single();
+        const savedRecovery = readPlanRecovery(disabledProduct?.metadata);
+        if (
+          deactivateError
+          || !disabledProduct
+          || disabledProduct.active !== false
+          || savedRecovery?.id !== recovery.id
+        ) {
+          return apiServerError(
+            new Error('plan persistence and durable product compensation both failed'),
+            'store/products',
+          );
+        }
+        const providerCompensation = await ensurePayPalPlanState(
+          tenantPayPalConfig,
+          planDef.paypalPlanId,
+          false,
+        );
+        return NextResponse.json({
+          success: false,
+          code: providerCompensation.ok
+            ? 'PRODUCT_CREATED_PLAN_SAVE_FAILED'
+            : 'PRODUCT_CREATED_PLAN_COMPENSATION_FAILED',
+          error: providerCompensation.ok
+            ? 'The product and PayPal plan were made inactive after local plan persistence failed. Retry to reconcile and verify both systems.'
+            : `${providerCompensation.error} The local product is inactive and its saved recovery contract remains available for retry.`,
+          data: {
+            id: data.id,
+            name: data.name,
+            paypal_product_id: data.paypal_product_id,
+            recovery_plan: recovery,
+          },
+        }, { status: base.status });
       }
       if (!plan || !planDef.paypalPlanId) {
         return apiServerError(new Error('plan insert returned no row'), 'store/products');
@@ -520,7 +665,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   // Notify bot about new product
-  await notifyBot('commerce', { product_created: data.id });
+  await notifyBot(guildId, 'commerce', { product_created: data.id });
 
   // Recorded only now: the product row, its PayPal catalog entry and every
   // plan are already committed, so this describes something that really exists.
@@ -578,16 +723,28 @@ export async function PUT(req: NextRequest) {
   if (
     'granted_role_ids' in updates
     || 'granted_channel_ids' in updates
+    || 'delivery_type' in updates
+    || 'type' in updates
     || updates.active === true
   ) {
     const { data: currentTargets, error: currentTargetsError } = await supabase
       .from('products')
-      .select('granted_role_ids, granted_channel_ids, active')
+      .select('type, delivery_type, granted_role_ids, granted_channel_ids, active')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
     if (currentTargetsError) return dbError(currentTargetsError, 'store/products/live-targets');
     if (!currentTargets) return apiError('Product not found for this guild', 404);
+
+    const storePolicy = await loadStoreProductPolicy(supabase, guildId);
+    if (storePolicy instanceof NextResponse) return storePolicy;
+    const productChoice = validateStoreProductChoice(storePolicy, {
+      type: updates.type ?? currentTargets.type,
+      deliveryType: updates.delivery_type ?? currentTargets.delivery_type,
+      grantedRoleIds: updates.granted_role_ids ?? currentTargets.granted_role_ids ?? [],
+      grantedChannelIds: updates.granted_channel_ids ?? currentTargets.granted_channel_ids ?? [],
+    });
+    if (!productChoice.ok) return apiError(productChoice.error, 409);
 
     // Drafts stay editable while the bot is offline or Discord permissions
     // are unfinished; the gate that matters is ACTIVATION. Validate whenever
@@ -701,7 +858,7 @@ export async function PUT(req: NextRequest) {
   }
 
   // Notify bot so it hot-reloads product changes
-  await notifyBot('commerce', { product_updated: id });
+  await notifyBot(guildId, 'commerce', { product_updated: id });
 
   await recordCrudChange(
     {
@@ -777,7 +934,7 @@ export async function DELETE(req: NextRequest) {
   }
 
   // Notify bot so deactivated product is no longer purchasable
-  await notifyBot('commerce', { product_deactivated: id });
+  await notifyBot(guildId, 'commerce', { product_deactivated: id });
 
   // This is an UPDATE, not a delete — the row still exists with active=false,
   // so restoring the prior flag is a real reversal, not a resurrection.

@@ -2,6 +2,7 @@
  * Tests for ../features/temp-channels/temp-channel-manager.js — instantiation and lifecycle.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -371,7 +372,7 @@ describe('TempChannelManager', () => {
     expect(member.voice.setChannel).toHaveBeenCalledWith(replacement);
   });
 
-  it('adopts a stale-claim Discord survivor before considering a new room', async () => {
+  it('adopts the durable-id stale-claim Discord survivor before considering a new room', async () => {
     const guild = makeGuild();
     const survivor = {
       id: 'survivor-room',
@@ -425,6 +426,7 @@ describe('TempChannelManager', () => {
         ownerId: 'user-1',
         channelName: 'Tester room',
         pairedTextName: 'Tester room-chat',
+        createdChannelIds: ['survivor-room'],
       },
       last_error: null,
       claimed_at: '2026-07-30T00:00:00.000Z',
@@ -439,6 +441,75 @@ describe('TempChannelManager', () => {
       owner_id: 'user-1',
       text_channel_id: null,
     });
+  });
+
+  it('leaves same-name user voice and text channels untouched when the stale claim has no durable ids', async () => {
+    const guild = makeGuild();
+    const userVoice = {
+      id: 'user-voice',
+      type: 2,
+      name: 'Tester room',
+      parentId: 'category-1',
+      createdTimestamp: Date.parse('2026-07-30T00:00:01.000Z'),
+      delete: vi.fn().mockResolvedValue(undefined),
+      permissionOverwrites: {
+        cache: new Map([['user-1', { allow: { has: () => true } }]]),
+      },
+    };
+    const userText = {
+      id: 'user-text',
+      type: 0,
+      name: 'Tester room-chat',
+      parentId: 'category-1',
+      createdTimestamp: Date.parse('2026-07-30T00:00:01.000Z'),
+      delete: vi.fn().mockResolvedValue(undefined),
+      permissionOverwrites: {
+        cache: new Map([
+          ['user-1', { allow: { has: () => true } }],
+          ['guild-1', { deny: { has: () => true } }],
+        ]),
+      },
+    };
+    guild.channels.cache.set(userVoice.id, userVoice);
+    guild.channels.cache.set(userText.id, userText);
+    const supabase = makeSupa();
+    const manager = new TempChannelManager(guild, supabase as unknown as SupabaseClient);
+    const member = {
+      id: 'user-1',
+      voice: { setChannel: vi.fn().mockResolvedValue(undefined) },
+    };
+
+    const outcome = await Reflect.get(manager, 'recoverStaleCreationClaim').call(manager, {
+      id: 'occurrence-1',
+      guild_id: 'guild-1',
+      operation_kind: 'temp_channel',
+      occurrence_key: 'join-1',
+      status: 'claimed',
+      resource_id: null,
+      result: {
+        recoveryKind: 'temp_channel_create',
+        hubId: 'hub-1',
+        hubChannelId: 'hub-voice',
+        categoryId: 'category-1',
+        ownerId: 'user-1',
+        channelName: 'Tester room',
+        pairedTextName: 'Tester room-chat',
+      },
+      last_error: null,
+      claimed_at: '2026-07-30T00:00:00.000Z',
+      updated_at: '2026-07-30T00:00:00.000Z',
+    }, member, {
+      id: 'hub-1',
+      hub_channel_id: 'hub-voice',
+      category_id: 'category-1',
+    });
+
+    expect(outcome).toBe('blocked');
+    expect(userVoice.delete).not.toHaveBeenCalled();
+    expect(userText.delete).not.toHaveBeenCalled();
+    expect(member.voice.setChannel).not.toHaveBeenCalled();
+    expect(supabase.from).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalled();
   });
 
   it('renews a stale claim only after a fresh Discord snapshot proves no survivor', async () => {
@@ -462,6 +533,7 @@ describe('TempChannelManager', () => {
         ownerId: 'user-1',
         channelName: 'Tester room',
         pairedTextName: null,
+        createdChannelIds: ['missing-room'],
       },
       last_error: null,
       claimed_at: '2026-07-30T00:00:00.000Z',

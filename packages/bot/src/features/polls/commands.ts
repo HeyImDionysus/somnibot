@@ -85,7 +85,7 @@ export async function handlePollCommand(
   if (sub === 'create') {
     const title = interaction.options.getString('title')!;
     const optionsStr = interaction.options.getString('options')!;
-    const multiple = interaction.options.getBoolean('multiple') ?? false;
+    const multiple = interaction.options.getBoolean('multiple') ?? undefined;
     const options = optionsStr.split(',').map((o) => o.trim()).filter(Boolean);
     await manager.createPoll(interaction, title, options, multiple);
   } else if (sub === 'close') {

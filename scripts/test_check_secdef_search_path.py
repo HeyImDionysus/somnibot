@@ -309,6 +309,29 @@ AS $$ BEGIN DELETE FROM widgets WHERE id = 1; END; $$;
         )
         self.assertEqual([x.symbol for x in v], ["raw_events"])
 
+    def test_plpgsql_keywords_and_distinct_from_operands_are_not_tables(self):
+        # The advisory scanner must not mistake PL/pgSQL control-flow / row-lock
+        # keywords, or the value operand of IS DISTINCT FROM, for relation names.
+        v = self._one(
+            "  IF p_value IS NOT DISTINCT FROM v_expected THEN\n"
+            "    NULL;\n"
+            "  END IF;\n"
+            "  SELECT id INTO p_value FROM public.widgets FOR UPDATE NOWAIT;\n"
+            "  FOR p_row IN SELECT id FROM public.widgets FOR UPDATE LOOP\n"
+            "    NULL;\n"
+            "  END LOOP;"
+        )
+        self.assertEqual(v, [])
+
+    def test_materialized_cte_names_are_not_flagged(self):
+        v = self._one(
+            "  WITH first_cte AS MATERIALIZED ("
+            "SELECT id FROM public.widgets), "
+            "second_cte AS NOT MATERIALIZED (SELECT id FROM first_cte) "
+            "SELECT id FROM second_cte;"
+        )
+        self.assertEqual(v, [])
+
 
 class TestSignatureParsing(unittest.TestCase):
     def test_overloads_are_distinct_effective_defs(self):

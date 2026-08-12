@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -33,6 +33,7 @@ export type TailscaleReadinessState =
   | 'ready'
   | 'not-installed'
   | 'not-logged-in'
+  | 'needs-permission'
   | 'not-configured'
   | 'needs-dashboard'
   | 'needs-policy'
@@ -45,6 +46,17 @@ export interface TailscaleStatusInfo {
   dnsName: string;
   hostName: string;
   user: string;
+}
+
+export interface TailscaleProfileStatus {
+  profileCount: number;
+  hasSelectedProfile: boolean;
+}
+
+type NetworkInterfaceSnapshot = Record<string, Array<{ internal: boolean }> | undefined>;
+
+export interface TailscaleReadinessOptions {
+  interfaces?: NetworkInterfaceSnapshot;
 }
 
 export interface FunnelStatusInfo {
@@ -103,6 +115,28 @@ export function redactTailscaleOutput(value: string): string {
     .replace(/(Authorization:\s*Bearer\s+)[^\s]+/gi, '$1[redacted]');
 }
 
+export function isTailscalePermissionError(error: unknown): boolean {
+  const candidate = error as Partial<TailscaleCommandError> & { cause?: unknown };
+  const text = [candidate?.message, candidate?.stderr, candidate?.stdout, String(candidate?.cause ?? '')]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+
+  return candidate?.code === 'EACCES'
+    || candidate?.code === 'EPERM'
+    || text.includes('access is denied')
+    || text.includes('permission denied')
+    || text.includes('protectedprefix\\administrators\\tailscale')
+    || text.includes('protectedprefix/administrators/tailscale');
+}
+
+export function tailscaleBinaryCandidates(platform = process.platform): string[] {
+  if (platform === 'win32') {
+    return ['tailscale', 'C:\\Program Files\\Tailscale\\tailscale.exe'];
+  }
+  return ['tailscale'];
+}
+
 export function buildEnableFunnelArgs(
   target = SOMNIBOT_FUNNEL_TARGET,
   httpsPort = TAILSCALE_FUNNEL_HTTPS_PORT,
@@ -122,6 +156,10 @@ export function buildStatusArgs(): string[] {
   return ['status', '--json'];
 }
 
+export function buildProfileListArgs(): string[] {
+  return ['switch', '--list', '--json'];
+}
+
 export function buildVersionArgs(): string[] {
   return ['version'];
 }
@@ -131,29 +169,37 @@ export function buildLoginWithAuthKeyArgs(authKeyFilePath: string): string[] {
 }
 
 export const defaultTailscaleRunner: TailscaleRunner = async (args, options = {}) => {
-  try {
-    const result = await execFileAsync('tailscale', args, {
-      timeout: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-      windowsHide: true,
-      maxBuffer: 1024 * 1024,
-    });
+  let lastMissingError: TailscaleCommandError | null = null;
 
-    return {
-      stdout: redactTailscaleOutput(result.stdout),
-      stderr: redactTailscaleOutput(result.stderr),
-    };
-  } catch (err) {
-    const error = err as NodeJS.ErrnoException & {
-      stdout?: string;
-      stderr?: string;
-    };
+  for (const binary of tailscaleBinaryCandidates()) {
+    try {
+      const result = await execFileAsync(binary, args, {
+        timeout: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      });
 
-    throw new TailscaleCommandError(error.message || 'Tailscale command failed.', {
-      code: error.code,
-      stdout: error.stdout,
-      stderr: error.stderr,
-    });
+      return {
+        stdout: redactTailscaleOutput(result.stdout),
+        stderr: redactTailscaleOutput(result.stderr),
+      };
+    } catch (err) {
+      const error = err as NodeJS.ErrnoException & {
+        stdout?: string;
+        stderr?: string;
+      };
+      const commandError = new TailscaleCommandError(error.message || 'Tailscale command failed.', {
+        code: error.code,
+        stdout: error.stdout,
+        stderr: error.stderr,
+      });
+
+      if (error.code !== 'ENOENT') throw commandError;
+      lastMissingError = commandError;
+    }
   }
+
+  throw lastMissingError ?? new TailscaleCommandError('Tailscale CLI was not found.', { code: 'ENOENT' });
 };
 
 function parseJson(value: string): unknown | null {
@@ -194,6 +240,23 @@ export function parseTailscaleStatusJson(stdout: string): TailscaleStatusInfo {
   };
 }
 
+export function parseTailscaleProfilesJson(stdout: string): TailscaleProfileStatus {
+  const parsed = parseJson(stdout);
+  const profiles = Array.isArray(parsed) ? parsed : [];
+
+  return {
+    profileCount: profiles.length,
+    hasSelectedProfile: profiles.some(profile => objectValue(profile).selected === true),
+  };
+}
+
+export function hasActiveTailscaleInterface(
+  interfaces: NetworkInterfaceSnapshot = networkInterfaces(),
+): boolean {
+  return Object.entries(interfaces).some(([name, entries]) =>
+    /tailscale/i.test(name) && Boolean(entries?.some(entry => !entry.internal)));
+}
+
 interface TsNetEndpoint {
   host: string;
   port: number;
@@ -216,7 +279,11 @@ function extractTsNetEndpoint(value: string): TsNetEndpoint | null {
 }
 
 function extractDashboardTarget(value: string): string {
-  const targetMatch = value.match(/https?:\/\/(?:127\.0\.0\.1|localhost):3456(?:\/[^\s|"'\\]*)?/i);
+  // Funnel state persists across runtime modes: Regular local uses 3456,
+  // while the VPS/standalone dashboard uses 3000. Recognize either supported
+  // loopback target so an existing Funnel is not reported as disabled merely
+  // because the other mode was used last.
+  const targetMatch = value.match(/https?:\/\/(?:127\.0\.0\.1|localhost):(?:3000|3456)(?:\/[^\s|"'\\]*)?/i);
   return targetMatch?.[0] ?? '';
 }
 
@@ -311,6 +378,10 @@ export async function getFunnelStatus(runner: TailscaleRunner = defaultTailscale
   return parseFunnelStatusText(`${result.stdout}\n${result.stderr}`);
 }
 
+function funnelTargetsCurrentRuntime(target: string): boolean {
+  return normalizeBaseUrl(target) === normalizeBaseUrl(SOMNIBOT_FUNNEL_TARGET);
+}
+
 function platformWarningMessage(): string {
   if (process.platform === 'darwin') {
     return 'Tailscale Funnel on macOS requires a Tailscale app variant that exposes the CLI Funnel feature.';
@@ -352,6 +423,7 @@ function readinessBase(overrides: Partial<TailscaleReadiness>): TailscaleReadine
 
 export async function getTailscaleReadiness(
   runner: TailscaleRunner = defaultTailscaleRunner,
+  options: TailscaleReadinessOptions = {},
 ): Promise<TailscaleReadiness> {
   const platformWarning = platformWarningMessage();
 
@@ -383,6 +455,16 @@ export async function getTailscaleReadiness(
     status = parseTailscaleStatusJson(statusResult.stdout);
   } catch (err) {
     const error = err as TailscaleCommandError;
+    if (isTailscalePermissionError(error)) {
+      return readinessBase({
+        state: 'needs-permission',
+        installed: true,
+        version,
+        commandPreview: [],
+        message: 'Tailscale is running, but SomniBot cannot read its status with the current Windows permissions.',
+        detail: 'Windows denied access to the Tailscale service. Restart SomniBot with the required permission, then check again.',
+      });
+    }
     return readinessBase({
       state: 'error',
       installed: true,
@@ -393,6 +475,48 @@ export async function getTailscaleReadiness(
   }
 
   if (!status.loggedIn) {
+    if (status.backendState !== 'NeedsLogin') {
+      try {
+        const profileResult = await runner(buildProfileListArgs(), { timeoutMs: 8_000 });
+        const profiles = parseTailscaleProfilesJson(profileResult.stdout);
+        if (profiles.hasSelectedProfile) {
+          if (hasActiveTailscaleInterface(options.interfaces)) {
+            return readinessBase({
+              state: 'not-configured',
+              installed: true,
+              loggedIn: true,
+              version,
+              status,
+              message: 'Tailscale is signed in and connected. Funnel is not configured for SomniBot yet.',
+              detail: 'The selected Tailscale profile and active Tailscale network adapter confirm this device is connected.',
+            });
+          }
+
+          return readinessBase({
+            state: 'error',
+            installed: true,
+            loggedIn: true,
+            version,
+            status,
+            commandPreview: [],
+            message: 'Tailscale is signed in, but its network adapter is not active.',
+            detail: 'Open Tailscale and connect this device, then check again.',
+          });
+        }
+      } catch (err) {
+        if (isTailscalePermissionError(err)) {
+          return readinessBase({
+            state: 'needs-permission',
+            installed: true,
+            version,
+            commandPreview: [],
+            message: 'Tailscale is running, but SomniBot cannot read its account profile with the current Windows permissions.',
+            detail: 'Windows denied access to the Tailscale service. Restart SomniBot with the required permission, then check again.',
+          });
+        }
+      }
+    }
+
     return readinessBase({
       state: 'not-logged-in',
       installed: true,
@@ -405,7 +529,10 @@ export async function getTailscaleReadiness(
 
   try {
     const funnel = await getFunnelStatus(runner);
-    if (!funnel.enabled) {
+    if (!funnel.enabled || !funnelTargetsCurrentRuntime(funnel.target)) {
+      const targetMismatch = funnel.enabled && funnel.target
+        ? `Funnel currently proxies ${funnel.target}, but regular-local SomniBot requires ${SOMNIBOT_FUNNEL_TARGET}.`
+        : undefined;
       return readinessBase({
         state: 'not-configured',
         installed: true,
@@ -413,8 +540,10 @@ export async function getTailscaleReadiness(
         version,
         status,
         funnel,
-        message: 'Tailscale is signed in. Funnel is not enabled for SomniBot yet.',
-        detail: platformWarning,
+        message: targetMismatch
+          ? 'Tailscale Funnel is enabled for a different dashboard target.'
+          : 'Tailscale is signed in. Funnel is not enabled for SomniBot yet.',
+        detail: targetMismatch || platformWarning,
       });
     }
 
@@ -433,6 +562,18 @@ export async function getTailscaleReadiness(
   } catch (err) {
     const error = err as TailscaleCommandError;
     const text = `${error.stderr}\n${error.stdout}\n${error.message}`.toLowerCase();
+    if (isTailscalePermissionError(error)) {
+      return readinessBase({
+        state: 'needs-permission',
+        installed: true,
+        loggedIn: true,
+        version,
+        status,
+        commandPreview: [],
+        message: 'Tailscale is signed in, but SomniBot cannot read Funnel status with the current Windows permissions.',
+        detail: 'Windows denied access to the Tailscale service. Restart SomniBot with the required permission, then check again.',
+      });
+    }
     if (isUnsupportedFunnelText(text)) {
       return readinessBase({
         state: 'unsupported-platform',
@@ -503,6 +644,16 @@ export async function loginWithTailscaleAuthKey(
       });
     }
 
+    if (isTailscalePermissionError(error)) {
+      return readinessBase({
+        state: 'needs-permission',
+        installed: true,
+        commandPreview: [],
+        message: 'Tailscale is installed, but SomniBot cannot sign in with the current Windows permissions.',
+        detail: 'Windows denied access to the Tailscale service. Restart SomniBot with the required permission, then try again.',
+      });
+    }
+
     if (text.includes('permission') || text.includes('policy') || text.includes('attribute')) {
       return readinessBase({
         state: 'needs-policy',
@@ -534,7 +685,10 @@ export async function enableSomniBotFunnel(
   const authKey = options.authKey?.trim() ?? '';
   if (authKey) {
     const readiness = await getTailscaleReadiness(runner);
-    if (readiness.state === 'not-installed' || readiness.state === 'needs-policy' || readiness.state === 'error') {
+    if (readiness.state === 'not-installed'
+      || readiness.state === 'needs-permission'
+      || readiness.state === 'needs-policy'
+      || readiness.state === 'error') {
       return readiness;
     }
     if (!readiness.loggedIn || readiness.state === 'not-logged-in') {
@@ -555,6 +709,15 @@ export async function enableSomniBotFunnel(
   } catch (err) {
     const error = err as TailscaleCommandError;
     const text = `${error.stderr}\n${error.stdout}\n${error.message}`.toLowerCase();
+    if (isTailscalePermissionError(error)) {
+      return readinessBase({
+        state: 'needs-permission',
+        installed: true,
+        commandPreview: [],
+        message: 'Tailscale is running, but SomniBot cannot change Funnel with the current Windows permissions.',
+        detail: 'Windows denied access to the Tailscale service. Restart SomniBot with the required permission, then try again.',
+      });
+    }
     if (isUnsupportedFunnelText(text)) {
       return readinessBase({
         state: 'unsupported-platform',

@@ -97,7 +97,7 @@ function buildCommand(host: string, user: string, deployPath: string, privateKey
     '-o',
     'ConnectTimeout=10',
     '-o',
-    'StrictHostKeyChecking=accept-new',
+    'StrictHostKeyChecking=yes',
   ];
 
   const keyArgs = privateKeyPath
@@ -106,7 +106,10 @@ function buildCommand(host: string, user: string, deployPath: string, privateKey
   const redactedKeyArgs = privateKeyPath
     ? ['-o', 'IdentitiesOnly=yes', '-i', REDACTED_KEY_PATH]
     : [];
-  const remoteReadOnlyCheck = ['--', target, 'test', '-d', deployPath];
+  // Stream the read-only contract over stdin so a first-time VPS can be
+  // checked before the deployment directory exists. The launcher handler
+  // attaches the fixed script; no operator credential ever enters this plan.
+  const remoteReadOnlyCheck = ['--', target, 'sh', '-s', '--', deployPath];
   const args = [...baseArgs, ...keyArgs, ...remoteReadOnlyCheck];
   const redactedArgs = [...baseArgs, ...redactedKeyArgs, ...remoteReadOnlyCheck];
 

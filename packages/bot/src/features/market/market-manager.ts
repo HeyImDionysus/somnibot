@@ -26,11 +26,11 @@ import { voice } from '../branding/voice.js';
 const log = createLogger('Market');
 
 /**
- * V5 Audit §4.P3a — Hard cap on price_per_unit to prevent absurd listings.
- * 1 billion coins is well above any realistic wallet limit while staying
- * within safe integer range for JS (Number.MAX_SAFE_INTEGER ≈ 9e15).
+ * Safe fallback for guilds created before the configurable market ceiling
+ * migration. The live value is read from guild_config on every cache fill.
  */
-const MAX_PRICE_PER_UNIT = 1_000_000_000;
+const DEFAULT_MAX_PRICE_PER_UNIT = 1_000_000_000;
+const ABSOLUTE_MAX_PRICE_PER_UNIT = 2_147_483_647;
 
 // ── Local Types ───────────────────────────────────────────
 
@@ -39,6 +39,7 @@ interface MarketConfig {
   economy_market_fee_pct: number;
   economy_market_listing_days: number;
   economy_market_max_listings: number;
+  economy_market_max_price_per_unit: number;
   /** White-label brand kit projected from the same cached guild_config row. */
   brandKit: BrandKit;
 }
@@ -105,7 +106,7 @@ export class MarketManager {
     if (this.configCache) return { config: this.configCache, degraded: false };
     const { data, error } = await this.supabase
       .from('guild_config')
-      .select(`economy_market_enabled, economy_market_fee_pct, economy_market_listing_days, economy_market_max_listings, ${BRAND_KIT_COLUMNS}`)
+      .select(`economy_market_enabled, economy_market_fee_pct, economy_market_listing_days, economy_market_max_listings, economy_market_max_price_per_unit, ${BRAND_KIT_COLUMNS}`)
       .eq('guild_id', this.guild.id)
       .single();
     const row = (data ?? null) as
@@ -116,6 +117,7 @@ export class MarketManager {
       economy_market_fee_pct: row?.economy_market_fee_pct ?? 5,
       economy_market_listing_days: row?.economy_market_listing_days ?? 7,
       economy_market_max_listings: row?.economy_market_max_listings ?? 10,
+      economy_market_max_price_per_unit: row?.economy_market_max_price_per_unit ?? DEFAULT_MAX_PRICE_PER_UNIT,
       brandKit: brandKitFromConfig(row, this.guild.name),
     };
     const degraded = error != null && error.code !== 'PGRST116';
@@ -158,11 +160,17 @@ export class MarketManager {
       return brandedEmbed(kit, { intent: 'danger', description: '🚫 The market is not enabled.' });
     }
 
-    // V5 Audit §4.P3a: Reject absurd prices
-    if (pricePerUnit > MAX_PRICE_PER_UNIT) {
+    // V5 Audit §4.P3a: Reject prices above the owner-configured ceiling. The
+    // database CHECK and atomic listing RPC repeat this guard for bypassed
+    // callers; this fast path keeps the member-facing error actionable.
+    const configuredMax = Number(config.economy_market_max_price_per_unit);
+    const maxPricePerUnit = Number.isSafeInteger(configuredMax) && configuredMax >= 1 && configuredMax <= ABSOLUTE_MAX_PRICE_PER_UNIT
+      ? configuredMax
+      : DEFAULT_MAX_PRICE_PER_UNIT;
+    if (!Number.isSafeInteger(pricePerUnit) || pricePerUnit <= 0 || pricePerUnit > maxPricePerUnit) {
       return brandedEmbed(kit, {
         intent: 'danger',
-        description: `❌ Maximum price per unit is **${MAX_PRICE_PER_UNIT.toLocaleString()}** coins.`,
+        description: `❌ Maximum price per unit is **${maxPricePerUnit.toLocaleString()}** coins.`,
       });
     }
 

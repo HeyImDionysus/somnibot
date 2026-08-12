@@ -44,7 +44,7 @@ import { runSyncCycle, type SyncConfig } from '../sync/sync-engine.js';
 function supaChain(data: any = null, error: any = null) {
   const c: any = {};
   const methods = ['select', 'insert', 'update', 'upsert', 'delete', 'eq', 'neq',
-    'gte', 'lt', 'lte', 'limit', 'order', 'in', 'filter', 'maybeSingle', 'single', 'match', 'then'];
+    'gte', 'lt', 'lte', 'limit', 'range', 'order', 'in', 'filter', 'maybeSingle', 'single', 'match', 'then'];
   for (const m of methods) c[m] = vi.fn((..._: any[]) => c);
   c.maybeSingle = vi.fn(async () => ({ data, error }));
   c.single = vi.fn(async () => ({ data, error }));
@@ -91,8 +91,14 @@ function makeGuild(opts: {
   roles?: Array<{ id: string; name: string; position: number; managed?: boolean; edit?: any }>;
   botHighestPosition?: number;
   setPositions?: ReturnType<typeof vi.fn>;
+  createRole?: ReturnType<typeof vi.fn>;
 } = {}) {
-  const { roles = [], botHighestPosition = 100, setPositions = vi.fn(async () => {}) } = opts;
+  const {
+    roles = [],
+    botHighestPosition = 100,
+    setPositions = vi.fn(async () => {}),
+    createRole = vi.fn(async (options: Record<string, unknown>) => ({ id: 'new-role', ...options })),
+  } = opts;
   const cache = new MockCollection();
   const everyone = { id: 'g1', name: '@everyone', setPermissions: vi.fn(async () => {}) };
   cache.set('g1', everyone);
@@ -106,7 +112,7 @@ function makeGuild(opts: {
 
   return {
     id: 'g1',
-    roles: { cache, everyone, setPositions },
+    roles: { cache, everyone, setPositions, create: createRole },
     channels: { cache: new MockCollection() },
     rulesChannelId: null,
     publicUpdatesChannelId: null,
@@ -130,6 +136,37 @@ const bus = { emit: vi.fn() } as any;
 beforeEach(() => {
   vi.resetAllMocks();
   mockComputeStateDiff.mockReturnValue({ everyoneDrift: false, diffs: [] });
+});
+
+describe('auto-repair: MISSING_RESOURCE', () => {
+  it('recreates a missing role with the Discord.js colors option', async () => {
+    const desired = {
+      roles: [{ key: 'moderator', name: 'Moderator', permissions: '1024', color: 0xFF0000, hoist: true, mentionable: false }],
+      channels: [],
+    };
+    const mappings = [{ template_key: 'role:moderator', entity_type: 'role', discord_id: 'old-role' }];
+    const createRole = vi.fn(async (options: Record<string, unknown>) => ({ id: 'new-role', ...options }));
+    const guild = makeGuild({ createRole });
+
+    mockClassifyDrift.mockReturnValueOnce([{
+      type: 'MISSING_RESOURCE',
+      severity: 'high',
+      entityType: 'role',
+      entityName: 'Moderator',
+      entityDiscordId: 'old-role',
+      templateKey: 'moderator',
+      description: 'Role was deleted',
+      suggestedAction: 'repair',
+    }]);
+
+    const result = await runSyncCycle(guild, makeSupabase({ desired, mappings }), bus, makeConfig());
+
+    expect(result.repaired).toBe(1);
+    expect(createRole).toHaveBeenCalledWith(expect.objectContaining({
+      colors: { primaryColor: 0xFF0000 },
+    }));
+    expect(createRole.mock.calls[0][0]).not.toHaveProperty('color');
+  });
 });
 
 // =========================================================

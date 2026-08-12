@@ -11,14 +11,26 @@
  * - Lavalink status included in getStatus()
  */
 
-import { fork, type ChildProcess } from 'node:child_process';
+import { execFile, execFileSync, fork, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { promisify } from 'node:util';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
-import { shouldApplyBotReadyTimeout } from './process-manager-guards.js';
+import { stopChildProcess } from './managed-child-stop.js';
+import {
+  PROCESS_RESTART_MAX_ATTEMPTS,
+  PROCESS_RESTART_STABLE_WINDOW_MS,
+  processRestartDelayMs,
+  shouldApplyBotReadyTimeout,
+  shouldRecoverManagedProcess,
+} from './process-manager-guards.js';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * V7 Audit §10.P3a — Allowlist of parent-process env vars to forward.
@@ -95,12 +107,131 @@ let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let botReadyTimeout: ReturnType<typeof setTimeout> | null = null;
 let statusCallback: ((status: StatusUpdate) => void) | null = null;
 const BOT_READY_TIMEOUT_MS = 60_000;
+type ManagedService = 'bot' | 'dashboard';
+interface RecoveryState {
+  attempts: number;
+  restartTimer: ReturnType<typeof setTimeout> | null;
+  stableTimer: ReturnType<typeof setTimeout> | null;
+}
+const recoveryState: Record<ManagedService, RecoveryState> = {
+  bot: { attempts: 0, restartTimer: null, stableTimer: null },
+  dashboard: { attempts: 0, restartTimer: null, stableTimer: null },
+};
+let desiredRunning = false;
+let lastStartEnv: Record<string, string> | null = null;
+let lastStartSessionToken: string | null = null;
+let dashboardSessionTokenFile: string | null = null;
+let stopPromise: Promise<void> | null = null;
+
+/**
+ * Stop a managed child deterministically. SIGTERM is given a bounded grace
+ * period, then the child is force-killed and the promise resolves only after
+ * the process has exited (or the OS has accepted the force-kill).
+ *
+ * Keeping the promise in the shutdown path prevents Electron from exiting
+ * while a bot/dashboard child is still listening on a port or holding the
+ * launcher-owned resources.
+ */
+function stopManagedChild(child: ChildProcess | null): Promise<void> {
+  return stopChildProcess(child, { serviceName: 'SomniBot bot/dashboard child' });
+}
 
 function clearBotReadyTimeout(): void {
   if (botReadyTimeout) {
     clearTimeout(botReadyTimeout);
     botReadyTimeout = null;
   }
+}
+
+function activeProcess(service: ManagedService): ChildProcess | null {
+  return service === 'bot' ? botProcess : dashboardProcess;
+}
+
+function serviceStatus(service: ManagedService): ProcessStatus {
+  return service === 'bot' ? botStatus : dashboardStatus;
+}
+
+function clearRecoveryState(resetAttempts: boolean): void {
+  for (const state of Object.values(recoveryState)) {
+    if (state.restartTimer) clearTimeout(state.restartTimer);
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.restartTimer = null;
+    state.stableTimer = null;
+    if (resetAttempts) state.attempts = 0;
+  }
+}
+
+function markServiceStable(service: ManagedService, launchedProcess: ChildProcess): void {
+  const state = recoveryState[service];
+  if (state.stableTimer) clearTimeout(state.stableTimer);
+  state.stableTimer = setTimeout(() => {
+    state.stableTimer = null;
+    if (
+      desiredRunning
+      && activeProcess(service) === launchedProcess
+      && serviceStatus(service) === 'online'
+    ) {
+      state.attempts = 0;
+    }
+  }, PROCESS_RESTART_STABLE_WINDOW_MS);
+  state.stableTimer.unref?.();
+}
+
+function scheduleRecovery(service: ManagedService, reason: string): void {
+  const state = recoveryState[service];
+  if (!desiredRunning || !lastStartEnv || !lastStartSessionToken || state.restartTimer || activeProcess(service)) return;
+
+  if (state.attempts >= PROCESS_RESTART_MAX_ATTEMPTS) {
+    if (service === 'bot') botStatus = 'error';
+    else dashboardStatus = 'error';
+    broadcastStatus({
+      error: `${service === 'bot' ? 'Bot' : 'Dashboard'} automatic recovery stopped after ${PROCESS_RESTART_MAX_ATTEMPTS} failed attempts. ${reason}`,
+    });
+    return;
+  }
+
+  state.attempts += 1;
+  const attempt = state.attempts;
+  const delayMs = processRestartDelayMs(attempt);
+  const recoveryEnv = lastStartEnv;
+  const recoverySessionToken = lastStartSessionToken;
+  broadcastStatus({
+    error: `${service === 'bot' ? 'Bot' : 'Dashboard'} stopped unexpectedly. Restarting in ${Math.ceil(delayMs / 1_000)}s (attempt ${attempt}/${PROCESS_RESTART_MAX_ATTEMPTS}). ${reason}`,
+  });
+
+  state.restartTimer = setTimeout(() => {
+    state.restartTimer = null;
+    if (!desiredRunning || activeProcess(service)) return;
+    try {
+      if (service === 'bot') startBotProcess(recoveryEnv);
+      else startDashboardProcess(recoveryEnv, recoverySessionToken);
+    } catch (error) {
+      if (service === 'bot') botStatus = 'error';
+      else dashboardStatus = 'error';
+      const detail = error instanceof Error ? error.message : 'unknown error';
+      broadcastStatus({
+        error: `${service === 'bot' ? 'Bot' : 'Dashboard'} restart failed: ${detail}`,
+      });
+      scheduleRecovery(service, `${service === 'bot' ? 'Bot' : 'Dashboard'} restart failed: ${detail}`);
+    }
+  }, delayMs);
+  state.restartTimer.unref?.();
+}
+
+function terminateForRecovery(service: ManagedService, child: ChildProcess): void {
+  if (!shouldRecoverManagedProcess(desiredRunning, activeProcess(service), child)) return;
+  child.kill('SIGTERM');
+  const pid = child.pid;
+  const forceKillTimer = setTimeout(() => {
+    if (!shouldRecoverManagedProcess(desiredRunning, activeProcess(service), child)) return;
+    try {
+      if (pid) process.kill(pid, 0);
+      if (pid) process.kill(pid, 'SIGKILL');
+    } catch {
+      // The child exited after SIGTERM.
+    }
+  }, 5_000);
+  forceKillTimer.unref?.();
 }
 
 /* ------------------------------------------------------------------ */
@@ -129,24 +260,246 @@ export function checkPortAvailable(port: number): Promise<boolean> {
  * Kill any leftover processes from a previous launcher crash.
  * Called once on app startup before the user can press Start.
  */
-export function cleanupStaleProcesses(): void {
-  const cfg = getConfig();
-  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+/**
+ * Wait until a PID is no longer alive, then force-kill it if the graceful
+ * window expires. This is used only for PIDs persisted by this launcher after
+ * a previous crash; clearing the record before the process is gone can leave
+ * the next instance racing a stale listener/port owner.
+ */
+async function waitForStaleProcessExit(pid: number): Promise<boolean> {
+  const graceDeadline = Date.now() + 5_000;
+  type PidLiveness = 'alive' | 'dead' | 'unknown';
+  const liveness = (): PidLiveness => {
+    try {
+      process.kill(pid, 0);
+      return 'alive';
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'dead' : 'unknown';
+    }
+  };
 
-  for (const [name, pid] of Object.entries(pids)) {
-    if (pid && typeof pid === 'number') {
-      try {
-        process.kill(pid, 0); // Throws if process doesn't exist
-        console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
-        process.kill(pid, 'SIGTERM');
-      } catch {
-        // Process doesn't exist — that's fine
-      }
+  let state = liveness();
+  while (state === 'alive' && Date.now() < graceDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    state = liveness();
+  }
+
+  if (state === 'dead') return true;
+  if (state === 'unknown') return false;
+
+  if (state === 'alive') {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (error) {
+      // ESRCH means it exited between the liveness check and force-kill;
+      // permission/other failures are ambiguous and must remain unresolved.
+      return (error as NodeJS.ErrnoException).code === 'ESRCH';
+    }
+    const killDeadline = Date.now() + 2_000;
+    state = liveness();
+    while (state === 'alive' && Date.now() < killDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      state = liveness();
     }
   }
 
-  // Clear stored PIDs
-  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
+  return state === 'dead';
+}
+
+type StaleProcessName = 'bot' | 'dashboard' | 'lavalink' | 'valkey';
+
+function normalizeProcessIdentity(value: string): string {
+  return value.replaceAll('\\', '/').replaceAll(/\/+/g, '/').toLowerCase();
+}
+
+function processErrorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException).code;
+}
+
+async function readProcessCommandLine(pid: number): Promise<string | null> {
+  try {
+    if (process.platform === 'win32') {
+      const filter = `ProcessId = ${pid}`;
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter '${filter}').CommandLine`,
+        ],
+        { timeout: 3_000, maxBuffer: 64 * 1024 },
+      );
+      return String(stdout).trim() || null;
+    }
+
+    const procCmdline = await fsp.readFile(`/proc/${pid}/cmdline`, 'utf8');
+    return procCmdline.replaceAll('\0', ' ').trim() || null;
+  } catch {
+    // A process may exit during inspection, or the host may not expose a
+    // command-line API. Ambiguous identity is handled fail-closed by caller.
+    return null;
+  }
+}
+
+async function readProcessStartedAt(pid: number): Promise<number | null> {
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+        ],
+        { timeout: 3_000, maxBuffer: 16 * 1024 },
+      );
+      const parsed = Date.parse(String(stdout).trim());
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    const { stdout } = await execFileAsync(
+      'ps',
+      ['-o', 'lstart=', '-p', String(pid)],
+      { timeout: 3_000, maxBuffer: 16 * 1024 },
+    );
+    const parsed = Date.parse(String(stdout).trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function processMatchesStartWitness(pid: number, expectedStartedAt: number): Promise<boolean> {
+  const observedStartedAt = await readProcessStartedAt(pid);
+  // ps reports whole seconds on Unix; spawn-to-persist delay is normally only
+  // milliseconds. Ten seconds tolerates scheduling delay without accepting a
+  // later PID reuse.
+  return observedStartedAt !== null && Math.abs(observedStartedAt - expectedStartedAt) <= 10_000;
+}
+
+function expectedProcessIdentityMarker(name: StaleProcessName): string {
+  switch (name) {
+    case 'bot':
+      return getBotEntryPath();
+    case 'dashboard':
+      return getDashboardEntryPath();
+    case 'lavalink':
+      return path.join(app.getPath('userData'), 'lavalink', 'Lavalink.jar');
+    case 'valkey':
+      return path.join(app.getPath('userData'), 'valkey', 'data');
+  }
+}
+
+async function processMatchesExpectedIdentity(
+  name: StaleProcessName,
+  pid: number,
+): Promise<boolean> {
+  const commandLine = await readProcessCommandLine(pid);
+  if (!commandLine) return false;
+
+  const normalizedCommand = normalizeProcessIdentity(commandLine);
+  const normalizedMarker = normalizeProcessIdentity(expectedProcessIdentityMarker(name));
+  if (!normalizedCommand.includes(normalizedMarker)) return false;
+
+  if (name === 'lavalink') return normalizedCommand.includes('lavalink.jar');
+  if (name === 'valkey') return /(?:^|\/)redis-server(?:\.exe)?(?:["']|\s|$)/.test(normalizedCommand)
+    || /(?:^|\/)valkey-server(?:\.exe)?(?:["']|\s|$)/.test(normalizedCommand);
+  return true;
+}
+
+export interface StaleProcessCleanupResult {
+  ok: boolean;
+  unresolved: string[];
+}
+
+export async function cleanupStaleProcesses(): Promise<StaleProcessCleanupResult> {
+  const cfg = getConfig();
+  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  const startedAt = cfg.lastPidStartedAt ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  const nextPids = { ...pids };
+  const nextStartedAt = { ...startedAt };
+
+  const stalePids: Array<[StaleProcessName, number]> = [];
+  const unresolved: string[] = [];
+  for (const [name, pid] of Object.entries(pids)) {
+    // Legacy stores may contain sentinel/invalid values (for example -1).
+    // Never pass those to process.kill: negative PIDs target process groups.
+    if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) {
+      let liveness: 'alive' | 'dead' | 'unknown';
+      try {
+        process.kill(pid, 0);
+        liveness = 'alive';
+      } catch (error) {
+        liveness = processErrorCode(error) === 'ESRCH' ? 'dead' : 'unknown';
+      }
+      if (liveness === 'dead') {
+        nextPids[name as StaleProcessName] = null;
+        nextStartedAt[name as StaleProcessName] = null;
+        continue;
+      }
+      if (liveness === 'unknown') {
+        console.warn(`[ProcessMgr] Refusing to inspect stale ${name} PID ${pid}: liveness is ambiguous.`);
+        unresolved.push(name);
+        continue;
+      }
+      if (!await processMatchesExpectedIdentity(name as StaleProcessName, pid)) {
+        console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process identity is ambiguous.`);
+        unresolved.push(name);
+        continue;
+      }
+      const expectedStartedAt = startedAt[name as StaleProcessName];
+      if (typeof expectedStartedAt !== 'number'
+        || !Number.isFinite(expectedStartedAt)
+        || !await processMatchesStartWitness(pid, expectedStartedAt)) {
+        console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process start witness is missing or changed.`);
+        unresolved.push(name);
+        continue;
+      }
+      // Revalidate both independent witnesses immediately before signaling to
+      // narrow the inspection/signal window and fail closed on PID reuse.
+      if (!await processMatchesExpectedIdentity(name as StaleProcessName, pid)
+        || !await processMatchesStartWitness(pid, expectedStartedAt)) {
+        console.warn(`[ProcessMgr] Refusing to signal stale ${name} PID ${pid}: process identity changed during inspection.`);
+        unresolved.push(name);
+        continue;
+      }
+      console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
+      try {
+        process.kill(pid, 'SIGTERM');
+        stalePids.push([name as StaleProcessName, pid]);
+      } catch (error) {
+        if (processErrorCode(error) === 'ESRCH') {
+          nextPids[name as StaleProcessName] = null;
+          nextStartedAt[name as StaleProcessName] = null;
+        } else {
+          console.warn(`[ProcessMgr] Could not terminate stale ${name} PID ${pid}; preserving it.`);
+          unresolved.push(name);
+        }
+      }
+    } else if (pid !== null) {
+      nextPids[name as StaleProcessName] = null;
+      nextStartedAt[name as StaleProcessName] = null;
+    }
+  }
+
+  const exited = await Promise.all(stalePids.map(async ([name, pid]) => ({
+    name,
+    exited: await waitForStaleProcessExit(pid),
+  })));
+  for (const result of exited) {
+    if (result.exited) {
+      nextPids[result.name] = null;
+      nextStartedAt[result.name] = null;
+    }
+    else unresolved.push(result.name);
+  }
+
+  // Clear only records proven dead. Ambiguous or unkillable records remain so
+  // the next launch cannot silently forget a service it failed to reclaim.
+  saveConfig({ lastPids: nextPids, lastPidStartedAt: nextStartedAt });
+  return { ok: unresolved.length === 0, unresolved: [...new Set(unresolved)] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -235,13 +588,16 @@ function getMigrationsDir(): string {
 
 function startBotProcess(envVars: Record<string, string>): void {
   const entryPath = getBotEntryPath();
+  lastHeartbeat = 0;
   botStatus = 'starting';
   broadcastStatus();
 
   // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
   // Avoids leaking parent-process env (cloud provider secrets, etc.) to children.
+  const { SESSION_TOKEN: ignoredSessionToken, ...botEnvVars } = envVars;
+  void ignoredSessionToken;
   botProcess = fork(entryPath, [], {
-    env: { ...safeParentEnv(), ...envVars, MIGRATIONS_DIR: getMigrationsDir() },
+    env: { ...safeParentEnv(), ...botEnvVars, MIGRATIONS_DIR: getMigrationsDir() },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });
@@ -273,6 +629,7 @@ function startBotProcess(envVars: Record<string, string>): void {
   });
 
   botProcess.on('message', (msg: unknown) => {
+    if (botProcess !== launchedBotProcess) return;
     if (typeof msg === 'object' && msg !== null && 'type' in msg) {
       const typed = msg as { type: string };
       if (typed.type === 'heartbeat') {
@@ -280,26 +637,39 @@ function startBotProcess(envVars: Record<string, string>): void {
         if (botStatus !== 'online') {
           botStatus = 'online';
           clearBotReadyTimeout();
+          markServiceStable('bot', launchedBotProcess);
           broadcastStatus();
         }
       } else if (typed.type === 'ready') {
         botStatus = 'online';
         lastHeartbeat = Date.now();
         clearBotReadyTimeout();
+        markServiceStable('bot', launchedBotProcess);
         broadcastStatus();
       }
     }
   });
 
   botProcess.on('exit', (code, signal) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      botProcess,
+      launchedBotProcess,
+    );
     if (botProcess !== launchedBotProcess) return;
 
     clearBotReadyTimeout();
+    const state = recoveryState.bot;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
     const wasOnline = botStatus === 'online';
     botStatus = 'offline';
     botProcess = null;
     persistPid('bot', null);
 
+    const reason = code && code !== 0
+      ? `Bot exited with code ${code}.`
+      : `Bot exited (code: ${code}, signal: ${signal}).`;
     if (code && code !== 0) {
       broadcastStatus({
         error: wasOnline
@@ -313,16 +683,26 @@ function startBotProcess(envVars: Record<string, string>): void {
           : undefined,
       });
     }
+    if (shouldRecover) scheduleRecovery('bot', reason);
   });
 
   botProcess.on('error', (err) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      botProcess,
+      launchedBotProcess,
+    );
     if (botProcess !== launchedBotProcess) return;
 
     clearBotReadyTimeout();
+    const state = recoveryState.bot;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
     botStatus = 'error';
     botProcess = null;
     persistPid('bot', null);
     broadcastStatus({ error: `Bot process error: ${err.message}` });
+    if (shouldRecover) scheduleRecovery('bot', `Bot process error: ${err.message}`);
   });
 
   clearBotReadyTimeout();
@@ -332,6 +712,7 @@ function startBotProcess(envVars: Record<string, string>): void {
       broadcastStatus({
         error: `Bot did not report ready or heartbeat within ${Math.round(BOT_READY_TIMEOUT_MS / 1000)}s. Check the bot log and provider credentials before calling setup complete.`,
       });
+      terminateForRecovery('bot', launchedBotProcess);
     }
   }, BOT_READY_TIMEOUT_MS);
   botReadyTimeout.unref?.();
@@ -341,47 +722,86 @@ function startBotProcess(envVars: Record<string, string>): void {
 /*  Dashboard process                                                  */
 /* ------------------------------------------------------------------ */
 
-function startDashboardProcess(envVars: Record<string, string>): void {
+export function createDashboardSessionTokenFile(sessionToken: string): string {
+  if (!sessionToken) {
+    throw new Error('Dashboard session-token file could not be created.');
+  }
+
+  const tokenDir = path.join(os.tmpdir(), 'somnibot-launcher');
+  const tokenFile = path.join(tokenDir, `session-${randomUUID()}.tok`);
+  try {
+    fs.mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(tokenDir, 0o700);
+    fs.writeFileSync(tokenFile, sessionToken, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    if (process.platform === 'win32') {
+      const username = process.env.USERNAME;
+      if (!username) throw new Error('Windows username is unavailable.');
+      execFileSync('icacls', [
+        tokenFile,
+        '/inheritance:r',
+        '/grant:r', username + ':(R,W)',
+      ], { stdio: 'ignore', windowsHide: true });
+    }
+    return tokenFile;
+  } catch {
+    try {
+      fs.rmSync(tokenFile, { force: true });
+    } catch {
+      console.warn('[ProcessManager] Could not remove an incomplete dashboard session-token file.');
+    }
+    throw new Error('Dashboard session-token file could not be created.');
+  }
+}
+
+function removeDashboardSessionTokenFile(): void {
+  const tokenFile = dashboardSessionTokenFile;
+  dashboardSessionTokenFile = null;
+  if (!tokenFile) return;
+  try {
+    fs.rmSync(tokenFile, { force: true });
+  } catch {
+    console.warn('[ProcessManager] Could not remove a dashboard session-token file.');
+  }
+}
+
+function startDashboardProcess(envVars: Record<string, string>, sessionToken: string): void {
   const entryPath = getDashboardEntryPath();
+  const tokenFile = createDashboardSessionTokenFile(sessionToken);
+  dashboardSessionTokenFile = tokenFile;
   dashboardStatus = 'starting';
   broadcastStatus();
 
-  // V10 Audit §12: Write SESSION_TOKEN to a temp file with restrictive
-  // permissions instead of passing it solely via env. The dashboard reads
-  // the file path from SESSION_TOKEN_FILE in instrumentation.ts and deletes
-  // the file after reading. The env var is still set as a fallback.
+  const { SESSION_TOKEN: ignoredSessionToken, ...dashboardEnvVars } = envVars;
+  void ignoredSessionToken;
   const dashEnv: Record<string, string> = {
     ...safeParentEnv(),
-    ...envVars,
+    ...dashboardEnvVars,
     SOMNIBOT_DASHBOARD_LOCAL_MODE: '1',
+    SESSION_TOKEN_FILE: tokenFile,
   };
-  if (envVars.SESSION_TOKEN) {
-    try {
-      const tokenDir = path.join(os.tmpdir(), 'somnibot-launcher');
-      fs.mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
-      const tokenFile = path.join(tokenDir, `session-${Date.now()}.tok`);
-      fs.writeFileSync(tokenFile, envVars.SESSION_TOKEN, { mode: 0o600 });
-      dashEnv.SESSION_TOKEN_FILE = tokenFile;
-    } catch {
-      // Fall back to env-only if temp file fails (e.g., Windows FS quirks)
-    }
-  }
-
   // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
-  dashboardProcess = fork(entryPath, [], {
-    env: dashEnv,
-    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-    silent: true,
-  });
+  try {
+    dashboardProcess = fork(entryPath, [], {
+      env: dashEnv,
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      silent: true,
+    });
+  } catch (error) {
+    removeDashboardSessionTokenFile();
+    throw error;
+  }
+  const launchedDashboardProcess = dashboardProcess;
 
   // Persist PID for stale-process cleanup
   persistPid('dashboard', dashboardProcess.pid ?? null);
 
   dashboardProcess.stdout?.on('data', (data: Buffer) => {
+    if (dashboardProcess !== launchedDashboardProcess) return;
     const line = data.toString().trim();
     if (line) {
       if (line.includes('Ready') || line.includes('started server') || line.includes('localhost:3456')) {
         dashboardStatus = 'online';
+        markServiceStable('dashboard', launchedDashboardProcess);
         broadcastStatus();
       }
       for (const win of BrowserWindow.getAllWindows()) {
@@ -393,6 +813,7 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   });
 
   dashboardProcess.stderr?.on('data', (data: Buffer) => {
+    if (dashboardProcess !== launchedDashboardProcess) return;
     const line = data.toString().trim();
     if (line) {
       for (const win of BrowserWindow.getAllWindows()) {
@@ -404,6 +825,16 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   });
 
   dashboardProcess.on('exit', (code, signal) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      dashboardProcess,
+      launchedDashboardProcess,
+    );
+    if (dashboardProcess !== launchedDashboardProcess) return;
+    const state = recoveryState.dashboard;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
+    removeDashboardSessionTokenFile();
     dashboardStatus = 'offline';
     dashboardProcess = null;
     persistPid('dashboard', null);
@@ -412,21 +843,39 @@ function startDashboardProcess(envVars: Record<string, string>): void {
         ? `Dashboard exited (code: ${code}, signal: ${signal})`
         : undefined,
     });
+    if (shouldRecover) {
+      scheduleRecovery('dashboard', `Dashboard exited (code: ${code}, signal: ${signal}).`);
+    }
   });
 
   dashboardProcess.on('error', (err) => {
+    const shouldRecover = shouldRecoverManagedProcess(
+      desiredRunning,
+      dashboardProcess,
+      launchedDashboardProcess,
+    );
+    if (dashboardProcess !== launchedDashboardProcess) return;
+    const state = recoveryState.dashboard;
+    if (state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableTimer = null;
+    removeDashboardSessionTokenFile();
     dashboardStatus = 'error';
     dashboardProcess = null;
     persistPid('dashboard', null);
     broadcastStatus({ error: `Dashboard error: ${err.message}` });
+    if (shouldRecover) scheduleRecovery('dashboard', `Dashboard error: ${err.message}`);
   });
 
-  setTimeout(() => {
-    if (dashboardProcess && dashboardStatus === 'starting') {
-      dashboardStatus = 'online';
-      broadcastStatus();
+  const dashboardReadyTimeout = setTimeout(() => {
+    if (dashboardProcess === launchedDashboardProcess && dashboardStatus === 'starting') {
+      dashboardStatus = 'error';
+      broadcastStatus({
+        error: 'Dashboard did not report ready within 60s. Automatic recovery will retry with bounded backoff.',
+      });
+      terminateForRecovery('dashboard', launchedDashboardProcess);
     }
-  }, 15_000);
+  }, BOT_READY_TIMEOUT_MS);
+  dashboardReadyTimeout.unref?.();
 }
 
 /* ------------------------------------------------------------------ */
@@ -441,6 +890,7 @@ function startHeartbeatMonitor(): void {
       if (elapsed > 60_000) {
         botStatus = 'error';
         broadcastStatus({ error: 'Bot stopped responding (no heartbeat in 60s)' });
+        if (botProcess) terminateForRecovery('bot', botProcess);
       }
     }
   }, 10_000);
@@ -460,68 +910,86 @@ function stopHeartbeatMonitor(): void {
 function persistPid(name: 'bot' | 'dashboard', pid: number | null): void {
   const cfg = getConfig();
   const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+  const startedAt = cfg.lastPidStartedAt ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
   pids[name] = pid;
-  saveConfig({ lastPids: pids });
+  startedAt[name] = pid === null ? null : Date.now();
+  saveConfig({ lastPids: pids, lastPidStartedAt: startedAt });
 }
 
 /* ------------------------------------------------------------------ */
 /*  Public API                                                         */
 /* ------------------------------------------------------------------ */
 
-export function startAll(envVars: Record<string, string>): void {
+export async function startAll(envVars: Record<string, string>, sessionToken: string): Promise<void> {
   if (botProcess || dashboardProcess) {
-    stopAll();
+    await stopAll();
   }
 
-  startBotProcess(envVars);
-  startDashboardProcess(envVars);
+  const { SESSION_TOKEN: ignoredSessionToken, ...serviceEnv } = envVars;
+  void ignoredSessionToken;
+  clearRecoveryState(true);
+  desiredRunning = true;
+  lastStartEnv = { ...serviceEnv };
+  lastStartSessionToken = sessionToken;
+  try {
+    startDashboardProcess(serviceEnv, sessionToken);
+    startBotProcess(serviceEnv);
+  } catch (error) {
+    desiredRunning = false;
+    lastStartEnv = null;
+    lastStartSessionToken = null;
+    await stopAll();
+    throw error;
+  }
   startHeartbeatMonitor();
 }
 
-export function stopAll(): void {
+export function stopAll(): Promise<void> {
+  if (stopPromise) return stopPromise;
+
+  desiredRunning = false;
+  lastStartEnv = null;
+  lastStartSessionToken = null;
+  removeDashboardSessionTokenFile();
+  clearRecoveryState(true);
   stopHeartbeatMonitor();
   clearBotReadyTimeout();
 
-  if (botProcess) {
-    botProcess.removeAllListeners();
-    botProcess.kill('SIGTERM');
-    const pid = botProcess.pid;
-    setTimeout(() => {
-      try {
-        if (pid) process.kill(pid, 0);
-        if (pid) process.kill(pid, 'SIGKILL');
-      } catch {
-        // Already dead — good
-      }
-    }, 5_000);
-    botProcess = null;
-  }
+  const botToStop = botProcess;
+  const dashboardToStop = dashboardProcess;
 
-  if (dashboardProcess) {
-    dashboardProcess.removeAllListeners();
-    dashboardProcess.kill('SIGTERM');
-    const pid = dashboardProcess.pid;
-    setTimeout(() => {
-      try {
-        if (pid) process.kill(pid, 0);
-        if (pid) process.kill(pid, 'SIGKILL');
-      } catch {
-        // Already dead
-      }
-    }, 5_000);
-    dashboardProcess = null;
-  }
-
+  // Stop restart/recovery logic immediately, but keep the child references
+  // until their close events arrive so isRunning() remains truthful during
+  // the grace period.
   botStatus = 'offline';
   dashboardStatus = 'offline';
   lastHeartbeat = 0;
-
-  // Clear stored PIDs
-  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
-
   broadcastStatus();
+
+  stopPromise = Promise.all([
+    stopManagedChild(botToStop),
+    stopManagedChild(dashboardToStop),
+  ]).then(() => {
+    if (botProcess === botToStop) botProcess = null;
+    if (dashboardProcess === dashboardToStop) dashboardProcess = null;
+
+    // Clear stored PIDs only after both children have actually stopped.
+    const persistedPids = getConfig().lastPids
+      ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+    const persistedStartedAt = getConfig().lastPidStartedAt
+      ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
+    saveConfig({
+      lastPids: { ...persistedPids, bot: null, dashboard: null },
+      lastPidStartedAt: { ...persistedStartedAt, bot: null, dashboard: null },
+    });
+    broadcastStatus();
+  }).finally(() => {
+    stopPromise = null;
+  });
+
+  return stopPromise;
 }
 
 export function isRunning(): boolean {
-  return botProcess !== null || dashboardProcess !== null;
+  return desiredRunning || botProcess !== null || dashboardProcess !== null;
 }

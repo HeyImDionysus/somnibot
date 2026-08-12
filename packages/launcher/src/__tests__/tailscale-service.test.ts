@@ -6,14 +6,19 @@ import {
   TailscaleCommandError,
   buildEnableFunnelArgs,
   buildLoginWithAuthKeyArgs,
+  buildProfileListArgs,
   enableSomniBotFunnel,
   getTailscaleReadiness,
+  hasActiveTailscaleInterface,
+  isTailscalePermissionError,
   loginWithTailscaleAuthKey,
   parseFunnelStatusJson,
   parseFunnelStatusText,
+  parseTailscaleProfilesJson,
   parseTailscaleStatusJson,
   probePublicCallbackHealth,
   redactTailscaleOutput,
+  tailscaleBinaryCandidates,
   type TailscaleRunner,
 } from '../main/tailscale-service';
 
@@ -48,6 +53,10 @@ describe('tailscale-service', () => {
       '--auth-key=file:/tmp/somnibot-authkey',
       '--timeout=30s',
     ]);
+  });
+
+  it('builds the read-only account profile command', () => {
+    expect(buildProfileListArgs()).toEqual(['switch', '--list', '--json']);
   });
 
   it('rejects unsupported Funnel listen ports', () => {
@@ -113,6 +122,22 @@ describe('tailscale-service', () => {
     expect(status.loggedIn).toBe(false);
   });
 
+  it('parses selected account profiles without retaining account identity', () => {
+    const profiles = parseTailscaleProfilesJson(JSON.stringify([{
+      id: 'profile-id',
+      account: 'owner@example.com',
+      tailnet: 'example.ts.net',
+      selected: true,
+    }]));
+
+    expect(profiles).toEqual({
+      profileCount: 1,
+      hasSelectedProfile: true,
+    });
+    expect(profiles).not.toHaveProperty('account');
+    expect(profiles).not.toHaveProperty('tailnet');
+  });
+
   it('parses Funnel status JSON even when Tailscale changes object shape', () => {
     const status = parseFunnelStatusJson(JSON.stringify({
       Web: {
@@ -133,6 +158,27 @@ describe('tailscale-service', () => {
     expect(status.allowFunnel).toBe(true);
     expect(status.publicUrl).toBe('https://somnibot.dionysus.ts.net');
     expect(status.target).toBe('http://127.0.0.1:3456');
+  });
+
+  it('recognizes a persisted VPS/standalone dashboard Funnel target on port 3000', () => {
+    const status = parseFunnelStatusJson(JSON.stringify({
+      Web: {
+        'somni.tailbd9d28.ts.net:443': {
+          Handlers: {
+            '/': {
+              Proxy: 'http://127.0.0.1:3000',
+            },
+          },
+        },
+      },
+      AllowFunnel: {
+        'somni.tailbd9d28.ts.net:443': true,
+      },
+    }));
+
+    expect(status.enabled).toBe(true);
+    expect(status.publicUrl).toBe('https://somni.tailbd9d28.ts.net');
+    expect(status.target).toBe('http://127.0.0.1:3000');
   });
 
   it('does not treat tailnet-only Serve JSON as public Funnel readiness', () => {
@@ -210,6 +256,18 @@ Available on the internet:
     expect(status.target).toBe('http://127.0.0.1:3456');
   });
 
+  it('recognizes a persisted port-3000 Funnel target in CLI text', () => {
+    const status = parseFunnelStatusText([
+      'Available on the internet:',
+      '|-- https://somni.tailbd9d28.ts.net',
+      '|--> http://127.0.0.1:3000',
+    ].join('\n'));
+
+    expect(status.enabled).toBe(true);
+    expect(status.publicUrl).toBe('https://somni.tailbd9d28.ts.net');
+    expect(status.target).toBe('http://127.0.0.1:3000');
+  });
+
   it('maps a missing Tailscale CLI to a not-installed readiness state', async () => {
     const readiness = await getTailscaleReadiness(async () => {
       throw new TailscaleCommandError('spawn tailscale ENOENT', { code: 'ENOENT' });
@@ -218,6 +276,94 @@ Available on the internet:
     expect(readiness.state).toBe('not-installed');
     expect(readiness.installed).toBe(false);
     expect(readiness.commandPreview).toEqual(['tailscale', ...buildEnableFunnelArgs()]);
+  });
+
+  it('uses the standard Windows install path when Tailscale is absent from PATH', () => {
+    expect(tailscaleBinaryCandidates('win32')).toEqual([
+      'tailscale',
+      'C:\\Program Files\\Tailscale\\tailscale.exe',
+    ]);
+  });
+
+  it('classifies protected Windows service access as a permission problem', () => {
+    const error = new TailscaleCommandError('Access is denied', {
+      stderr: String.raw`failed to open \\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled`,
+    });
+
+    expect(isTailscalePermissionError(error)).toBe(true);
+  });
+
+  it('does not report a signed-in Tailscale service as signed out when Windows blocks status access', async () => {
+    const readiness = await getTailscaleReadiness(async (args) => {
+      if (args[0] === 'version') return { stdout: '1.98.9\n', stderr: '' };
+      throw new TailscaleCommandError('Access is denied', {
+        stderr: String.raw`failed to open \\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled`,
+      });
+    });
+
+    expect(readiness.state).toBe('needs-permission');
+    expect(readiness.installed).toBe(true);
+    expect(readiness.message).not.toContain('not signed in');
+    expect(readiness.commandPreview).toEqual([]);
+  });
+
+  it('recognizes a selected profile and active adapter when status reports NoState', async () => {
+    const readiness = await getTailscaleReadiness(runnerFor({
+      version: { stdout: '1.98.9\n' },
+      'status --json': {
+        stdout: JSON.stringify({
+          BackendState: 'NoState',
+          Self: { HostName: 'somnibot' },
+        }),
+      },
+      'switch --list --json': {
+        stdout: JSON.stringify([{
+          id: 'profile-id',
+          account: 'owner@example.com',
+          selected: true,
+        }]),
+      },
+    }), {
+      interfaces: {
+        Tailscale: [{ internal: false }],
+      },
+    });
+
+    expect(readiness.state).toBe('not-configured');
+    expect(readiness.loggedIn).toBe(true);
+    expect(readiness.message).toContain('signed in and connected');
+    expect(readiness.detail).toContain('active Tailscale network adapter');
+  });
+
+  it('detects only active Tailscale-named network interfaces', () => {
+    expect(hasActiveTailscaleInterface({
+      Ethernet: [{ internal: false }],
+      Tailscale: [{ internal: false }],
+    })).toBe(true);
+    expect(hasActiveTailscaleInterface({
+      Ethernet: [{ internal: false }],
+      Tailscale: [{ internal: true }],
+    })).toBe(false);
+  });
+
+  it('keeps signed-in state when Windows blocks Funnel status access', async () => {
+    const readiness = await getTailscaleReadiness(async (args) => {
+      if (args[0] === 'version') return { stdout: '1.98.9\n', stderr: '' };
+      if (args[0] === 'status') {
+        return {
+          stdout: JSON.stringify({
+            BackendState: 'Running',
+            Self: { DNSName: 'somnibot.dionysus.ts.net.' },
+          }),
+          stderr: '',
+        };
+      }
+      throw new TailscaleCommandError('Access is denied', { code: 'EPERM' });
+    });
+
+    expect(readiness.state).toBe('needs-permission');
+    expect(readiness.loggedIn).toBe(true);
+    expect(readiness.message).toContain('signed in');
   });
 
   it('reports a signed-in machine without Funnel as not configured', async () => {
@@ -241,6 +387,35 @@ Available on the internet:
     expect(readiness.installed).toBe(true);
     expect(readiness.loggedIn).toBe(true);
     expect(readiness.dnsPropagationWaitMs).toBe(TAILSCALE_DNS_PROPAGATION_WAIT_MS);
+  });
+
+  it('does not treat a stale port-3000 Funnel as ready for regular-local mode', async () => {
+    const readiness = await getTailscaleReadiness(runnerFor({
+      version: { stdout: '1.84.0\n' },
+      'status --json': {
+        stdout: JSON.stringify({
+          BackendState: 'Running',
+          Self: { DNSName: 'somni.tailbd9d28.ts.net.' },
+        }),
+      },
+      'funnel status --json': {
+        stdout: JSON.stringify({
+          Web: {
+            'somni.tailbd9d28.ts.net:443': {
+              Handlers: { '/': { Proxy: 'http://127.0.0.1:3000' } },
+            },
+          },
+          AllowFunnel: { 'somni.tailbd9d28.ts.net:443': true },
+        }),
+      },
+    }));
+
+    expect(readiness.state).toBe('not-configured');
+    expect(readiness.funnelEnabled).toBe(false);
+    expect(readiness.publicCallbackBaseUrl).toBe('');
+    expect(readiness.message).toContain('different dashboard target');
+    expect(readiness.detail).toContain(':3000');
+    expect(readiness.detail).toContain(':3456');
   });
 
   it('enables Funnel only through the explicit enable command and returns the public URL', async () => {

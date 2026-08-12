@@ -24,6 +24,7 @@ import {
 import { executeEscalation, getEscalationAction } from './escalation.js';
 import { postModLogEntry } from './mod-log.js';
 import { writeAuditLog } from '../../services/audit.js';
+import { raiseOwnerAlert } from '../../services/alert-service.js';
 
 const log = createLogger('ModCommands');
 
@@ -52,6 +53,38 @@ async function auditDeniedModAttempt(
     success: false,
     details: { command, reason: 'missing_permission', required: requiredPermission },
   });
+}
+
+/** Record an applied punishment whose infraction row could not be persisted. */
+async function auditModerationPersistenceFailure(
+  client: SomniClient,
+  interaction: ChatInputCommandInteraction,
+  type: 'mute' | 'kick' | 'ban',
+  targetId: string,
+  details: Record<string, unknown>,
+): Promise<void> {
+  const guildId = interaction.guildId!;
+  const error = `Discord ${type} applied but infraction persistence failed`;
+  await writeAuditLog(client.supabase, {
+    guildId,
+    actorType: 'discord',
+    actorId: interaction.user.id,
+    action: `moderation.${type}.persistence_failed`,
+    category: 'moderation',
+    targetType: 'member',
+    targetId,
+    details,
+    occurrenceKey: `moderation:${interaction.id}:${type}:persistence-failed`,
+    success: false,
+    errorMessage: error,
+  });
+  await raiseOwnerAlert(client.supabase, guildId, {
+    alertType: 'moderation_infraction_persist_failed',
+    severity: 'critical',
+    title: 'Moderation action needs reconciliation',
+    message: `${error} for <@${targetId}>. Review the audit log and reconcile the member state.`,
+    metadata: { command: type, target_id: targetId, interaction_id: interaction.id, ...details },
+  }).catch(() => {});
 }
 
 // ── Command Builders ──────────────────────────────────────
@@ -404,6 +437,29 @@ export async function handleMuteCommand(
     correlationId: interaction.id,
   });
 
+  if (!created) {
+    let reverted = false;
+    try {
+      await member.timeout(null, `Reverting mute ${interaction.id}: infraction persistence failed`);
+      reverted = true;
+    } catch (rollbackError) {
+      log.error('Mute rollback failed after infraction persistence failure', {
+        target: member.id,
+        error: String(rollbackError),
+      });
+    }
+    await auditModerationPersistenceFailure(client, interaction, 'mute', member.id, {
+      rollback_attempted: true,
+      rollback_succeeded: reverted,
+    });
+    await interaction.editReply(
+      reverted
+        ? '❌ Mute was reverted because its moderation record could not be saved.'
+        : '⚠️ Mute was applied but its moderation record could not be saved. An owner alert was raised.',
+    );
+    return;
+  }
+
   // Replayed delivery — skip the side-effect block (events, DM, mod log).
   if (created?.replayed) {
     log.info(`Replayed /mute for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
@@ -539,6 +595,16 @@ export async function handleKickCommand(
     correlationId: interaction.id,
   });
 
+  if (!created) {
+    await auditModerationPersistenceFailure(client, interaction, 'kick', member.id, {
+      rollback_attempted: false,
+    });
+    await interaction.editReply(
+      '⚠️ Kick was applied but its moderation record could not be saved. An owner alert was raised.',
+    );
+    return;
+  }
+
   // Replayed delivery — skip the side-effect block (events, mod log).
   if (created?.replayed) {
     log.info(`Replayed /kick for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
@@ -658,6 +724,16 @@ export async function handleBanCommand(
     expiresAt: calculateExpiryDate(config?.infraction_expiry_days ?? 30),
     correlationId: interaction.id,
   });
+
+  if (!created) {
+    await auditModerationPersistenceFailure(client, interaction, 'ban', member.id, {
+      rollback_attempted: false,
+    });
+    await interaction.editReply(
+      '⚠️ Ban was applied but its moderation record could not be saved. An owner alert was raised.',
+    );
+    return;
+  }
 
   // Replayed delivery — the original /ban already suspended entitlements,
   // emitted events, and mod-logged. Skip the whole side-effect block.

@@ -44,6 +44,9 @@ function segmentToApiPath(segment: string): string {
  */
 const CSRF_EXEMPT_PREFIXES = [
   '/api/paypal/webhook',
+  // Cron/operator recovery authenticates with x-paypal-reconcile-secret,
+  // independently of the browser session/CSRF token.
+  '/api/paypal/recovery',
   '/api/license/',
   '/api/portal/',
   '/api/auth/',
@@ -56,7 +59,7 @@ const CSRF_EXEMPT_PREFIXES = [
  * (which only checks mutating methods) doesn't apply to them.
  * These do NOT need CSRF exemptions.
  */
-const GET_ONLY_PUBLIC_ROUTES = ['/api/health'];
+const GET_ONLY_PUBLIC_ROUTES = ['/api/health', '/api/health/live'];
 
 // ── Tests ────────────────────────────────────────────
 

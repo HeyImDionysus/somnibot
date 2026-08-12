@@ -4,6 +4,7 @@
  * Routes listed here skip CSRF verification on mutating requests because
  * they use an alternative authentication mechanism:
  * - paypal/webhook  → PayPal API signature verification
+ * - paypal/recovery → Dedicated reconciliation-secret authentication
  * - license/*       → API-key + per-key rate limiting
  * - portal/*        → Portal session token auth
  * - auth/*          → OAuth provider callback (state param)
@@ -18,6 +19,7 @@
  */
 export const CSRF_EXEMPT_PREFIXES: readonly string[] = [
   '/api/paypal/webhook',
+  '/api/paypal/recovery',
   '/api/license/',
   '/api/portal/',
   '/api/auth/',

@@ -404,7 +404,12 @@ describe('game-economy-pets', () => {
       guild_config: () => supaChain({ economy_pets_enabled: true }),
       economy_pets: () => supaChain(null),
       economy_wallets: () => supaChain({ wallet: 99999 }),
-    }, { economy_subtract_balance: () => ({ data: null, error: null }) });
+    }, {
+      economy_pet_buy_atomic: () => ({
+        data: { status: 'purchased', replayed: false },
+        error: null,
+      }),
+    });
     const mgr = new PetsManager(supabase);
     const interaction = makeInteraction({ options: { getString: () => 'hunting', getUser: () => null } });
     await mgr.buyPet(interaction);

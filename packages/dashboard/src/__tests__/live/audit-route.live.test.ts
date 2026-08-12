@@ -11,24 +11,15 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import {
+  armDashboardLiveEnv,
+  localSupabaseReachable,
+  createOwnerSession,
+  buildNextHeadersMock,
+  type OwnerSession,
+} from './_session-harness';
 
-// ── Arm the local rig env BEFORE importing any route/module ──────────────────
-const DEMO_SERVICE =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
-const DEMO_ANON =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
-const SUPA_URL = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
-Object.assign(process.env, {
-  SUPABASE_URL: SUPA_URL,
-  NEXT_PUBLIC_SUPABASE_URL: SUPA_URL,
-  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || DEMO_ANON,
-  SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || DEMO_ANON,
-  SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY || DEMO_SERVICE,
-  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
-});
-
-import { createOwnerSession, buildNextHeadersMock, type OwnerSession } from './_session-harness';
+const SUPA_URL = armDashboardLiveEnv();
 
 // ── next/headers mock: served from a mutable holder set per-scenario ─────────
 const holder: ReturnType<typeof buildNextHeadersMock> = vi.hoisted(() => ({
@@ -40,16 +31,7 @@ vi.mock('next/headers', () => ({
   headers: () => holder.headers(),
 }));
 
-async function localSupabaseReachable(): Promise<boolean> {
-  try {
-    const res = await fetch(`${SUPA_URL}/auth/v1/health`);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-const reachable = await localSupabaseReachable();
+const reachable = await localSupabaseReachable(SUPA_URL);
 
 describe.skipIf(!reachable)('LIVE: GET /api/audit (real-session harness)', () => {
   const suffix = `${Date.now()}`;

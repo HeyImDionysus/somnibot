@@ -180,6 +180,7 @@ export default function AutomationsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [previewSummary, setPreviewSummary] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'automations' | 'holds' | 'templates' | 'logs'>('automations');
   const [showEditor, setShowEditor] = useState(false);
@@ -255,7 +256,20 @@ export default function AutomationsPage() {
 
     try {
       const method = editingId ? 'PUT' : 'POST';
-      const body = editingId ? { id: editingId, ...draft } : draft;
+      const previewResponse = await fetch('/api/automations/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draft),
+      });
+      const previewJson = await previewResponse.json();
+      if (!previewResponse.ok || !previewJson.success) {
+        setError(previewJson.error ?? 'Preview failed');
+        return;
+      }
+      setPreviewSummary(previewJson.preview?.message ?? null);
+      const body = editingId
+        ? { id: editingId, ...draft, preview_hash: previewJson.preview_hash }
+        : { ...draft, preview_hash: previewJson.preview_hash };
 
       const res = await fetch('/api/automations', {
         method,
@@ -423,15 +437,20 @@ export default function AutomationsPage() {
           <button onClick={() => setError(null)} className="ml-2 text-red-300 hover:text-red-200">✕</button>
         </div>
       )}
+      {previewSummary && (
+        <div className="mb-4 rounded-md border border-discord-accent/30 bg-discord-accent/10 px-4 py-3 text-sm text-discord-text-secondary" data-testid="automation-preview-summary">
+          {previewSummary}
+        </div>
+      )}
 
       {/* Tabs */}
       {!showEditor && (
-        <div className="mb-6 flex gap-1 rounded-lg bg-discord-bg-secondary p-1">
+        <div className="mb-6 grid grid-cols-2 gap-1 rounded-lg bg-discord-bg-secondary p-1 sm:flex">
           {(['automations', 'holds', 'templates', 'logs'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`flex-1 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+              className={`min-w-0 rounded-md px-3 py-2 text-sm font-medium transition-colors sm:flex-1 ${
                 activeTab === tab
                   ? 'bg-discord-bg-primary text-discord-text-primary'
                   : 'text-discord-text-muted hover:text-discord-text-secondary'

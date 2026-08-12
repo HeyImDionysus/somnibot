@@ -11,6 +11,39 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
+const BOT_HEARTBEAT_STALE_MS = 120_000;
+const MAX_FUTURE_CLOCK_SKEW_MS = 30_000;
+
+interface Observation {
+  readonly at: string | null;
+  readonly ageSecs: number | null;
+  readonly isFresh: boolean;
+  readonly timestampMs: number | null;
+}
+
+function observationAt(timestamp: string | null | undefined, nowMs: number): Observation {
+  if (!timestamp) {
+    return { at: null, ageSecs: null, isFresh: false, timestampMs: null };
+  }
+
+  const timestampMs = Date.parse(timestamp);
+  if (!Number.isFinite(timestampMs)) {
+    return { at: null, ageSecs: null, isFresh: false, timestampMs: null };
+  }
+
+  const ageMs = nowMs - timestampMs;
+  if (ageMs < -MAX_FUTURE_CLOCK_SKEW_MS) {
+    return { at: null, ageSecs: null, isFresh: false, timestampMs: null };
+  }
+
+  const ageSecs = Math.max(0, Math.round(ageMs / 1000));
+  return {
+    at: timestamp,
+    ageSecs,
+    isFresh: ageMs < BOT_HEARTBEAT_STALE_MS,
+    timestampMs,
+  };
+}
 
 export async function GET(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'standard');
@@ -28,6 +61,8 @@ export async function GET(request: NextRequest) {
     .select('*')
     .eq('guild_id', guildId)
     .eq('type', 'health')
+    .order('snapshot_at', { ascending: false })
+    .limit(1)
     .maybeSingle();
 
   // Check Supabase health (if we got this far, it's working)
@@ -74,14 +109,22 @@ export async function GET(request: NextRequest) {
     .select('snapshot_at, uptime_seconds')
     .eq('guild_id', guildId)
     .eq('type', 'heartbeat')
+    .order('snapshot_at', { ascending: false })
+    .limit(1)
     .maybeSingle();
 
-  // Determine bot online status — use heartbeat if available, else health snapshot
-  const heartbeatAt = heartbeatRow?.snapshot_at ? new Date(heartbeatRow.snapshot_at).getTime() : 0;
-  const snapshotAt = botHealth?.snapshot_at ? new Date(botHealth.snapshot_at).getTime() : 0;
-  const latestPing = Math.max(heartbeatAt, snapshotAt);
-  const staleSecs = latestPing > 0 ? (Date.now() - latestPing) / 1000 : Infinity;
-  const isOnline = staleSecs < 120; // Within 2 minutes
+  const nowMs = Date.now();
+  const heartbeat = observationAt(heartbeatRow?.snapshot_at, nowMs);
+  const healthSnapshot = observationAt(botHealth?.snapshot_at, nowMs);
+  const heartbeatIsLatest = heartbeat.timestampMs !== null
+    && (healthSnapshot.timestampMs === null || heartbeat.timestampMs >= healthSnapshot.timestampMs);
+  const onlineObservation = heartbeatIsLatest ? heartbeat : healthSnapshot;
+  const onlineSource = heartbeatIsLatest
+    ? 'heartbeat'
+    : healthSnapshot.timestampMs !== null
+      ? 'health_snapshot'
+      : 'unavailable';
+  const isOnline = onlineObservation.isFresh;
 
   // V53 Phase 2: DLQ count
   const { count: dlqCount } = await supabase
@@ -119,7 +162,7 @@ export async function GET(request: NextRequest) {
   // failed read just renders the page without the extra context.
   const { data: guidedCfg } = await supabase
     .from('guild_config')
-    .select('diagnostics_guided_mode, memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold')
+    .select('diagnostics_guided_mode, memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold, diagnostics_snapshot_interval_ms')
     .eq('guild_id', guildId)
     .maybeSingle();
   const cfgRow = (guidedCfg ?? null) as Record<string, unknown> | null;
@@ -133,6 +176,7 @@ export async function GET(request: NextRequest) {
         wsPingMs: Number(cfgRow?.ws_ping_alert_threshold_ms ?? 500),
         webhookErrorRate: Number(cfgRow?.webhook_error_rate_threshold ?? 0.25),
       },
+      snapshotIntervalMs: Number(cfgRow?.diagnostics_snapshot_interval_ms ?? 60_000),
       bot: {
         online: isOnline,
         uptimeSeconds: botHealth?.uptime_seconds ?? 0,
@@ -142,7 +186,16 @@ export async function GET(request: NextRequest) {
         guildMemberCount: botHealth?.guild_member_count ?? 0,
         activeVoiceConnections: botHealth?.active_voice_connections ?? 0,
         snapshotAt: botHealth?.snapshot_at ?? null,
-        staleSecs: staleSecs === Infinity ? null : Math.round(staleSecs),
+        staleSecs: onlineObservation.ageSecs,
+        onlineSource,
+        onlineSourceAt: onlineObservation.at,
+        onlineSourceAgeSecs: onlineObservation.ageSecs,
+        heartbeatAt: heartbeat.at,
+        heartbeatAgeSecs: heartbeat.ageSecs,
+        metricsSnapshotAt: healthSnapshot.at,
+        metricsAgeSecs: healthSnapshot.ageSecs,
+        metricsAvailable: healthSnapshot.at !== null,
+        metricsStale: !healthSnapshot.isFresh,
       },
       lavalink: {
         nodes: botHealth?.lavalink_nodes ?? [],

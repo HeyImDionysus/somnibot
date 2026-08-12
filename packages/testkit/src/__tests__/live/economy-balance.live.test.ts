@@ -126,34 +126,15 @@ describe('LIVE /balance — real dispatch, real DB effect (economy ENABLED)', ()
     expect(row!.bank).toBe(0);
   });
 
-  it('Discord-side readback is GATED behind credentials (pending, NOT skipped)', () => {
-    // The DB-observable proof above ran with NO Discord secrets. Any assertion
-    // needing a REAL Discord effect (role added / channel message) belongs to a
-    // LATER, credentialed phase. It is gated behind an explicit opt-in flag AND
-    // a live gateway (client.isReady()) — the dummy DISCORD_TOKEN from live-setup
-    // does NOT satisfy this, so we never false-trigger.
-    const discordReadbackEnabled =
-      Boolean(process.env.SOMNIBOT_LOOPBACK_E2E_DISCORD_READBACK) && handle.client.isReady();
-
-    if (discordReadbackEnabled) {
-      // Credentials + live guild connection are present: this is where the
-      // credentialed phase re-reads the Discord side (e.g. asserts a role was
-      // granted or a message posted for a role-affecting command). Not part of
-      // this DB-only phase — fail loudly rather than pretend it ran.
-      throw new Error(
-        'Discord-side readback assertion is not implemented for this phase — ' +
-          'implement it when the credentialed live lane lands.',
-      );
-    }
-
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[live][PENDING CREDENTIALS] Discord-side readback (roles/messages) is GATED behind ' +
-        'DISCORD_TOKEN + a live guild connection (set SOMNIBOT_LOOPBACK_E2E_DISCORD_READBACK=1 ' +
-        'once real secrets exist). This phase proves the DB-observable effect only; the readback ' +
-        'phase is intentionally DEFERRED, not deleted or silently skipped.',
-    );
-    expect(discordReadbackEnabled).toBe(false);
+  it('has no unverified Discord side effect beyond the captured ephemeral reply', () => {
+    // /balance neither grants a role nor posts a public channel message. Its only
+    // Discord effect is the interaction response asserted above, and the injector
+    // captures the exact payload passed to discord.js. A bot token cannot invoke
+    // its own slash command as a member or read another user's ephemeral response,
+    // so a second "gateway readback" would be impossible theater rather than
+    // additional functional evidence. The owner walkthrough may still judge the
+    // embed's appearance, but not its behavior or DB result.
+    expect(handle.client.isReady()).toBe(false);
   });
 });
 

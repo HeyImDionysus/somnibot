@@ -6,25 +6,25 @@
  * tests must run against a real database, never silently pass.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createAuthenticatedJwt } from './supabase-bootstrap.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
-/**
- * Well-known local-dev demo JWTs (signed with the Supabase CLI default
- * secret, same issuer/expiry as the service_role key CI uses).
- * Only valid against a local `supabase start` instance — not secrets.
- */
-const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ??
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
-const SUPABASE_AUTHENTICATED_JWT =
-  process.env.SUPABASE_AUTHENTICATED_JWT ??
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImF1dGhlbnRpY2F0ZWQiLCJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAiLCJleHAiOjE5ODM4MTI5OTZ9.gtnsf1op2LwTIjIxCAXFhdmPR1CndDznrJ-zD8GRGIY';
+/** Resolve the canonical launcher key while preserving the legacy CI alias. */
+export function resolveTestSupabaseKey(
+  env: Partial<Pick<NodeJS.ProcessEnv, 'SUPABASE_SECRET_KEY' | 'SUPABASE_SERVICE_ROLE_KEY'>> = process.env,
+): string {
+  return env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '';
+}
+
+const SUPABASE_KEY = resolveTestSupabaseKey();
+
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? '';
 
 let _client: SupabaseClient | null = null;
 let _anonClient: SupabaseClient | null = null;
 let _authenticatedClient: SupabaseClient | null = null;
+let _authenticatedClientIssuedAt = 0;
 let _connected: boolean | null = null;
 
 /** Get a shared Supabase client for integration tests. */
@@ -56,11 +56,19 @@ export function getAnonTestClient(): SupabaseClient {
  * the Authorization bearer switches PostgREST to role `authenticated`.
  */
 export function getAuthenticatedTestClient(): SupabaseClient {
-  if (!_authenticatedClient) {
+  const now = Math.floor(Date.now() / 1000);
+  // Refresh before the five-minute bootstrap token expires so long-running
+  // single-fork suites never silently fall back to an expired authenticated
+  // role. The JWT secret remains in process memory only.
+  if (!_authenticatedClient || (process.env.SUPABASE_JWT_SECRET && now - _authenticatedClientIssuedAt >= 240)) {
+    const jwt = process.env.SUPABASE_JWT_SECRET
+      ? createAuthenticatedJwt(process.env.SUPABASE_JWT_SECRET, now)
+      : process.env.SUPABASE_AUTHENTICATED_JWT ?? '';
     _authenticatedClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { autoRefreshToken: false, persistSession: false },
-      global: { headers: { Authorization: `Bearer ${SUPABASE_AUTHENTICATED_JWT}` } },
+      global: { headers: { Authorization: `Bearer ${jwt}` } },
     });
+    _authenticatedClientIssuedAt = now;
   }
   return _authenticatedClient;
 }
@@ -118,6 +126,13 @@ export async function isSupabaseAvailable(): Promise<boolean> {
  * available, the suite should fail loudly, not silently pass.
  */
 export async function requireSupabase(): Promise<SupabaseClient> {
+  if (!SUPABASE_KEY) {
+    throw new Error(
+      'SUPABASE_SECRET_KEY is required for integration tests ' +
+      '(legacy SUPABASE_SERVICE_ROLE_KEY is also accepted).'
+    );
+  }
+
   const available = await isSupabaseAvailable();
   if (!available) {
     throw new Error(

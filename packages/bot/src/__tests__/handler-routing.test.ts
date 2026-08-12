@@ -74,7 +74,10 @@ vi.mock('../features/starboard/index.js', () => ({ handleStarboardReaction: mock
 vi.mock('../features/message-log/index.js', () => ({ logMessageEdit: mockFn(), logMessageDelete: mockFn() }));
 vi.mock('../features/levels/admin-commands.js', () => ({ handleXpAdminCommand: mockFn() }));
 vi.mock('../features/moderation/purge-command.js', () => ({ handlePurgeCommand: mockFn() }));
-vi.mock('../features/reaction-roles/button-roles.js', () => ({ handleButtonRoleInteraction: vi.fn(async () => false) }));
+vi.mock('../features/reaction-roles/button-roles.js', () => ({
+  handleButtonRoleInteraction: vi.fn(async () => false),
+  handleSelectMenuRoleInteraction: vi.fn(async () => false),
+}));
 vi.mock('../features/economy/commands.js', () => ({ handleEconomyCommand: mockFn() }));
 vi.mock('../features/economy/timers-command.js', () => ({ handleTimersCommand: mockFn() }));
 vi.mock('../features/gathering/commands.js', () => ({ handleGatheringCommand: mockFn() }));

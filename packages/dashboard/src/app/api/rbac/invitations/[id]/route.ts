@@ -51,7 +51,10 @@ export async function DELETE(
     if (!data) {
       // Either it does not exist for this guild, or it is no longer pending.
       return NextResponse.json(
-        { error: 'No pending invitation found to revoke' },
+        {
+          error: 'That invitation is no longer pending, so there is nothing to revoke.',
+          message: 'The invitation may already have been accepted, expired, or revoked.',
+        },
         { status: 404 },
       );
     }
@@ -62,6 +65,8 @@ export async function DELETE(
       action: 'team.invite_revoked',
       targetId: (data as { discord_id: string }).discord_id,
       details: { invitation_id: id, role_id: (data as { role_id: string }).role_id },
+      correlationId: `team-invitation:${id}`,
+      occurrenceKey: `team.invite_revoked:${id}`,
     });
 
     const revoked = data as {

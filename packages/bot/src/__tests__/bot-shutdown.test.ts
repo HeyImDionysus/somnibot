@@ -19,6 +19,7 @@ describe('shutdownBot', () => {
     const destroyAll = vi.fn();
     const destroyGuildServices = vi.fn();
     const stopHealthServer = vi.fn();
+    const releaseRuntimeLease = vi.fn().mockResolvedValue(undefined);
     const exit = vi.fn();
     const log = makeLogger();
 
@@ -26,6 +27,7 @@ describe('shutdownBot', () => {
       heartbeat: { stop: vi.fn() },
       presence: { stop: vi.fn() },
       stopAntiRaidPruner: vi.fn(),
+      runtimeLease: { release: releaseRuntimeLease },
     };
 
     await shutdownBot({
@@ -61,6 +63,9 @@ describe('shutdownBot', () => {
     expect(disconnect).toHaveBeenCalledWith(1000, 'shutdown');
     expect(destroy).toHaveBeenCalledOnce();
     expect(stopHealthServer).toHaveBeenCalledOnce();
+    expect(releaseRuntimeLease).toHaveBeenCalledOnce();
+    expect(destroy.mock.invocationCallOrder[0]).toBeLessThan(releaseRuntimeLease.mock.invocationCallOrder[0]!);
+    expect(releaseRuntimeLease.mock.invocationCallOrder[0]).toBeLessThan(quit.mock.invocationCallOrder[0]!);
     expect(quit).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(0);
     expect(log.error).not.toHaveBeenCalled();
@@ -196,5 +201,16 @@ describe('shutdownBot', () => {
     expect(quit).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(1);
     expect(exit).not.toHaveBeenCalledWith(0);
+  });
+
+  it('preserves a requested non-zero exit after a clean lease-loss shutdown', async () => {
+    const exit = vi.fn();
+    await shutdownBot({
+      signal: 'RUNTIME_LEASE_LOST',
+      client: { destroy: vi.fn(), valkey: { quit: vi.fn().mockResolvedValue(undefined) } },
+      exitCode: 1,
+      dependencies: { exit, stopHealthServer: vi.fn(), log: makeLogger() },
+    });
+    expect(exit).toHaveBeenCalledWith(1);
   });
 });

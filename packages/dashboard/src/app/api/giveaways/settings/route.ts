@@ -79,7 +79,7 @@ export async function PUT(req: NextRequest) {
 
   if (error) return dbError(error, 'giveaways/settings');
 
-  await notifyBot('giveaways');
+  await notifyBot(guildId, 'giveaways');
 
   await recordGuildConfigChange({
     guildId,

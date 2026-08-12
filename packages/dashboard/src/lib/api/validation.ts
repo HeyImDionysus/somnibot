@@ -72,7 +72,7 @@ const snowflake = z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake I
 const uuid = z.string().uuid();
 const safeName = z.string().min(1).max(100).trim();
 const safeDescription = z.string().max(2000).trim().optional().default('');
-const colorHex = z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().nullable();
+const embedColor = z.number().int().min(0).max(0xffffff).optional().nullable();
 const urlString = z.string().url().max(2048).optional().nullable();
 const snowflakeArray = z.array(snowflake).max(100).default([]);
 const uniqueSnowflakeArray = snowflakeArray.refine(
@@ -115,6 +115,7 @@ const automationCreate = z.object({
   target_channel_ids: uniqueSnowflakeArray,
   exclude_user_ids: uniqueSnowflakeArray,
   exclude_channel_ids: uniqueSnowflakeArray,
+  preview_hash: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
 });
 
 const automationUpdate = z.object({
@@ -134,6 +135,7 @@ const automationUpdate = z.object({
   target_channel_ids: optionalUniqueSnowflakeArray,
   exclude_user_ids: optionalUniqueSnowflakeArray,
   exclude_channel_ids: optionalUniqueSnowflakeArray,
+  preview_hash: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
 });
 
 const automationTemplateDeploySchema = z.object({
@@ -187,7 +189,7 @@ const embedCreate = z.object({
   name: safeName,
   title: z.string().max(256).optional().nullable(),
   description: z.string().max(4096).optional().nullable(),
-  color: colorHex,
+  color: embedColor,
   fields: z.array(z.object({
     name: z.string().max(256),
     value: z.string().max(1024),
@@ -210,7 +212,7 @@ const embedUpdate = z.object({
   name: safeName.optional(),
   title: z.string().max(256).optional().nullable(),
   description: z.string().max(4096).optional().nullable(),
-  color: colorHex,
+  color: embedColor,
   fields: z.array(z.object({
     name: z.string().max(256),
     value: z.string().max(1024),
@@ -234,16 +236,19 @@ const reservedCommerceMetadataKeys = [
   'grant_role_id',
   'historical_grant_role_ids',
   'role_duration_hours',
+  'commerce_plan_recovery',
 ] as const;
 
 const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
   for (const key of reservedCommerceMetadataKeys) {
     if (Object.prototype.hasOwnProperty.call(metadata, key)) {
+      const message = key === 'commerce_plan_recovery'
+        ? `Commerce metadata key "${key}" is reserved for server-managed state.`
+        : `Legacy commerce metadata key "${key}" is not accepted. Put permanent product role benefits in granted_role_ids instead.`;
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message:
-          `Commerce metadata key "${key}" is no longer supported; migrate role grants to canonical granted_role_ids.`,
+        message,
       });
     }
   }
@@ -254,13 +259,15 @@ const productPlanDefinition = z.object({
   interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']).optional(),
   interval_count: z.number().int().min(1).max(12).optional(),
   price_cents: z.number().int().min(0).max(999999).optional(),
+  trial_days: z.number().int().min(0).max(365).optional(),
+  active: z.boolean().optional(),
 }).strict();
 
 const productCreate = z.object({
   name: safeName,
   description: safeDescription,
   type: z.enum(['one_time', 'subscription', 'free']).default('one_time'),
-  delivery_type: z.string().max(32).optional(),
+  delivery_type: z.enum(['file', 'link', 'access_pass', 'license_key', 'mixed']),
   price_cents: z.number().int().min(0).max(999999).default(0),
   currency: z.string()
     .regex(/^[A-Za-z]{3}$/)
@@ -271,7 +278,7 @@ const productCreate = z.object({
   active: z.boolean().default(true),
   sort_order: z.number().int().min(0).max(999).default(0),
   metadata: productMetadata.optional(),
-  plans: z.array(productPlanDefinition).max(50).optional(),
+  plans: z.array(productPlanDefinition).max(1).optional(),
 });
 
 // STRICT update schema — mass-assignment guard.
@@ -433,6 +440,10 @@ const escalationConfig = z.object({
   escalation_chain: z.array(z.record(z.unknown())).optional(),
   mod_log_channel_id: snowflake.optional().nullable(),
   infraction_expiry_days: z.number().int().min(0).max(3650).optional(),
+  appeals_enabled: z.boolean().optional(),
+  appeal_cooldown_hours: z.number().int().min(1).max(168).optional(),
+  appeal_review_channel_id: snowflake.optional().nullable(),
+  dm_on_action: z.boolean().optional(),
 });
 
 // ── Giveaway schemas ────────────────────────────────
@@ -476,24 +487,49 @@ const giveawaySettings = z.object({
 const welcomeConfig = z.object({
   welcome_enabled: z.boolean().optional(),
   welcome_channel_id: snowflake.optional().nullable(),
-  welcome_message: z.string().max(2000).optional(),
+  welcome_message: z.string().max(2000).nullable().optional(),
   welcome_card_enabled: z.boolean().optional(),
   welcome_card_background: optionalHttpUrlSchema,
   welcome_dm_enabled: z.boolean().optional(),
-  welcome_dm_message: z.string().max(2000).optional(),
+  welcome_dm_message: z.string().max(2000).nullable().optional(),
   welcome_auto_roles: z.array(snowflake).max(25).optional(),
   goodbye_enabled: z.boolean().optional(),
   goodbye_channel_id: snowflake.optional().nullable(),
-  goodbye_message: z.string().max(2000).optional(),
+  goodbye_message: z.string().max(2000).nullable().optional(),
+});
+
+const nativeOnboardingOption = z.object({
+  title: z.string().trim().min(1).max(100),
+  description: z.string().trim().max(100).optional(),
+  emoji: z.string().trim().max(100).optional(),
+  role_ids: z.array(snowflake).max(25).optional(),
+  channel_ids: z.array(snowflake).max(25).optional(),
+});
+
+const nativeOnboardingPrompt = z.object({
+  title: z.string().trim().min(1).max(100),
+  type: z.enum(['multiple_choice', 'dropdown']),
+  required: z.boolean(),
+  single_select: z.boolean(),
+  options: z.array(nativeOnboardingOption).min(1).max(12),
+});
+
+const nativeOnboardingConfig = z.object({
+  enabled: z.boolean(),
+  prompts: z.array(nativeOnboardingPrompt).max(5),
+  default_channel_ids: z.array(snowflake).max(25),
 });
 
 const onboardingConfig = z.object({
   member_role_id: snowflake.optional().nullable(),
   onboarding_enabled: z.boolean().optional(),
-  interest_role_mapping: z.record(z.unknown()).optional(),
+  interest_role_mapping: z.record(snowflake).optional(),
   returning_member_skip_welcome_dm: z.boolean().optional(),
   returning_member_restore_entitlements: z.boolean().optional(),
   returning_member_restore_levels: z.boolean().optional(),
+  onboarding_config: nativeOnboardingConfig.optional().nullable(),
+  fallback_mode: z.enum(['grant-after-timeout', 'manual-review']).optional(),
+  fallback_timeout_minutes: z.number().int().min(1).max(1440).optional(),
 });
 
 // ── Reaction role schemas ───────────────────────────
@@ -574,10 +610,15 @@ const levelRewardCreate = z.object({
 const namePlaceholder = (s: string) => s.includes('{value}') || s.includes('{count}');
 const namePlaceholderMsg = 'name_format must contain the {value} placeholder';
 
+const statsChannelConfig = z.object({
+  category_id: snowflake,
+  value: z.string().max(128).optional(),
+}).passthrough();
+
 const statsChannelCreate = z.object({
   stat_type: z.string().min(1).max(64),
   name_format: z.string().max(128).refine(namePlaceholder, { message: namePlaceholderMsg }),
-  stat_config: z.record(z.unknown()).optional(),
+  stat_config: statsChannelConfig,
 });
 
 // ── Temp channel schemas ────────────────────────────
@@ -619,13 +660,26 @@ const guildConfigUpdate = z.object({
 
 const licenseConfig = z.object({
   license_mode: z.string().max(32).optional(),
+  /** White-label key prefix; issuance still stores only SHA-256 hashes. */
+  key_prefix: z.string().regex(/^[A-Z]{2,8}$/).optional(),
   max_devices: z.number().int().min(1).max(100).optional(),
   heartbeat_interval_seconds: z.number().int().min(0).max(86400).optional(),
+  /** Convenience owner-surface unit; persisted canonically as seconds. */
+  heartbeat_interval_ms: z.number().int().min(60000).max(86400000).refine((value) => value % 1000 === 0, 'heartbeat_interval_ms must be a whole number of seconds').optional(),
+  sdk_cache_ttl_ms: z.number().int().min(1000).max(3600000).optional(),
   offline_grace_period_seconds: z.number().int().min(0).max(604800).optional(),
-  feature_flags: z.record(z.unknown()).optional(),
+  // String-list is the shipped SDK contract. Accept the historical object
+  // shape only for backwards-compatible reads/writes, normalizing it in the
+  // route before it reaches the TEXT[] column.
+  feature_flags: z.union([
+    z.array(z.string().min(1).max(64)).max(100),
+    z.record(z.unknown()),
+  ]).optional(),
   tier: z.string().max(64).optional(),
   watermark_config: z.record(z.unknown()).optional().nullable(),
   require_discord_guild_membership: z.boolean().optional(),
+  rotation_policy: z.enum(['rotate-and-invalidate', 'disabled']).optional(),
+  self_service_device_removal: z.boolean().optional(),
 });
 
 // ── Setup schemas ───────────────────────────────────
@@ -649,6 +703,8 @@ const setupAction = z.discriminatedUnion('action', [
   }),
   z.object({
     action: z.literal('configure-auth'),
+    clientId: snowflake.optional(),
+    clientSecret: z.string().optional(),
   }),
   z.object({
     action: z.literal('finalize'),
@@ -662,13 +718,27 @@ const setupAction = z.discriminatedUnion('action', [
 // ── Deploy / server-setup schemas ───────────────────
 
 const deployAction = z.object({
-  action: z.enum(['deploy', 'preview']).default('deploy'),
+  action: z.literal('deploy'),
+  deployMode: z.enum(['safe', 'destructive']).default('safe'),
+  confirmDestructive: z.literal(true).optional(),
   template_id: uuid.optional(),
   options: z.record(z.unknown()).optional(),
   roles: z.array(z.record(z.unknown())).optional(),
   channels: z.array(z.record(z.unknown())).optional(),
+  categories: z.array(z.object({
+    key: z.string().min(1).max(128),
+    name: z.string().min(1).max(100),
+    position: z.number().int().min(0).max(1000),
+  }).passthrough()).optional(),
   permissionMap: z.record(z.unknown()).optional(),
-  cleanExisting: z.boolean().optional(),
+}).superRefine((value, context) => {
+  if (value.deployMode === 'destructive' && value.confirmDestructive !== true) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['confirmDestructive'],
+      message: 'Destructive deployments require an explicit confirmation',
+    });
+  }
 });
 
 // ── Sync action schemas ─────────────────────────────
@@ -727,8 +797,10 @@ const musicConfig = z.object({
   // auto_destroy caps at 120 to match the route's ceiling (Math.min(120, ...)).
   music_auto_leave_minutes: z.number().int().min(1).max(60).optional(),
   music_auto_destroy_minutes: z.number().int().min(1).max(120).optional(),
-  // V5 Audit §6.P3a — validate max queue length (bot default 500, hard cap 10 000)
-  max_queue_length: z.number().int().min(1).max(10_000).optional(),
+  // V5 Audit §6.P3a — validate max queue length (catalog default/hard cap 5 000)
+  max_queue_length: z.number().int().min(1).max(5_000).optional(),
+  allow_duplicates: z.boolean().optional(),
+  per_user_queue_cap: z.number().int().min(1).max(500).optional(),
   // Fairness controls (catalog: music.json)
   vote_skip_threshold_percent: z.number().int().min(1).max(100).optional(),
   self_skip_enabled: z.boolean().optional(),

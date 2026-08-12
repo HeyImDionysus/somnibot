@@ -12,6 +12,18 @@ import { describe, it, expect } from 'vitest';
 import { schemas } from '@/lib/api/validation';
 
 describe('statsChannel.create name_format placeholder', () => {
+  it('rejects a stats channel without the category where the bot will create it', () => {
+    const result = schemas.statsChannel.create.safeParse({
+      stat_type: 'total_members',
+      name_format: '📊 Members: {value}',
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path.join('.') === 'stat_config')).toBe(true);
+    }
+  });
+
   it('rejects a name_format with no {value}/{count} placeholder', () => {
     const result = schemas.statsChannel.create.safeParse({
       stat_type: 'total_members',
@@ -27,6 +39,7 @@ describe('statsChannel.create name_format placeholder', () => {
     const result = schemas.statsChannel.create.safeParse({
       stat_type: 'total_members',
       name_format: '📊 Members: {value}',
+      stat_config: { category_id: '123456789012345678' },
     });
     expect(result.success).toBe(true);
   });
@@ -35,6 +48,7 @@ describe('statsChannel.create name_format placeholder', () => {
     const result = schemas.statsChannel.create.safeParse({
       stat_type: 'total_members',
       name_format: 'Members {count}',
+      stat_config: { category_id: '123456789012345678' },
     });
     expect(result.success).toBe(true);
   });

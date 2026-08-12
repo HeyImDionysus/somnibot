@@ -4,12 +4,14 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Trophy, Plus, Pencil, Trash2 } from 'lucide-react';
+import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
+import { ValidatedNumberInput } from '../_components/validated-number-input';
 
 interface AchievementDef {
   id: string;
@@ -29,6 +31,7 @@ interface AchConfig {
   economy_prestige_multiplier_pct: number;
   economy_prestige_min_level: number;
   economy_prestige_min_net_worth: number;
+  economy_prestige_max_level: number;
 }
 
 const DEFAULT_CONFIG: AchConfig = {
@@ -37,6 +40,7 @@ const DEFAULT_CONFIG: AchConfig = {
   economy_prestige_multiplier_pct: 10,
   economy_prestige_min_level: 50,
   economy_prestige_min_net_worth: 1000000,
+  economy_prestige_max_level: 10,
 };
 
 const BLANK_ACH: Omit<AchievementDef, 'id'> & { id?: string } = {
@@ -58,6 +62,7 @@ export default function AchievementsPage() {
   const [editing, setEditing] = useState<(Omit<AchievementDef, 'id'> & { id?: string }) | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const saveCoordinator = useRef(new GuildConfigSaveCoordinator()).current;
 
   const loadData = useCallback(async () => {
     try {
@@ -84,18 +89,26 @@ export default function AchievementsPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   const saveConfig = async (patch: Partial<AchConfig>) => {
-    const merged = { ...config, ...patch };
-    setConfig(merged);
     try {
-      const res = await fetch('/api/guild', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
+      const result = await saveCoordinator.save(patch);
+      if (result.status === 'superseded') return 'superseded' as const;
+      setConfig({
+        economy_achievements_enabled: readConfirmedBoolean(result.config, 'economy_achievements_enabled'),
+        economy_prestige_enabled: readConfirmedBoolean(result.config, 'economy_prestige_enabled'),
+        economy_prestige_multiplier_pct: readConfirmedNumber(result.config, 'economy_prestige_multiplier_pct'),
+        economy_prestige_min_level: readConfirmedNumber(result.config, 'economy_prestige_min_level'),
+        economy_prestige_min_net_worth: readConfirmedNumber(result.config, 'economy_prestige_min_net_worth'),
+        economy_prestige_max_level: readConfirmedNumber(result.config, 'economy_prestige_max_level'),
       });
-      if (!res.ok) throw new Error();
+      if (result.status === 'failed') {
+        toast({ title: 'Failed to save settings', variant: 'error' });
+        return 'failed' as const;
+      }
       toast({ title: 'Settings saved!', variant: 'success' });
+      return 'saved' as const;
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });
+      return 'failed' as const;
     }
   };
 
@@ -137,12 +150,12 @@ export default function AchievementsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Achievements & Prestige</h1>
           <p className="text-discord-text-secondary">Configure milestone badges and prestige system.</p>
         </div>
-        <div className="flex gap-4">
+        <div className="flex flex-wrap gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={config.economy_achievements_enabled}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_achievements_enabled: e.target.checked })}
@@ -160,27 +173,13 @@ export default function AchievementsPage() {
 
       {/* Prestige settings */}
       {config.economy_prestige_enabled && (
-        <div className="bg-discord-secondary rounded-lg p-4">
+        <div className="bg-discord-bg-secondary rounded-lg p-4">
           <h3 className="font-semibold text-discord-text-primary mb-3">⭐ Prestige Settings</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <label className="text-sm text-discord-text-secondary">Multiplier Per Level (%)</label>
-              <input type="number" min={1} max={100} value={config.economy_prestige_multiplier_pct}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_multiplier_pct: parseInt(e.target.value) || 10 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Min Level Required</label>
-              <input type="number" min={1} value={config.economy_prestige_min_level}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_min_level: parseInt(e.target.value) || 50 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
-            <div>
-              <label className="text-sm text-discord-text-secondary">Min Net Worth</label>
-              <input type="number" min={0} value={config.economy_prestige_min_net_worth}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_prestige_min_net_worth: parseInt(e.target.value) || 1000000 })}
-                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <ValidatedNumberInput label="Prestige Multiplier per Level (%)" help="Bonus percentage added by each prestige level." value={config.economy_prestige_multiplier_pct} onCommit={(value) => saveConfig({ economy_prestige_multiplier_pct: value })} min={1} max={100} />
+            <ValidatedNumberInput label="Minimum Level for Prestige" help="Level a member must reach before prestiging." value={config.economy_prestige_min_level} onCommit={(value) => saveConfig({ economy_prestige_min_level: value })} min={1} />
+            <ValidatedNumberInput label="Minimum Net Worth (coins)" help="Coin net worth required before prestiging; 0 removes this requirement." value={config.economy_prestige_min_net_worth} onCommit={(value) => saveConfig({ economy_prestige_min_net_worth: value })} min={0} />
+            <ValidatedNumberInput label="Maximum Prestige Level" help="Highest prestige level a member can reach." value={config.economy_prestige_max_level} onCommit={(value) => saveConfig({ economy_prestige_max_level: value })} min={1} max={2147483647} />
           </div>
         </div>
       )}
@@ -191,7 +190,7 @@ export default function AchievementsPage() {
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-discord-text-primary">Achievement Definitions</h2>
             <button onClick={() => setEditing({ ...BLANK_ACH })}
-              className="flex items-center gap-1 bg-discord-blurple text-white px-3 py-1.5 rounded text-sm hover:bg-discord-blurple/80">
+              className="flex items-center gap-1 bg-discord-accent text-white px-3 py-1.5 rounded text-sm hover:bg-discord-accent/80">
               <Plus className="w-4 h-4" /> Add Achievement
             </button>
           </div>
@@ -201,7 +200,7 @@ export default function AchievementsPage() {
           ) : (
             <div className="space-y-2">
               {achievements.map((a) => (
-                <div key={a.id} className="bg-discord-secondary rounded-lg p-3 flex items-center justify-between">
+                <div key={a.id} className="bg-discord-bg-secondary rounded-lg p-3 flex items-center justify-between">
                   <div>
                     <span className="text-xl mr-2">{a.badge_emoji}</span>
                     <span className="text-discord-text-primary font-medium">{a.name}</span>
@@ -212,8 +211,8 @@ export default function AchievementsPage() {
                     </span>
                   </div>
                   <div className="flex gap-1">
-                    <button onClick={() => setEditing({ ...a })} className="p-1 hover:text-discord-blurple text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
-                    <button onClick={() => setDeleteId(a.id)} className="p-1 hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
+                    <button type="button" aria-label={`Edit ${a.name}`} onClick={() => setEditing({ ...a })} className="flex h-11 w-11 items-center justify-center rounded hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
+                    <button type="button" aria-label={`Delete ${a.name}`} onClick={() => setDeleteId(a.id)} className="flex h-11 w-11 items-center justify-center rounded hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
                   </div>
                 </div>
               ))}
@@ -229,49 +228,49 @@ export default function AchievementsPage() {
       {/* Edit modal */}
       {editing && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEditing(null)}>
-          <div className="bg-discord-secondary rounded-lg p-6 w-full max-w-md space-y-4" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-discord-bg-secondary rounded-lg p-6 w-full max-w-md space-y-4" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-discord-text-primary">{editing.id ? 'Edit' : 'New'} Achievement</h3>
             <div className="grid grid-cols-4 gap-3">
               <div>
                 <label className="text-xs text-discord-text-secondary">Emoji</label>
                 <input value={editing.badge_emoji}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, badge_emoji: e.target.value })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2 text-center text-xl" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2 text-center text-xl" />
               </div>
               <div className="col-span-3">
                 <label className="text-xs text-discord-text-secondary">Name</label>
                 <input value={editing.name}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, name: e.target.value })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
             </div>
             <input placeholder="Description" value={editing.description}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, description: e.target.value })}
-              className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+              className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-xs text-discord-text-secondary">Condition Type</label>
                 <input value={editing.condition_type}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, condition_type: e.target.value })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Condition Value</label>
                 <input type="number" min={1} value={editing.condition_value}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, condition_value: parseInt(e.target.value) || 1 })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Reward (coins)</label>
                 <input type="number" min={0} value={editing.reward_currency}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, reward_currency: parseInt(e.target.value) || 0 })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Reward XP</label>
                 <input type="number" min={0} value={editing.reward_xp}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, reward_xp: parseInt(e.target.value) || 0 })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
               </div>
             </div>
             <label className="flex items-center gap-2 cursor-pointer">
@@ -283,7 +282,7 @@ export default function AchievementsPage() {
             <div className="flex justify-end gap-2">
               <button onClick={() => setEditing(null)} className="px-4 py-2 rounded text-discord-text-secondary hover:text-discord-text-primary">Cancel</button>
               <button onClick={saveAchievement} disabled={saving}
-                className="px-4 py-2 bg-discord-blurple text-white rounded hover:bg-discord-blurple/80 disabled:opacity-50">
+                className="px-4 py-2 bg-discord-accent text-white rounded hover:bg-discord-accent/80 disabled:opacity-50">
                 {saving ? 'Saving...' : 'Save'}
               </button>
             </div>
