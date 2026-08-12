@@ -226,7 +226,7 @@ test.describe('Dashboard admin mutation safety', () => {
     });
 
     await page.goto('/admin-changes');
-    await page.getByRole('button', { name: 'Undo Raised spam threshold' }).click();
+    await page.getByRole('button', { name: 'Undo change: Raised spam threshold' }).click();
     const dialog = page.getByRole('alertdialog');
     await expect(dialog).toContainText('auto-mod rule rule-8');
     await expect(dialog).toContainText('recorded before-state');
