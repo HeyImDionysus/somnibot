@@ -294,12 +294,16 @@ export default function MusicSettingsPage() {
             aria-label="Enable Music System"
             aria-checked={config.music_enabled}
             onClick={() => updateField('music_enabled', !config.music_enabled)}
-            className={`relative inline-flex h-11 w-11 shrink-0 items-center rounded-full transition-colors ${
-              config.music_enabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
-            }`}
+            className="relative inline-flex h-11 w-11 shrink-0 items-center"
           >
             <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+              aria-hidden="true"
+              className={`absolute inset-x-0 h-6 rounded-full transition-colors ${
+                config.music_enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'
+              }`}
+            />
+            <span
+              className={`relative inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                 config.music_enabled ? 'translate-x-6' : 'translate-x-1'
               }`}
             />
