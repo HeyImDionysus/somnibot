@@ -1513,10 +1513,20 @@ function resolveCaptureRefundPaymentId(resource: Record<string, unknown>): strin
   }
 
   for (const link of capture.links ?? []) {
-    if (link.rel?.toLowerCase() !== 'capture') continue;
+    const rel = link.rel?.toLowerCase();
+    if (rel !== 'capture' && rel !== 'up') continue;
     if (typeof link.href !== 'string') return null;
     const match = link.href.match(/\/payments\/captures?\/([^/?#]+)\/?(?:[?#]|$)/i);
-    if (!match?.[1] || !addCanonicalPayPalCandidate(candidates, match[1])) return null;
+    // PayPal's v2 Refund resource identifies its parent capture with a
+    // HATEOAS `rel=up` link. A Capture resource can also use `rel=up` for its
+    // parent order, so only treat an `up` link as a witness when its URL is
+    // actually a Payments v2 capture URL. The explicit legacy `rel=capture`
+    // contract remains fail-closed when malformed.
+    if (!match?.[1]) {
+      if (rel === 'up') continue;
+      return null;
+    }
+    if (!addCanonicalPayPalCandidate(candidates, match[1])) return null;
   }
 
   const unique = [...new Set(candidates)];

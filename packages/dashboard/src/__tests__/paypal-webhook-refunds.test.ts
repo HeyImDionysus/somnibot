@@ -203,6 +203,35 @@ describe('PayPal refund parent identity', () => {
     }, 'PAYMENT.CAPTURE.REFUNDED')).toBe('CAPTURE-1');
   });
 
+  it('accepts the v2 refund parent capture from its rel=up link', () => {
+    expect(resolveRefundPaymentId({
+      id: 'REFUND-CAPTURE-1',
+      status: 'COMPLETED',
+      links: [
+        {
+          rel: 'self',
+          href: 'https://api-m.sandbox.paypal.com/v2/payments/refunds/REFUND-CAPTURE-1',
+          method: 'GET',
+        },
+        {
+          rel: 'up',
+          href: 'https://api-m.sandbox.paypal.com/v2/payments/captures/CAPTURE-1',
+          method: 'GET',
+        },
+      ],
+    }, 'PAYMENT.CAPTURE.REFUNDED')).toBe('CAPTURE-1');
+
+    expect(resolveRefundPaymentId({
+      id: 'CAPTURE-REVERSED-1',
+      capture_id: 'CAPTURE-REVERSED-1',
+      links: [{
+        rel: 'up',
+        href: 'https://api-m.sandbox.paypal.com/v2/checkout/orders/ORDER-1',
+        method: 'GET',
+      }],
+    }, 'PAYMENT.CAPTURE.REVERSED')).toBe('CAPTURE-REVERSED-1');
+  });
+
   it('rejects conflicting or noncanonical capture witnesses', () => {
     expect(resolveRefundPaymentId({
       id: 'REFUND-CAPTURE-1',
