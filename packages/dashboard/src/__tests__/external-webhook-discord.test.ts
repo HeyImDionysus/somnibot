@@ -7,7 +7,7 @@ afterEach(() => {
 
 describe('external webhook Discord delivery', () => {
   it('disables mentions and returns the real Discord message id', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: '12345678901234567' }), {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ id: '12345678901234567' }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }));

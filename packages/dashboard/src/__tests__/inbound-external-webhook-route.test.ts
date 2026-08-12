@@ -1,16 +1,17 @@
 import { NextRequest } from 'next/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const createAdminSupabaseMock = vi.hoisted(() => vi.fn());
+
 vi.mock('@/lib/api/client-ip', () => ({ getClientIp: vi.fn(() => '203.0.113.8') }));
 vi.mock('@/lib/api/rate-limit', () => ({ checkRateLimit: vi.fn() }));
 vi.mock('@/lib/external-webhook-discord', () => ({ sendExternalWebhookDiscordMessage: vi.fn() }));
-vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: createAdminSupabaseMock }));
 
 import { POST } from '@/app/api/inbound-webhooks/[token]/route';
 import { checkRateLimit } from '@/lib/api/rate-limit';
 import { sendExternalWebhookDiscordMessage } from '@/lib/external-webhook-discord';
 import { hashExternalWebhookValue } from '@/lib/external-webhook-relay';
-import { createAdminSupabase } from '@/lib/supabase/admin';
 
 const token = 'a'.repeat(43);
 const endpoint = `http://localhost/api/inbound-webhooks/${token}`;
@@ -74,7 +75,7 @@ describe('POST /api/inbound-webhooks/[token]', () => {
   it('claims a JSON delivery without persisting the raw body and returns the Discord message id', async () => {
     const body = JSON.stringify({ source: 'agent', event: 'release.ready', content: 'secret body value' });
     const state = adminFor(claimRow());
-    vi.mocked(createAdminSupabase).mockReturnValue(state.admin);
+    createAdminSupabaseMock.mockReturnValue(state.admin);
 
     const response = await POST(request(body, {
       'content-type': 'application/json',
@@ -110,7 +111,7 @@ describe('POST /api/inbound-webhooks/[token]', () => {
       existing_request_hash: hashExternalWebhookValue(body),
       discord_message_id: '666666666666666666',
     }));
-    vi.mocked(createAdminSupabase).mockReturnValue(state.admin);
+    createAdminSupabaseMock.mockReturnValue(state.admin);
 
     const response = await POST(request(body, {
       'content-type': 'text/plain',
@@ -133,7 +134,7 @@ describe('POST /api/inbound-webhooks/[token]', () => {
       claim_outcome: 'duplicate',
       existing_request_hash: hashExternalWebhookValue('first body'),
     }));
-    vi.mocked(createAdminSupabase).mockReturnValue(state.admin);
+    createAdminSupabaseMock.mockReturnValue(state.admin);
 
     const response = await POST(request('second body', { 'idempotency-key': 'same-key' }), {
       params: Promise.resolve({ token }),
@@ -149,7 +150,7 @@ describe('POST /api/inbound-webhooks/[token]', () => {
     });
 
     expect(response.status).toBe(413);
-    expect(createAdminSupabase).not.toHaveBeenCalled();
+    expect(createAdminSupabaseMock).not.toHaveBeenCalled();
     expect(sendExternalWebhookDiscordMessage).not.toHaveBeenCalled();
   });
 
@@ -165,6 +166,6 @@ describe('POST /api/inbound-webhooks/[token]', () => {
     expect(response.status).toBe(429);
     expect(response.headers.get('retry-after')).toBe('2');
     expect(checkRateLimit).toHaveBeenCalledTimes(2);
-    expect(createAdminSupabase).not.toHaveBeenCalled();
+    expect(createAdminSupabaseMock).not.toHaveBeenCalled();
   });
 });
