@@ -438,6 +438,33 @@ describe('MusicPlayerManager', () => {
         .resolves.toMatchObject({ volume: 50 });
     });
 
+    it('rolls back chained failed volume updates to the last applied value', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [], currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      let rejectFirstUpdate: ((reason: Error) => void) | undefined;
+      player.setGlobalVolume
+        .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+          rejectFirstUpdate = reject;
+        }))
+        .mockRejectedValueOnce(new Error('Second update failed'));
+
+      const firstUpdate = manager.setVolume('g1', 75);
+      await vi.waitFor(() => expect(player.setGlobalVolume).toHaveBeenCalledTimes(1));
+      const secondUpdate = manager.setVolume('g1', 25);
+      await vi.waitFor(async () => {
+        const queue = await manager.queueManager.getQueue('g1');
+        expect(queue?.volume).toBe(25);
+      });
+
+      rejectFirstUpdate?.(new Error('First update failed'));
+      await expect(firstUpdate).rejects.toThrow('First update failed');
+      await expect(secondUpdate).rejects.toThrow('Second update failed');
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ volume: 50 });
+    });
+
     it('returns error when nothing playing', async () => {
       shoukaku.players.clear();
       const result = await manager.setVolume('g1', 50);
@@ -643,6 +670,16 @@ describe('MusicPlayerManager', () => {
   });
 
   describe('queue-end restart', () => {
+    function getStartHandler(): () => void {
+      const eventSetup = manager as unknown as {
+        setupPlayerEvents(target: ReturnType<typeof makePlayer>): void;
+      };
+      eventSetup.setupPlayerEvents(player);
+      const startRegistration = player.on.mock.calls.find(([event]) => event === 'start');
+      expect(startRegistration).toBeDefined();
+      return startRegistration?.[1] as () => void;
+    }
+
     function getEndHandler(): (event: { reason: string }) => Promise<void> {
       const eventSetup = manager as unknown as {
         setupPlayerEvents(target: ReturnType<typeof makePlayer>): void;
@@ -729,6 +766,43 @@ describe('MusicPlayerManager', () => {
       await ending;
       expect(player.playTrack).toHaveBeenCalledTimes(1);
       expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'next' } });
+    });
+
+    it('restarts the persisted current entry after an earlier playback start fails', async () => {
+      player.node.rest.resolve
+        .mockResolvedValueOnce({
+          loadType: 'search',
+          data: [{
+            encoded: 'first-track',
+            info: {
+              title: 'First', uri: 'https://youtube.com/watch?v=first', length: 240000,
+              author: 'Artist', artworkUrl: null, isStream: false, identifier: 'first', sourceName: 'youtube',
+            },
+          }],
+        })
+        .mockResolvedValueOnce({
+          loadType: 'search',
+          data: [{
+            encoded: 'second-track',
+            info: {
+              title: 'Second', uri: 'https://youtube.com/watch?v=second', length: 240000,
+              author: 'Artist', artworkUrl: null, isStream: false, identifier: 'second', sourceName: 'youtube',
+            },
+          }],
+        });
+      player.playTrack.mockRejectedValueOnce(new Error('Playback start failed'));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('first', 'u1', voiceChannel, textChannel))
+        .rejects.toThrow('Playback start failed');
+      await expect(manager.play('second', 'u2', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(2);
+      expect(player.playTrack).toHaveBeenNthCalledWith(2, { track: { encoded: 'first-track' } });
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ currentIndex: 0, entries: [{ track: 'first-track' }, { track: 'second-track' }] });
     });
 
     it('preserves a simultaneous add across the track-end transition', async () => {
@@ -828,6 +902,41 @@ describe('MusicPlayerManager', () => {
 
       expect(player.playTrack).toHaveBeenCalledTimes(2);
       expect(player.playTrack).toHaveBeenNthCalledWith(2, { track: { encoded: 'c' } });
+    });
+
+    it('attributes a delayed start event to its scheduled entry', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'a', title: 'A', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'b', title: 'B', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+          { track: 'c', title: 'C', uri: 'u3', duration: 120000, author: 'C', requestedBy: 'u3', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const sendNowPlaying = vi.spyOn(manager, 'sendNowPlaying').mockResolvedValue(undefined);
+      let finishFirstPlayback: (() => void) | undefined;
+      player.playTrack.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishFirstPlayback = resolve;
+      }));
+      const startHandler = getStartHandler();
+
+      const firstSkip = manager.skip('g1', { userId: 'u1' });
+      await vi.waitFor(() => expect(player.playTrack).toHaveBeenCalledTimes(1));
+      const secondSkip = manager.skip('g1', { userId: 'u2' });
+      await vi.waitFor(async () => {
+        const queue = await manager.queueManager.getQueue('g1');
+        expect(queue?.currentIndex).toBe(2);
+      });
+
+      startHandler();
+      await vi.waitFor(() => {
+        expect(sendNowPlaying).toHaveBeenCalledWith('g1', expect.objectContaining({ track: 'b', title: 'B' }));
+        expect(eventBus.emit).toHaveBeenCalledWith('track.started', 'g1', expect.objectContaining({ title: 'B' }));
+      });
+
+      finishFirstPlayback?.();
+      await Promise.all([firstSkip, secondSkip]);
     });
 
     it('does not recreate a ghost queue when stop overlaps track end', async () => {
@@ -957,6 +1066,33 @@ describe('MusicPlayerManager', () => {
       expect(shoukaku.leaveVoiceChannel).not.toHaveBeenCalled();
       await expect(manager.queueManager.getQueue('g1'))
         .resolves.toMatchObject({ entries: [expect.objectContaining({ requestedBy: 'u1' })] });
+    });
+
+    it('rejects a different channel while the first voice join is pending', async () => {
+      shoukaku.players.clear();
+      let finishJoin: (() => void) | undefined;
+      shoukaku.joinVoiceChannel.mockImplementationOnce(() => new Promise((resolve) => {
+        finishJoin = () => resolve(player);
+      }));
+      const voiceChannelA = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const voiceChannelB = {
+        ...voiceChannelA,
+        id: 'vc2',
+      } as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const firstPlay = manager.play('first song', 'u1', voiceChannelA, textChannel);
+      await vi.waitFor(() => expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(1));
+      await expect(manager.play('other channel song', 'u2', voiceChannelB, textChannel)).resolves.toEqual({
+        success: false,
+        message: 'Voice is already connecting in another channel — please use that channel or try again shortly.',
+      });
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(1);
+
+      finishJoin?.();
+      await expect(firstPlay).resolves.toMatchObject({ success: true });
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ voiceChannelId: 'vc1' });
     });
 
     it('removes an unused queue when the first resolved search is empty', async () => {

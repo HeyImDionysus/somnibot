@@ -119,9 +119,16 @@ export class MusicPlayerManager {
   private playRequestRevision = 0;
   private pendingPlayRequests = new Set<number>();
   private uncommittedVoiceSession = false;
+  private uncommittedVoiceChannelId: string | null = null;
   private uncommittedVoiceCleanupInProgress = false;
+  private pendingVoiceJoin: Promise<Player> | null = null;
+  private pendingVoiceChannelId: string | null = null;
+  private pendingTrackStarts: QueueEntry[] = [];
+  private trackPlaybackRevision = 0;
+  private playbackRestartRequired = false;
   private pauseRevision = 0;
   private volumeRevision = 0;
+  private appliedVolume: number | null = null;
 
   constructor(
     private readonly guild: Guild,
@@ -405,23 +412,56 @@ export class MusicPlayerManager {
     let joinedVoiceSession = false;
     try {
       if (!player) {
-        const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
-        if (!node) {
-          await this.completePlayRequest(requestRevision, false);
-          return { success: false, message: 'No Lavalink nodes available' };
-        }
+        if (this.pendingVoiceJoin) {
+          if (this.pendingVoiceChannelId !== voiceChannel.id) {
+            await this.completePlayRequest(requestRevision, false);
+            return {
+              success: false,
+              message: 'Voice is already connecting in another channel — please use that channel or try again shortly.',
+            };
+          }
+          player = await this.pendingVoiceJoin;
+        } else {
+          const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
+          if (!node) {
+            await this.completePlayRequest(requestRevision, false);
+            return { success: false, message: 'No Lavalink nodes available' };
+          }
 
-        this.voiceOperationRevision += 1;
-        player = await this.shoukaku.joinVoiceChannel({
-          guildId: this.guild.id,
-          channelId: voiceChannel.id,
-          // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
-          shardId: this.guild.shardId,
-          deaf: true,
-        });
-        this.setupPlayerEvents(player);
-        this.uncommittedVoiceSession = true;
-        joinedVoiceSession = true;
+          this.voiceOperationRevision += 1;
+          const join = this.shoukaku.joinVoiceChannel({
+            guildId: this.guild.id,
+            channelId: voiceChannel.id,
+            // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
+            shardId: this.guild.shardId,
+            deaf: true,
+          });
+          this.pendingVoiceJoin = join;
+          this.pendingVoiceChannelId = voiceChannel.id;
+          try {
+            player = await join;
+            this.setupPlayerEvents(player);
+            this.uncommittedVoiceSession = true;
+            this.uncommittedVoiceChannelId = voiceChannel.id;
+            joinedVoiceSession = true;
+          } finally {
+            if (this.pendingVoiceJoin === join) {
+              this.pendingVoiceJoin = null;
+              this.pendingVoiceChannelId = null;
+            }
+          }
+        }
+      }
+      if (
+        this.uncommittedVoiceSession &&
+        this.uncommittedVoiceChannelId !== null &&
+        this.uncommittedVoiceChannelId !== voiceChannel.id
+      ) {
+        await this.completePlayRequest(requestRevision, false);
+        return {
+          success: false,
+          message: 'Voice is already connected in another channel — please use that channel.',
+        };
       }
       const activePlayer = player;
       const expectedVoiceRevision = this.voiceOperationRevision;
@@ -524,8 +564,8 @@ export class MusicPlayerManager {
       );
     }
 
-    if (this.uncommittedVoiceSession && queue.entries.length === 0) {
-      queue.voiceChannelId = voiceChannel.id;
+    if (this.uncommittedVoiceSession) {
+      queue.voiceChannelId = this.uncommittedVoiceChannelId ?? voiceChannel.id;
       queue.textChannelId = textChannel.id;
     }
 
@@ -602,6 +642,7 @@ export class MusicPlayerManager {
       };
     }
     this.uncommittedVoiceSession = false;
+    this.uncommittedVoiceChannelId = null;
 
     // Audit the persisted ADD side of the shared queue before playback setup.
     // music.skipped / music.stopped record only removals, so without this the
@@ -621,7 +662,7 @@ export class MusicPlayerManager {
     });
 
     // If this is the first track (or queue was empty), start playing
-    const shouldPlay = isNewQueue || queueWasExhausted || joinedVoiceSession ||
+    const shouldPlay = isNewQueue || queueWasExhausted || joinedVoiceSession || this.playbackRestartRequired ||
       queue.entries.length === addedEntries.length;
 
     let playback: Promise<void> | null = null;
@@ -629,11 +670,10 @@ export class MusicPlayerManager {
       const firstEntry = queue.entries[queue.currentIndex];
       if (firstEntry) {
         this.queueExhausted = false;
-        const encodedTrack = firstEntry.track;
         const volume = queue.volume;
-        playback = this.enqueuePlaybackAfterQueueMutation(async () => {
-          await player.playTrack({ track: { encoded: encodedTrack } });
+        playback = this.enqueueTrackPlaybackAfterQueueMutation(player, firstEntry, async () => {
           await player.setGlobalVolume(volume);
+          this.appliedVolume = volume;
         });
       }
     }
@@ -675,13 +715,14 @@ export class MusicPlayerManager {
       await this.queueManager.clearVoteSkip(guildId);
       const skippedTrack = await this.queueManager.getCurrentTrack(guildId);
       const queueTransition = await this.queueManager.nextTrack(guildId);
-      const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
-        if (queueTransition.queueEnded || !queueTransition.track) {
+      let playback: Promise<void>;
+      if (queueTransition.queueEnded || !queueTransition.track) {
+        playback = this.enqueuePlaybackAfterQueueMutation(async () => {
           await player.stopTrack();
-          return;
-        }
-        await player.playTrack({ track: { encoded: queueTransition.track.track } });
-      });
+        });
+      } else {
+        playback = this.enqueueTrackPlaybackAfterQueueMutation(player, queueTransition.track);
+      }
       return { skipped: skippedTrack, ...queueTransition, playback };
     });
     if (!transition) {
@@ -788,6 +829,11 @@ export class MusicPlayerManager {
         await this.queueManager.destroyQueue(guildId);
         this.queueExhausted = false;
         this.uncommittedVoiceSession = false;
+        this.uncommittedVoiceChannelId = null;
+        this.playbackRestartRequired = false;
+        this.pendingTrackStarts = [];
+        this.trackPlaybackRevision += 1;
+        this.appliedVolume = null;
         this.pauseRevision += 1;
         this.volumeRevision += 1;
       });
@@ -890,6 +936,7 @@ export class MusicPlayerManager {
           queue.volume = clamped;
           await this.queueManager.saveQueue(queue);
           revision = ++this.volumeRevision;
+          if (this.appliedVolume === null) this.appliedVolume = previousVolume;
         }
       }
       return {
@@ -897,15 +944,16 @@ export class MusicPlayerManager {
         revision,
         playback: this.enqueuePlaybackAfterQueueMutation(async () => {
           await player.setGlobalVolume(clamped);
+          this.appliedVolume = clamped;
         }),
       };
     });
     try {
       await transition.playback;
     } catch (error) {
-      const previousVolume = transition.previousVolume;
+      const rollbackVolume = this.appliedVolume ?? transition.previousVolume;
       const failedRevision = transition.revision;
-      if (previousVolume !== null && failedRevision !== null) {
+      if (rollbackVolume !== null && failedRevision !== null) {
         await this.withQueueMutation(async () => {
           const queue = await this.queueManager.getQueue(guildId);
           if (
@@ -913,7 +961,7 @@ export class MusicPlayerManager {
             queue.volume !== clamped ||
             this.volumeRevision !== failedRevision
           ) return;
-          queue.volume = previousVolume;
+          queue.volume = rollbackVolume;
           await this.queueManager.saveQueue(queue);
           this.volumeRevision += 1;
         });
@@ -1086,11 +1134,11 @@ export class MusicPlayerManager {
   // ── Now Playing Updates ─────────────────────────────────
 
   /** Send or update the now-playing embed. */
-  async sendNowPlaying(guildId: string): Promise<void> {
+  async sendNowPlaying(guildId: string, scheduledEntry?: QueueEntry): Promise<void> {
     const queue = await this.queueManager.getQueue(guildId);
     if (!queue) return;
 
-    const current = queue.entries[queue.currentIndex];
+    const current = scheduledEntry ?? queue.entries[queue.currentIndex];
     if (!current) return;
 
     const textChannel = this.guild.channels.cache.get(queue.textChannelId);
@@ -1286,8 +1334,10 @@ export class MusicPlayerManager {
   private setupPlayerEvents(player: Player): void {
     player.on('start', () => {
       if (this.disposed) return;
+      const scheduledEntry = this.pendingTrackStarts.shift();
       this.queueExhausted = false;
-      this.sendNowPlaying(this.guild.id).catch((err) => {
+      this.playbackRestartRequired = false;
+      this.sendNowPlaying(this.guild.id, scheduledEntry).catch((err) => {
         log.error('Failed to send now-playing:', { error: String(err) });
       });
       this.clearInactivityTimer(this.guild.id);
@@ -1298,9 +1348,9 @@ export class MusicPlayerManager {
         if (queue?.paused) {
           this.resetInactivityTimer(this.guild.id);
         }
-        const np = queue && queue.currentIndex < queue.entries.length
+        const np = scheduledEntry ?? (queue && queue.currentIndex < queue.entries.length
           ? queue.entries[queue.currentIndex]
-          : null;
+          : null);
         if (np) {
           this.eventBus.emit('track.started', this.guild.id, {
             title: np.title ?? 'Unknown',
@@ -1360,6 +1410,8 @@ export class MusicPlayerManager {
 
           const queue = await this.queueManager.getQueue(this.guild.id);
           this.queueExhausted = true;
+          this.playbackRestartRequired = false;
+          this.trackPlaybackRevision += 1;
           this.pauseRevision += 1;
           if (queue) {
             queue.entries = [];
@@ -1385,9 +1437,7 @@ export class MusicPlayerManager {
         }
 
         await this.queueManager.clearVoteSkip(this.guild.id);
-        const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
-          await player.playTrack({ track: { encoded: track.track } });
-        });
+        const playback = this.enqueueTrackPlaybackAfterQueueMutation(player, track);
         return { queueEnded: false, textChannelId: null, playback };
       });
 
@@ -1432,9 +1482,7 @@ export class MusicPlayerManager {
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) return null;
         return {
-          playback: this.enqueuePlaybackAfterQueueMutation(async () => {
-            await player.playTrack({ track: { encoded: track.track } });
-          }),
+          playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
         };
       });
       if (this.disposed) return;
@@ -1449,9 +1497,7 @@ export class MusicPlayerManager {
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) return null;
         return {
-          playback: this.enqueuePlaybackAfterQueueMutation(async () => {
-            await player.playTrack({ track: { encoded: track.track } });
-          }),
+          playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
         };
       });
       if (this.disposed) return;
@@ -1524,6 +1570,7 @@ export class MusicPlayerManager {
               volume: queue.volume,
               paused: queue.paused,
             });
+            this.appliedVolume = queue.volume;
             return !(await recoveryWasCancelled());
           };
 
@@ -1606,6 +1653,32 @@ export class MusicPlayerManager {
     });
   }
 
+  private enqueueTrackPlaybackAfterQueueMutation(
+    player: Player,
+    entry: QueueEntry,
+    afterStart?: () => Promise<void>,
+  ): Promise<void> {
+    const playbackRevision = ++this.trackPlaybackRevision;
+    this.playbackRestartRequired = false;
+    return this.enqueuePlaybackAfterQueueMutation(async () => {
+      this.pendingTrackStarts.push(entry);
+      try {
+        await player.playTrack({ track: { encoded: entry.track } });
+      } catch (error) {
+        const pendingIndex = this.pendingTrackStarts.indexOf(entry);
+        if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+        if (this.trackPlaybackRevision === playbackRevision) {
+          this.playbackRestartRequired = true;
+        }
+        throw error;
+      }
+      if (this.trackPlaybackRevision === playbackRevision) {
+        this.playbackRestartRequired = false;
+      }
+      if (afterStart) await afterStart();
+    });
+  }
+
   private async reconcilePlayerPauseState(
     player: Player,
     requestedPaused: boolean,
@@ -1653,6 +1726,7 @@ export class MusicPlayerManager {
       }
       if (queue && queue.entries.length > 0) {
         this.uncommittedVoiceSession = false;
+        this.uncommittedVoiceChannelId = null;
         return false;
       }
 
@@ -1665,6 +1739,7 @@ export class MusicPlayerManager {
       }
 
       this.uncommittedVoiceSession = false;
+      this.uncommittedVoiceChannelId = null;
       this.uncommittedVoiceCleanupInProgress = true;
       this.voiceOperationRevision += 1;
       this.intentionalVoiceLeaveDepth += 1;
