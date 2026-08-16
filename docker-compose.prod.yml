@@ -89,7 +89,7 @@ services:
       start_period: 15s
 
   lavalink:
-    image: ghcr.io/lavalink-devs/lavalink:4.0
+    image: ghcr.io/lavalink-devs/lavalink:4.2.2
     restart: unless-stopped
     volumes:
       - ./services/lavalink/application.yml:/opt/Lavalink/application.yml

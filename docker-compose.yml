@@ -3,7 +3,7 @@
 # dashboard on the same machine. Use docker-compose.prod.yml for VPS hosting.
 services:
   lavalink:
-    image: ghcr.io/lavalink-devs/lavalink:4.0
+    image: ghcr.io/lavalink-devs/lavalink:4.2.2
     restart: unless-stopped
     ports:
       - "127.0.0.1:2333:2333"
