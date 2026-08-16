@@ -1417,6 +1417,7 @@ export class MusicPlayerManager {
 
     player.on('exception', async (data: TrackExceptionEvent) => {
       if (this.disposed) return;
+      const expectedStopRevision = this.stopRevision;
       log.error('Track exception:', data);
       const { shouldRecover, strategy } = this.selfHealer.recordFailure();
 
@@ -1437,7 +1438,9 @@ export class MusicPlayerManager {
       }
 
       const transition = await this.withQueueMutation(async () => {
-        if (this.stopInProgress) return null;
+        if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
+        const activeQueue = await this.queueManager.getQueue(this.guild.id);
+        if (!activeQueue) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) {
           return {
@@ -1459,9 +1462,12 @@ export class MusicPlayerManager {
 
     player.on('stuck', async () => {
       if (this.disposed) return;
+      const expectedStopRevision = this.stopRevision;
       log.warn('Track stuck, skipping...');
       const transition = await this.withQueueMutation(async () => {
-        if (this.stopInProgress) return null;
+        if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
+        const activeQueue = await this.queueManager.getQueue(this.guild.id);
+        if (!activeQueue) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) {
           return {
@@ -1744,7 +1750,12 @@ export class MusicPlayerManager {
   private async completePlayRequest(requestRevision: number, shouldCleanUp: boolean): Promise<void> {
     const shouldLeaveVoice = await this.withQueueMutation(async () => {
       this.pendingPlayRequests.delete(requestRevision);
-      if (!shouldCleanUp || !this.uncommittedVoiceSession || this.pendingPlayRequests.size > 0) return false;
+      if (
+        !shouldCleanUp ||
+        this.stopInProgress ||
+        !this.uncommittedVoiceSession ||
+        this.pendingPlayRequests.size > 0
+      ) return false;
 
       let queue: GuildQueue | null = null;
       try {

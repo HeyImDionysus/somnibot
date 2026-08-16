@@ -755,6 +755,56 @@ describe('MusicPlayerManager', () => {
       },
     );
 
+    it.each(['exception', 'stuck'] as const)(
+      'ignores a terminal %s event after an explicit stop removed the queue',
+      async (eventName) => {
+        await valkey.set('queue:g1', JSON.stringify({
+          guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+          entries: [{
+            track: 'active', title: 'Active', uri: 'u1', duration: 120000,
+            author: 'A', requestedBy: 'u1', isStream: false,
+          }],
+          currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+        }));
+        const failureHandler = getFailureHandler(eventName);
+
+        await expect(manager.stop('g1', { userId: 'u1', reason: 'command' }))
+          .resolves.toMatchObject({ success: true });
+        await failureHandler(eventName === 'exception' ? { message: 'Late failure' } : undefined);
+
+        await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
+        expect(eventBus.emit).not.toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+      },
+    );
+
+    it('ignores an exception delayed across an explicit stop', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{
+          track: 'active', title: 'Active', uri: 'u1', duration: 120000,
+          author: 'A', requestedBy: 'u1', isStream: false,
+        }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const textChannel = guild.channels.cache.get('tc1') as { send: ReturnType<typeof vi.fn> };
+      const noticeResult = { id: 'error', edit: vi.fn(), delete: vi.fn().mockResolvedValue(undefined) };
+      let finishErrorNotice: (() => void) | undefined;
+      textChannel.send.mockImplementationOnce(() => new Promise<typeof noticeResult>((resolve) => {
+        finishErrorNotice = () => resolve(noticeResult);
+      }));
+      const exceptionHandler = getFailureHandler('exception');
+
+      const exception = exceptionHandler({ message: 'Delayed failure' });
+      await vi.waitFor(() => expect(textChannel.send).toHaveBeenCalledTimes(1));
+      await expect(manager.stop('g1', { userId: 'u1', reason: 'command' }))
+        .resolves.toMatchObject({ success: true });
+      finishErrorNotice?.();
+      await exception;
+
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
+      expect(eventBus.emit).not.toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+    });
+
     it('does not replay a finished entry when play commits before its end callback', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
@@ -1221,6 +1271,41 @@ describe('MusicPlayerManager', () => {
 
       finishLeave?.();
       await expect(failedPlay).resolves.toMatchObject({ success: false });
+    });
+
+    it('lets an in-progress stop own cleanup of a failed first play', async () => {
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      let finishResolution: ((result: Awaited<ReturnType<typeof player.node.rest.resolve>>) => void) | undefined;
+      player.node.rest.resolve.mockImplementationOnce(() => new Promise((resolve) => {
+        finishResolution = resolve;
+      }));
+      let finishStopLeave: (() => void) | undefined;
+      shoukaku.leaveVoiceChannel.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishStopLeave = resolve;
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const failedPlay = manager.play('missing song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(1));
+      const stopping = manager.stop('g1', { userId: 'u2', reason: 'command' });
+      await vi.waitFor(() => expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(1));
+
+      finishResolution?.({ loadType: 'empty', data: {} });
+      await expect(failedPlay).resolves.toMatchObject({ success: false });
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(1);
+
+      finishStopLeave?.();
+      await expect(stopping).resolves.toMatchObject({ success: true });
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
+      expect(eventBus.emit).toHaveBeenCalledWith('music.stopped', 'g1', expect.objectContaining({
+        userId: 'u2',
+        reason: 'command',
+      }));
     });
 
     it('rejects a full queue before asking Lavalink to resolve the query', async () => {
