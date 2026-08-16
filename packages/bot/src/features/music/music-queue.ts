@@ -252,8 +252,6 @@ export class MusicQueueManager {
         return { track: queue.entries[0] ?? null, queueEnded: false };
       }
       // Queue ended
-      queue.currentIndex = queue.entries.length;
-      await this.saveQueue(queue);
       return { track: null, queueEnded: true };
     }
 

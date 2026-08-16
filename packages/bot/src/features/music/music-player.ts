@@ -338,23 +338,46 @@ export class MusicPlayerManager {
     voiceChannel: VoiceBasedChannel,
     textChannel: TextChannel,
   ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
+    if (this.reconnectingVoice) {
+      return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
+    }
+
+    const searchQuery = this.resolveSearchQuery(query);
+    let player = this.shoukaku.players.get(this.guild.id) ?? null;
+    if (!player) {
+      const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
+      if (!node) {
+        return { success: false, message: 'No Lavalink nodes available' };
+      }
+
+      this.voiceOperationRevision += 1;
+      player = await this.shoukaku.joinVoiceChannel({
+        guildId: this.guild.id,
+        channelId: voiceChannel.id,
+        // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
+        shardId: this.guild.shardId,
+        deaf: true,
+      });
+      this.setupPlayerEvents(player);
+    }
+
+    const result = await player.node.rest.resolve(searchQuery);
     return this.withQueueMutation(() => this.playWithinQueueMutation(
-      query,
       userId,
       voiceChannel,
       textChannel,
+      player,
+      result,
     ));
   }
 
   private async playWithinQueueMutation(
-    query: string,
     userId: string,
     voiceChannel: VoiceBasedChannel,
     textChannel: TextChannel,
+    player: Player,
+    result: Awaited<ReturnType<Player['node']['rest']['resolve']>>,
   ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
-    if (this.reconnectingVoice) {
-      return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
-    }
 
     // Get or create queue. [music-collaborative-queue] The queue lives in the
     // Valkey store; if that store is unreachable, raise a durable owner alert
@@ -408,33 +431,6 @@ export class MusicPlayerManager {
       return { success: false, message: `You've reached the per-user limit of ${maxPerUser} queued tracks` };
     }
 
-    // Resolve search query
-    const searchQuery = this.resolveSearchQuery(query);
-
-    // Get or create a Shoukaku player
-    let player = this.shoukaku.players.get(this.guild.id) ?? null;
-
-    if (!player) {
-      const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
-      if (!node) {
-        return { success: false, message: 'No Lavalink nodes available' };
-      }
-
-      this.voiceOperationRevision += 1;
-      player = await this.shoukaku.joinVoiceChannel({
-        guildId: this.guild.id,
-        channelId: voiceChannel.id,
-        // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
-        shardId: this.guild.shardId,
-        deaf: true,
-      });
-
-      this.setupPlayerEvents(player);
-    }
-
-    // Search for tracks
-    const result = await player.node.rest.resolve(searchQuery);
-
     if (!result || result.loadType === 'empty' || result.loadType === 'error') {
       this.selfHealer.recordFailure();
       return { success: false, message: 'No results found for your query' };
@@ -480,8 +476,6 @@ export class MusicPlayerManager {
       return { success: false, message: 'No tracks could be added (duplicates filtered)' };
     }
 
-    const queueWasExhausted = queue.currentIndex >= queue.entries.length;
-
     // Add to queue
     queue.entries.push(...addedEntries);
     await this.queueManager.saveQueue(queue);
@@ -504,7 +498,7 @@ export class MusicPlayerManager {
     });
 
     // If this is the first track (or queue was empty), start playing
-    const shouldPlay = isNewQueue || queueWasExhausted || queue.entries.length === addedEntries.length ||
+    const shouldPlay = isNewQueue || queue.entries.length === addedEntries.length ||
       !player.track;
 
     if (shouldPlay) {
@@ -1110,10 +1104,14 @@ export class MusicPlayerManager {
           });
           await this.resetSessionStats();
 
-          await this.queueManager.clearNowPlayingMessage(this.guild.id);
+          const queue = await this.queueManager.getQueue(this.guild.id);
+          try {
+            await this.queueManager.destroyQueue(this.guild.id);
+          } catch (error) {
+            log.warn('Failed to clear the exhausted music queue:', (error as Error)?.message ?? error);
+          }
           this.resetInactivityTimer(this.guild.id);
 
-          const queue = await this.queueManager.getQueue(this.guild.id);
           if (queue) {
             const textChannel = this.guild.channels.cache.get(queue.textChannelId);
             if (textChannel && textChannel.type === ChannelType.GuildText) {

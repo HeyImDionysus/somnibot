@@ -606,7 +606,7 @@ describe('MusicPlayerManager', () => {
 
       await endHandler({ reason: 'finished' });
       const endedQueue = await manager.queueManager.getQueue('g1');
-      expect(endedQueue?.currentIndex).toBe(1);
+      expect(endedQueue).toBeNull();
 
       const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
       const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
@@ -615,11 +615,11 @@ describe('MusicPlayerManager', () => {
       expect(result.success).toBe(true);
       expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
       const restartedQueue = await manager.queueManager.getQueue('g1');
-      expect(restartedQueue?.currentIndex).toBe(1);
-      expect(restartedQueue?.entries).toHaveLength(2);
+      expect(restartedQueue?.currentIndex).toBe(0);
+      expect(restartedQueue?.entries).toHaveLength(1);
     });
 
-    it('serializes a simultaneous add before the track-end transition', async () => {
+    it('preserves a simultaneous add across the track-end transition', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
         entries: [{ track: 'finishing', title: 'Finishing', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
@@ -634,10 +634,41 @@ describe('MusicPlayerManager', () => {
       await Promise.all([add, finish]);
 
       const queue = await manager.queueManager.getQueue('g1');
-      expect(queue?.entries).toHaveLength(2);
-      expect(queue?.currentIndex).toBe(1);
+      expect(queue?.entries).toHaveLength(1);
+      expect(queue?.currentIndex).toBe(0);
       expect(player.playTrack).toHaveBeenCalledTimes(1);
       expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+    });
+
+    it('does not recreate a ghost queue when stop overlaps track end', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finishing', title: 'Finishing', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const endHandler = getEndHandler();
+
+      await Promise.all([
+        manager.stop('g1', { userId: 'u1', reason: 'command' }),
+        endHandler({ reason: 'finished' }),
+      ]);
+
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
+    });
+
+    it('completes queue-end lifecycle when exhausted-queue cleanup fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finishing', title: 'Finishing', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      valkey.del.mockRejectedValueOnce(new Error('Valkey unavailable'));
+      const endHandler = getEndHandler();
+
+      await expect(endHandler({ reason: 'finished' })).resolves.toBeUndefined();
+      expect(eventBus.emit).toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+      const textChannel = guild.channels.cache.get('tc1') as { send: ReturnType<typeof vi.fn> };
+      expect(textChannel.send).toHaveBeenCalled();
     });
   });
 
