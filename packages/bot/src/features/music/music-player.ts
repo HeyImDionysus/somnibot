@@ -79,6 +79,12 @@ type PlayMutationResult = {
   playback: Promise<void> | null;
 };
 
+type PauseTransition = {
+  previousPaused: boolean;
+  newPaused: boolean;
+  revision: number;
+};
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 5000,
@@ -115,6 +121,7 @@ export class MusicPlayerManager {
   private uncommittedVoiceSession = false;
   private uncommittedVoiceCleanupInProgress = false;
   private pauseRevision = 0;
+  private volumeRevision = 0;
 
   constructor(
     private readonly guild: Guild,
@@ -395,6 +402,7 @@ export class MusicPlayerManager {
 
     const searchQuery = this.resolveSearchQuery(query);
     let player = this.shoukaku.players.get(this.guild.id) ?? null;
+    let joinedVoiceSession = false;
     try {
       if (!player) {
         const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
@@ -413,6 +421,7 @@ export class MusicPlayerManager {
         });
         this.setupPlayerEvents(player);
         this.uncommittedVoiceSession = true;
+        joinedVoiceSession = true;
       }
       const activePlayer = player;
       const expectedVoiceRevision = this.voiceOperationRevision;
@@ -427,6 +436,7 @@ export class MusicPlayerManager {
         requestRevision,
         expectedVoiceRevision,
         expectedStopRevision,
+        joinedVoiceSession,
       ));
       if (transition.playback) await transition.playback;
       await this.completePlayRequest(requestRevision, !transition.response.success);
@@ -473,6 +483,7 @@ export class MusicPlayerManager {
     requestRevision: number,
     expectedVoiceRevision: number,
     expectedStopRevision: number,
+    joinedVoiceSession: boolean,
   ): Promise<PlayMutationResult> {
 
     if (
@@ -610,8 +621,8 @@ export class MusicPlayerManager {
     });
 
     // If this is the first track (or queue was empty), start playing
-    const shouldPlay = isNewQueue || queueWasExhausted || queue.entries.length === addedEntries.length ||
-      !player.track;
+    const shouldPlay = isNewQueue || queueWasExhausted || joinedVoiceSession ||
+      queue.entries.length === addedEntries.length;
 
     let playback: Promise<void> | null = null;
     if (shouldPlay) {
@@ -778,6 +789,7 @@ export class MusicPlayerManager {
         this.queueExhausted = false;
         this.uncommittedVoiceSession = false;
         this.pauseRevision += 1;
+        this.volumeRevision += 1;
       });
       this.clearTimers(guildId);
 
@@ -836,17 +848,7 @@ export class MusicPlayerManager {
         message: finalPaused ? '⏸️ Paused' : '▶️ Resumed',
       };
     } catch (error) {
-      await this.withQueueMutation(async () => {
-        const queue = await this.queueManager.getQueue(guildId);
-        if (
-          !queue ||
-          queue.paused !== pauseTransition.newPaused ||
-          this.pauseRevision !== pauseTransition.revision
-        ) return;
-        queue.paused = pauseTransition.previousPaused;
-        await this.queueManager.saveQueue(queue);
-        this.pauseRevision += 1;
-      });
+      await this.rollbackPauseTransition(guildId, pauseTransition);
       throw error;
     }
   }
@@ -879,20 +881,45 @@ export class MusicPlayerManager {
 
     const clamped = Math.max(0, Math.min(150, volume));
     const transition = await this.withQueueMutation(async () => {
+      let previousVolume: number | null = null;
+      let revision: number | null = null;
       if (!context.internal) {
         const queue = await this.queueManager.getQueue(guildId);
         if (queue) {
+          previousVolume = queue.volume;
           queue.volume = clamped;
           await this.queueManager.saveQueue(queue);
+          revision = ++this.volumeRevision;
         }
       }
       return {
+        previousVolume,
+        revision,
         playback: this.enqueuePlaybackAfterQueueMutation(async () => {
           await player.setGlobalVolume(clamped);
         }),
       };
     });
-    await transition.playback;
+    try {
+      await transition.playback;
+    } catch (error) {
+      const previousVolume = transition.previousVolume;
+      const failedRevision = transition.revision;
+      if (previousVolume !== null && failedRevision !== null) {
+        await this.withQueueMutation(async () => {
+          const queue = await this.queueManager.getQueue(guildId);
+          if (
+            !queue ||
+            queue.volume !== clamped ||
+            this.volumeRevision !== failedRevision
+          ) return;
+          queue.volume = previousVolume;
+          await this.queueManager.saveQueue(queue);
+          this.volumeRevision += 1;
+        });
+      }
+      throw error;
+    }
 
     this.auditControlApplied(context, 'volume', clamped);
     return { success: true, message: `🔊 Volume set to **${clamped}%**` };
@@ -1109,12 +1136,18 @@ export class MusicPlayerManager {
         const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
           if (!latestQueue || latestQueue.voiceChannelId !== channelId || latestQueue.paused) return null;
+          const previousPaused = latestQueue.paused;
           latestQueue.paused = true;
           await this.queueManager.saveQueue(latestQueue);
-          return ++this.pauseRevision;
+          return { previousPaused, newPaused: true, revision: ++this.pauseRevision };
         });
         if (transition !== null) {
-          await this.reconcilePlayerPauseState(player, true, transition);
+          try {
+            await this.reconcilePlayerPauseState(player, transition.newPaused, transition.revision);
+          } catch (error) {
+            await this.rollbackPauseTransition(this.guild.id, transition);
+            throw error;
+          }
         }
       }
       this.startAutoLeaveTimer(this.guild.id);
@@ -1127,12 +1160,18 @@ export class MusicPlayerManager {
         const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
           if (!latestQueue || latestQueue.voiceChannelId !== channelId || !latestQueue.paused) return null;
+          const previousPaused = latestQueue.paused;
           latestQueue.paused = false;
           await this.queueManager.saveQueue(latestQueue);
-          return ++this.pauseRevision;
+          return { previousPaused, newPaused: false, revision: ++this.pauseRevision };
         });
         if (transition !== null) {
-          await this.reconcilePlayerPauseState(player, false, transition);
+          try {
+            await this.reconcilePlayerPauseState(player, transition.newPaused, transition.revision);
+          } catch (error) {
+            await this.rollbackPauseTransition(this.guild.id, transition);
+            throw error;
+          }
         }
       }
     }
@@ -1585,6 +1624,20 @@ export class MusicPlayerManager {
       paused = latest.paused;
       revision = latest.revision;
     }
+  }
+
+  private async rollbackPauseTransition(guildId: string, transition: PauseTransition): Promise<void> {
+    await this.withQueueMutation(async () => {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (
+        !queue ||
+        queue.paused !== transition.newPaused ||
+        this.pauseRevision !== transition.revision
+      ) return;
+      queue.paused = transition.previousPaused;
+      await this.queueManager.saveQueue(queue);
+      this.pauseRevision += 1;
+    });
   }
 
   private async completePlayRequest(requestRevision: number, shouldCleanUp: boolean): Promise<void> {

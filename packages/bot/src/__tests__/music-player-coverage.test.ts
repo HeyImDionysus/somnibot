@@ -425,6 +425,19 @@ describe('MusicPlayerManager', () => {
       expect(player.setGlobalVolume).toHaveBeenCalledWith(150);
     });
 
+    it('rolls back stored volume when Lavalink rejects the update', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [], currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      player.setGlobalVolume.mockRejectedValueOnce(new Error('Lavalink unavailable'));
+
+      await expect(manager.setVolume('g1', 75)).rejects.toThrow('Lavalink unavailable');
+
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ volume: 50 });
+    });
+
     it('returns error when nothing playing', async () => {
       shoukaku.players.clear();
       const result = await manager.setVolume('g1', 50);
@@ -597,6 +610,36 @@ describe('MusicPlayerManager', () => {
       await manager.handleVoiceStateChange('vc1');
       // Should not crash
     });
+
+    it('rolls back automatic pause state when Lavalink rejects', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [], currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as {
+        members: { filter: ReturnType<typeof vi.fn> };
+      };
+      voiceChannel.members.filter.mockReturnValue({ size: 0 });
+      player.setPaused.mockRejectedValueOnce(new Error('Lavalink unavailable'));
+
+      await expect(manager.handleVoiceStateChange('vc1')).rejects.toThrow('Lavalink unavailable');
+
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ paused: false });
+    });
+
+    it('rolls back automatic resume state when Lavalink rejects', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [], currentIndex: 0, loopMode: 'off', volume: 50, paused: true, shuffled: false,
+      }));
+      player.setPaused.mockRejectedValueOnce(new Error('Lavalink unavailable'));
+
+      await expect(manager.handleVoiceStateChange('vc1')).rejects.toThrow('Lavalink unavailable');
+
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ paused: true });
+    });
   });
 
   describe('queue-end restart', () => {
@@ -635,6 +678,57 @@ describe('MusicPlayerManager', () => {
       const restartedQueue = await manager.queueManager.getQueue('g1');
       expect(restartedQueue?.currentIndex).toBe(0);
       expect(restartedQueue?.entries).toHaveLength(1);
+    });
+
+    it('does not replay a finished entry when play commits before its end callback', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'next', title: 'Next', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      (player as unknown as { track: string | null }).track = null;
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('added song', 'u3', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+      expect(player.playTrack).not.toHaveBeenCalled();
+
+      await getEndHandler()({ reason: 'finished' });
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'next' } });
+    });
+
+    it('does not duplicate the advanced entry when the end callback commits first', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'next', title: 'Next', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      (player as unknown as { track: string | null }).track = null;
+      let finishPlayback: (() => void) | undefined;
+      player.playTrack.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishPlayback = resolve;
+      }));
+
+      const ending = getEndHandler()({ reason: 'finished' });
+      await vi.waitFor(() => expect(player.playTrack).toHaveBeenCalledTimes(1));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+      await expect(manager.play('added song', 'u3', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+
+      finishPlayback?.();
+      await ending;
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'next' } });
     });
 
     it('preserves a simultaneous add across the track-end transition', async () => {
