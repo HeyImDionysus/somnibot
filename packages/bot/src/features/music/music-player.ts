@@ -92,6 +92,7 @@ export class MusicPlayerManager {
   private reconnectingVoice = false;
   private intentionalVoiceLeaveDepth = 0;
   private disposed = false;
+  private queueMutationTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly guild: Guild,
@@ -337,6 +338,20 @@ export class MusicPlayerManager {
     voiceChannel: VoiceBasedChannel,
     textChannel: TextChannel,
   ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
+    return this.withQueueMutation(() => this.playWithinQueueMutation(
+      query,
+      userId,
+      voiceChannel,
+      textChannel,
+    ));
+  }
+
+  private async playWithinQueueMutation(
+    query: string,
+    userId: string,
+    voiceChannel: VoiceBasedChannel,
+    textChannel: TextChannel,
+  ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
     if (this.reconnectingVoice) {
       return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
     }
@@ -465,6 +480,8 @@ export class MusicPlayerManager {
       return { success: false, message: 'No tracks could be added (duplicates filtered)' };
     }
 
+    const queueWasExhausted = queue.currentIndex >= queue.entries.length;
+
     // Add to queue
     queue.entries.push(...addedEntries);
     await this.queueManager.saveQueue(queue);
@@ -487,7 +504,7 @@ export class MusicPlayerManager {
     });
 
     // If this is the first track (or queue was empty), start playing
-    const shouldPlay = isNewQueue || queue.entries.length === addedEntries.length ||
+    const shouldPlay = isNewQueue || queueWasExhausted || queue.entries.length === addedEntries.length ||
       !player.track;
 
     if (shouldPlay) {
@@ -1063,53 +1080,55 @@ export class MusicPlayerManager {
     });
 
     player.on('end', async (data: TrackEndEvent) => {
-      if (this.disposed) return;
-      if (data.reason === 'replaced') return; // Track was replaced (skip)
+      await this.withQueueMutation(async () => {
+        if (this.disposed) return;
+        if (data.reason === 'replaced') return; // Track was replaced (skip)
 
-      // Emit track.ended event for the track that just finished
-      const currentQueue = await this.queueManager.getQueue(this.guild.id);
-      if (this.disposed) return;
-      const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
-        ? currentQueue.entries[currentQueue.currentIndex]
-        : null;
-      if (np) {
-        this.eventBus.emit('track.ended', this.guild.id, {
-          title: np.title ?? 'Unknown',
-          author: np.author ?? 'Unknown',
-          uri: np.uri ?? '',
-          reason: data.reason === 'finished' ? 'finished' : 'skipped',
-        });
-      }
-
-      const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
-      if (this.disposed) return;
-
-      if (queueEnded || !track) {
-        // Queue ended — emit event
-        const totalPlayed = await this.getMusicStat('tracks_played_session');
-        this.eventBus.emit('queue.ended', this.guild.id, {
-          totalTracksPlayed: totalPlayed,
-        });
-        await this.resetSessionStats();
-
-        await this.queueManager.clearNowPlayingMessage(this.guild.id);
-        this.resetInactivityTimer(this.guild.id);
-
-        const queue = await this.queueManager.getQueue(this.guild.id);
-        if (queue) {
-          const textChannel = this.guild.channels.cache.get(queue.textChannelId);
-          if (textChannel && textChannel.type === ChannelType.GuildText) {
-            await textChannel.send({
-              embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
-            }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-          }
+        // Emit track.ended event for the track that just finished
+        const currentQueue = await this.queueManager.getQueue(this.guild.id);
+        if (this.disposed) return;
+        const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
+          ? currentQueue.entries[currentQueue.currentIndex]
+          : null;
+        if (np) {
+          this.eventBus.emit('track.ended', this.guild.id, {
+            title: np.title ?? 'Unknown',
+            author: np.author ?? 'Unknown',
+            uri: np.uri ?? '',
+            reason: data.reason === 'finished' ? 'finished' : 'skipped',
+          });
         }
-        return;
-      }
 
-      // Play next track
-      await player.playTrack({ track: { encoded: track.track } });
-      await this.queueManager.clearVoteSkip(this.guild.id);
+        const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
+        if (this.disposed) return;
+
+        if (queueEnded || !track) {
+          // Queue ended — emit event
+          const totalPlayed = await this.getMusicStat('tracks_played_session');
+          this.eventBus.emit('queue.ended', this.guild.id, {
+            totalTracksPlayed: totalPlayed,
+          });
+          await this.resetSessionStats();
+
+          await this.queueManager.clearNowPlayingMessage(this.guild.id);
+          this.resetInactivityTimer(this.guild.id);
+
+          const queue = await this.queueManager.getQueue(this.guild.id);
+          if (queue) {
+            const textChannel = this.guild.channels.cache.get(queue.textChannelId);
+            if (textChannel && textChannel.type === ChannelType.GuildText) {
+              await textChannel.send({
+                embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
+              }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+            }
+          }
+          return;
+        }
+
+        // Play next track
+        await player.playTrack({ track: { encoded: track.track } });
+        await this.queueManager.clearVoteSkip(this.guild.id);
+      });
     });
 
     player.on('exception', async (data: TrackExceptionEvent) => {
@@ -1267,6 +1286,20 @@ export class MusicPlayerManager {
     } catch (error) {
       log.warn(`${phase} failed:`, error);
       return false;
+    }
+  }
+
+  private async withQueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.queueMutationTail;
+    let release: (() => void) | undefined;
+    this.queueMutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
     }
   }
 

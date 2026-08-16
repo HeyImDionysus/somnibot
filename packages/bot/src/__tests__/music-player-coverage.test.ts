@@ -585,6 +585,62 @@ describe('MusicPlayerManager', () => {
     });
   });
 
+  describe('queue-end restart', () => {
+    function getEndHandler(): (event: { reason: string }) => Promise<void> {
+      const eventSetup = manager as unknown as {
+        setupPlayerEvents(target: ReturnType<typeof makePlayer>): void;
+      };
+      eventSetup.setupPlayerEvents(player);
+      const endRegistration = player.on.mock.calls.find(([event]) => event === 'end');
+      expect(endRegistration).toBeDefined();
+      return endRegistration?.[1] as (event: { reason: string }) => Promise<void>;
+    }
+
+    it('starts a newly queued track after the previous queue ended', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const endHandler = getEndHandler();
+
+      await endHandler({ reason: 'finished' });
+      const endedQueue = await manager.queueManager.getQueue('g1');
+      expect(endedQueue?.currentIndex).toBe(1);
+
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+      const result = await manager.play('next song', 'u1', voiceChannel, textChannel);
+
+      expect(result.success).toBe(true);
+      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+      const restartedQueue = await manager.queueManager.getQueue('g1');
+      expect(restartedQueue?.currentIndex).toBe(1);
+      expect(restartedQueue?.entries).toHaveLength(2);
+    });
+
+    it('serializes a simultaneous add before the track-end transition', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finishing', title: 'Finishing', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const endHandler = getEndHandler();
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const add = manager.play('next song', 'u1', voiceChannel, textChannel);
+      const finish = endHandler({ reason: 'finished' });
+      await Promise.all([add, finish]);
+
+      const queue = await manager.queueManager.getQueue('g1');
+      expect(queue?.entries).toHaveLength(2);
+      expect(queue?.currentIndex).toBe(1);
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+    });
+  });
+
   describe('voice websocket recovery', () => {
     function getClosedHandler(): (event: {
       code: number;
