@@ -93,6 +93,7 @@ export class MusicPlayerManager {
   private intentionalVoiceLeaveDepth = 0;
   private disposed = false;
   private queueMutationTail: Promise<void> = Promise.resolve();
+  private queueExhausted = false;
 
   constructor(
     private readonly guild: Guild,
@@ -344,6 +345,7 @@ export class MusicPlayerManager {
 
     const searchQuery = this.resolveSearchQuery(query);
     let player = this.shoukaku.players.get(this.guild.id) ?? null;
+    let joinedForRequest = false;
     if (!player) {
       const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
       if (!node) {
@@ -359,16 +361,28 @@ export class MusicPlayerManager {
         deaf: true,
       });
       this.setupPlayerEvents(player);
+      joinedForRequest = true;
     }
 
-    const result = await player.node.rest.resolve(searchQuery);
-    return this.withQueueMutation(() => this.playWithinQueueMutation(
-      userId,
-      voiceChannel,
-      textChannel,
-      player,
-      result,
-    ));
+    try {
+      const result = await player.node.rest.resolve(searchQuery);
+      const response = await this.withQueueMutation(() => this.playWithinQueueMutation(
+        userId,
+        voiceChannel,
+        textChannel,
+        player,
+        result,
+      ));
+      if (!response.success && joinedForRequest) {
+        await this.leaveFailedPlaySession();
+      }
+      return response;
+    } catch (error) {
+      if (joinedForRequest) {
+        await this.leaveFailedPlaySession();
+      }
+      throw error;
+    }
   }
 
   private async playWithinQueueMutation(
@@ -407,6 +421,14 @@ export class MusicPlayerManager {
         await this.raiseStoreOutageAlert(userId, 'save_queue', err);
         return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
       }
+    }
+
+    const queueWasExhausted = this.queueExhausted;
+    if (queueWasExhausted) {
+      queue.entries = [];
+      queue.currentIndex = 0;
+      queue.paused = false;
+      queue.shuffled = false;
     }
 
     // Check queue size limit — [music-collaborative-queue] capacity lane.
@@ -498,13 +520,14 @@ export class MusicPlayerManager {
     });
 
     // If this is the first track (or queue was empty), start playing
-    const shouldPlay = isNewQueue || queue.entries.length === addedEntries.length ||
+    const shouldPlay = isNewQueue || queueWasExhausted || queue.entries.length === addedEntries.length ||
       !player.track;
 
     if (shouldPlay) {
       const firstEntry = queue.entries[queue.currentIndex];
       if (firstEntry) {
         await player.playTrack({ track: { encoded: firstEntry.track } });
+        this.queueExhausted = false;
         // Re-applying the queue's own stored volume is a restore, not a
         // member-initiated control change — internal, so it writes no row.
         await this.setVolume(this.guild.id, queue.volume, { internal: true });
@@ -628,7 +651,10 @@ export class MusicPlayerManager {
         await this.shoukaku.leaveVoiceChannel(guildId);
       }
 
-      await this.queueManager.destroyQueue(guildId);
+      await this.withQueueMutation(async () => {
+        await this.queueManager.destroyQueue(guildId);
+        this.queueExhausted = false;
+      });
       this.clearTimers(guildId);
 
       // [music-collaborative-queue] Audit the queue teardown /
@@ -1041,6 +1067,7 @@ export class MusicPlayerManager {
   private setupPlayerEvents(player: Player): void {
     player.on('start', () => {
       if (this.disposed) return;
+      this.queueExhausted = false;
       this.sendNowPlaying(this.guild.id).catch((err) => {
         log.error('Failed to send now-playing:', { error: String(err) });
       });
@@ -1105,10 +1132,17 @@ export class MusicPlayerManager {
           await this.resetSessionStats();
 
           const queue = await this.queueManager.getQueue(this.guild.id);
-          try {
-            await this.queueManager.destroyQueue(this.guild.id);
-          } catch (error) {
-            log.warn('Failed to clear the exhausted music queue:', (error as Error)?.message ?? error);
+          this.queueExhausted = true;
+          if (queue) {
+            queue.entries = [];
+            queue.currentIndex = 0;
+            queue.paused = false;
+            queue.shuffled = false;
+            try {
+              await this.queueManager.saveQueue(queue);
+            } catch (error) {
+              log.warn('Failed to persist the exhausted music queue:', (error as Error)?.message ?? error);
+            }
           }
           this.resetInactivityTimer(this.guild.id);
 
@@ -1298,6 +1332,18 @@ export class MusicPlayerManager {
       return await operation();
     } finally {
       release?.();
+    }
+  }
+
+  private async leaveFailedPlaySession(): Promise<void> {
+    this.voiceOperationRevision += 1;
+    this.intentionalVoiceLeaveDepth += 1;
+    try {
+      await this.shoukaku.leaveVoiceChannel(this.guild.id);
+    } catch (error) {
+      log.warn('Failed to leave voice after an unsuccessful play request:', (error as Error)?.message ?? error);
+    } finally {
+      this.intentionalVoiceLeaveDepth -= 1;
     }
   }
 
