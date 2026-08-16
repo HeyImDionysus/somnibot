@@ -641,6 +641,7 @@ export class MusicPlayerManager {
         playback: null,
       };
     }
+    const ownsUncommittedVoiceSession = joinedVoiceSession && this.uncommittedVoiceSession;
     this.uncommittedVoiceSession = false;
     this.uncommittedVoiceChannelId = null;
 
@@ -662,7 +663,7 @@ export class MusicPlayerManager {
     });
 
     // If this is the first track (or queue was empty), start playing
-    const shouldPlay = isNewQueue || queueWasExhausted || joinedVoiceSession || this.playbackRestartRequired ||
+    const shouldPlay = isNewQueue || queueWasExhausted || ownsUncommittedVoiceSession || this.playbackRestartRequired ||
       queue.entries.length === addedEntries.length;
 
     let playback: Promise<void> | null = null;
@@ -1401,39 +1402,8 @@ export class MusicPlayerManager {
         if (this.disposed) return { queueEnded: false, textChannelId: null, playback: null };
 
         if (queueEnded || !track) {
-          // Queue ended — emit event
-          const totalPlayed = await this.getMusicStat('tracks_played_session');
-          this.eventBus.emit('queue.ended', this.guild.id, {
-            totalTracksPlayed: totalPlayed,
-          });
-          await this.resetSessionStats();
-
-          const queue = await this.queueManager.getQueue(this.guild.id);
-          this.queueExhausted = true;
-          this.playbackRestartRequired = false;
-          this.trackPlaybackRevision += 1;
-          this.pauseRevision += 1;
-          if (queue) {
-            queue.entries = [];
-            queue.currentIndex = 0;
-            queue.paused = false;
-            queue.shuffled = false;
-            try {
-              await this.queueManager.saveQueue(queue);
-            } catch (error) {
-              log.warn('Failed to persist the exhausted music queue:', (error as Error)?.message ?? error);
-            }
-          }
-          await this.queueManager.clearNowPlayingMessage(this.guild.id)
-            .catch((error: unknown) => {
-              log.warn('Failed to clear the previous now-playing message:', (error as Error)?.message ?? error);
-            });
-          await this.queueManager.clearVoteSkip(this.guild.id)
-            .catch((error: unknown) => {
-              log.warn('Failed to clear skip votes for the exhausted queue:', (error as Error)?.message ?? error);
-            });
-          this.resetInactivityTimer(this.guild.id);
-          return { queueEnded: true, textChannelId: queue?.textChannelId ?? null, playback: null };
+          const textChannelId = await this.completeQueueEndTransition();
+          return { queueEnded: true, textChannelId, playback: null };
         }
 
         await this.queueManager.clearVoteSkip(this.guild.id);
@@ -1442,18 +1412,7 @@ export class MusicPlayerManager {
       });
 
       if (transition.playback) await transition.playback;
-      if (!transition.queueEnded || !transition.textChannelId) return;
-      const textChannel = this.guild.channels.cache.get(transition.textChannelId);
-      if (textChannel && textChannel.type === ChannelType.GuildText) {
-        const notice = await textChannel.send({
-          embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
-        }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-        if (notice && !this.queueExhausted) {
-          await notice.delete().catch((e: unknown) => {
-            log.warn('Failed to remove a stale queue-ended notice:', (e as Error)?.message ?? e);
-          });
-        }
-      }
+      if (transition.queueEnded) await this.sendQueueEndedNotice(transition.textChannelId);
     });
 
     player.on('exception', async (data: TrackExceptionEvent) => {
@@ -1480,13 +1439,22 @@ export class MusicPlayerManager {
       const transition = await this.withQueueMutation(async () => {
         if (this.stopInProgress) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
-        if (!track) return null;
+        if (!track) {
+          return {
+            queueEnded: true,
+            textChannelId: await this.completeQueueEndTransition(),
+            playback: null,
+          };
+        }
         return {
+          queueEnded: false,
+          textChannelId: null,
           playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
         };
       });
       if (this.disposed) return;
-      if (transition) await transition.playback;
+      if (transition?.playback) await transition.playback;
+      if (transition?.queueEnded) await this.sendQueueEndedNotice(transition.textChannelId);
     });
 
     player.on('stuck', async () => {
@@ -1495,13 +1463,22 @@ export class MusicPlayerManager {
       const transition = await this.withQueueMutation(async () => {
         if (this.stopInProgress) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
-        if (!track) return null;
+        if (!track) {
+          return {
+            queueEnded: true,
+            textChannelId: await this.completeQueueEndTransition(),
+            playback: null,
+          };
+        }
         return {
+          queueEnded: false,
+          textChannelId: null,
           playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
         };
       });
       if (this.disposed) return;
-      if (transition) await transition.playback;
+      if (transition?.playback) await transition.playback;
+      if (transition?.queueEnded) await this.sendQueueEndedNotice(transition.textChannelId);
     });
 
     player.on('closed', async (event: WebSocketClosedEvent) => {
@@ -1677,6 +1654,57 @@ export class MusicPlayerManager {
       }
       if (afterStart) await afterStart();
     });
+  }
+
+  private async completeQueueEndTransition(): Promise<string | null> {
+    const totalPlayed = await this.getMusicStat('tracks_played_session');
+    this.eventBus.emit('queue.ended', this.guild.id, {
+      totalTracksPlayed: totalPlayed,
+    });
+    await this.resetSessionStats();
+
+    const queue = await this.queueManager.getQueue(this.guild.id);
+    this.queueExhausted = true;
+    this.playbackRestartRequired = false;
+    this.trackPlaybackRevision += 1;
+    this.pauseRevision += 1;
+    if (queue) {
+      queue.entries = [];
+      queue.currentIndex = 0;
+      queue.paused = false;
+      queue.shuffled = false;
+      try {
+        await this.queueManager.saveQueue(queue);
+      } catch (error) {
+        log.warn('Failed to persist the exhausted music queue:', (error as Error)?.message ?? error);
+      }
+    }
+    await this.queueManager.clearNowPlayingMessage(this.guild.id)
+      .catch((error: unknown) => {
+        log.warn('Failed to clear the previous now-playing message:', (error as Error)?.message ?? error);
+      });
+    await this.queueManager.clearVoteSkip(this.guild.id)
+      .catch((error: unknown) => {
+        log.warn('Failed to clear skip votes for the exhausted queue:', (error as Error)?.message ?? error);
+      });
+    this.resetInactivityTimer(this.guild.id);
+    return queue?.textChannelId ?? null;
+  }
+
+  private async sendQueueEndedNotice(textChannelId: string | null): Promise<void> {
+    if (!textChannelId) return;
+    const textChannel = this.guild.channels.cache.get(textChannelId);
+    if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
+    const notice = await textChannel.send({
+      embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
+    }).catch((error: unknown) => {
+      log.warn('Failed to send the queue-ended notice:', (error as Error)?.message ?? error);
+    });
+    if (notice && !this.queueExhausted) {
+      await notice.delete().catch((error: unknown) => {
+        log.warn('Failed to remove a stale queue-ended notice:', (error as Error)?.message ?? error);
+      });
+    }
   }
 
   private async reconcilePlayerPauseState(

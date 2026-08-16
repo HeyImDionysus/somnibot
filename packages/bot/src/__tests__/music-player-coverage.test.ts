@@ -690,6 +690,16 @@ describe('MusicPlayerManager', () => {
       return endRegistration?.[1] as (event: { reason: string }) => Promise<void>;
     }
 
+    function getFailureHandler(eventName: 'exception' | 'stuck'): (...args: unknown[]) => Promise<void> {
+      const eventSetup = manager as unknown as {
+        setupPlayerEvents(target: ReturnType<typeof makePlayer>): void;
+      };
+      eventSetup.setupPlayerEvents(player);
+      const registration = player.on.mock.calls.find(([event]) => event === eventName);
+      expect(registration).toBeDefined();
+      return registration?.[1] as (...args: unknown[]) => Promise<void>;
+    }
+
     it('starts a newly queued track after the previous queue ended', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
@@ -716,6 +726,34 @@ describe('MusicPlayerManager', () => {
       expect(restartedQueue?.currentIndex).toBe(0);
       expect(restartedQueue?.entries).toHaveLength(1);
     });
+
+    it.each(['exception', 'stuck'] as const)(
+      'clears a terminal %s transition so the next play starts',
+      async (eventName) => {
+        await valkey.set('queue:g1', JSON.stringify({
+          guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+          entries: [{
+            track: 'failed', title: 'Failed', uri: 'u1', duration: 120000,
+            author: 'A', requestedBy: 'u1', isStream: false,
+          }],
+          currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+        }));
+
+        const failureHandler = getFailureHandler(eventName);
+        await failureHandler(eventName === 'exception' ? { message: 'Playback failed' } : undefined);
+
+        await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+          entries: [],
+          currentIndex: 0,
+        });
+        const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+        const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+        await expect(manager.play('next song', 'u2', voiceChannel, textChannel))
+          .resolves.toMatchObject({ success: true });
+        expect(player.playTrack).toHaveBeenCalledTimes(1);
+        expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+      },
+    );
 
     it('does not replay a finished entry when play commits before its end callback', async () => {
       await valkey.set('queue:g1', JSON.stringify({
@@ -1029,6 +1067,48 @@ describe('MusicPlayerManager', () => {
       expect(shoukaku.leaveVoiceChannel).not.toHaveBeenCalled();
       await expect(manager.queueManager.getQueue('g1'))
         .resolves.toMatchObject({ entries: [expect.objectContaining({ requestedBy: 'u2' })] });
+    });
+
+    it('does not restart playback when another request adopts and commits the voice join first', async () => {
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      let finishFirstResolution: ((result: Awaited<ReturnType<typeof player.node.rest.resolve>>) => void) | undefined;
+      player.node.rest.resolve.mockImplementationOnce(() => new Promise((resolve) => {
+        finishFirstResolution = resolve;
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const firstPlay = manager.play('slow song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(1));
+      await expect(manager.play('fast song', 'u2', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+
+      finishFirstResolution?.({
+        loadType: 'search',
+        data: [{
+          encoded: 'slow-track',
+          info: {
+            title: 'Slow Song', uri: 'https://youtube.com/watch?v=slow', length: 240000,
+            author: 'Artist', artworkUrl: null, isStream: false, identifier: 'slow', sourceName: 'youtube',
+          },
+        }],
+      });
+      await expect(firstPlay).resolves.toMatchObject({ success: true });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        currentIndex: 0,
+        entries: [
+          expect.objectContaining({ requestedBy: 'u2' }),
+          expect.objectContaining({ requestedBy: 'u1' }),
+        ],
+      });
     });
 
     it('keeps a new session alive while an earlier valid play is still pending', async () => {
