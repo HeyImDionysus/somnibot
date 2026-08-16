@@ -345,6 +345,20 @@ describe('MusicPlayerManager', () => {
       expect(result.paused).toBe(true);
       expect(result.message).toContain('Paused');
     });
+
+    it('rolls back the queue state when Lavalink rejects the pause', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      player.setPaused.mockRejectedValueOnce(new Error('Lavalink rejected pause'));
+
+      await expect(manager.togglePause('g1')).rejects.toThrow('Lavalink rejected pause');
+
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ paused: false });
+    });
   });
 
   describe('seek', () => {
@@ -736,6 +750,43 @@ describe('MusicPlayerManager', () => {
         .resolves.toMatchObject({ entries: [expect.objectContaining({ requestedBy: 'u2' })] });
     });
 
+    it('keeps a new session alive while an earlier valid play is still pending', async () => {
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      let finishFirstResolution: ((result: Awaited<ReturnType<typeof player.node.rest.resolve>>) => void) | undefined;
+      player.node.rest.resolve
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          finishFirstResolution = resolve;
+        }))
+        .mockRejectedValueOnce(new Error('Second search failed'));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const firstPlay = manager.play('working song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(1));
+      await expect(manager.play('unavailable song', 'u2', voiceChannel, textChannel))
+        .rejects.toThrow('Second search failed');
+      expect(shoukaku.leaveVoiceChannel).not.toHaveBeenCalled();
+
+      finishFirstResolution?.({
+        loadType: 'search',
+        data: [{
+          encoded: 'base64track',
+          info: {
+            title: 'Working Song', uri: 'https://youtube.com/watch?v=working', length: 240000,
+            author: 'Artist', artworkUrl: null, isStream: false, identifier: 'working', sourceName: 'youtube',
+          },
+        }],
+      });
+      await expect(firstPlay).resolves.toMatchObject({ success: true });
+      expect(shoukaku.leaveVoiceChannel).not.toHaveBeenCalled();
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ entries: [expect.objectContaining({ requestedBy: 'u1' })] });
+    });
+
     it('removes an unused queue when the first resolved search is empty', async () => {
       shoukaku.players.clear();
       shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
@@ -826,6 +877,78 @@ describe('MusicPlayerManager', () => {
       });
       await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
       expect(eventBus.emit).not.toHaveBeenCalledWith('music.queued', 'g1', expect.any(Object));
+    });
+
+    it('does not hold the queue lock while sending the queue-ended notice', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const textChannel = guild.channels.cache.get('tc1') as { send: ReturnType<typeof vi.fn> };
+      const noticeResult = { id: 'notice', edit: vi.fn(), delete: vi.fn().mockResolvedValue(undefined) };
+      let finishNotice: (() => void) | undefined;
+      textChannel.send.mockImplementationOnce(() => new Promise<typeof noticeResult>((resolve) => {
+        finishNotice = () => resolve(noticeResult);
+      }));
+      const endHandler = getEndHandler();
+      const ending = endHandler({ reason: 'finished' });
+      await vi.waitFor(() => expect(textChannel.send).toHaveBeenCalledTimes(1));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const playableTextChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('next song', 'u1', voiceChannel, playableTextChannel))
+        .resolves.toMatchObject({ success: true });
+      finishNotice?.();
+      await ending;
+
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ entries: [expect.objectContaining({ track: 'base64track' })] });
+      expect(noticeResult.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let a paused-state writer restore an exhausted track', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      let finishPause: (() => void) | undefined;
+      player.setPaused.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishPause = resolve;
+      }));
+      const pausing = manager.togglePause('g1');
+      await vi.waitFor(() => expect(player.setPaused).toHaveBeenCalledTimes(1));
+      const ending = getEndHandler()({ reason: 'finished' });
+
+      finishPause?.();
+      await Promise.all([pausing, ending]);
+
+      const queue = await manager.queueManager.getQueue('g1');
+      expect(queue?.entries).toEqual([]);
+      expect(queue?.currentIndex).toBe(0);
+    });
+
+    it('does not let a volume writer restore an exhausted track', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      let finishVolume: (() => void) | undefined;
+      player.setGlobalVolume.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishVolume = resolve;
+      }));
+      const volumeChange = manager.setVolume('g1', 25);
+      await vi.waitFor(() => expect(player.setGlobalVolume).toHaveBeenCalledTimes(1));
+
+      await getEndHandler()({ reason: 'finished' });
+      finishVolume?.();
+      await volumeChange;
+
+      const queue = await manager.queueManager.getQueue('g1');
+      expect(queue?.entries).toEqual([]);
+      expect(queue?.volume).toBe(25);
     });
   });
 

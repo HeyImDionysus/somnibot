@@ -97,7 +97,8 @@ export class MusicPlayerManager {
   private stopInProgress = false;
   private stopRevision = 0;
   private playRequestRevision = 0;
-  private uncommittedVoiceSessionRevision: number | null = null;
+  private pendingPlayRequests = new Set<number>();
+  private uncommittedVoiceSession = false;
 
   constructor(
     private readonly guild: Guild,
@@ -349,6 +350,8 @@ export class MusicPlayerManager {
     if (this.stopInProgress) {
       return { success: false, message: 'Playback is stopping — please try again shortly.' };
     }
+    const requestRevision = ++this.playRequestRevision;
+    this.pendingPlayRequests.add(requestRevision);
     const expectedStopRevision = this.stopRevision;
 
     let queueBeforeResolve: GuildQueue | null;
@@ -356,58 +359,60 @@ export class MusicPlayerManager {
       queueBeforeResolve = await this.queueManager.getQueue(this.guild.id);
     } catch (err) {
       await this.raiseStoreOutageAlert(userId, 'load_queue', err);
+      await this.completePlayRequest(requestRevision, true);
       return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
     }
     if (queueBeforeResolve && !this.queueExhausted) {
       const capacityRejection = this.getCapacityRejection(queueBeforeResolve, userId);
-      if (capacityRejection) return capacityRejection;
+      if (capacityRejection) {
+        await this.completePlayRequest(requestRevision, true);
+        return capacityRejection;
+      }
     }
     if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+      await this.completePlayRequest(requestRevision, false);
       return { success: false, message: 'Playback is stopping — please try again shortly.' };
     }
 
     const searchQuery = this.resolveSearchQuery(query);
-    const requestRevision = ++this.playRequestRevision;
     let player = this.shoukaku.players.get(this.guild.id) ?? null;
-    if (!player) {
-      const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
-      if (!node) {
-        return { success: false, message: 'No Lavalink nodes available' };
-      }
-
-      this.voiceOperationRevision += 1;
-      player = await this.shoukaku.joinVoiceChannel({
-        guildId: this.guild.id,
-        channelId: voiceChannel.id,
-        // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
-        shardId: this.guild.shardId,
-        deaf: true,
-      });
-      this.setupPlayerEvents(player);
-      this.uncommittedVoiceSessionRevision = requestRevision;
-    } else if (this.uncommittedVoiceSessionRevision !== null) {
-      this.uncommittedVoiceSessionRevision = requestRevision;
-    }
-    const expectedVoiceRevision = this.voiceOperationRevision;
-
     try {
-      const result = await player.node.rest.resolve(searchQuery);
+      if (!player) {
+        const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
+        if (!node) {
+          await this.completePlayRequest(requestRevision, false);
+          return { success: false, message: 'No Lavalink nodes available' };
+        }
+
+        this.voiceOperationRevision += 1;
+        player = await this.shoukaku.joinVoiceChannel({
+          guildId: this.guild.id,
+          channelId: voiceChannel.id,
+          // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
+          shardId: this.guild.shardId,
+          deaf: true,
+        });
+        this.setupPlayerEvents(player);
+        this.uncommittedVoiceSession = true;
+      }
+      const activePlayer = player;
+      const expectedVoiceRevision = this.voiceOperationRevision;
+
+      const result = await activePlayer.node.rest.resolve(searchQuery);
       const response = await this.withQueueMutation(() => this.playWithinQueueMutation(
         userId,
         voiceChannel,
         textChannel,
-        player,
+        activePlayer,
         result,
         requestRevision,
         expectedVoiceRevision,
         expectedStopRevision,
       ));
-      if (!response.success) {
-        await this.leaveFailedPlaySession(requestRevision);
-      }
+      await this.completePlayRequest(requestRevision, !response.success);
       return response;
     } catch (error) {
-      await this.leaveFailedPlaySession(requestRevision);
+      await this.completePlayRequest(requestRevision, true);
       throw error;
     }
   }
@@ -482,7 +487,7 @@ export class MusicPlayerManager {
       );
     }
 
-    if (this.uncommittedVoiceSessionRevision === requestRevision && queue.entries.length === 0) {
+    if (this.uncommittedVoiceSession && queue.entries.length === 0) {
       queue.voiceChannelId = voiceChannel.id;
       queue.textChannelId = textChannel.id;
     }
@@ -552,9 +557,7 @@ export class MusicPlayerManager {
       await this.raiseStoreOutageAlert(userId, 'save_queue', err);
       return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
     }
-    if (this.uncommittedVoiceSessionRevision === requestRevision) {
-      this.uncommittedVoiceSessionRevision = null;
-    }
+    this.uncommittedVoiceSession = false;
 
     // Audit the persisted ADD side of the shared queue before playback setup.
     // music.skipped / music.stopped record only removals, so without this the
@@ -615,12 +618,12 @@ export class MusicPlayerManager {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
-    await this.queueManager.clearVoteSkip(guildId);
-
-    // Capture the track being skipped for the audit trail before we advance.
-    const skipped = await this.queueManager.getCurrentTrack(guildId);
-
-    const { track, queueEnded } = await this.queueManager.nextTrack(guildId);
+    const { skipped, track, queueEnded } = await this.withQueueMutation(async () => {
+      await this.queueManager.clearVoteSkip(guildId);
+      const skippedTrack = await this.queueManager.getCurrentTrack(guildId);
+      const transition = await this.queueManager.nextTrack(guildId);
+      return { skipped: skippedTrack, ...transition };
+    });
 
     // [music-player-fairness] Audit the skip outcome — proves which fairness
     // path resolved the skip and who invoked it.
@@ -717,7 +720,7 @@ export class MusicPlayerManager {
       await this.withQueueMutation(async () => {
         await this.queueManager.destroyQueue(guildId);
         this.queueExhausted = false;
-        this.uncommittedVoiceSessionRevision = null;
+        this.uncommittedVoiceSession = false;
       });
       this.clearTimers(guildId);
 
@@ -744,16 +747,32 @@ export class MusicPlayerManager {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, paused: false, message: 'Nothing is playing' };
 
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, paused: false, message: 'No active queue' };
+    const pauseTransition = await this.withQueueMutation(async () => {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return null;
 
-    const newPaused = !queue.paused;
-    await player.setPaused(newPaused);
-    queue.paused = newPaused;
-    await this.queueManager.saveQueue(queue);
-    this.auditControlApplied(context, 'pause', newPaused ? 'paused' : 'resumed');
+      const previousPaused = queue.paused;
+      const newPaused = !queue.paused;
+      queue.paused = newPaused;
+      await this.queueManager.saveQueue(queue);
+      return { previousPaused, newPaused };
+    });
+    if (!pauseTransition) return { success: false, paused: false, message: 'No active queue' };
 
-    if (newPaused) {
+    try {
+      await player.setPaused(pauseTransition.newPaused);
+    } catch (error) {
+      await this.withQueueMutation(async () => {
+        const queue = await this.queueManager.getQueue(guildId);
+        if (!queue || queue.paused !== pauseTransition.newPaused) return;
+        queue.paused = pauseTransition.previousPaused;
+        await this.queueManager.saveQueue(queue);
+      });
+      throw error;
+    }
+
+    this.auditControlApplied(context, 'pause', pauseTransition.newPaused ? 'paused' : 'resumed');
+    if (pauseTransition.newPaused) {
       this.resetInactivityTimer(guildId);
     } else {
       this.clearInactivityTimer(guildId);
@@ -761,8 +780,8 @@ export class MusicPlayerManager {
 
     return {
       success: true,
-      paused: newPaused,
-      message: newPaused ? '⏸️ Paused' : '▶️ Resumed',
+      paused: pauseTransition.newPaused,
+      message: pauseTransition.newPaused ? '⏸️ Paused' : '▶️ Resumed',
     };
   }
 
@@ -795,10 +814,14 @@ export class MusicPlayerManager {
     const clamped = Math.max(0, Math.min(150, volume));
     await player.setGlobalVolume(clamped);
 
-    const queue = await this.queueManager.getQueue(guildId);
-    if (queue) {
-      queue.volume = clamped;
-      await this.queueManager.saveQueue(queue);
+    if (!context.internal) {
+      await this.withQueueMutation(async () => {
+        const queue = await this.queueManager.getQueue(guildId);
+        if (queue) {
+          queue.volume = clamped;
+          await this.queueManager.saveQueue(queue);
+        }
+      });
     }
 
     this.auditControlApplied(context, 'volume', clamped);
@@ -807,11 +830,14 @@ export class MusicPlayerManager {
 
   /** Set loop mode. */
   async setLoopMode(guildId: string, mode: LoopMode, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, message: 'No active queue' };
-
-    queue.loopMode = mode;
-    await this.queueManager.saveQueue(queue);
+    const updated = await this.withQueueMutation(async () => {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return false;
+      queue.loopMode = mode;
+      await this.queueManager.saveQueue(queue);
+      return true;
+    });
+    if (!updated) return { success: false, message: 'No active queue' };
 
     this.auditControlApplied(context, 'loop', mode);
     const labels = { off: '▶️ Loop off', track: '🔂 Looping track', queue: '🔁 Looping queue' };
@@ -834,7 +860,7 @@ export class MusicPlayerManager {
 
   /** Shuffle the queue. */
   async shuffle(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
-    const success = await this.queueManager.shuffle(guildId);
+    const success = await this.withQueueMutation(() => this.queueManager.shuffle(guildId));
     if (!success) return { success: false, message: 'No active queue to shuffle' };
     this.auditControlApplied(context, 'shuffle');
     return { success: true, message: '🔀 Queue shuffled' };
@@ -842,19 +868,21 @@ export class MusicPlayerManager {
 
   /** Remove a track from the queue by position (1-indexed, relative to upcoming). */
   async remove(guildId: string, position: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, message: 'No active queue' };
+    return this.withQueueMutation(async () => {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return { success: false, message: 'No active queue' };
 
-    const index = queue.currentIndex + position;
-    if (index <= queue.currentIndex || index >= queue.entries.length) {
-      return { success: false, message: 'Invalid position' };
-    }
+      const index = queue.currentIndex + position;
+      if (index <= queue.currentIndex || index >= queue.entries.length) {
+        return { success: false, message: 'Invalid position' };
+      }
 
-    const removed = await this.queueManager.removeEntry(guildId, index);
-    if (!removed) return { success: false, message: 'Failed to remove track' };
+      const removed = await this.queueManager.removeEntry(guildId, index);
+      if (!removed) return { success: false, message: 'Failed to remove track' };
 
-    this.auditControlApplied(context, 'remove', removed.title);
-    return { success: true, message: `🗑️ Removed **${removed.title}** from the queue` };
+      this.auditControlApplied(context, 'remove', removed.title);
+      return { success: true, message: `🗑️ Removed **${removed.title}** from the queue` };
+    });
   }
 
   /**
@@ -869,38 +897,39 @@ export class MusicPlayerManager {
     fromPosition: number,
     toPosition: number,
   ): Promise<{ success: boolean; message: string }> {
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, message: 'No active queue' };
+    const userIsDJ = await this.isDJ(userId);
+    return this.withQueueMutation(async () => {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return { success: false, message: 'No active queue' };
 
-    const fromIndex = queue.currentIndex + fromPosition;
-    const toIndex = queue.currentIndex + toPosition;
-    if (fromIndex <= queue.currentIndex || fromIndex >= queue.entries.length) {
-      return { success: false, message: 'Invalid source position' };
-    }
-    if (toIndex <= queue.currentIndex || toIndex >= queue.entries.length) {
-      return { success: false, message: 'Invalid target position' };
-    }
-
-    const entry = queue.entries[fromIndex];
-    if (!entry) return { success: false, message: 'Invalid source position' };
-
-    if (!(await this.isDJ(userId))) {
-      if (!this.config.requesterMoveEnabled) {
-        this.auditPermissionDenied(userId, 'move');
-        return { success: false, message: 'Only a DJ can move tracks here.' };
+      const fromIndex = queue.currentIndex + fromPosition;
+      const toIndex = queue.currentIndex + toPosition;
+      if (fromIndex <= queue.currentIndex || fromIndex >= queue.entries.length) {
+        return { success: false, message: 'Invalid source position' };
       }
-      if (entry.requestedBy !== userId) {
-        this.auditPermissionDenied(userId, 'move');
-        return { success: false, message: 'You can only move tracks you requested.' };
+      if (toIndex <= queue.currentIndex || toIndex >= queue.entries.length) {
+        return { success: false, message: 'Invalid target position' };
       }
-    }
 
-    const moved = await this.queueManager.moveEntry(guildId, fromIndex, toIndex);
-    if (!moved) return { success: false, message: 'Failed to move track' };
-    // A denied move already audits (auditPermissionDenied above) — an allowed
-    // one must too, or the trail only ever shows moves that did not happen.
-    this.auditControlApplied({ userId }, 'move', `${fromPosition}→${toPosition}`);
-    return { success: true, message: `↔️ Moved **${entry.title}** to position ${toPosition}` };
+      const entry = queue.entries[fromIndex];
+      if (!entry) return { success: false, message: 'Invalid source position' };
+
+      if (!userIsDJ) {
+        if (!this.config.requesterMoveEnabled) {
+          this.auditPermissionDenied(userId, 'move');
+          return { success: false, message: 'Only a DJ can move tracks here.' };
+        }
+        if (entry.requestedBy !== userId) {
+          this.auditPermissionDenied(userId, 'move');
+          return { success: false, message: 'You can only move tracks you requested.' };
+        }
+      }
+
+      const moved = await this.queueManager.moveEntry(guildId, fromIndex, toIndex);
+      if (!moved) return { success: false, message: 'Failed to move track' };
+      this.auditControlApplied({ userId }, 'move', `${fromPosition}→${toPosition}`);
+      return { success: true, message: `↔️ Moved **${entry.title}** to position ${toPosition}` };
+    });
   }
 
   /** Get the current player position in ms. */
@@ -1008,8 +1037,12 @@ export class MusicPlayerManager {
       const player = this.shoukaku.players.get(this.guild.id);
       if (player && !queue.paused) {
         await player.setPaused(true);
-        queue.paused = true;
-        await this.queueManager.saveQueue(queue);
+        await this.withQueueMutation(async () => {
+          const latestQueue = await this.queueManager.getQueue(this.guild.id);
+          if (!latestQueue || latestQueue.voiceChannelId !== channelId) return;
+          latestQueue.paused = true;
+          await this.queueManager.saveQueue(latestQueue);
+        });
       }
       this.startAutoLeaveTimer(this.guild.id);
     } else {
@@ -1019,8 +1052,12 @@ export class MusicPlayerManager {
       const player = this.shoukaku.players.get(this.guild.id);
       if (player && queue.paused) {
         await player.setPaused(false);
-        queue.paused = false;
-        await this.queueManager.saveQueue(queue);
+        await this.withQueueMutation(async () => {
+          const latestQueue = await this.queueManager.getQueue(this.guild.id);
+          if (!latestQueue || latestQueue.voiceChannelId !== channelId) return;
+          latestQueue.paused = false;
+          await this.queueManager.saveQueue(latestQueue);
+        });
       }
     }
   }
@@ -1168,13 +1205,16 @@ export class MusicPlayerManager {
     });
 
     player.on('end', async (data: TrackEndEvent) => {
-      await this.withQueueMutation(async () => {
-        if (this.disposed) return;
-        if (data.reason === 'replaced') return; // Track was replaced (skip)
+      const transition = await this.withQueueMutation(async (): Promise<{
+        queueEnded: boolean;
+        textChannelId: string | null;
+      }> => {
+        if (this.disposed) return { queueEnded: false, textChannelId: null };
+        if (data.reason === 'replaced') return { queueEnded: false, textChannelId: null };
 
         // Emit track.ended event for the track that just finished
         const currentQueue = await this.queueManager.getQueue(this.guild.id);
-        if (this.disposed) return;
+        if (this.disposed) return { queueEnded: false, textChannelId: null };
         const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
           ? currentQueue.entries[currentQueue.currentIndex]
           : null;
@@ -1188,7 +1228,7 @@ export class MusicPlayerManager {
         }
 
         const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
-        if (this.disposed) return;
+        if (this.disposed) return { queueEnded: false, textChannelId: null };
 
         if (queueEnded || !track) {
           // Queue ended — emit event
@@ -1220,22 +1260,27 @@ export class MusicPlayerManager {
               log.warn('Failed to clear skip votes for the exhausted queue:', (error as Error)?.message ?? error);
             });
           this.resetInactivityTimer(this.guild.id);
-
-          if (queue) {
-            const textChannel = this.guild.channels.cache.get(queue.textChannelId);
-            if (textChannel && textChannel.type === ChannelType.GuildText) {
-              await textChannel.send({
-                embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
-              }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-            }
-          }
-          return;
+          return { queueEnded: true, textChannelId: queue?.textChannelId ?? null };
         }
 
         // Play next track
         await player.playTrack({ track: { encoded: track.track } });
         await this.queueManager.clearVoteSkip(this.guild.id);
+        return { queueEnded: false, textChannelId: null };
       });
+
+      if (!transition.queueEnded || !transition.textChannelId) return;
+      const textChannel = this.guild.channels.cache.get(transition.textChannelId);
+      if (textChannel && textChannel.type === ChannelType.GuildText) {
+        const notice = await textChannel.send({
+          embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
+        }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+        if (notice && !this.queueExhausted) {
+          await notice.delete().catch((e: unknown) => {
+            log.warn('Failed to remove a stale queue-ended notice:', (e as Error)?.message ?? e);
+          });
+        }
+      }
     });
 
     player.on('exception', async (data: TrackExceptionEvent) => {
@@ -1259,7 +1304,7 @@ export class MusicPlayerManager {
         }
       }
 
-      const { track } = await this.queueManager.nextTrack(this.guild.id);
+      const { track } = await this.withQueueMutation(() => this.queueManager.nextTrack(this.guild.id));
       if (this.disposed) return;
       if (track) {
         await player.playTrack({ track: { encoded: track.track } });
@@ -1269,7 +1314,7 @@ export class MusicPlayerManager {
     player.on('stuck', async () => {
       if (this.disposed) return;
       log.warn('Track stuck, skipping...');
-      const { track } = await this.queueManager.nextTrack(this.guild.id);
+      const { track } = await this.withQueueMutation(() => this.queueManager.nextTrack(this.guild.id));
       if (this.disposed) return;
       if (track) {
         await player.playTrack({ track: { encoded: track.track } });
@@ -1410,9 +1455,10 @@ export class MusicPlayerManager {
     }
   }
 
-  private async leaveFailedPlaySession(requestRevision: number): Promise<void> {
+  private async completePlayRequest(requestRevision: number, shouldCleanUp: boolean): Promise<void> {
     await this.withQueueMutation(async () => {
-      if (this.uncommittedVoiceSessionRevision !== requestRevision) return;
+      this.pendingPlayRequests.delete(requestRevision);
+      if (!shouldCleanUp || !this.uncommittedVoiceSession || this.pendingPlayRequests.size > 0) return;
 
       let queue: GuildQueue | null = null;
       try {
@@ -1421,7 +1467,7 @@ export class MusicPlayerManager {
         log.warn('Failed to inspect the unused queue after an unsuccessful play request:', (error as Error)?.message ?? error);
       }
       if (queue && queue.entries.length > 0) {
-        this.uncommittedVoiceSessionRevision = null;
+        this.uncommittedVoiceSession = false;
         return;
       }
 
@@ -1433,7 +1479,7 @@ export class MusicPlayerManager {
         }
       }
 
-      this.uncommittedVoiceSessionRevision = null;
+      this.uncommittedVoiceSession = false;
       this.voiceOperationRevision += 1;
       this.intentionalVoiceLeaveDepth += 1;
       try {
