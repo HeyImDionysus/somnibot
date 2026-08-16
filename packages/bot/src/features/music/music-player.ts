@@ -94,6 +94,10 @@ export class MusicPlayerManager {
   private disposed = false;
   private queueMutationTail: Promise<void> = Promise.resolve();
   private queueExhausted = false;
+  private stopInProgress = false;
+  private stopRevision = 0;
+  private playRequestRevision = 0;
+  private uncommittedVoiceSessionRevision: number | null = null;
 
   constructor(
     private readonly guild: Guild,
@@ -342,10 +346,29 @@ export class MusicPlayerManager {
     if (this.reconnectingVoice) {
       return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
     }
+    if (this.stopInProgress) {
+      return { success: false, message: 'Playback is stopping — please try again shortly.' };
+    }
+    const expectedStopRevision = this.stopRevision;
+
+    let queueBeforeResolve: GuildQueue | null;
+    try {
+      queueBeforeResolve = await this.queueManager.getQueue(this.guild.id);
+    } catch (err) {
+      await this.raiseStoreOutageAlert(userId, 'load_queue', err);
+      return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+    }
+    if (queueBeforeResolve && !this.queueExhausted) {
+      const capacityRejection = this.getCapacityRejection(queueBeforeResolve, userId);
+      if (capacityRejection) return capacityRejection;
+    }
+    if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+      return { success: false, message: 'Playback is stopping — please try again shortly.' };
+    }
 
     const searchQuery = this.resolveSearchQuery(query);
+    const requestRevision = ++this.playRequestRevision;
     let player = this.shoukaku.players.get(this.guild.id) ?? null;
-    let joinedForRequest = false;
     if (!player) {
       const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
       if (!node) {
@@ -361,8 +384,11 @@ export class MusicPlayerManager {
         deaf: true,
       });
       this.setupPlayerEvents(player);
-      joinedForRequest = true;
+      this.uncommittedVoiceSessionRevision = requestRevision;
+    } else if (this.uncommittedVoiceSessionRevision !== null) {
+      this.uncommittedVoiceSessionRevision = requestRevision;
     }
+    const expectedVoiceRevision = this.voiceOperationRevision;
 
     try {
       const result = await player.node.rest.resolve(searchQuery);
@@ -372,17 +398,45 @@ export class MusicPlayerManager {
         textChannel,
         player,
         result,
+        requestRevision,
+        expectedVoiceRevision,
+        expectedStopRevision,
       ));
-      if (!response.success && joinedForRequest) {
-        await this.leaveFailedPlaySession();
+      if (!response.success) {
+        await this.leaveFailedPlaySession(requestRevision);
       }
       return response;
     } catch (error) {
-      if (joinedForRequest) {
-        await this.leaveFailedPlaySession();
-      }
+      await this.leaveFailedPlaySession(requestRevision);
       throw error;
     }
+  }
+
+  private getCapacityRejection(
+    queue: GuildQueue,
+    userId: string,
+  ): { success: false; message: string } | null {
+    if (queue.entries.length >= this.config.maxQueueLength) {
+      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
+        userId,
+        reason: 'queue_full',
+        limit: this.config.maxQueueLength,
+      });
+      return { success: false, message: `Queue is full (max ${this.config.maxQueueLength} tracks)` };
+    }
+
+    const maxPerUser = this.config.perUserQueueCap;
+    const userQueueCount = queue.entries.filter((entry) => entry.requestedBy === userId).length;
+    if (userQueueCount >= maxPerUser) {
+      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
+        userId,
+        reason: 'user_limit',
+        limit: maxPerUser,
+      });
+      return { success: false, message: `You've reached the per-user limit of ${maxPerUser} queued tracks` };
+    }
+
+    return null;
   }
 
   private async playWithinQueueMutation(
@@ -391,7 +445,18 @@ export class MusicPlayerManager {
     textChannel: TextChannel,
     player: Player,
     result: Awaited<ReturnType<Player['node']['rest']['resolve']>>,
+    requestRevision: number,
+    expectedVoiceRevision: number,
+    expectedStopRevision: number,
   ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
+
+    if (
+      this.stopInProgress ||
+      this.stopRevision !== expectedStopRevision ||
+      this.voiceOperationRevision !== expectedVoiceRevision
+    ) {
+      return { success: false, message: 'Playback was stopped before the track could be queued.' };
+    }
 
     // Get or create queue. [music-collaborative-queue] The queue lives in the
     // Valkey store; if that store is unreachable, raise a durable owner alert
@@ -415,12 +480,11 @@ export class MusicPlayerManager {
         textChannel.id,
         this.config.defaultVolume,
       );
-      try {
-        await this.queueManager.saveQueue(queue);
-      } catch (err) {
-        await this.raiseStoreOutageAlert(userId, 'save_queue', err);
-        return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
-      }
+    }
+
+    if (this.uncommittedVoiceSessionRevision === requestRevision && queue.entries.length === 0) {
+      queue.voiceChannelId = voiceChannel.id;
+      queue.textChannelId = textChannel.id;
     }
 
     const queueWasExhausted = this.queueExhausted;
@@ -432,26 +496,8 @@ export class MusicPlayerManager {
     }
 
     // Check queue size limit — [music-collaborative-queue] capacity lane.
-    if (queue.entries.length >= this.config.maxQueueLength) {
-      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
-        userId,
-        reason: 'queue_full',
-        limit: this.config.maxQueueLength,
-      });
-      return { success: false, message: `Queue is full (max ${this.config.maxQueueLength} tracks)` };
-    }
-
-    // V9 Audit §12.P2: Per-user queue limit — prevent one user from monopolizing the queue.
-    const userQueueCount = queue.entries.filter((e) => e.requestedBy === userId).length;
-    const maxPerUser = this.config.perUserQueueCap;
-    if (userQueueCount >= maxPerUser) {
-      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
-        userId,
-        reason: 'user_limit',
-        limit: maxPerUser,
-      });
-      return { success: false, message: `You've reached the per-user limit of ${maxPerUser} queued tracks` };
-    }
+    const capacityRejection = this.getCapacityRejection(queue, userId);
+    if (capacityRejection) return capacityRejection;
 
     if (!result || result.loadType === 'empty' || result.loadType === 'error') {
       this.selfHealer.recordFailure();
@@ -500,7 +546,15 @@ export class MusicPlayerManager {
 
     // Add to queue
     queue.entries.push(...addedEntries);
-    await this.queueManager.saveQueue(queue);
+    try {
+      await this.queueManager.saveQueue(queue);
+    } catch (err) {
+      await this.raiseStoreOutageAlert(userId, 'save_queue', err);
+      return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+    }
+    if (this.uncommittedVoiceSessionRevision === requestRevision) {
+      this.uncommittedVoiceSessionRevision = null;
+    }
 
     // Audit the persisted ADD side of the shared queue before playback setup.
     // music.skipped / music.stopped record only removals, so without this the
@@ -642,7 +696,16 @@ export class MusicPlayerManager {
     context: { userId?: string; reason?: StopReason } = {},
   ): Promise<{ success: boolean; message: string }> {
     const queueBeforeStop = await this.queueManager.getQueue(guildId);
-    this.voiceOperationRevision += 1;
+    const claimedStop = await this.withQueueMutation(async () => {
+      if (this.stopInProgress) return false;
+      this.stopInProgress = true;
+      this.stopRevision += 1;
+      this.voiceOperationRevision += 1;
+      return true;
+    });
+    if (!claimedStop) {
+      return { success: true, message: '⏹️ Playback is already stopping' };
+    }
     this.intentionalVoiceLeaveDepth += 1;
     try {
       const player = this.shoukaku.players.get(guildId);
@@ -654,6 +717,7 @@ export class MusicPlayerManager {
       await this.withQueueMutation(async () => {
         await this.queueManager.destroyQueue(guildId);
         this.queueExhausted = false;
+        this.uncommittedVoiceSessionRevision = null;
       });
       this.clearTimers(guildId);
 
@@ -668,6 +732,9 @@ export class MusicPlayerManager {
 
       return { success: true, message: '⏹️ Stopped playback and cleared the queue' };
     } finally {
+      await this.withQueueMutation(async () => {
+        this.stopInProgress = false;
+      });
       this.intentionalVoiceLeaveDepth -= 1;
     }
   }
@@ -1144,6 +1211,14 @@ export class MusicPlayerManager {
               log.warn('Failed to persist the exhausted music queue:', (error as Error)?.message ?? error);
             }
           }
+          await this.queueManager.clearNowPlayingMessage(this.guild.id)
+            .catch((error: unknown) => {
+              log.warn('Failed to clear the previous now-playing message:', (error as Error)?.message ?? error);
+            });
+          await this.queueManager.clearVoteSkip(this.guild.id)
+            .catch((error: unknown) => {
+              log.warn('Failed to clear skip votes for the exhausted queue:', (error as Error)?.message ?? error);
+            });
           this.resetInactivityTimer(this.guild.id);
 
           if (queue) {
@@ -1335,16 +1410,40 @@ export class MusicPlayerManager {
     }
   }
 
-  private async leaveFailedPlaySession(): Promise<void> {
-    this.voiceOperationRevision += 1;
-    this.intentionalVoiceLeaveDepth += 1;
-    try {
-      await this.shoukaku.leaveVoiceChannel(this.guild.id);
-    } catch (error) {
-      log.warn('Failed to leave voice after an unsuccessful play request:', (error as Error)?.message ?? error);
-    } finally {
-      this.intentionalVoiceLeaveDepth -= 1;
-    }
+  private async leaveFailedPlaySession(requestRevision: number): Promise<void> {
+    await this.withQueueMutation(async () => {
+      if (this.uncommittedVoiceSessionRevision !== requestRevision) return;
+
+      let queue: GuildQueue | null = null;
+      try {
+        queue = await this.queueManager.getQueue(this.guild.id);
+      } catch (error) {
+        log.warn('Failed to inspect the unused queue after an unsuccessful play request:', (error as Error)?.message ?? error);
+      }
+      if (queue && queue.entries.length > 0) {
+        this.uncommittedVoiceSessionRevision = null;
+        return;
+      }
+
+      if (queue) {
+        try {
+          await this.queueManager.destroyQueue(this.guild.id);
+        } catch (error) {
+          log.warn('Failed to remove an unused queue after an unsuccessful play request:', (error as Error)?.message ?? error);
+        }
+      }
+
+      this.uncommittedVoiceSessionRevision = null;
+      this.voiceOperationRevision += 1;
+      this.intentionalVoiceLeaveDepth += 1;
+      try {
+        await this.shoukaku.leaveVoiceChannel(this.guild.id);
+      } catch (error) {
+        log.warn('Failed to leave voice after an unsuccessful play request:', (error as Error)?.message ?? error);
+      } finally {
+        this.intentionalVoiceLeaveDepth -= 1;
+      }
+    });
   }
 
   private async clearVoiceConnectionForRecovery(guildId: string, phase: string): Promise<void> {
