@@ -598,6 +598,24 @@ describe('MusicPlayerManager', () => {
         volume: 37,
         paused: true,
       });
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it('continues into the reconnect loop when stale cleanup fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      shoukaku.leaveVoiceChannel.mockRejectedValueOnce(new Error('stale cleanup unavailable'));
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await reconnect;
+
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
     });
 
     it('coalesces overlapping close events into one reconnect', async () => {
@@ -705,6 +723,53 @@ describe('MusicPlayerManager', () => {
       expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(2);
       expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(2);
       expect(player.playTrack).toHaveBeenCalledTimes(3);
+    });
+
+    it('cancels recovery while the resume track is resolving', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      let finishResolve: (() => void) | undefined;
+      player.node.rest.resolve.mockImplementationOnce(() => new Promise((resolve) => {
+        finishResolve = () => resolve({
+          loadType: 'search',
+          data: [{ encoded: 'base64track', info: {} }],
+        });
+      }));
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(2_000);
+      manager.shutdown();
+      finishResolve?.();
+      await reconnect;
+
+      expect(player.playTrack).not.toHaveBeenCalled();
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(2);
+    });
+
+    it('leaves the rejoined player when recovery is cancelled during playback', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      let finishPlayback: (() => void) | undefined;
+      player.playTrack.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishPlayback = resolve;
+      }));
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      manager.shutdown();
+      finishPlayback?.();
+      await reconnect;
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(2);
     });
 
     it('destroys and audits the queue after all reconnect attempts fail', async () => {

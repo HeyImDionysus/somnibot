@@ -1035,6 +1035,9 @@ export class MusicPlayerManager {
 
       // Emit track.started event
       this.queueManager.getQueue(this.guild.id).then((queue) => {
+        if (queue?.paused) {
+          this.resetInactivityTimer(this.guild.id);
+        }
         const np = queue && queue.currentIndex < queue.entries.length
           ? queue.entries[queue.currentIndex]
           : null;
@@ -1162,7 +1165,7 @@ export class MusicPlayerManager {
       if (!recoveryIsCurrent()) return;
 
       const resumePosition = Math.max(0, player.position ?? 0);
-      await this.shoukaku.leaveVoiceChannel(guildId);
+      await this.tryLeaveVoiceChannel(guildId, 'Stale player cleanup');
       if (!recoveryIsCurrent()) return;
 
       if (!queue || !queue.voiceChannelId) {
@@ -1182,51 +1185,53 @@ export class MusicPlayerManager {
             shardId: this.guild.shardId,
             deaf: true,
           });
-          if (!recoveryIsCurrent()) {
-            await this.shoukaku.leaveVoiceChannel(guildId);
-            return;
-          }
+          const recoveryWasCancelled = async (): Promise<boolean> => {
+            if (recoveryIsCurrent()) return false;
+            await this.tryLeaveVoiceChannel(guildId, 'Cancelled recovery cleanup');
+            return true;
+          };
+          if (await recoveryWasCancelled()) return;
 
           this.setupPlayerEvents(newPlayer);
           const currentTrack = queue.currentIndex < queue.entries.length
             ? queue.entries[queue.currentIndex]
             : null;
-          const resumeTrack = async (encoded: string): Promise<void> => {
+          const resumeTrack = async (encoded: string): Promise<boolean> => {
+            if (await recoveryWasCancelled()) return false;
             await newPlayer.playTrack({
               track: { encoded },
               position: currentTrack?.isStream ? 0 : resumePosition,
               volume: queue.volume,
               paused: queue.paused,
             });
+            return !(await recoveryWasCancelled());
           };
 
           if (currentTrack?.uri) {
             try {
               const resolved = await newPlayer.node.rest.resolve(currentTrack.uri);
+              if (await recoveryWasCancelled()) return;
               if (resolved?.data && !Array.isArray(resolved.data) && 'encoded' in resolved.data) {
-                await resumeTrack(resolved.data.encoded);
+                if (!(await resumeTrack(resolved.data.encoded))) return;
               } else if (resolved?.data && Array.isArray(resolved.data) && resolved.data.length > 0) {
-                await resumeTrack(resolved.data[0].encoded);
+                if (!(await resumeTrack(resolved.data[0].encoded))) return;
               } else if (currentTrack.track) {
-                await resumeTrack(currentTrack.track);
+                if (!(await resumeTrack(currentTrack.track))) return;
               }
             } catch {
               if (currentTrack.track) {
-                await resumeTrack(currentTrack.track);
+                if (!(await resumeTrack(currentTrack.track))) return;
               }
             }
           } else if (currentTrack?.track) {
-            await resumeTrack(currentTrack.track);
+            if (!(await resumeTrack(currentTrack.track))) return;
           }
+          if (queue.paused) this.resetInactivityTimer(guildId);
           log.info(`Reconnected after ${attempt} attempt(s)`);
           return;
         } catch (error) {
           log.warn(`Reconnect attempt ${attempt}/3 failed:`, error);
-          try {
-            await this.shoukaku.leaveVoiceChannel(guildId);
-          } catch (cleanupError) {
-            log.warn(`Reconnect cleanup after attempt ${attempt}/3 failed:`, cleanupError);
-          }
+          await this.tryLeaveVoiceChannel(guildId, `Reconnect cleanup after attempt ${attempt}/3`);
         }
       }
 
@@ -1240,6 +1245,16 @@ export class MusicPlayerManager {
       this.clearTimers(guildId);
     } finally {
       this.reconnectingVoice = false;
+    }
+  }
+
+  private async tryLeaveVoiceChannel(guildId: string, phase: string): Promise<boolean> {
+    try {
+      await this.shoukaku.leaveVoiceChannel(guildId);
+      return true;
+    } catch (error) {
+      log.warn(`${phase} failed:`, error);
+      return false;
     }
   }
 
