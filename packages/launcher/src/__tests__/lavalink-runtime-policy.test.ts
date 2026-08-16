@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { LAVALINK_VERSION } from '../main/lavalink-version';
 
-const DAVE_CAPABLE_LAVALINK_IMAGE = 'ghcr.io/lavalink-devs/lavalink:4.2.2';
+const DAVE_CAPABLE_LAVALINK_IMAGE = `ghcr.io/lavalink-devs/lavalink:${LAVALINK_VERSION}`;
 
 describe('Lavalink runtime policy', () => {
   it('pins every Compose runtime to the DAVE-capable Lavalink release', () => {

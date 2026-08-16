@@ -25,6 +25,11 @@ import {
 import { probeLavalinkReady, waitForServiceReady } from './service-readiness.js';
 import { getConfig, saveConfig } from './config-store.js';
 import { stopChildProcess } from './managed-child-stop.js';
+import {
+  isCurrentLavalinkVersion,
+  LAVALINK_JAR_URL,
+  LAVALINK_VERSION,
+} from './lavalink-version.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -32,8 +37,7 @@ const execFileAsync = promisify(execFile);
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const LAVALINK_VERSION = '4.0.8';
-const LAVALINK_JAR_URL = `https://github.com/lavalink-devs/Lavalink/releases/download/${LAVALINK_VERSION}/Lavalink.jar`;
+// allow: SIZE_OK — the child-process lifecycle is one state machine whose callbacks share recovery state.
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
@@ -118,6 +122,10 @@ function getJarPath(): string {
   return path.join(getLavalinkDir(), 'Lavalink.jar');
 }
 
+function getVersionPath(): string {
+  return path.join(getLavalinkDir(), 'Lavalink.version');
+}
+
 function getConfigPath(): string {
   return path.join(getLavalinkDir(), 'application.yml');
 }
@@ -135,7 +143,10 @@ export function getLavalinkError(): string {
 }
 
 export function isLavalinkJarPresent(): boolean {
-  return fs.existsSync(getJarPath());
+  const versionPath = getVersionPath();
+  return fs.existsSync(getJarPath())
+    && fs.existsSync(versionPath)
+    && isCurrentLavalinkVersion(fs.readFileSync(versionPath, 'utf8'));
 }
 
 export function getLavalinkPid(): number | null {
@@ -235,6 +246,7 @@ export async function downloadLavalink(
     // Write atomically via temp file
     await fsp.writeFile(tempPath, Buffer.concat(chunks));
     await fsp.rename(tempPath, jarPath);
+    await fsp.writeFile(getVersionPath(), `${LAVALINK_VERSION}\n`, 'utf8');
 
     // Generate default application.yml
     await writeDefaultConfig();
@@ -254,6 +266,21 @@ export async function downloadLavalink(
     broadcastLavalinkStatus();
     return { ok: false, error: msg };
   }
+}
+
+export async function ensureCurrentLavalinkJar(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  if (!fs.existsSync(getJarPath())) {
+    const error = 'Lavalink.jar not found. Download it first.';
+    setStatus('error', error);
+    broadcastLavalinkStatus();
+    return { ok: false, error };
+  }
+
+  if (isLavalinkJarPresent()) return { ok: true };
+  return downloadLavalink();
 }
 
 /* ------------------------------------------------------------------ */
@@ -306,13 +333,9 @@ export async function startLavalink(): Promise<{
     return { ok: true }; // Already running
   }
 
+  const jarResult = await ensureCurrentLavalinkJar();
+  if (!jarResult.ok) return jarResult;
   const jarPath = getJarPath();
-  if (!fs.existsSync(jarPath)) {
-    const msg = 'Lavalink.jar not found. Download it first.';
-    setStatus('error', msg);
-    broadcastLavalinkStatus();
-    return { ok: false, error: msg };
-  }
 
   const javaCheck = await checkJava();
   if (!javaCheck.available) {
