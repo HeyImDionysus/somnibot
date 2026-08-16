@@ -658,6 +658,84 @@ describe('MusicPlayerManager', () => {
       expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
     });
 
+    it('releases the queue lock before starting a newly committed track', async () => {
+      let finishPlayback: (() => void) | undefined;
+      player.playTrack.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishPlayback = resolve;
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const playing = manager.play('next song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.playTrack).toHaveBeenCalledTimes(1));
+      const mutationAccess = manager as unknown as {
+        withQueueMutation<T>(operation: () => Promise<T>): Promise<T>;
+      };
+
+      await expect(mutationAccess.withQueueMutation(async () => 'available')).resolves.toBe('available');
+      finishPlayback?.();
+      await expect(playing).resolves.toMatchObject({ success: true });
+    });
+
+    it('claims stop ownership before a delayed queue snapshot can admit another play', async () => {
+      const storedQueue = JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'active', title: 'Active', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      });
+      let finishQueueLoad: (() => void) | undefined;
+      valkey.get.mockImplementationOnce(() => new Promise<string | null>((resolve) => {
+        finishQueueLoad = () => resolve(storedQueue);
+      }));
+
+      const stopping = manager.stop('g1', { userId: 'u1', reason: 'command' });
+      await Promise.resolve();
+      await Promise.resolve();
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('late song', 'u2', voiceChannel, textChannel)).resolves.toEqual({
+        success: false,
+        message: 'Playback is stopping — please try again shortly.',
+      });
+      expect(player.node.rest.resolve).not.toHaveBeenCalled();
+
+      finishQueueLoad?.();
+      await expect(stopping).resolves.toMatchObject({ success: true });
+    });
+
+    it('serializes concurrent skip playback in committed queue order', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'a', title: 'A', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'b', title: 'B', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+          { track: 'c', title: 'C', uri: 'u3', duration: 120000, author: 'C', requestedBy: 'u3', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      let finishFirstPlayback: (() => void) | undefined;
+      player.playTrack.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishFirstPlayback = resolve;
+      }));
+
+      const firstSkip = manager.skip('g1', { userId: 'u1' });
+      await vi.waitFor(() => expect(player.playTrack).toHaveBeenCalledTimes(1));
+      const secondSkip = manager.skip('g1', { userId: 'u2' });
+      await vi.waitFor(async () => {
+        const queue = await manager.queueManager.getQueue('g1');
+        expect(queue?.currentIndex).toBe(2);
+      });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenNthCalledWith(1, { track: { encoded: 'b' } });
+      finishFirstPlayback?.();
+      await Promise.all([firstSkip, secondSkip]);
+
+      expect(player.playTrack).toHaveBeenCalledTimes(2);
+      expect(player.playTrack).toHaveBeenNthCalledWith(2, { track: { encoded: 'c' } });
+    });
+
     it('does not recreate a ghost queue when stop overlaps track end', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',

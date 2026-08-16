@@ -66,6 +66,19 @@ export type StopReason = 'command' | 'auto_leave' | 'inactivity' | 'connection_l
  */
 export type ControlActor = { userId?: string; internal?: boolean };
 
+type PlayResult = {
+  success: boolean;
+  message?: string;
+  entry?: QueueEntry;
+  count?: number;
+  playlistName?: string;
+};
+
+type PlayMutationResult = {
+  response: PlayResult;
+  playback: Promise<void> | null;
+};
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 5000,
@@ -93,6 +106,7 @@ export class MusicPlayerManager {
   private intentionalVoiceLeaveDepth = 0;
   private disposed = false;
   private queueMutationTail: Promise<void> = Promise.resolve();
+  private playbackMutationTail: Promise<void> = Promise.resolve();
   private queueExhausted = false;
   private stopInProgress = false;
   private stopRevision = 0;
@@ -404,7 +418,7 @@ export class MusicPlayerManager {
       const expectedVoiceRevision = this.voiceOperationRevision;
 
       const result = await activePlayer.node.rest.resolve(searchQuery);
-      const response = await this.withQueueMutation(() => this.playWithinQueueMutation(
+      const transition = await this.withQueueMutation(() => this.playWithinQueueMutation(
         userId,
         voiceChannel,
         textChannel,
@@ -414,8 +428,9 @@ export class MusicPlayerManager {
         expectedVoiceRevision,
         expectedStopRevision,
       ));
-      await this.completePlayRequest(requestRevision, !response.success);
-      return response;
+      if (transition.playback) await transition.playback;
+      await this.completePlayRequest(requestRevision, !transition.response.success);
+      return transition.response;
     } catch (error) {
       await this.completePlayRequest(requestRevision, true);
       throw error;
@@ -458,14 +473,17 @@ export class MusicPlayerManager {
     requestRevision: number,
     expectedVoiceRevision: number,
     expectedStopRevision: number,
-  ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
+  ): Promise<PlayMutationResult> {
 
     if (
       this.stopInProgress ||
       this.stopRevision !== expectedStopRevision ||
       this.voiceOperationRevision !== expectedVoiceRevision
     ) {
-      return { success: false, message: 'Playback was stopped before the track could be queued.' };
+      return {
+        response: { success: false, message: 'Playback was stopped before the track could be queued.' },
+        playback: null,
+      };
     }
 
     // Get or create queue. [music-collaborative-queue] The queue lives in the
@@ -476,7 +494,10 @@ export class MusicPlayerManager {
       existingQueue = await this.queueManager.getQueue(this.guild.id);
     } catch (err) {
       await this.raiseStoreOutageAlert(userId, 'load_queue', err);
-      return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+      return {
+        response: { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' },
+        playback: null,
+      };
     }
 
     const isNewQueue = !existingQueue;
@@ -508,11 +529,11 @@ export class MusicPlayerManager {
 
     // Check queue size limit — [music-collaborative-queue] capacity lane.
     const capacityRejection = this.getCapacityRejection(queue, userId);
-    if (capacityRejection) return capacityRejection;
+    if (capacityRejection) return { response: capacityRejection, playback: null };
 
     if (!result || result.loadType === 'empty' || result.loadType === 'error') {
       this.selfHealer.recordFailure();
-      return { success: false, message: 'No results found for your query' };
+      return { response: { success: false, message: 'No results found for your query' }, playback: null };
     }
 
     this.selfHealer.recordSuccess();
@@ -539,20 +560,23 @@ export class MusicPlayerManager {
         : result.data;
 
       if (!track) {
-        return { success: false, message: 'No results found for your query' };
+        return { response: { success: false, message: 'No results found for your query' }, playback: null };
       }
 
       const entry = this.trackToEntry(track, userId);
 
       if (!this.config.allowDuplicates && queue.entries.some((e) => e.uri === entry.uri)) {
-        return { success: false, message: 'This track is already in the queue' };
+        return { response: { success: false, message: 'This track is already in the queue' }, playback: null };
       }
 
       addedEntries = [entry];
     }
 
     if (addedEntries.length === 0) {
-      return { success: false, message: 'No tracks could be added (duplicates filtered)' };
+      return {
+        response: { success: false, message: 'No tracks could be added (duplicates filtered)' },
+        playback: null,
+      };
     }
 
     // Add to queue
@@ -561,7 +585,10 @@ export class MusicPlayerManager {
       await this.queueManager.saveQueue(queue);
     } catch (err) {
       await this.raiseStoreOutageAlert(userId, 'save_queue', err);
-      return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+      return {
+        response: { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' },
+        playback: null,
+      };
     }
     this.uncommittedVoiceSession = false;
 
@@ -586,14 +613,17 @@ export class MusicPlayerManager {
     const shouldPlay = isNewQueue || queueWasExhausted || queue.entries.length === addedEntries.length ||
       !player.track;
 
+    let playback: Promise<void> | null = null;
     if (shouldPlay) {
       const firstEntry = queue.entries[queue.currentIndex];
       if (firstEntry) {
-        await player.playTrack({ track: { encoded: firstEntry.track } });
         this.queueExhausted = false;
-        // Re-applying the queue's own stored volume is a restore, not a
-        // member-initiated control change — internal, so it writes no row.
-        await this.setVolume(this.guild.id, queue.volume, { internal: true });
+        const encodedTrack = firstEntry.track;
+        const volume = queue.volume;
+        playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+          await player.playTrack({ track: { encoded: encodedTrack } });
+          await player.setGlobalVolume(volume);
+        });
       }
     }
 
@@ -601,14 +631,19 @@ export class MusicPlayerManager {
     this.resetInactivityTimer(this.guild.id);
 
     if (addedEntries.length === 1 && addedEntries[0]) {
-      const position = queue.entries.length - queue.currentIndex;
-      return { success: true, entry: addedEntries[0], message: undefined, count: 1 };
+      return {
+        response: { success: true, entry: addedEntries[0], message: undefined, count: 1 },
+        playback,
+      };
     }
 
     return {
-      success: true,
-      count: addedEntries.length,
-      playlistName,
+      response: {
+        success: true,
+        count: addedEntries.length,
+        playlistName,
+      },
+      playback,
     };
   }
 
@@ -624,12 +659,24 @@ export class MusicPlayerManager {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
-    const { skipped, track, queueEnded } = await this.withQueueMutation(async () => {
+    const transition = await this.withQueueMutation(async () => {
+      if (this.stopInProgress) return null;
       await this.queueManager.clearVoteSkip(guildId);
       const skippedTrack = await this.queueManager.getCurrentTrack(guildId);
-      const transition = await this.queueManager.nextTrack(guildId);
-      return { skipped: skippedTrack, ...transition };
+      const queueTransition = await this.queueManager.nextTrack(guildId);
+      const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+        if (queueTransition.queueEnded || !queueTransition.track) {
+          await player.stopTrack();
+          return;
+        }
+        await player.playTrack({ track: { encoded: queueTransition.track.track } });
+      });
+      return { skipped: skippedTrack, ...queueTransition, playback };
     });
+    if (!transition) {
+      return { success: false, message: 'Playback is stopping — please try again shortly.' };
+    }
+    const { skipped, track, queueEnded, playback } = transition;
 
     // [music-player-fairness] Audit the skip outcome — proves which fairness
     // path resolved the skip and who invoked it.
@@ -642,12 +689,8 @@ export class MusicPlayerManager {
       queueEnded: queueEnded || !track,
     });
 
-    if (queueEnded || !track) {
-      await player.stopTrack();
-      return { success: true, message: '⏭️ Skipped — queue ended' };
-    }
-
-    await player.playTrack({ track: { encoded: track.track } });
+    await playback;
+    if (queueEnded || !track) return { success: true, message: '⏭️ Skipped — queue ended' };
     return { success: true, message: `⏭️ Skipped to **${track.title}**` };
   }
 
@@ -704,24 +747,31 @@ export class MusicPlayerManager {
     guildId: string,
     context: { userId?: string; reason?: StopReason } = {},
   ): Promise<{ success: boolean; message: string }> {
-    const queueBeforeStop = await this.queueManager.getQueue(guildId);
-    const claimedStop = await this.withQueueMutation(async () => {
-      if (this.stopInProgress) return false;
+    const stopClaim = await this.withQueueMutation(async () => {
+      if (this.stopInProgress) return null;
       this.stopInProgress = true;
-      this.stopRevision += 1;
-      this.voiceOperationRevision += 1;
-      return true;
+      try {
+        const queueBeforeStop = await this.queueManager.getQueue(guildId);
+        this.stopRevision += 1;
+        this.voiceOperationRevision += 1;
+        const player = this.shoukaku.players.get(guildId);
+        this.intentionalVoiceLeaveDepth += 1;
+        const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+          if (!player) return;
+          await player.stopTrack();
+          await this.shoukaku.leaveVoiceChannel(guildId);
+        });
+        return { queueBeforeStop, playback };
+      } catch (error) {
+        this.stopInProgress = false;
+        throw error;
+      }
     });
-    if (!claimedStop) {
+    if (!stopClaim) {
       return { success: true, message: '⏹️ Playback is already stopping' };
     }
-    this.intentionalVoiceLeaveDepth += 1;
     try {
-      const player = this.shoukaku.players.get(guildId);
-      if (player) {
-        await player.stopTrack();
-        await this.shoukaku.leaveVoiceChannel(guildId);
-      }
+      await stopClaim.playback;
 
       await this.withQueueMutation(async () => {
         await this.queueManager.destroyQueue(guildId);
@@ -737,7 +787,7 @@ export class MusicPlayerManager {
       this.eventBus.emit('music.stopped', this.guild.id, {
         userId: context.userId,
         reason: context.reason ?? 'command',
-        trackCount: queueBeforeStop?.entries.length ?? 0,
+        trackCount: stopClaim.queueBeforeStop?.entries.length ?? 0,
       });
 
       return { success: true, message: '⏹️ Stopped playback and cleared the queue' };
@@ -828,17 +878,21 @@ export class MusicPlayerManager {
     if (!player) return { success: false, message: 'Nothing is playing' };
 
     const clamped = Math.max(0, Math.min(150, volume));
-    await player.setGlobalVolume(clamped);
-
-    if (!context.internal) {
-      await this.withQueueMutation(async () => {
+    const transition = await this.withQueueMutation(async () => {
+      if (!context.internal) {
         const queue = await this.queueManager.getQueue(guildId);
         if (queue) {
           queue.volume = clamped;
           await this.queueManager.saveQueue(queue);
         }
-      });
-    }
+      }
+      return {
+        playback: this.enqueuePlaybackAfterQueueMutation(async () => {
+          await player.setGlobalVolume(clamped);
+        }),
+      };
+    });
+    await transition.playback;
 
     this.auditControlApplied(context, 'volume', clamped);
     return { success: true, message: `🔊 Volume set to **${clamped}%**` };
@@ -1230,13 +1284,18 @@ export class MusicPlayerManager {
       const transition = await this.withQueueMutation(async (): Promise<{
         queueEnded: boolean;
         textChannelId: string | null;
+        playback: Promise<void> | null;
       }> => {
-        if (this.disposed) return { queueEnded: false, textChannelId: null };
-        if (data.reason === 'replaced') return { queueEnded: false, textChannelId: null };
+        if (this.disposed || this.stopInProgress) {
+          return { queueEnded: false, textChannelId: null, playback: null };
+        }
+        if (data.reason === 'replaced') {
+          return { queueEnded: false, textChannelId: null, playback: null };
+        }
 
         // Emit track.ended event for the track that just finished
         const currentQueue = await this.queueManager.getQueue(this.guild.id);
-        if (this.disposed) return { queueEnded: false, textChannelId: null };
+        if (this.disposed) return { queueEnded: false, textChannelId: null, playback: null };
         const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
           ? currentQueue.entries[currentQueue.currentIndex]
           : null;
@@ -1250,7 +1309,7 @@ export class MusicPlayerManager {
         }
 
         const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
-        if (this.disposed) return { queueEnded: false, textChannelId: null };
+        if (this.disposed) return { queueEnded: false, textChannelId: null, playback: null };
 
         if (queueEnded || !track) {
           // Queue ended — emit event
@@ -1283,15 +1342,17 @@ export class MusicPlayerManager {
               log.warn('Failed to clear skip votes for the exhausted queue:', (error as Error)?.message ?? error);
             });
           this.resetInactivityTimer(this.guild.id);
-          return { queueEnded: true, textChannelId: queue?.textChannelId ?? null };
+          return { queueEnded: true, textChannelId: queue?.textChannelId ?? null, playback: null };
         }
 
-        // Play next track
-        await player.playTrack({ track: { encoded: track.track } });
         await this.queueManager.clearVoteSkip(this.guild.id);
-        return { queueEnded: false, textChannelId: null };
+        const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+          await player.playTrack({ track: { encoded: track.track } });
+        });
+        return { queueEnded: false, textChannelId: null, playback };
       });
 
+      if (transition.playback) await transition.playback;
       if (!transition.queueEnded || !transition.textChannelId) return;
       const textChannel = this.guild.channels.cache.get(transition.textChannelId);
       if (textChannel && textChannel.type === ChannelType.GuildText) {
@@ -1327,21 +1388,35 @@ export class MusicPlayerManager {
         }
       }
 
-      const { track } = await this.withQueueMutation(() => this.queueManager.nextTrack(this.guild.id));
+      const transition = await this.withQueueMutation(async () => {
+        if (this.stopInProgress) return null;
+        const { track } = await this.queueManager.nextTrack(this.guild.id);
+        if (!track) return null;
+        return {
+          playback: this.enqueuePlaybackAfterQueueMutation(async () => {
+            await player.playTrack({ track: { encoded: track.track } });
+          }),
+        };
+      });
       if (this.disposed) return;
-      if (track) {
-        await player.playTrack({ track: { encoded: track.track } });
-      }
+      if (transition) await transition.playback;
     });
 
     player.on('stuck', async () => {
       if (this.disposed) return;
       log.warn('Track stuck, skipping...');
-      const { track } = await this.withQueueMutation(() => this.queueManager.nextTrack(this.guild.id));
+      const transition = await this.withQueueMutation(async () => {
+        if (this.stopInProgress) return null;
+        const { track } = await this.queueManager.nextTrack(this.guild.id);
+        if (!track) return null;
+        return {
+          playback: this.enqueuePlaybackAfterQueueMutation(async () => {
+            await player.playTrack({ track: { encoded: track.track } });
+          }),
+        };
+      });
       if (this.disposed) return;
-      if (track) {
-        await player.playTrack({ track: { encoded: track.track } });
-      }
+      if (transition) await transition.playback;
     });
 
     player.on('closed', async (event: WebSocketClosedEvent) => {
@@ -1476,6 +1551,20 @@ export class MusicPlayerManager {
     } finally {
       release?.();
     }
+  }
+
+  private enqueuePlaybackMutation(operation: () => Promise<void>): Promise<void> {
+    const playback = this.playbackMutationTail.then(operation);
+    this.playbackMutationTail = playback.catch(() => undefined);
+    return playback;
+  }
+
+  private enqueuePlaybackAfterQueueMutation(operation: () => Promise<void>): Promise<void> {
+    const queueRelease = this.queueMutationTail;
+    return this.enqueuePlaybackMutation(async () => {
+      await queueRelease;
+      await operation();
+    });
   }
 
   private async reconcilePlayerPauseState(
