@@ -91,6 +91,7 @@ export class MusicPlayerManager {
   private voiceOperationRevision = 0;
   private reconnectingVoice = false;
   private intentionalVoiceLeaveDepth = 0;
+  private disposed = false;
 
   constructor(
     private readonly guild: Guild,
@@ -130,6 +131,7 @@ export class MusicPlayerManager {
 
   /** Clean up timers on shutdown. */
   shutdown(): void {
+    this.disposed = true;
     this.voiceOperationRevision += 1;
     for (const timer of this.autoLeaveTimers.values()) clearTimeout(timer);
     for (const timer of this.inactivityTimers.values()) clearTimeout(timer);
@@ -605,12 +607,11 @@ export class MusicPlayerManager {
     guildId: string,
     context: { userId?: string; reason?: StopReason } = {},
   ): Promise<{ success: boolean; message: string }> {
+    const queueBeforeStop = await this.queueManager.getQueue(guildId);
     this.voiceOperationRevision += 1;
     this.intentionalVoiceLeaveDepth += 1;
     try {
       const player = this.shoukaku.players.get(guildId);
-      // Snapshot the queue depth before teardown for the audit details.
-      const queueBeforeStop = await this.queueManager.getQueue(guildId);
       if (player) {
         await player.stopTrack();
         await this.shoukaku.leaveVoiceChannel(guildId);
@@ -1028,6 +1029,7 @@ export class MusicPlayerManager {
 
   private setupPlayerEvents(player: Player): void {
     player.on('start', () => {
+      if (this.disposed) return;
       this.sendNowPlaying(this.guild.id).catch((err) => {
         log.error('Failed to send now-playing:', { error: String(err) });
       });
@@ -1035,6 +1037,7 @@ export class MusicPlayerManager {
 
       // Emit track.started event
       this.queueManager.getQueue(this.guild.id).then((queue) => {
+        if (this.disposed) return;
         if (queue?.paused) {
           this.resetInactivityTimer(this.guild.id);
         }
@@ -1060,10 +1063,12 @@ export class MusicPlayerManager {
     });
 
     player.on('end', async (data: TrackEndEvent) => {
+      if (this.disposed) return;
       if (data.reason === 'replaced') return; // Track was replaced (skip)
 
       // Emit track.ended event for the track that just finished
       const currentQueue = await this.queueManager.getQueue(this.guild.id);
+      if (this.disposed) return;
       const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
         ? currentQueue.entries[currentQueue.currentIndex]
         : null;
@@ -1077,6 +1082,7 @@ export class MusicPlayerManager {
       }
 
       const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
+      if (this.disposed) return;
 
       if (queueEnded || !track) {
         // Queue ended — emit event
@@ -1107,6 +1113,7 @@ export class MusicPlayerManager {
     });
 
     player.on('exception', async (data: TrackExceptionEvent) => {
+      if (this.disposed) return;
       log.error('Track exception:', data);
       const { shouldRecover, strategy } = this.selfHealer.recordFailure();
 
@@ -1116,6 +1123,7 @@ export class MusicPlayerManager {
 
       // Skip to next track
       const queue = await this.queueManager.getQueue(this.guild.id);
+      if (this.disposed) return;
       if (queue) {
         const textChannel = this.guild.channels.cache.get(queue.textChannelId);
         if (textChannel && textChannel.type === ChannelType.GuildText) {
@@ -1126,20 +1134,24 @@ export class MusicPlayerManager {
       }
 
       const { track } = await this.queueManager.nextTrack(this.guild.id);
+      if (this.disposed) return;
       if (track) {
         await player.playTrack({ track: { encoded: track.track } });
       }
     });
 
     player.on('stuck', async () => {
+      if (this.disposed) return;
       log.warn('Track stuck, skipping...');
       const { track } = await this.queueManager.nextTrack(this.guild.id);
+      if (this.disposed) return;
       if (track) {
         await player.playTrack({ track: { encoded: track.track } });
       }
     });
 
     player.on('closed', async (event: WebSocketClosedEvent) => {
+      if (this.disposed) return;
       try {
         await this.recoverVoiceConnection(player, event);
       } catch (error) {
@@ -1165,7 +1177,7 @@ export class MusicPlayerManager {
       if (!recoveryIsCurrent()) return;
 
       const resumePosition = Math.max(0, player.position ?? 0);
-      await this.tryLeaveVoiceChannel(guildId, 'Stale player cleanup');
+      await this.clearVoiceConnectionForRecovery(guildId, 'Stale player cleanup');
       if (!recoveryIsCurrent()) return;
 
       if (!queue || !queue.voiceChannelId) {
@@ -1187,7 +1199,7 @@ export class MusicPlayerManager {
           });
           const recoveryWasCancelled = async (): Promise<boolean> => {
             if (recoveryIsCurrent()) return false;
-            await this.tryLeaveVoiceChannel(guildId, 'Cancelled recovery cleanup');
+            await this.clearVoiceConnectionForRecovery(guildId, 'Cancelled recovery cleanup');
             return true;
           };
           if (await recoveryWasCancelled()) return;
@@ -1231,7 +1243,7 @@ export class MusicPlayerManager {
           return;
         } catch (error) {
           log.warn(`Reconnect attempt ${attempt}/3 failed:`, error);
-          await this.tryLeaveVoiceChannel(guildId, `Reconnect cleanup after attempt ${attempt}/3`);
+          await this.clearVoiceConnectionForRecovery(guildId, `Reconnect cleanup after attempt ${attempt}/3`);
         }
       }
 
@@ -1255,6 +1267,31 @@ export class MusicPlayerManager {
     } catch (error) {
       log.warn(`${phase} failed:`, error);
       return false;
+    }
+  }
+
+  private async clearVoiceConnectionForRecovery(guildId: string, phase: string): Promise<void> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (await this.tryLeaveVoiceChannel(guildId, `${phase} (${attempt}/3)`)) return;
+    }
+
+    log.error(`${phase} failed after 3 attempts — force-clearing local voice state`);
+    const connection = this.shoukaku.connections.get(guildId);
+    try {
+      connection?.disconnect();
+    } catch (error) {
+      log.warn(`${phase} forced connection disconnect failed:`, error);
+    } finally {
+      this.shoukaku.connections.delete(guildId);
+    }
+
+    const stalePlayer = this.shoukaku.players.get(guildId);
+    try {
+      stalePlayer?.clean();
+    } catch (error) {
+      log.warn(`${phase} forced player cleanup failed:`, error);
+    } finally {
+      this.shoukaku.players.delete(guildId);
     }
   }
 
