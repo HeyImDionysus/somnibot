@@ -202,6 +202,7 @@ describe('MusicPlayerManager', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
