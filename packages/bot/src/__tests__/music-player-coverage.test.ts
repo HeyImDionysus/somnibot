@@ -804,6 +804,37 @@ describe('MusicPlayerManager', () => {
       expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
     });
 
+    it('releases the queue lock before leaving an unused voice session', async () => {
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      player.node.rest.resolve.mockResolvedValueOnce({ loadType: 'empty', data: {} });
+      let finishLeave: (() => void) | undefined;
+      shoukaku.leaveVoiceChannel.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishLeave = resolve;
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const failedPlay = manager.play('missing song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(1));
+      const mutationAccess = manager as unknown as {
+        withQueueMutation<T>(operation: () => Promise<T>): Promise<T>;
+      };
+
+      await expect(mutationAccess.withQueueMutation(async () => 'available')).resolves.toBe('available');
+      await expect(manager.play('another song', 'u2', voiceChannel, textChannel)).resolves.toEqual({
+        success: false,
+        message: 'Voice is resetting — please try again shortly.',
+      });
+      expect(player.node.rest.resolve).toHaveBeenCalledTimes(1);
+
+      finishLeave?.();
+      await expect(failedPlay).resolves.toMatchObject({ success: false });
+    });
+
     it('rejects a full queue before asking Lavalink to resolve the query', async () => {
       const mutableManager = manager as unknown as { config: { maxQueueLength: number } };
       mutableManager.config.maxQueueLength = 1;
@@ -921,12 +952,16 @@ describe('MusicPlayerManager', () => {
       await vi.waitFor(() => expect(player.setPaused).toHaveBeenCalledTimes(1));
       const ending = getEndHandler()({ reason: 'finished' });
 
+      await ending;
       finishPause?.();
-      await Promise.all([pausing, ending]);
+      await expect(pausing).resolves.toMatchObject({ success: true, paused: false });
 
       const queue = await manager.queueManager.getQueue('g1');
       expect(queue?.entries).toEqual([]);
       expect(queue?.currentIndex).toBe(0);
+      expect(queue?.paused).toBe(false);
+      expect(player.setPaused).toHaveBeenNthCalledWith(1, true);
+      expect(player.setPaused).toHaveBeenNthCalledWith(2, false);
     });
 
     it('does not let a volume writer restore an exhausted track', async () => {

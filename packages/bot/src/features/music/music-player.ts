@@ -99,6 +99,8 @@ export class MusicPlayerManager {
   private playRequestRevision = 0;
   private pendingPlayRequests = new Set<number>();
   private uncommittedVoiceSession = false;
+  private uncommittedVoiceCleanupInProgress = false;
+  private pauseRevision = 0;
 
   constructor(
     private readonly guild: Guild,
@@ -347,6 +349,9 @@ export class MusicPlayerManager {
     if (this.reconnectingVoice) {
       return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
     }
+    if (this.uncommittedVoiceCleanupInProgress) {
+      return { success: false, message: 'Voice is resetting — please try again shortly.' };
+    }
     if (this.stopInProgress) {
       return { success: false, message: 'Playback is stopping — please try again shortly.' };
     }
@@ -498,6 +503,7 @@ export class MusicPlayerManager {
       queue.currentIndex = 0;
       queue.paused = false;
       queue.shuffled = false;
+      this.pauseRevision += 1;
     }
 
     // Check queue size limit — [music-collaborative-queue] capacity lane.
@@ -721,6 +727,7 @@ export class MusicPlayerManager {
         await this.queueManager.destroyQueue(guildId);
         this.queueExhausted = false;
         this.uncommittedVoiceSession = false;
+        this.pauseRevision += 1;
       });
       this.clearTimers(guildId);
 
@@ -755,34 +762,43 @@ export class MusicPlayerManager {
       const newPaused = !queue.paused;
       queue.paused = newPaused;
       await this.queueManager.saveQueue(queue);
-      return { previousPaused, newPaused };
+      const revision = ++this.pauseRevision;
+      return { previousPaused, newPaused, revision };
     });
     if (!pauseTransition) return { success: false, paused: false, message: 'No active queue' };
 
     try {
-      await player.setPaused(pauseTransition.newPaused);
+      const finalPaused = await this.reconcilePlayerPauseState(
+        player,
+        pauseTransition.newPaused,
+        pauseTransition.revision,
+      );
+      this.auditControlApplied(context, 'pause', finalPaused ? 'paused' : 'resumed');
+      if (finalPaused) {
+        this.resetInactivityTimer(guildId);
+      } else {
+        this.clearInactivityTimer(guildId);
+      }
+
+      return {
+        success: true,
+        paused: finalPaused,
+        message: finalPaused ? '⏸️ Paused' : '▶️ Resumed',
+      };
     } catch (error) {
       await this.withQueueMutation(async () => {
         const queue = await this.queueManager.getQueue(guildId);
-        if (!queue || queue.paused !== pauseTransition.newPaused) return;
+        if (
+          !queue ||
+          queue.paused !== pauseTransition.newPaused ||
+          this.pauseRevision !== pauseTransition.revision
+        ) return;
         queue.paused = pauseTransition.previousPaused;
         await this.queueManager.saveQueue(queue);
+        this.pauseRevision += 1;
       });
       throw error;
     }
-
-    this.auditControlApplied(context, 'pause', pauseTransition.newPaused ? 'paused' : 'resumed');
-    if (pauseTransition.newPaused) {
-      this.resetInactivityTimer(guildId);
-    } else {
-      this.clearInactivityTimer(guildId);
-    }
-
-    return {
-      success: true,
-      paused: pauseTransition.newPaused,
-      message: pauseTransition.newPaused ? '⏸️ Paused' : '▶️ Resumed',
-    };
   }
 
   /** Seek to a position in the current track. */
@@ -1035,14 +1051,17 @@ export class MusicPlayerManager {
     if (humanMembers.size === 0) {
       // Bot is alone — auto-pause and start leave timer
       const player = this.shoukaku.players.get(this.guild.id);
-      if (player && !queue.paused) {
-        await player.setPaused(true);
-        await this.withQueueMutation(async () => {
+      if (player) {
+        const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
-          if (!latestQueue || latestQueue.voiceChannelId !== channelId) return;
+          if (!latestQueue || latestQueue.voiceChannelId !== channelId || latestQueue.paused) return null;
           latestQueue.paused = true;
           await this.queueManager.saveQueue(latestQueue);
+          return ++this.pauseRevision;
         });
+        if (transition !== null) {
+          await this.reconcilePlayerPauseState(player, true, transition);
+        }
       }
       this.startAutoLeaveTimer(this.guild.id);
     } else {
@@ -1050,14 +1069,17 @@ export class MusicPlayerManager {
       this.clearAutoLeaveTimer(this.guild.id);
 
       const player = this.shoukaku.players.get(this.guild.id);
-      if (player && queue.paused) {
-        await player.setPaused(false);
-        await this.withQueueMutation(async () => {
+      if (player) {
+        const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
-          if (!latestQueue || latestQueue.voiceChannelId !== channelId) return;
+          if (!latestQueue || latestQueue.voiceChannelId !== channelId || !latestQueue.paused) return null;
           latestQueue.paused = false;
           await this.queueManager.saveQueue(latestQueue);
+          return ++this.pauseRevision;
         });
+        if (transition !== null) {
+          await this.reconcilePlayerPauseState(player, false, transition);
+        }
       }
     }
   }
@@ -1240,6 +1262,7 @@ export class MusicPlayerManager {
 
           const queue = await this.queueManager.getQueue(this.guild.id);
           this.queueExhausted = true;
+          this.pauseRevision += 1;
           if (queue) {
             queue.entries = [];
             queue.currentIndex = 0;
@@ -1455,10 +1478,30 @@ export class MusicPlayerManager {
     }
   }
 
+  private async reconcilePlayerPauseState(
+    player: Player,
+    requestedPaused: boolean,
+    requestedRevision: number,
+  ): Promise<boolean> {
+    let paused = requestedPaused;
+    let revision = requestedRevision;
+
+    while (true) {
+      await player.setPaused(paused);
+      const latest = await this.withQueueMutation(async () => {
+        const queue = await this.queueManager.getQueue(this.guild.id);
+        return { paused: queue?.paused ?? false, revision: this.pauseRevision };
+      });
+      if (latest.paused === paused && latest.revision === revision) return paused;
+      paused = latest.paused;
+      revision = latest.revision;
+    }
+  }
+
   private async completePlayRequest(requestRevision: number, shouldCleanUp: boolean): Promise<void> {
-    await this.withQueueMutation(async () => {
+    const shouldLeaveVoice = await this.withQueueMutation(async () => {
       this.pendingPlayRequests.delete(requestRevision);
-      if (!shouldCleanUp || !this.uncommittedVoiceSession || this.pendingPlayRequests.size > 0) return;
+      if (!shouldCleanUp || !this.uncommittedVoiceSession || this.pendingPlayRequests.size > 0) return false;
 
       let queue: GuildQueue | null = null;
       try {
@@ -1468,7 +1511,7 @@ export class MusicPlayerManager {
       }
       if (queue && queue.entries.length > 0) {
         this.uncommittedVoiceSession = false;
-        return;
+        return false;
       }
 
       if (queue) {
@@ -1480,16 +1523,21 @@ export class MusicPlayerManager {
       }
 
       this.uncommittedVoiceSession = false;
+      this.uncommittedVoiceCleanupInProgress = true;
       this.voiceOperationRevision += 1;
       this.intentionalVoiceLeaveDepth += 1;
-      try {
-        await this.shoukaku.leaveVoiceChannel(this.guild.id);
-      } catch (error) {
-        log.warn('Failed to leave voice after an unsuccessful play request:', (error as Error)?.message ?? error);
-      } finally {
-        this.intentionalVoiceLeaveDepth -= 1;
-      }
+      return true;
     });
+    if (!shouldLeaveVoice) return;
+
+    try {
+      await this.shoukaku.leaveVoiceChannel(this.guild.id);
+    } catch (error) {
+      log.warn('Failed to leave voice after an unsuccessful play request:', (error as Error)?.message ?? error);
+    } finally {
+      this.intentionalVoiceLeaveDepth -= 1;
+      this.uncommittedVoiceCleanupInProgress = false;
+    }
   }
 
   private async clearVoiceConnectionForRecovery(guildId: string, phase: string): Promise<void> {
