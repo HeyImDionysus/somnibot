@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { LAVALINK_VERSION } from '../main/lavalink-version';
 
-const DAVE_CAPABLE_LAVALINK_IMAGE = `ghcr.io/lavalink-devs/lavalink:${LAVALINK_VERSION}`;
+const DAVE_CAPABLE_LAVALINK_VERSION = '4.2.2';
+const DAVE_CAPABLE_LAVALINK_IMAGE =
+  `ghcr.io/lavalink-devs/lavalink:${DAVE_CAPABLE_LAVALINK_VERSION}`;
 
 describe('Lavalink runtime policy', () => {
   it('pins every Compose runtime to the DAVE-capable Lavalink release', () => {
@@ -16,6 +18,7 @@ describe('Lavalink runtime policy', () => {
     const composeSources = composeFiles.map(file => readFileSync(file, 'utf8'));
 
     // Then every Lavalink service uses the release that supports Discord DAVE voice sessions.
+    expect(LAVALINK_VERSION).toBe(DAVE_CAPABLE_LAVALINK_VERSION);
     for (const source of composeSources) {
       expect(source).toContain(`image: ${DAVE_CAPABLE_LAVALINK_IMAGE}`);
     }
