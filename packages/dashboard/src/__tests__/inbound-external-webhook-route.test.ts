@@ -88,6 +88,29 @@ describe('POST /api/inbound-webhooks/[token]', () => {
     });
   });
 
+  it.each([
+    'idempotency-key',
+    'x-idempotency-key',
+    'x-webhook-id',
+    'x-event-id',
+    'x-github-delivery',
+    'x-request-id',
+  ])('accepts %s as an idempotency key', async (header) => {
+    const body = 'server online';
+    const state = adminFor(claimRow());
+    createAdminSupabaseMock.mockReturnValue(state.admin);
+
+    const response = await POST(request(body, {
+      'content-type': 'text/plain',
+      [header]: 'provider-event-1',
+    }), { params: Promise.resolve({ token }) });
+
+    expect(response.status).toBe(200);
+    expect(state.rpc).toHaveBeenCalledWith('claim_external_webhook_delivery', expect.objectContaining({
+      p_idempotency_key: 'provider-event-1',
+    }));
+  });
+
   it('returns duplicate evidence without dispatching a second Discord message', async () => {
     const body = 'server online';
     const state = adminFor(claimRow({
