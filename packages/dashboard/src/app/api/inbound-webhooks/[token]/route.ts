@@ -15,6 +15,8 @@ const RECEIVER_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const IDEMPOTENCY_HEADERS = [
   'idempotency-key',
   'x-idempotency-key',
+  'x-webhook-id',
+  'x-event-id',
   'x-github-delivery',
   'x-request-id',
 ] as const;
