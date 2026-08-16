@@ -12,7 +12,7 @@ import {
   type VoiceBasedChannel,
   ChannelType,
 } from 'discord.js';
-import type { Shoukaku, Player, Track, TrackExceptionEvent, TrackEndEvent } from 'shoukaku';
+import type { Shoukaku, Player, Track, TrackExceptionEvent, TrackEndEvent, WebSocketClosedEvent } from 'shoukaku';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
@@ -88,6 +88,9 @@ export class MusicPlayerManager {
   private config: MusicConfig = { ...DEFAULT_CONFIG };
   private autoLeaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private inactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private voiceOperationRevision = 0;
+  private reconnectingVoice = false;
+  private intentionalVoiceLeaveDepth = 0;
 
   constructor(
     private readonly guild: Guild,
@@ -127,6 +130,7 @@ export class MusicPlayerManager {
 
   /** Clean up timers on shutdown. */
   shutdown(): void {
+    this.voiceOperationRevision += 1;
     for (const timer of this.autoLeaveTimers.values()) clearTimeout(timer);
     for (const timer of this.inactivityTimers.values()) clearTimeout(timer);
     this.autoLeaveTimers.clear();
@@ -331,6 +335,10 @@ export class MusicPlayerManager {
     voiceChannel: VoiceBasedChannel,
     textChannel: TextChannel,
   ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
+    if (this.reconnectingVoice) {
+      return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
+    }
+
     // Get or create queue. [music-collaborative-queue] The queue lives in the
     // Valkey store; if that store is unreachable, raise a durable owner alert
     // (store-outage lane) instead of letting the request fail silently.
@@ -395,6 +403,7 @@ export class MusicPlayerManager {
         return { success: false, message: 'No Lavalink nodes available' };
       }
 
+      this.voiceOperationRevision += 1;
       player = await this.shoukaku.joinVoiceChannel({
         guildId: this.guild.id,
         channelId: voiceChannel.id,
@@ -596,27 +605,33 @@ export class MusicPlayerManager {
     guildId: string,
     context: { userId?: string; reason?: StopReason } = {},
   ): Promise<{ success: boolean; message: string }> {
-    const player = this.shoukaku.players.get(guildId);
-    // Snapshot the queue depth before teardown for the audit details.
-    const queueBeforeStop = await this.queueManager.getQueue(guildId);
-    if (player) {
-      await player.stopTrack();
-      await this.shoukaku.leaveVoiceChannel(guildId);
+    this.voiceOperationRevision += 1;
+    this.intentionalVoiceLeaveDepth += 1;
+    try {
+      const player = this.shoukaku.players.get(guildId);
+      // Snapshot the queue depth before teardown for the audit details.
+      const queueBeforeStop = await this.queueManager.getQueue(guildId);
+      if (player) {
+        await player.stopTrack();
+        await this.shoukaku.leaveVoiceChannel(guildId);
+      }
+
+      await this.queueManager.destroyQueue(guildId);
+      this.clearTimers(guildId);
+
+      // [music-collaborative-queue] Audit the queue teardown /
+      // [music-player-fairness] lifecycle stop so the shared session's end is
+      // observable, including automatic (empty-channel / inactivity) teardowns.
+      this.eventBus.emit('music.stopped', this.guild.id, {
+        userId: context.userId,
+        reason: context.reason ?? 'command',
+        trackCount: queueBeforeStop?.entries.length ?? 0,
+      });
+
+      return { success: true, message: '⏹️ Stopped playback and cleared the queue' };
+    } finally {
+      this.intentionalVoiceLeaveDepth -= 1;
     }
-
-    await this.queueManager.destroyQueue(guildId);
-    this.clearTimers(guildId);
-
-    // [music-collaborative-queue] Audit the queue teardown /
-    // [music-player-fairness] lifecycle stop so the shared session's end is
-    // observable, including automatic (empty-channel / inactivity) teardowns.
-    this.eventBus.emit('music.stopped', this.guild.id, {
-      userId: context.userId,
-      reason: context.reason ?? 'command',
-      trackCount: queueBeforeStop?.entries.length ?? 0,
-    });
-
-    return { success: true, message: '⏹️ Stopped playback and cleared the queue' };
   }
 
   /** Pause or resume playback. */
@@ -1121,70 +1136,111 @@ export class MusicPlayerManager {
       }
     });
 
-    player.on('closed', async () => {
-      log.info('Player connection closed — attempting reconnect');
-      const queue = await this.queueManager.getQueue(this.guild.id);
+    player.on('closed', async (event: WebSocketClosedEvent) => {
+      try {
+        await this.recoverVoiceConnection(player, event);
+      } catch (error) {
+        log.error('Unexpected player reconnect failure:', error);
+      }
+    });
+  }
+
+  private async recoverVoiceConnection(player: Player, event: WebSocketClosedEvent): Promise<void> {
+    const guildId = this.guild.id;
+    const activePlayer = this.shoukaku.players.get(guildId);
+    if (this.intentionalVoiceLeaveDepth > 0 || this.reconnectingVoice || (activePlayer && activePlayer !== player)) {
+      return;
+    }
+
+    this.reconnectingVoice = true;
+    const recoveryRevision = ++this.voiceOperationRevision;
+    const recoveryIsCurrent = (): boolean => recoveryRevision === this.voiceOperationRevision;
+
+    try {
+      log.info(`Player voice websocket closed (${event.code}, remote=${event.byRemote}): ${event.reason || 'no reason'} — attempting reconnect`);
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!recoveryIsCurrent()) return;
+
+      const resumePosition = Math.max(0, player.position ?? 0);
+      await this.shoukaku.leaveVoiceChannel(guildId);
+      if (!recoveryIsCurrent()) return;
+
       if (!queue || !queue.voiceChannelId) {
-        // No queue to resume — clean up
-        await this.queueManager.destroyQueue(this.guild.id);
-        this.clearTimers(this.guild.id);
+        await this.queueManager.destroyQueue(guildId);
+        this.clearTimers(guildId);
         return;
       }
 
-      // Attempt reconnect with back-off
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          await new Promise((r) => setTimeout(r, attempt * 2000));
+          await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+          if (!recoveryIsCurrent()) return;
+
           const newPlayer = await this.shoukaku.joinVoiceChannel({
-            guildId: this.guild.id,
+            guildId,
             channelId: queue.voiceChannelId,
             shardId: this.guild.shardId,
+            deaf: true,
           });
-          this.setupPlayerEvents(newPlayer);
+          if (!recoveryIsCurrent()) {
+            await this.shoukaku.leaveVoiceChannel(guildId);
+            return;
+          }
 
-          // Resume playback — re-resolve via URI in case encoded track expired
+          this.setupPlayerEvents(newPlayer);
           const currentTrack = queue.currentIndex < queue.entries.length
             ? queue.entries[queue.currentIndex]
             : null;
+          const resumeTrack = async (encoded: string): Promise<void> => {
+            await newPlayer.playTrack({
+              track: { encoded },
+              position: currentTrack?.isStream ? 0 : resumePosition,
+              volume: queue.volume,
+              paused: queue.paused,
+            });
+          };
+
           if (currentTrack?.uri) {
             try {
               const resolved = await newPlayer.node.rest.resolve(currentTrack.uri);
               if (resolved?.data && !Array.isArray(resolved.data) && 'encoded' in resolved.data) {
-                await newPlayer.playTrack({ track: { encoded: resolved.data.encoded } });
+                await resumeTrack(resolved.data.encoded);
               } else if (resolved?.data && Array.isArray(resolved.data) && resolved.data.length > 0) {
-                await newPlayer.playTrack({ track: { encoded: resolved.data[0].encoded } });
+                await resumeTrack(resolved.data[0].encoded);
               } else if (currentTrack.track) {
-                // Fallback to the original encoded track
-                await newPlayer.playTrack({ track: { encoded: currentTrack.track } });
+                await resumeTrack(currentTrack.track);
               }
             } catch {
-              // Last resort: try the stale encoded track
               if (currentTrack.track) {
-                await newPlayer.playTrack({ track: { encoded: currentTrack.track } });
+                await resumeTrack(currentTrack.track);
               }
             }
           } else if (currentTrack?.track) {
-            await newPlayer.playTrack({ track: { encoded: currentTrack.track } });
+            await resumeTrack(currentTrack.track);
           }
           log.info(`Reconnected after ${attempt} attempt(s)`);
           return;
-        } catch (err) {
-          log.warn(`Reconnect attempt ${attempt}/3 failed:`, err);
+        } catch (error) {
+          log.warn(`Reconnect attempt ${attempt}/3 failed:`, error);
+          try {
+            await this.shoukaku.leaveVoiceChannel(guildId);
+          } catch (cleanupError) {
+            log.warn(`Reconnect cleanup after attempt ${attempt}/3 failed:`, cleanupError);
+          }
         }
       }
 
-      // All reconnect attempts failed — clean up
       log.error('Failed to reconnect after 3 attempts — destroying queue');
-      // [music-collaborative-queue] Audit the involuntary teardown so a lost
-      // voice connection that drops the shared queue is observable.
-      this.eventBus.emit('music.stopped', this.guild.id, {
+      this.eventBus.emit('music.stopped', guildId, {
         userId: undefined,
         reason: 'connection_lost',
         trackCount: queue.entries.length,
       });
-      await this.queueManager.destroyQueue(this.guild.id);
-      this.clearTimers(this.guild.id);
-    });
+      await this.queueManager.destroyQueue(guildId);
+      this.clearTimers(guildId);
+    } finally {
+      this.reconnectingVoice = false;
+    }
   }
 
   // ── Auto Leave / Inactivity Timers ──────────────────────

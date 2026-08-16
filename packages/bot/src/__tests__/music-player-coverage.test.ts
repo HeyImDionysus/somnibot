@@ -556,4 +556,176 @@ describe('MusicPlayerManager', () => {
       // Should not crash
     });
   });
+
+  describe('voice websocket recovery', () => {
+    function getClosedHandler(): (event: {
+      code: number;
+      reason: string;
+      byRemote: boolean;
+    }) => Promise<void> {
+      const eventSetup = manager as unknown as {
+        setupPlayerEvents(target: ReturnType<typeof makePlayer>): void;
+      };
+      eventSetup.setupPlayerEvents(player);
+      const closedRegistration = player.on.mock.calls.find(([event]) => event === 'closed');
+      expect(closedRegistration).toBeDefined();
+      return closedRegistration?.[1] as (event: {
+        code: number;
+        reason: string;
+        byRemote: boolean;
+      }) => Promise<void>;
+    }
+
+    it('removes the stale Shoukaku connection before rejoining voice', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 37, paused: true, shuffled: false,
+      }));
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await reconnect;
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
+      expect(shoukaku.leaveVoiceChannel.mock.invocationCallOrder[0])
+        .toBeLessThan(shoukaku.joinVoiceChannel.mock.invocationCallOrder[0]);
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledWith(expect.objectContaining({ deaf: true }));
+      expect(player.playTrack).toHaveBeenCalledWith({
+        track: { encoded: 'base64track' },
+        position: 60000,
+        volume: 37,
+        paused: true,
+      });
+    });
+
+    it('coalesces overlapping close events into one reconnect', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+
+      const closedHandler = getClosedHandler();
+      const event = { code: 4006, reason: 'Session no longer valid', byRemote: true };
+      const firstReconnect = closedHandler(event);
+      const overlappingReconnect = closedHandler(event);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await Promise.all([firstReconnect, overlappingReconnect]);
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(1);
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not reconnect an obsolete player after a replacement becomes active', async () => {
+      const closedHandler = getClosedHandler();
+      shoukaku.players.set('g1', makePlayer());
+
+      await closedHandler({ code: 4006, reason: 'Old session closed', byRemote: true });
+
+      expect(shoukaku.leaveVoiceChannel).not.toHaveBeenCalled();
+      expect(shoukaku.joinVoiceChannel).not.toHaveBeenCalled();
+    });
+
+    it('cancels an in-flight reconnect when playback is intentionally stopped', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(0);
+      await manager.stop('g1', { userId: 'u1', reason: 'command' });
+      await vi.runAllTimersAsync();
+      await reconnect;
+
+      expect(shoukaku.joinVoiceChannel).not.toHaveBeenCalled();
+      expect(player.stopTrack).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the intentional-stop guard when queue loading fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      valkey.get.mockRejectedValueOnce(new Error('queue unavailable'));
+
+      await expect(manager.stop('g1', { reason: 'command' })).rejects.toThrow('queue unavailable');
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await reconnect;
+
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a new play request while voice recovery owns the connection', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+      const playResult = await manager.play('test query', 'u1', voiceChannel, textChannel);
+
+      expect(playResult).toEqual({
+        success: false,
+        message: 'Voice is reconnecting — please try again shortly.',
+      });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await reconnect;
+    });
+
+    it('clears a partially rejoined player before retrying playback', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      player.playTrack
+        .mockRejectedValueOnce(new Error('decoder unavailable'))
+        .mockRejectedValueOnce(new Error('stale track unavailable'))
+        .mockResolvedValueOnce(undefined);
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(6_000);
+      await reconnect;
+
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(2);
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(2);
+      expect(player.playTrack).toHaveBeenCalledTimes(3);
+    });
+
+    it('destroys and audits the queue after all reconnect attempts fail', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      shoukaku.joinVoiceChannel.mockRejectedValue(new Error('voice unavailable'));
+
+      const closedHandler = getClosedHandler();
+      const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
+      await vi.advanceTimersByTimeAsync(12_000);
+      await reconnect;
+
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(3);
+      expect(await valkey.get('queue:g1')).toBeNull();
+      expect(eventBus.emit).toHaveBeenCalledWith('music.stopped', 'g1', expect.objectContaining({
+        reason: 'connection_lost',
+        trackCount: 1,
+      }));
+    });
+  });
 });
