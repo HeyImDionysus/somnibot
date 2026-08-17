@@ -268,15 +268,25 @@ type CheckoutBlockReason =
   | 'paid_fulfillment'
   | 'active_entitlement';
 
+type BlockedCheckout = {
+  state: 'blocked';
+  orderId: string | null;
+  orderNumber: string | null;
+  reason: CheckoutBlockReason;
+  approvalUrl: string | null;
+};
+
 type InFlightCheckout =
   | { state: 'clear' }
-  | {
-      state: 'blocked';
-      orderNumber: string | null;
-      reason: CheckoutBlockReason;
-      approvalUrl: string | null;
-    }
+  | BlockedCheckout
   | { state: 'unavailable' };
+
+function isCheckoutBlockReason(value: unknown): value is CheckoutBlockReason {
+  return value === 'provider_checkout'
+    || value === 'paid_hold'
+    || value === 'paid_fulfillment'
+    || value === 'active_entitlement';
+}
 
 /**
  * Finding 10: refuse to open a SECOND payment link for a product this customer
@@ -291,11 +301,10 @@ type InFlightCheckout =
  * A read ERROR is not "clear": during an outage the live checkout may exist, so
  * refusing to guess is the only safe answer on the money path.
  *
- * Age is intentionally irrelevant. PayPal approval windows are provider/account
- * state, not a locally provable six-hour expiry (Orders may have an extended
- * redirect window, and Subscriptions exposes no equivalent local age contract).
- * Until exact provider state or an operator proves the link cannot be paid, the
- * active row keeps blocking a second real-money checkout.
+ * Age is intentionally irrelevant. A stored approval URL is resumed only after
+ * PayPal confirms the exact provider checkout is still awaiting approval and
+ * returns that same URL. Authoritative provider expiry/cancellation proof is
+ * persisted before this handler is allowed to create a replacement checkout.
  */
 async function inspectInFlightCheckout(
   supabase: SupabaseClient,
@@ -330,8 +339,10 @@ async function inspectInFlightCheckout(
   }
   if (
     result.disposition === 'blocked'
-    && ['provider_checkout', 'paid_hold', 'paid_fulfillment', 'active_entitlement']
-      .includes(String(result.reason))
+    && isCheckoutBlockReason(result.reason)
+    && (result.order_id === null || (
+      typeof result.order_id === 'string' && result.order_id.length > 0
+    ))
     && (result.order_number === null || typeof result.order_number === 'string')
     && (
       result.approval_url === null
@@ -341,12 +352,17 @@ async function inspectInFlightCheckout(
       result.reason === 'provider_checkout'
       || result.approval_url === null
     )
+    && (
+      result.reason !== 'provider_checkout'
+      || typeof result.order_id === 'string'
+    )
   ) {
     return {
       state: 'blocked',
-      orderNumber: result.order_number as string | null,
-      reason: result.reason as CheckoutBlockReason,
-      approvalUrl: result.approval_url as string | null,
+      orderId: typeof result.order_id === 'string' ? result.order_id : null,
+      orderNumber: typeof result.order_number === 'string' ? result.order_number : null,
+      reason: result.reason,
+      approvalUrl: typeof result.approval_url === 'string' ? result.approval_url : null,
     };
   }
   log.error('Checkout blocker inspection returned malformed identity');
@@ -370,6 +386,180 @@ function isPayPalApprovalUrl(value: unknown): value is string {
   } catch {
     return false;
   }
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function paypalApprovalLink(payload: Record<string, unknown>): string | null {
+  if (!Array.isArray(payload.links)) return null;
+  for (const link of payload.links) {
+    if (
+      isUnknownRecord(link)
+      && link.rel === 'approve'
+      && isPayPalApprovalUrl(link.href)
+    ) {
+      return link.href;
+    }
+  }
+  return null;
+}
+
+type PayPalCheckoutInspection =
+  | { state: 'usable'; approvalUrl: string }
+  | { state: 'processing' }
+  | {
+      state: 'unpayable';
+      providerKind: 'capture' | 'subscription';
+      providerId: string;
+      proofKind: 'provider_cancelled' | 'provider_expired';
+      proofReference: string;
+    }
+  | { state: 'unavailable' };
+
+async function inspectPayPalCheckout(
+  supabase: SupabaseClient,
+  paypalApiBase: string,
+  token: string,
+  block: BlockedCheckout,
+  guildId: string,
+  customerId: string,
+  productId: string,
+  productType: 'one_time' | 'subscription',
+): Promise<PayPalCheckoutInspection> {
+  if (!block.orderId || !block.approvalUrl) return { state: 'unavailable' };
+
+  const { data, error } = await supabase
+    .from('orders')
+    .select('id, paypal_order_id, paypal_subscription_id, checkout_approval_url')
+    .eq('id', block.orderId)
+    .eq('guild_id', guildId)
+    .eq('customer_id', customerId)
+    .eq('product_id', productId)
+    .eq('status', 'pending')
+    .eq('checkout_active', true)
+    .maybeSingle();
+
+  if (error || !isUnknownRecord(data) || data.id !== block.orderId
+    || data.checkout_approval_url !== block.approvalUrl) {
+    log.error('Failed to resolve exact provider checkout identity', {
+      orderId: block.orderId,
+      detail: error?.message,
+    });
+    return { state: 'unavailable' };
+  }
+
+  const expectedProviderId = productType === 'one_time'
+    ? data.paypal_order_id
+    : data.paypal_subscription_id;
+  const unexpectedProviderId = productType === 'one_time'
+    ? data.paypal_subscription_id
+    : data.paypal_order_id;
+  if (
+    typeof expectedProviderId !== 'string'
+    || expectedProviderId.length === 0
+    || unexpectedProviderId !== null
+  ) {
+    log.error('Provider checkout identity does not match product billing type', {
+      orderId: block.orderId,
+      productType,
+    });
+    return { state: 'unavailable' };
+  }
+
+  const providerKind = productType === 'one_time' ? 'capture' : 'subscription';
+  const resourceName = productType === 'one_time' ? 'order' : 'subscription';
+  const endpoint = productType === 'one_time'
+    ? `/v2/checkout/orders/${encodeURIComponent(expectedProviderId)}`
+    : `/v1/billing/subscriptions/${encodeURIComponent(expectedProviderId)}`;
+  let response: Response;
+  try {
+    response = await fetch(`${paypalApiBase}${endpoint}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(PAYPAL_FETCH_TIMEOUT_MS),
+    });
+  } catch (providerError) {
+    log.warn(`PayPal ${resourceName} lookup failed`, {
+      orderId: block.orderId,
+      error: String(providerError),
+    });
+    return { state: 'unavailable' };
+  }
+
+  const proofPrefix = productType === 'one_time'
+    ? 'paypal-order-get'
+    : 'paypal-subscription-get';
+  if (response.status === 404) {
+    return {
+      state: 'unpayable',
+      providerKind,
+      providerId: expectedProviderId,
+      proofKind: 'provider_expired',
+      proofReference: `${proofPrefix}:404`,
+    };
+  }
+  if (!response.ok) {
+    log.warn(`PayPal ${resourceName} lookup was unavailable`, {
+      orderId: block.orderId,
+      status: response.status,
+    });
+    return { state: 'unavailable' };
+  }
+
+  const payload: unknown = await response.json().catch(() => null);
+  if (!isUnknownRecord(payload) || typeof payload.status !== 'string') {
+    log.error(`PayPal ${resourceName} lookup returned malformed state`, {
+      orderId: block.orderId,
+    });
+    return { state: 'unavailable' };
+  }
+
+  if (productType === 'one_time') {
+    if (payload.status === 'VOIDED') {
+      return {
+        state: 'unpayable',
+        providerKind,
+        providerId: expectedProviderId,
+        proofKind: 'provider_cancelled',
+        proofReference: `${proofPrefix}:VOIDED`,
+      };
+    }
+    if (payload.status === 'APPROVED' || payload.status === 'COMPLETED') {
+      return { state: 'processing' };
+    }
+    if (payload.status !== 'CREATED' && payload.status !== 'PAYER_ACTION_REQUIRED') {
+      return { state: 'unavailable' };
+    }
+  } else {
+    if (payload.status === 'CANCELLED' || payload.status === 'EXPIRED') {
+      return {
+        state: 'unpayable',
+        providerKind,
+        providerId: expectedProviderId,
+        proofKind: payload.status === 'CANCELLED' ? 'provider_cancelled' : 'provider_expired',
+        proofReference: `${proofPrefix}:${payload.status}`,
+      };
+    }
+    if (
+      payload.status === 'APPROVED'
+      || payload.status === 'ACTIVE'
+      || payload.status === 'SUSPENDED'
+    ) {
+      return { state: 'processing' };
+    }
+    if (payload.status !== 'APPROVAL_PENDING') return { state: 'unavailable' };
+  }
+
+  const providerApprovalUrl = paypalApprovalLink(payload);
+  if (providerApprovalUrl !== block.approvalUrl) {
+    log.warn(`PayPal ${resourceName} approval link no longer matches stored checkout`, {
+      orderId: block.orderId,
+    });
+    return { state: 'unavailable' };
+  }
+  return { state: 'usable', approvalUrl: providerApprovalUrl };
 }
 
 type CheckoutReservationBlock = {
@@ -727,6 +917,18 @@ export async function handleBuyButton(
     return;
   }
 
+  let cachedPayPalToken: string | null | undefined;
+  const requirePayPalToken = async (): Promise<string | null> => {
+    if (cachedPayPalToken === undefined) {
+      cachedPayPalToken = await getPayPalToken(
+        paypalApiBase,
+        paypalClientId,
+        paypalClientSecret,
+      );
+    }
+    return cachedPayPalToken;
+  };
+
   if (existingCustomer && !giftIntentId) {
     const { data: existing, error: entitlementLookupError } = await supabase
       .from('entitlements')
@@ -780,40 +982,99 @@ export async function handleBuyButton(
       inFlight.state === 'blocked'
       && !(repeatPurchasePolicy !== 'unique' && inFlight.reason === 'active_entitlement')
     ) {
-      if (inFlight.reason === 'provider_checkout' && inFlight.approvalUrl) {
+      if (
+        inFlight.reason === 'provider_checkout'
+        && inFlight.orderId
+        && inFlight.approvalUrl
+      ) {
+        const resumeToken = await requirePayPalToken();
+        if (!resumeToken) {
+          await replyCheckoutUnavailable(interaction, supabase, guildId);
+          return;
+        }
+        const providerCheckout = await inspectPayPalCheckout(
+          supabase,
+          paypalApiBase,
+          resumeToken,
+          inFlight,
+          guildId,
+          existingCustomer.id,
+          productId,
+          product.type,
+        );
+        if (providerCheckout.state === 'unavailable') {
+          await replyCheckoutUnavailable(interaction, supabase, guildId);
+          return;
+        }
+        if (providerCheckout.state === 'usable') {
+          await interaction.editReply({
+            embeds: [
+              brandedEmbed(brandKit, {
+                intent: 'primary',
+                title: product.type === 'subscription'
+                  ? `🔄 Resume Subscription: ${product.name}`
+                  : `🛒 Resume Purchase: ${product.name}`,
+                description:
+                  'PayPal confirmed your existing checkout is still available. Continue it below; no second checkout was created.',
+              }),
+            ],
+            components: [
+              new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder()
+                  .setLabel(product.type === 'subscription' ? 'Continue Subscription' : 'Continue Purchase')
+                  .setStyle(ButtonStyle.Link)
+                  .setURL(providerCheckout.approvalUrl)
+                  .setEmoji('💳'),
+              ),
+            ],
+          });
+          return;
+        }
+        if (providerCheckout.state === 'processing') {
+          await interaction.editReply({
+            embeds: [
+              brandedEmbed(brandKit, {
+                intent: 'warning',
+                title: '⏳ Payment Already Processing',
+                description:
+                  'PayPal shows that this checkout has already been approved or activated. '
+                  + 'SomniBot is waiting for the payment confirmation and will not create a second charge. '
+                  + 'If delivery does not arrive shortly, contact the server owner.',
+              }),
+            ],
+          });
+          return;
+        }
+        const deactivation = await supabase.rpc('commerce_deactivate_pending_checkout', {
+          p_order_id: inFlight.orderId,
+          p_guild_id: guildId,
+          p_customer_id: existingCustomer.id,
+          p_product_id: productId,
+          p_provider_kind: providerCheckout.providerKind,
+          p_provider_id: providerCheckout.providerId,
+          p_proof_kind: providerCheckout.proofKind,
+          p_proof_reference: providerCheckout.proofReference,
+        });
+        if (deactivation.error) {
+          log.error('Failed to record expired provider checkout proof:', {
+            orderId: inFlight.orderId,
+            detail: deactivation.error.message,
+          });
+          await replyCheckoutUnavailable(interaction, supabase, guildId);
+          return;
+        }
+      } else {
+        const copy = checkoutBlockCopy(inFlight, product.type === 'subscription');
         await interaction.editReply({
           embeds: [
             brandedEmbed(brandKit, {
-              intent: 'primary',
-              title: product.type === 'subscription'
-                ? `🔄 Resume Subscription: ${product.name}`
-                : `🛒 Resume Purchase: ${product.name}`,
-              description:
-                'Your existing PayPal checkout is still available. Continue it below; no second checkout was created.',
+              intent: 'warning',
+              ...copy,
             }),
-          ],
-          components: [
-            new ActionRowBuilder<ButtonBuilder>().addComponents(
-              new ButtonBuilder()
-                .setLabel(product.type === 'subscription' ? 'Continue Subscription' : 'Continue Purchase')
-                .setStyle(ButtonStyle.Link)
-                .setURL(inFlight.approvalUrl)
-                .setEmoji('💳'),
-            ),
           ],
         });
         return;
       }
-      const copy = checkoutBlockCopy(inFlight, product.type === 'subscription');
-      await interaction.editReply({
-        embeds: [
-          brandedEmbed(brandKit, {
-            intent: 'warning',
-            ...copy,
-          }),
-        ],
-      });
-      return;
     }
   }
 
@@ -841,7 +1102,7 @@ export async function handleBuyButton(
   }
 
   // Get PayPal token
-  const token = await getPayPalToken(paypalApiBase, paypalClientId, paypalClientSecret);
+  const token = await requirePayPalToken();
   if (!token) {
     await interaction.editReply({ content: '❌ Payment service unavailable. Please try again later.' });
     return;
