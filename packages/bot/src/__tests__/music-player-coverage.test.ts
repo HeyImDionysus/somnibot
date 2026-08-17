@@ -1078,6 +1078,26 @@ describe('MusicPlayerManager', () => {
       );
     });
 
+    it('starts the next track when skip-vote cleanup fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'next', title: 'Next', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      valkey.del.mockRejectedValueOnce(new Error('Valkey unavailable'));
+
+      await getEndHandler()({ reason: 'finished', track: { encoded: 'finished' } });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'next' }),
+      }));
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({ currentIndex: 1 });
+    });
+
     it('does not replay a finished entry when play commits before its end callback', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
@@ -1696,6 +1716,59 @@ describe('MusicPlayerManager', () => {
       await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
         currentIndex: 0,
         entries: [
+          expect.objectContaining({ requestedBy: 'u2' }),
+          expect.objectContaining({ requestedBy: 'u1' }),
+        ],
+      });
+    });
+
+    it('starts a persisted queue when another request adopts the pending voice join', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{
+          track: 'persisted', title: 'Persisted', uri: 'https://youtube.com/watch?v=persisted',
+          duration: 120000, author: 'A', requestedBy: 'u0', isStream: false,
+        }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      let finishFirstResolution: ((result: Awaited<ReturnType<typeof player.node.rest.resolve>>) => void) | undefined;
+      player.node.rest.resolve.mockImplementationOnce(() => new Promise((resolve) => {
+        finishFirstResolution = resolve;
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const firstPlay = manager.play('slow song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(1));
+      await expect(manager.play('fast song', 'u2', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'persisted' }),
+      }));
+
+      finishFirstResolution?.({
+        loadType: 'search',
+        data: [{
+          encoded: 'slow-track',
+          info: {
+            title: 'Slow Song', uri: 'https://youtube.com/watch?v=slow', length: 240000,
+            author: 'Artist', artworkUrl: null, isStream: false, identifier: 'slow', sourceName: 'youtube',
+          },
+        }],
+      });
+      await expect(firstPlay).resolves.toMatchObject({ success: true });
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        currentIndex: 0,
+        entries: [
+          expect.objectContaining({ track: 'persisted' }),
           expect.objectContaining({ requestedBy: 'u2' }),
           expect.objectContaining({ requestedBy: 'u1' }),
         ],

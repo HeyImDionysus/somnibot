@@ -440,7 +440,6 @@ export class MusicPlayerManager {
 
     const searchQuery = this.resolveSearchQuery(query);
     let player = this.shoukaku.players.get(this.guild.id) ?? null;
-    let joinedVoiceSession = false;
     try {
       if (!player) {
         if (this.pendingVoiceJoin) {
@@ -474,7 +473,6 @@ export class MusicPlayerManager {
             this.setupPlayerEvents(player);
             this.uncommittedVoiceSession = true;
             this.uncommittedVoiceChannelId = voiceChannel.id;
-            joinedVoiceSession = true;
           } finally {
             if (this.pendingVoiceJoin === join) {
               this.pendingVoiceJoin = null;
@@ -516,7 +514,6 @@ export class MusicPlayerManager {
         requestRevision,
         expectedVoiceRevision,
         expectedStopRevision,
-        joinedVoiceSession,
       ));
       if (transition.playback) await transition.playback;
       await this.completePlayRequest(requestRevision, !transition.response.success);
@@ -563,7 +560,6 @@ export class MusicPlayerManager {
     requestRevision: number,
     expectedVoiceRevision: number,
     expectedStopRevision: number,
-    joinedVoiceSession: boolean,
   ): Promise<PlayMutationResult> {
 
     if (
@@ -684,7 +680,7 @@ export class MusicPlayerManager {
       };
     }
     if (queueWasExhausted) this.playbackSessionRevision += 1;
-    const ownsUncommittedVoiceSession = joinedVoiceSession && this.uncommittedVoiceSession;
+    const ownsUncommittedVoiceSession = this.uncommittedVoiceSession;
     this.uncommittedVoiceSession = false;
     this.uncommittedVoiceChannelId = null;
 
@@ -1609,7 +1605,11 @@ export class MusicPlayerManager {
           return { queueEnded: true, ...queueEnd, playback: null };
         }
 
-        await this.queueManager.clearVoteSkip(this.guild.id);
+        try {
+          await this.queueManager.clearVoteSkip(this.guild.id);
+        } catch (error) {
+          log.warn('Failed to clear skip votes while advancing the music queue:', (error as Error)?.message ?? error);
+        }
         const playback = this.enqueueTrackPlaybackAfterQueueMutation(player, track);
         return { queueEnded: false, textChannelId: null, sessionRevision: null, playback };
       });
