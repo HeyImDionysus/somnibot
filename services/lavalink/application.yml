@@ -33,7 +33,7 @@ lavalink:
     gc-warnings: true
 
   plugins:
-    - dependency: "dev.lavalink.youtube:youtube-plugin:1.17.0"
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
       snapshot: false
 
 plugins:
@@ -47,7 +47,6 @@ plugins:
       - ANDROID_VR
       - WEB
       - WEBEMBEDDED
-      - TVHTML5EMBEDDED
     oauth:
       # OFF by default: with `enabled: true` and no refreshToken the plugin
       # polls Google for a token it will never get and logs a 400 every few
