@@ -24,6 +24,16 @@ import { deterministicUuidV8 } from '../../utils/deterministic-uuid.js';
 
 const log = createLogger('PaymentHandler');
 const PAYPAL_FETCH_TIMEOUT_MS = 15_000;
+const PAYPAL_TRANSACTION_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
+const PAYPAL_LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+const PAYPAL_TRANSACTION_STATUSES = new Set([
+  'COMPLETED',
+  'DECLINED',
+  'PARTIALLY_REFUNDED',
+  'PENDING',
+  'REFUNDED',
+  'REVERSED',
+]);
 
 /**
  * Branded degradation for a buy click when a checkout READ fails (database
@@ -396,7 +406,9 @@ function paypalProviderBinding(apiBase: string, clientId: string): string | null
   if (!clientId || clientId.trim() !== clientId) return null;
   try {
     const url = new URL(apiBase);
-    if (url.protocol !== 'https:' || url.username || url.password) return null;
+    const secureProvider = url.protocol === 'https:';
+    const localProvider = url.protocol === 'http:' && PAYPAL_LOOPBACK_HOSTS.has(url.hostname);
+    if ((!secureProvider && !localProvider) || url.username || url.password) return null;
     return createHash('sha256')
       .update(`${url.origin}\0${clientId}`)
       .digest('hex');
@@ -420,6 +432,90 @@ function paypalActionLink(
     }
   }
   return null;
+}
+
+async function inspectPayPalSubscriptionTransactions(
+  paypalApiBase: string,
+  token: string,
+  subscriptionId: string,
+  orderCreatedAt: unknown,
+  orderId: string,
+): Promise<'clear' | 'processing' | 'unavailable'> {
+  const createdAtMs = Date.parse(String(orderCreatedAt));
+  const historyEndMs = Date.now();
+  let windowStartMs = createdAtMs - 5 * 60 * 1000;
+  if (!Number.isFinite(createdAtMs) || windowStartMs >= historyEndMs) {
+    log.error('Pending subscription has an invalid creation timestamp', { orderId });
+    return 'unavailable';
+  }
+
+  while (windowStartMs < historyEndMs) {
+    const windowEndMs = Math.min(windowStartMs + PAYPAL_TRANSACTION_WINDOW_MS, historyEndMs);
+    const transactionUrl = new URL(
+      `${paypalApiBase}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}/transactions`,
+    );
+    transactionUrl.searchParams.set('start_time', new Date(windowStartMs).toISOString());
+    transactionUrl.searchParams.set('end_time', new Date(windowEndMs).toISOString());
+
+    let transactionResponse: Response;
+    try {
+      transactionResponse = await fetch(transactionUrl.toString(), {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(PAYPAL_FETCH_TIMEOUT_MS),
+      });
+    } catch (providerError) {
+      log.warn('PayPal subscription transaction lookup failed', {
+        orderId,
+        error: String(providerError),
+      });
+      return 'unavailable';
+    }
+    if (!transactionResponse.ok) {
+      log.warn('PayPal subscription transaction history was unavailable', {
+        orderId,
+        status: transactionResponse.status,
+      });
+      return 'unavailable';
+    }
+
+    const transactionPayload: unknown = await transactionResponse.json().catch(() => null);
+    if (!isUnknownRecord(transactionPayload)) {
+      log.error('PayPal subscription transaction history was malformed', { orderId });
+      return 'unavailable';
+    }
+    const transactions = transactionPayload.transactions === undefined
+      ? []
+      : transactionPayload.transactions;
+    if (
+      !Array.isArray(transactions)
+      || (
+        transactionPayload.total_items !== undefined
+        && (
+          !Number.isInteger(transactionPayload.total_items)
+          || (transactionPayload.total_items as number) < 0
+          || transactionPayload.total_items !== transactions.length
+        )
+      )
+    ) {
+      log.error('PayPal subscription transaction history was malformed', { orderId });
+      return 'unavailable';
+    }
+    for (const transaction of transactions) {
+      if (
+        !isUnknownRecord(transaction)
+        || typeof transaction.status !== 'string'
+        || !PAYPAL_TRANSACTION_STATUSES.has(transaction.status)
+      ) {
+        log.error('PayPal subscription transaction history was malformed', { orderId });
+        return 'unavailable';
+      }
+      if (transaction.status !== 'DECLINED') return 'processing';
+    }
+    windowStartMs = windowEndMs;
+  }
+
+  return 'clear';
 }
 
 type PayPalCheckoutInspection =
@@ -571,68 +667,15 @@ async function inspectPayPalCheckout(
     }
   } else {
     if (payload.status === 'CANCELLED' || payload.status === 'EXPIRED') {
-      const createdAt = Date.parse(String(data.created_at));
-      if (!Number.isFinite(createdAt)) {
-        log.error('Pending subscription has an invalid creation timestamp', {
-          orderId: block.orderId,
-        });
-        return { state: 'unavailable' };
-      }
-      const transactionUrl = new URL(
-        `${paypalApiBase}/v1/billing/subscriptions/${encodeURIComponent(expectedProviderId)}/transactions`,
+      const transactionState = await inspectPayPalSubscriptionTransactions(
+        paypalApiBase,
+        token,
+        expectedProviderId,
+        data.created_at,
+        block.orderId,
       );
-      transactionUrl.searchParams.set(
-        'start_time',
-        new Date(createdAt - 5 * 60 * 1000).toISOString(),
-      );
-      transactionUrl.searchParams.set('end_time', new Date().toISOString());
-      let transactionResponse: Response;
-      try {
-        transactionResponse = await fetch(transactionUrl.toString(), {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(PAYPAL_FETCH_TIMEOUT_MS),
-        });
-      } catch (providerError) {
-        log.warn('PayPal subscription transaction lookup failed', {
-          orderId: block.orderId,
-          error: String(providerError),
-        });
-        return { state: 'unavailable' };
-      }
-      if (!transactionResponse.ok) {
-        log.warn('PayPal subscription transaction history was unavailable', {
-          orderId: block.orderId,
-          status: transactionResponse.status,
-        });
-        return { state: 'unavailable' };
-      }
-      const transactionPayload: unknown = await transactionResponse.json().catch(() => null);
-      if (
-        !isUnknownRecord(transactionPayload)
-        || !Array.isArray(transactionPayload.transactions)
-        || (
-          transactionPayload.total_items !== undefined
-          && (
-            !Number.isInteger(transactionPayload.total_items)
-            || (transactionPayload.total_items as number) < 0
-          )
-        )
-      ) {
-        log.error('PayPal subscription transaction history was malformed', {
-          orderId: block.orderId,
-        });
-        return { state: 'unavailable' };
-      }
-      if (
-        transactionPayload.transactions.length > 0
-        || (
-          transactionPayload.total_items !== undefined
-          && transactionPayload.total_items !== 0
-        )
-      ) {
-        return { state: 'processing' };
-      }
+      if (transactionState === 'processing') return { state: 'processing' };
+      if (transactionState === 'unavailable') return { state: 'unavailable' };
       return {
         state: 'unpayable',
         providerKind,
