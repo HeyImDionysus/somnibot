@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
 
     const { data: orders, error: ordersError } = await admin
       .from('orders')
-      .select('id, order_number, amount_cents, discount_cents, currency, status, source, created_at, products(name, type), payments(id, amount_cents, currency, status, provider, created_at), entitlements(id, status, type, expires_at, grace_period_ends_at, cancelled_at)')
+      .select('id, order_number, amount_cents, discount_cents, currency, status, source, paypal_subscription_id, created_at, products(name, type), payments(id, amount_cents, currency, status, provider, created_at), entitlements(id, status, type, expires_at, grace_period_ends_at, cancelled_at)')
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
       .order('created_at', { ascending: false })
@@ -63,7 +63,14 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      data: orders || [],
+      data: (orders || []).map(({ paypal_subscription_id: subscriptionId, ...order }) => ({
+        ...order,
+        can_self_service_cancel:
+          (order.source === 'purchase' || order.source === null)
+          && typeof subscriptionId === 'string'
+          && subscriptionId.length > 0
+          && subscriptionId.trim() === subscriptionId,
+      })),
       controls: {
         self_service_cancellation: portalConfig?.self_service_cancellation !== false,
         cancellation_timing: portalConfig?.cancellation_timing === 'immediate' ? 'immediate' : 'end-of-term',

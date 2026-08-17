@@ -13,20 +13,25 @@ import { rateLimits } from '@/lib/api/rate-limit';
 
 const SESSION = { customer_id: 'customer-1', guild_id: 'guild-1' };
 const eqCalls: Array<[table: string, column: string, value: unknown]> = [];
+const selectCalls: Array<[table: string, columns: string | undefined]> = [];
+let orderRows: Record<string, unknown>[] = [];
 
 type QueryChain = {
-  select: () => QueryChain;
+  select: (columns?: string) => QueryChain;
   eq: (column: string, value: unknown) => QueryChain;
   gt: () => QueryChain;
   order: () => QueryChain;
   single: () => Promise<{ data: typeof SESSION | null; error: null }>;
   maybeSingle: () => Promise<{ data: Record<string, unknown> | null; error: null }>;
-  limit: () => Promise<{ data: never[]; error: null }>;
+  limit: () => Promise<{ data: Record<string, unknown>[]; error: null }>;
 };
 
 function makeChain(table: string): QueryChain {
   const chain: QueryChain = {
-    select: () => chain,
+    select: (columns) => {
+      selectCalls.push([table, columns]);
+      return chain;
+    },
     eq: (column, value) => {
       eqCalls.push([table, column, value]);
       return chain;
@@ -45,7 +50,7 @@ function makeChain(table: string): QueryChain {
         : null,
       error: null,
     }),
-    limit: async () => ({ data: [], error: null }),
+    limit: async () => ({ data: table === 'orders' ? orderRows : [], error: null }),
   };
   return chain;
 }
@@ -58,6 +63,8 @@ function request(path: string): NextRequest {
 
 beforeEach(() => {
   eqCalls.length = 0;
+  selectCalls.length = 0;
+  orderRows = [];
   vi.clearAllMocks();
   vi.mocked(rateLimits.portalData).mockResolvedValue({ limited: false } as never);
   vi.mocked(createAdminSupabase).mockReturnValue({
@@ -86,5 +93,27 @@ describe('portal list tenant scope', () => {
     expect(response.status).toBe(200);
     expect(eqCalls).toContainEqual(['license_keys', 'customer_id', SESSION.customer_id]);
     expect(eqCalls).toContainEqual(['license_keys', 'guild_id', SESSION.guild_id]);
+    expect(selectCalls.find(([table]) => table === 'license_keys')?.[1]).toContain('entitlements(status, type)');
+  });
+
+  it('exposes cancellation only for provider-backed purchase subscriptions', async () => {
+    orderRows = [
+      { id: 'manual-with-provider', source: 'manual', paypal_subscription_id: 'SUB-MANUAL' },
+      { id: 'purchase-without-provider', source: 'purchase', paypal_subscription_id: null },
+      { id: 'purchase-with-whitespace-provider', source: 'purchase', paypal_subscription_id: ' SUB-INVALID ' },
+      { id: 'purchase-with-provider', source: 'purchase', paypal_subscription_id: 'SUB-123' },
+      { id: 'legacy-purchase-with-provider', source: null, paypal_subscription_id: 'SUB-LEGACY' },
+    ];
+
+    const response = await getOrders(request('/api/portal/orders'));
+    const body = await response.json();
+
+    expect(body.data).toEqual([
+      { id: 'manual-with-provider', source: 'manual', can_self_service_cancel: false },
+      { id: 'purchase-without-provider', source: 'purchase', can_self_service_cancel: false },
+      { id: 'purchase-with-whitespace-provider', source: 'purchase', can_self_service_cancel: false },
+      { id: 'purchase-with-provider', source: 'purchase', can_self_service_cancel: true },
+      { id: 'legacy-purchase-with-provider', source: null, can_self_service_cancel: true },
+    ]);
   });
 });

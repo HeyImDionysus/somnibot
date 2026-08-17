@@ -32,7 +32,21 @@ const LICENCE = {
   product_id: PRODUCT_ID,
   bound_discord_id: DISCORD_ID,
   order_id: ORDER_ID,
-  orders: { order_number: 'ORD-001', amount_cents: 999, currency: 'USD' },
+  orders: {
+    order_number: 'ORD-001',
+    amount_cents: 999,
+    currency: 'USD',
+    entitlements: [{
+      id: '77777777-7777-4777-8777-777777777777',
+      status: 'active',
+      type: 'one_time',
+      license_key_id: KEY_ID,
+      order_id: ORDER_ID,
+      customer_id: CUSTOMER_ID,
+      guild_id: GUILD_ID,
+      product_id: PRODUCT_ID,
+    }],
+  },
   products: { name: 'VIP Pass' },
 };
 
@@ -147,7 +161,19 @@ describe('access control and recovery routing', () => {
 
   it('routes a revoked predecessor through the atomic RPC for response-loss recovery', async () => {
     const db = mockDb({
-      licence: { ...LICENCE, status: 'revoked' },
+      licence: {
+        ...LICENCE,
+        status: 'revoked',
+        revocation_reason: 'rotated',
+        rotated_to_key_id: SUCCESSOR_ID,
+        orders: {
+          ...LICENCE.orders,
+          entitlements: [{
+            ...LICENCE.orders.entitlements[0],
+            license_key_id: SUCCESSOR_ID,
+          }],
+        },
+      },
       rpcImpl: async () => ({
         data: { status: 'not_rotatable' },
         error: null,
@@ -172,6 +198,48 @@ describe('access control and recovery routing', () => {
 
     expect((await POST(req('token'), params())).status).toBe(403);
     expect(db.rpcCalls).toHaveLength(0);
+  });
+
+  it('rejects rotation when the linked entitlement is terminal', async () => {
+    const db = mockDb({
+      licence: {
+        ...LICENCE,
+        orders: {
+          ...LICENCE.orders,
+          entitlements: [{ ...LICENCE.orders.entitlements[0], status: 'cancelled' }],
+        },
+      },
+    });
+
+    expect((await POST(req('token'), params())).status).toBe(409);
+    expect(db.rpcCalls).toHaveLength(0);
+  });
+
+  it('rejects rotation when active access is not linked to the predecessor key', async () => {
+    const db = mockDb({
+      licence: {
+        ...LICENCE,
+        orders: {
+          ...LICENCE.orders,
+          entitlements: [{ ...LICENCE.orders.entitlements[0], license_key_id: null }],
+        },
+      },
+    });
+
+    expect((await POST(req('token'), params())).status).toBe(409);
+    expect(db.rpcCalls).toHaveLength(0);
+  });
+
+  it('maps the transaction-time entitlement guard to a terminal-access conflict', async () => {
+    const db = mockDb({
+      rpcImpl: async () => ({
+        data: null,
+        error: { message: 'license_rotate_key_without_receipt_stage: entitlement is not usable' },
+      }),
+    });
+
+    expect((await POST(req('token'), params())).status).toBe(409);
+    expect(db.rpcCalls).toHaveLength(1);
   });
 });
 

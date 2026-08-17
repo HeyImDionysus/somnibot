@@ -175,6 +175,23 @@ describe('POST /api/portal/cancel', () => {
     expect(paypalCancelCalls).toBe(1); // no second provider call
   });
 
+  it('reports the persisted end-of-term timing when policy changes before a replay', async () => {
+    await POST(makeRequest({ entitlement_id: ENT_ID }));
+    portalConfig.cancellation_timing = 'immediate';
+
+    const replay = await POST(makeRequest({
+      entitlement_id: ENT_ID,
+      cancellation_timing: 'immediate',
+    }));
+    const body = await replay.json();
+
+    expect(replay.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.data.cancellation_timing).toBe('end-of-term');
+    expect(body.data.access_until).toBe('2026-08-23T00:00:00.000Z');
+    expect(paypalCancelCalls).toBe(1);
+  });
+
   it('404s a non-subscription or foreign entitlement', async () => {
     entitlement.type = 'one_time';
     const res = await POST(makeRequest({ entitlement_id: ENT_ID }));

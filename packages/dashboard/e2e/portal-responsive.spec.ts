@@ -63,6 +63,7 @@ test('subscription cancellation and support requests are reachable and truthful 
         currency: 'USD',
         status: 'completed',
         source: 'paypal',
+        can_self_service_cancel: true,
         created_at: '2026-08-17T00:00:00.000Z',
         products: { name: 'Final Release Subscription', type: 'subscription' },
         payments: [],
@@ -174,6 +175,7 @@ test('disabled portal controls hide unavailable customer actions', async ({ page
         currency: 'USD',
         status: 'completed',
         source: 'paypal',
+        can_self_service_cancel: true,
         created_at: '2026-08-17T00:00:00.000Z',
         products: { name: 'Policy Controlled Subscription', type: 'subscription' },
         payments: [],
@@ -221,6 +223,7 @@ test('immediate cancellation warns that access ends now', async ({ page }, testI
         currency: 'USD',
         status: 'completed',
         source: 'paypal',
+        can_self_service_cancel: true,
         created_at: '2026-08-17T00:00:00.000Z',
         products: { name: 'Immediate Subscription', type: 'subscription' },
         payments: [],
@@ -268,6 +271,7 @@ test('grace-period cancellation uses the grace deadline', async ({ page }, testI
         currency: 'USD',
         status: 'completed',
         source: 'paypal',
+        can_self_service_cancel: true,
         created_at: '2026-08-17T00:00:00.000Z',
         products: { name: 'Grace Subscription', type: 'subscription' },
         payments: [],
@@ -315,6 +319,7 @@ test('cancelled grace-period readback uses the grace deadline', async ({ page })
         currency: 'USD',
         status: 'completed',
         source: 'paypal',
+        can_self_service_cancel: true,
         created_at: '2026-08-17T00:00:00.000Z',
         products: { name: 'Grace Readback Subscription', type: 'subscription' },
         payments: [],
@@ -346,6 +351,69 @@ test('order load failure does not claim that purchase history is empty', async (
   await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
   await expect(page.getByText('Order history could not be loaded.')).toBeVisible();
   await expect(page.getByText('No orders yet.')).toHaveCount(0);
+});
+
+test('non-provider subscription grants do not offer PayPal cancellation', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-manual-grant-session'));
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      controls: {
+        self_service_cancellation: true,
+        cancellation_timing: 'end-of-term',
+        refund_requests_enabled: false,
+        service_requests_enabled: true,
+      },
+      data: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        order_number: 'ORD-MANUAL-GRANT',
+        amount_cents: 0,
+        discount_cents: 0,
+        currency: 'USD',
+        status: 'completed',
+        source: 'manual',
+        can_self_service_cancel: false,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: { name: 'Manual Subscription Grant', type: 'subscription' },
+        payments: [],
+        entitlements: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          status: 'active',
+          type: 'subscription',
+          expires_at: '2026-09-17T12:00:00.000Z',
+          grace_period_ends_at: null,
+          cancelled_at: null,
+        }],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('table').getByText('Manual Subscription Grant')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel renewal' })).toHaveCount(0);
+  await testInfo.attach('orders-desktop-manual-grant-no-cancellation', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
+
+test('license load failure does not claim that the account has no licenses', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-load-failure'));
+  await page.route('**/api/portal/licenses', (route) => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'Licenses could not be loaded.' }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByText('Licenses could not be loaded.')).toBeVisible();
+  await expect(page.getByText(/No licenses yet/)).toHaveCount(0);
+  await testInfo.attach('licenses-desktop-load-failed', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
 });
 
 ([
@@ -380,6 +448,7 @@ test('order load failure does not claim that purchase history is empty', async (
               self_service_device_removal: true,
             }],
           },
+          entitlements: [{ status: 'active', type: 'one_time' }],
           license_sessions: [{
             id: '44444444-4444-4444-8444-444444444444',
             device_name: 'Test workstation',
@@ -480,6 +549,7 @@ test('disabled license policies hide rotation and device removal', async ({ page
               self_service_device_removal: false,
             },
         },
+        entitlements: [{ status: 'active', type: 'one_time' }],
         license_sessions: [{
           id: '44444444-4444-4444-8444-444444444444',
           device_name: 'Test workstation',
@@ -498,6 +568,44 @@ test('disabled license policies hide rotation and device removal', async ({ page
   await expect(page.getByRole('button', { name: 'Rotate key' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Remove device' })).toHaveCount(0);
   await testInfo.attach('licenses-desktop-disabled-controls', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
+
+test('terminal license entitlements hide key rotation', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-terminal-license'));
+  await page.route('**/api/portal/licenses', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      data: [{
+        id: '33333333-3333-4333-8333-333333333333',
+        key_prefix: 'SMNI',
+        key_suffix: 'ABCD',
+        status: 'active',
+        max_devices: 2,
+        expires_at: null,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: {
+          name: 'Cancelled Access License',
+          type: 'one_time',
+          product_license_config: {
+            rotation_policy: 'rotate-and-invalidate',
+            self_service_device_removal: true,
+          },
+        },
+        entitlements: [{ status: 'cancelled', type: 'one_time' }],
+        license_sessions: [],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Cancelled Access License/ }).click();
+  await expect(page.getByRole('button', { name: 'Rotate key' })).toHaveCount(0);
+  await testInfo.attach('licenses-desktop-terminal-entitlement', {
     body: await page.screenshot({ fullPage: true }),
     contentType: 'image/png',
   });
@@ -536,6 +644,7 @@ test('rotation success remains truthful when license refresh fails', async ({ pa
               self_service_device_removal: true,
             }],
           },
+          entitlements: [{ status: 'active', type: 'one_time' }],
           license_sessions: [],
         }],
       }),
@@ -594,6 +703,7 @@ test('device removal success remains truthful when license refresh fails', async
               self_service_device_removal: true,
             },
           },
+          entitlements: [{ status: 'active', type: 'one_time' }],
           license_sessions: [{
             id: '44444444-4444-4444-8444-444444444444',
             device_name: 'Test workstation',

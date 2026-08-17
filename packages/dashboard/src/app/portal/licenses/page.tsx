@@ -39,6 +39,9 @@ interface LicenseKey {
           self_service_device_removal?: boolean;
         }>;
   } | null;
+  entitlements?:
+    | { status: string; type: string }
+    | Array<{ status: string; type: string }>;
   license_sessions: LicenseSession[];
 }
 
@@ -51,6 +54,12 @@ function productLicenseConfig(product: LicenseKey['products']) {
   return Array.isArray(config) ? config[0] : config;
 }
 
+function hasUsableEntitlement(key: LicenseKey): boolean {
+  const embedded = key.entitlements;
+  const entitlements = Array.isArray(embedded) ? embedded : embedded ? [embedded] : [];
+  return entitlements.some((entitlement) => ['active', 'grace_period'].includes(entitlement.status));
+}
+
 export default function PortalLicenses() {
   const [keys, setKeys] = useState<LicenseKey[]>([]);
   const [loading, setLoading] = useState(true);
@@ -59,6 +68,7 @@ export default function PortalLicenses() {
   const [rotateTarget, setRotateTarget] = useState<LicenseKey | null>(null);
   const [mutation, setMutation] = useState<'remove' | 'rotate' | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [keysLoaded, setKeysLoaded] = useState(false);
 
   const loadKeys = useCallback(async () => {
     const token = localStorage.getItem('portal_token');
@@ -79,6 +89,7 @@ export default function PortalLicenses() {
       throw new Error(body.error || 'Licenses could not be loaded.');
     }
     setKeys(body.data);
+    setKeysLoaded(true);
   }, []);
 
   const removeDevice = async () => {
@@ -187,10 +198,12 @@ export default function PortalLicenses() {
       )}
 
       {keys.length === 0 ? (
-        <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
-          <KeyRound className="mx-auto mb-3 text-discord-text-muted" size={36} aria-hidden="true" />
-          <p className="text-discord-text-muted">No licenses yet. Purchased products will appear here.</p>
-        </div>
+        keysLoaded ? (
+          <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
+            <KeyRound className="mx-auto mb-3 text-discord-text-muted" size={36} aria-hidden="true" />
+            <p className="text-discord-text-muted">No licenses yet. Purchased products will appear here.</p>
+          </div>
+        ) : null
       ) : (
         keys.map((key) => {
           const activeSessions = key.license_sessions?.filter(s => s.active) || [];
@@ -234,7 +247,7 @@ export default function PortalLicenses() {
                     <div>Max Devices: {key.max_devices}</div>
                   </div>
 
-                  {key.status === 'active' && rotationAllowed && (
+                  {key.status === 'active' && rotationAllowed && hasUsableEntitlement(key) && (
                     <div className="rounded-input border border-discord-warning/30 bg-discord-warning/10 p-3">
                       <p className="text-xs text-discord-text-secondary">
                         Replace this key if it was shared or exposed. The current key stops working immediately, and the replacement is delivered only through Discord DM.

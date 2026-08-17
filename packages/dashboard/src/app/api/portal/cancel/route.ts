@@ -12,7 +12,7 @@
  *  - is idempotent: a second confirm resolves to the single scheduled
  *    cancellation without a second provider call or state change.
  *
- * Body: { entitlement_id: uuid }
+ * Body: { entitlement_id: uuid, cancellation_timing: 'immediate' | 'end-of-term' }
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -56,6 +56,10 @@ function scheduledResponse(entitlement: {
       cancellation_scheduled_at: entitlement.cancelled_at,
     },
   });
+}
+
+function persistedCancellationTiming(entitlement: { status: string }): 'immediate' | 'end-of-term' {
+  return entitlement.status === 'cancelled' ? 'immediate' : 'end-of-term';
 }
 
 export async function POST(request: NextRequest) {
@@ -128,7 +132,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Subscription not found' }, { status: 404 });
     }
     if (entitlement.cancelled_at) {
-      return scheduledResponse(entitlement, true, cancellationTiming);
+      return scheduledResponse(entitlement, true, persistedCancellationTiming(entitlement));
     }
     if (!['active', 'grace_period'].includes(entitlement.status)) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
@@ -276,10 +280,6 @@ export async function POST(request: NextRequest) {
       currentError
       || !current
       || current.id !== entitlement.id
-      || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(current.status))
-      || (cancellationTiming === 'immediate' && current.status !== 'cancelled')
-      || (cancellationTiming === 'end-of-term' && current.expires_at !== entitlement.expires_at)
-      || (cancellationTiming === 'end-of-term' && current.grace_period_ends_at !== entitlement.grace_period_ends_at)
       || typeof current.cancelled_at !== 'string'
       || !Number.isFinite(Date.parse(current.cancelled_at))
     ) {
@@ -288,7 +288,21 @@ export async function POST(request: NextRequest) {
         { status: 503 },
       );
     }
-    return scheduledResponse(current, true, cancellationTiming);
+    const appliedTiming = persistedCancellationTiming(current);
+    if (
+      appliedTiming === 'end-of-term'
+      && (
+        !['active', 'grace_period'].includes(current.status)
+        || current.expires_at !== entitlement.expires_at
+        || current.grace_period_ends_at !== entitlement.grace_period_ends_at
+      )
+    ) {
+      return NextResponse.json(
+        { error: 'The provider cancelled renewal, but the local schedule is unconfirmed. Please retry.' },
+        { status: 503 },
+      );
+    }
+    return scheduledResponse(current, true, appliedTiming);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });

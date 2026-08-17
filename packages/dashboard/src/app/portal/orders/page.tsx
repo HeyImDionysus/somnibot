@@ -31,6 +31,7 @@ interface Order {
   currency: string;
   status: string;
   source: string;
+  can_self_service_cancel: boolean;
   created_at: string;
   products: { name: string; type: string } | null;
   payments: Payment[];
@@ -246,7 +247,7 @@ export default function PortalOrders() {
     const subscriptionBoundary = subscription ? accessBoundary(subscription) : null;
     return (
       <div className="flex flex-wrap gap-2">
-        {controls?.self_service_cancellation && subscription && !subscription.cancelled_at && (
+        {controls?.self_service_cancellation && order.can_self_service_cancel && subscription && !subscription.cancelled_at && (
           <Button size="sm" variant="danger" onClick={() => setCancelTarget(order)}>
             Cancel renewal
           </Button>
