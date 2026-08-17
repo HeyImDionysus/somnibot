@@ -229,6 +229,29 @@ describe('MusicPlayerManager', () => {
       await manager.init();
       // Should have started auto-leave timer (no assertion on timer itself, just no crash)
     });
+
+    it('marks a persisted queue for restart when the existing player is idle', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{
+          track: 'persisted', title: 'Persisted', uri: 'https://youtube.com/watch?v=persisted',
+          duration: 120000, author: 'A', requestedBy: 'u0', isStream: false,
+        }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      (player as unknown as { track: string | null }).track = null;
+      await manager.init();
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('new request', 'u1', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'persisted' }),
+      }));
+    });
   });
 
   describe('shutdown', () => {

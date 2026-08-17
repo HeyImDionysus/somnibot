@@ -179,6 +179,9 @@ export class MusicPlayerManager {
     const existingPlayer = this.shoukaku.players?.get(this.guild.id);
     if (existingPlayer) {
       const queue = await this.queueManager.getQueue(this.guild.id);
+      if (!existingPlayer.track && queue && queue.currentIndex < queue.entries.length) {
+        this.playbackRestartRequired = true;
+      }
       if (queue?.voiceChannelId) {
         const vc = this.guild.channels.cache.get(queue.voiceChannelId);
         if (vc?.isVoiceBased()) {
