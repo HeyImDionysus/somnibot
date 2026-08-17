@@ -1312,7 +1312,11 @@ export class MusicPlayerManager {
   /** Called when voice state changes — handles auto-pause/resume/leave. */
   async handleVoiceStateChange(channelId: string): Promise<void> {
     const queue = await this.queueManager.getQueue(this.guild.id);
-    if (!queue || queue.voiceChannelId !== channelId) return;
+    const matchesQueuedSession = queue?.voiceChannelId === channelId;
+    const matchesUncommittedSession = !queue &&
+      this.uncommittedVoiceSession &&
+      this.uncommittedVoiceChannelId === channelId;
+    if (!matchesQueuedSession && !matchesUncommittedSession) return;
 
     const voiceChannel = this.guild.channels.cache.get(channelId);
     if (!voiceChannel || !voiceChannel.isVoiceBased()) return;
@@ -1322,7 +1326,7 @@ export class MusicPlayerManager {
     if (humanMembers.size === 0) {
       // Bot is alone — auto-pause and start leave timer
       const player = this.shoukaku.players.get(this.guild.id);
-      if (player) {
+      if (player && queue) {
         const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
           if (this.stopInProgress || !latestQueue || latestQueue.voiceChannelId !== channelId || latestQueue.paused) return null;
@@ -1352,7 +1356,7 @@ export class MusicPlayerManager {
       this.clearAutoLeaveTimer(this.guild.id);
 
       const player = this.shoukaku.players.get(this.guild.id);
-      if (player) {
+      if (player && queue) {
         const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
           if (this.stopInProgress || !latestQueue || latestQueue.voiceChannelId !== channelId || !latestQueue.paused) return null;
@@ -1953,8 +1957,15 @@ export class MusicPlayerManager {
 
   private enqueuePlaybackAfterQueueMutation(operation: () => Promise<void>): Promise<void> {
     const queueRelease = this.queueMutationTail;
+    const operationRevision = this.playbackMutationRevision;
+    const stopWasInProgress = this.stopInProgress;
     return this.enqueuePlaybackMutation(async () => {
       await queueRelease;
+      if (
+        this.disposed ||
+        operationRevision !== this.playbackMutationRevision ||
+        (!stopWasInProgress && this.stopInProgress)
+      ) return;
       await operation();
     });
   }

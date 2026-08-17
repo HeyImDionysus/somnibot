@@ -327,6 +327,38 @@ describe('MusicPlayerManager', () => {
       await expect(secondVolume).resolves.toMatchObject({ success: true });
       expect(player.setGlobalVolume).toHaveBeenCalledTimes(1);
     });
+
+    it('rechecks stop cancellation after a queued playback operation clears its queue wait', async () => {
+      const mutationAccess = manager as unknown as {
+        withQueueMutation<T>(operation: () => Promise<T>): Promise<T>;
+        enqueuePlaybackMutation(operation: () => Promise<void>): Promise<void>;
+        enqueuePlaybackAfterQueueMutation(operation: () => Promise<void>): Promise<void>;
+      };
+      let finishQueueMutation: (() => void) | undefined;
+      const heldQueue = mutationAccess.withQueueMutation(() => new Promise<void>((resolve) => {
+        finishQueueMutation = resolve;
+      }));
+      await vi.waitFor(() => expect(finishQueueMutation).toBeDefined());
+      let finishPriorPlayback: (() => void) | undefined;
+      const priorPlayback = mutationAccess.enqueuePlaybackMutation(() => new Promise<void>((resolve) => {
+        finishPriorPlayback = resolve;
+      }));
+      await vi.waitFor(() => expect(finishPriorPlayback).toBeDefined());
+      const staleOperation = vi.fn().mockResolvedValue(undefined);
+      const stalePlayback = mutationAccess.enqueuePlaybackAfterQueueMutation(staleOperation);
+      const stopping = manager.stop('g1', { reason: 'command' });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      finishPriorPlayback?.();
+      await priorPlayback;
+      finishQueueMutation?.();
+
+      await heldQueue;
+      await stalePlayback;
+      await expect(stopping).resolves.toMatchObject({ success: true });
+      expect(staleOperation).not.toHaveBeenCalled();
+    });
   });
 
   describe('getStatus', () => {
@@ -828,6 +860,44 @@ describe('MusicPlayerManager', () => {
 
       await expect(manager.queueManager.getQueue('g1'))
         .resolves.toMatchObject({ paused: true });
+    });
+
+    it('auto-leaves when the requester exits during the first slow resolution', async () => {
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      let finishResolution: ((result: Awaited<ReturnType<typeof player.node.rest.resolve>>) => void) | undefined;
+      player.node.rest.resolve.mockImplementationOnce(() => new Promise((resolve) => {
+        finishResolution = resolve;
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2] & {
+        members: { filter: ReturnType<typeof vi.fn> };
+      };
+      voiceChannel.members.filter.mockReturnValue({ size: 0 });
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const playing = manager.play('slow song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(1));
+      await manager.handleVoiceStateChange('vc1');
+      expect(vi.getTimerCount()).toBe(1);
+
+      finishResolution?.({
+        loadType: 'search',
+        data: [{
+          encoded: 'slow-track',
+          info: {
+            title: 'Slow Song', uri: 'https://youtube.com/watch?v=slow', length: 240000,
+            author: 'Artist', artworkUrl: null, isStream: false, identifier: 'slow', sourceName: 'youtube',
+          },
+        }],
+      });
+      await expect(playing).resolves.toMatchObject({ success: true });
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
     });
   });
 
