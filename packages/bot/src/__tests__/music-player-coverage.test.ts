@@ -821,6 +821,30 @@ describe('MusicPlayerManager', () => {
       expect(restartedQueue?.entries).toHaveLength(1);
     });
 
+    it('classifies the first track after a persisted empty queue as a new session', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [], currentIndex: 3, loopMode: 'off', volume: 50, paused: true, shuffled: true,
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('next session', 'u2', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'music.queued',
+        'g1',
+        expect.objectContaining({ sessionStarted: true }),
+      );
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        currentIndex: 0,
+        paused: false,
+        shuffled: false,
+        entries: [expect.objectContaining({ track: 'base64track' })],
+      });
+    });
+
     it.each(['exception', 'stuck'] as const)(
       'clears a terminal %s transition so the next play starts',
       async (eventName) => {
@@ -1271,6 +1295,23 @@ describe('MusicPlayerManager', () => {
 
       finishFirstPlayback?.();
       await Promise.all([firstSkip, secondSkip]);
+    });
+
+    it('clears the active playback timer before start metadata loading can fail', async () => {
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+      const startHandler = getStartHandler();
+      await expect(manager.play('active song', 'u1', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+      expect(vi.getTimerCount()).toBe(1);
+      const playback = player.playTrack.mock.calls[0]?.[0] as { track: PlaybackEvent['track'] };
+      valkey.get.mockRejectedValueOnce(new Error('Valkey unavailable'));
+
+      startHandler({ track: playback.track });
+
+      expect(vi.getTimerCount()).toBe(0);
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
     it('prevents an older start from overwriting the latest now-playing message', async () => {
@@ -2103,6 +2144,39 @@ describe('MusicPlayerManager', () => {
         paused: true,
       });
       expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it('advances the queue when a re-resolved recovery track ends', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{
+          track: 'stale-encoding', title: 'Song', uri: 'https://youtube.com/watch?v=test',
+          duration: 120000, author: 'A', requestedBy: 'u1', isStream: false,
+        }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+
+      const reconnect = getClosedHandler()({
+        code: 4006,
+        reason: 'Session no longer valid',
+        byRemote: true,
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await reconnect;
+      const recoveryPlayback = player.playTrack.mock.calls[0]?.[0] as {
+        track: { encoded: string; userData?: unknown };
+      };
+      expect(recoveryPlayback.track.encoded).toBe('base64track');
+      const endRegistrations = player.on.mock.calls.filter(([event]) => event === 'end');
+      const endHandler = endRegistrations[endRegistrations.length - 1]?.[1] as (event: {
+        reason: string;
+        track: typeof recoveryPlayback.track;
+      }) => Promise<void>;
+
+      await endHandler({ reason: 'finished', track: recoveryPlayback.track });
+
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({ entries: [] });
+      expect(eventBus.emit).toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
     });
 
     it('continues into the reconnect loop when stale cleanup fails', async () => {

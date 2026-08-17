@@ -600,7 +600,9 @@ export class MusicPlayerManager {
       queue.textChannelId = textChannel.id;
     }
 
-    const queueWasExhausted = this.queueExhausted;
+    const queueWasExhausted = this.queueExhausted || Boolean(
+      existingQueue && existingQueue.entries.length === 0,
+    );
     if (queueWasExhausted) {
       queue.entries = [];
       queue.currentIndex = 0;
@@ -1497,6 +1499,8 @@ export class MusicPlayerManager {
         this.latestStartedPlaybackRevision = scheduledStart.playbackRevision;
       }
       const expectedSessionRevision = scheduledStart?.sessionRevision ?? this.playbackSessionRevision;
+      if (expectedSessionRevision !== this.playbackSessionRevision) return;
+      if (scheduledStart) this.clearInactivityTimer(this.guild.id);
 
       // Emit track.started event
       this.queueManager.getQueue(this.guild.id).then((queue) => {
@@ -1522,7 +1526,7 @@ export class MusicPlayerManager {
         ).catch((err) => {
           log.error('Failed to send now-playing:', { error: String(err) });
         });
-        this.clearInactivityTimer(this.guild.id);
+        if (!scheduledStart) this.clearInactivityTimer(this.guild.id);
         if (queue?.paused) {
           this.resetInactivityTimer(this.guild.id);
         }
@@ -1575,7 +1579,7 @@ export class MusicPlayerManager {
         const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
           ? currentQueue.entries[currentQueue.currentIndex]
           : null;
-        if (data.track?.encoded && np?.track !== data.track.encoded) {
+        if (!playbackIdentity && data.track?.encoded && np?.track !== data.track.encoded) {
           return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         }
         if (np) {
