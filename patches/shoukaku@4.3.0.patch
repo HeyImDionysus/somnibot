@@ -1,0 +1,22 @@
+diff --git a/dist/index.js b/dist/index.js
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1107,6 +1107,7 @@ var Node = class extends TypedEventEmitter {
+     for (this.reconnects = 0; this.reconnects < this.manager.options.reconnectTries; this.reconnects++) {
+       try {
+         this.ws = await createConnection();
++        connectError = void 0;
+         break;
+       } catch (error) {
+         this.emit("reconnecting", this.manager.options.reconnectTries - this.reconnects, this.manager.options.reconnectInterval);
+diff --git a/dist/index.mjs b/dist/index.mjs
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -1065,6 +1065,7 @@ var Node = class extends TypedEventEmitter {
+     for (this.reconnects = 0; this.reconnects < this.manager.options.reconnectTries; this.reconnects++) {
+       try {
+         this.ws = await createConnection();
++        connectError = void 0;
+         break;
+       } catch (error) {
+         this.emit("reconnecting", this.manager.options.reconnectTries - this.reconnects, this.manager.options.reconnectInterval);
