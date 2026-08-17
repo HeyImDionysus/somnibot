@@ -1121,11 +1121,12 @@ describe('MusicPlayerManager', () => {
       await vi.waitFor(() => expect(player.playTrack).toHaveBeenCalledTimes(1));
       const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
       const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
-      await expect(manager.play('added song', 'u3', voiceChannel, textChannel))
-        .resolves.toMatchObject({ success: true });
+      const added = manager.play('added song', 'u3', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(1));
       expect(player.playTrack).toHaveBeenCalledTimes(1);
 
       finishPlayback?.();
+      await expect(added).resolves.toMatchObject({ success: true });
       await ending;
       expect(player.playTrack).toHaveBeenCalledTimes(1);
       expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
@@ -1164,6 +1165,56 @@ describe('MusicPlayerManager', () => {
       await expect(manager.play('second', 'u2', voiceChannel, textChannel))
         .resolves.toMatchObject({ success: true });
 
+      expect(player.playTrack).toHaveBeenCalledTimes(2);
+      expect(player.playTrack).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'first-track' }),
+      }));
+      await expect(manager.queueManager.getQueue('g1'))
+        .resolves.toMatchObject({ currentIndex: 0, entries: [{ track: 'first-track' }, { track: 'second-track' }] });
+    });
+
+    it('lets an overlapping play recover a pending playback start that fails', async () => {
+      player.node.rest.resolve
+        .mockResolvedValueOnce({
+          loadType: 'search',
+          data: [{
+            encoded: 'first-track',
+            info: {
+              title: 'First', uri: 'https://youtube.com/watch?v=first', length: 240000,
+              author: 'Artist', artworkUrl: null, isStream: false, identifier: 'first', sourceName: 'youtube',
+            },
+          }],
+        })
+        .mockResolvedValueOnce({
+          loadType: 'search',
+          data: [{
+            encoded: 'second-track',
+            info: {
+              title: 'Second', uri: 'https://youtube.com/watch?v=second', length: 240000,
+              author: 'Artist', artworkUrl: null, isStream: false, identifier: 'second', sourceName: 'youtube',
+            },
+          }],
+        });
+      let rejectFirstPlayback: ((error: Error) => void) | undefined;
+      player.playTrack
+        .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+          rejectFirstPlayback = reject;
+        }))
+        .mockResolvedValueOnce(undefined);
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const firstPlay = manager.play('first', 'u1', voiceChannel, textChannel);
+      const firstFailure = expect(firstPlay).rejects.toThrow('Playback start failed');
+      await vi.waitFor(() => expect(player.playTrack).toHaveBeenCalledTimes(1));
+      const secondPlay = manager.play('second', 'u2', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(2));
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+
+      rejectFirstPlayback?.(new Error('Playback start failed'));
+
+      await firstFailure;
+      await expect(secondPlay).resolves.toMatchObject({ success: true });
       expect(player.playTrack).toHaveBeenCalledTimes(2);
       expect(player.playTrack).toHaveBeenNthCalledWith(2, expect.objectContaining({
         track: expect.objectContaining({ encoded: 'first-track' }),

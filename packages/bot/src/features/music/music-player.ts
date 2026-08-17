@@ -498,6 +498,15 @@ export class MusicPlayerManager {
       const expectedVoiceRevision = this.voiceOperationRevision;
 
       const result = await activePlayer.node.rest.resolve(searchQuery);
+      if (
+        this.stopInProgress ||
+        this.stopRevision !== expectedStopRevision ||
+        this.voiceOperationRevision !== expectedVoiceRevision
+      ) {
+        await this.completePlayRequest(requestRevision, false);
+        return { success: false, message: 'Playback was stopped before the track could be queued.' };
+      }
+      await this.waitForPlaybackMutations();
       const transition = await this.withQueueMutation(() => this.playWithinQueueMutation(
         userId,
         voiceChannel,
@@ -1886,6 +1895,15 @@ export class MusicPlayerManager {
       return await operation();
     } finally {
       release?.();
+    }
+  }
+
+  private async waitForPlaybackMutations(): Promise<void> {
+    let pendingPlayback = this.playbackMutationTail;
+    while (true) {
+      await pendingPlayback;
+      if (pendingPlayback === this.playbackMutationTail) return;
+      pendingPlayback = this.playbackMutationTail;
     }
   }
 
