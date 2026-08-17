@@ -12,7 +12,7 @@ import {
   type VoiceBasedChannel,
   ChannelType,
 } from 'discord.js';
-import type { Shoukaku, Player, Track, TrackExceptionEvent, TrackEndEvent, WebSocketClosedEvent } from 'shoukaku';
+import type { Shoukaku, Player, Track, TrackExceptionEvent, TrackEndEvent, TrackStartEvent, TrackStuckEvent, WebSocketClosedEvent } from 'shoukaku';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
@@ -85,6 +85,13 @@ type PauseTransition = {
   revision: number;
 };
 
+type PendingTrackStart = {
+  entry: QueueEntry;
+  encodedTrack: string;
+  playbackRevision: number;
+  sessionRevision: number;
+};
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 5000,
@@ -123,10 +130,13 @@ export class MusicPlayerManager {
   private uncommittedVoiceCleanupInProgress = false;
   private pendingVoiceJoin: Promise<Player> | null = null;
   private pendingVoiceChannelId: string | null = null;
-  private pendingTrackStarts: QueueEntry[] = [];
+  private pendingTrackStarts: PendingTrackStart[] = [];
   private trackPlaybackRevision = 0;
+  private playbackSessionRevision = 0;
+  private playbackMutationRevision = 0;
   private playbackRestartRequired = false;
   private pauseRevision = 0;
+  private appliedPaused: boolean | null = null;
   private volumeRevision = 0;
   private appliedVolume: number | null = null;
 
@@ -170,6 +180,9 @@ export class MusicPlayerManager {
   shutdown(): void {
     this.disposed = true;
     this.voiceOperationRevision += 1;
+    this.playbackSessionRevision += 1;
+    this.playbackMutationRevision += 1;
+    this.pendingTrackStarts = [];
     for (const timer of this.autoLeaveTimers.values()) clearTimeout(timer);
     for (const timer of this.inactivityTimers.values()) clearTimeout(timer);
     this.autoLeaveTimers.clear();
@@ -807,6 +820,9 @@ export class MusicPlayerManager {
         const queueBeforeStop = await this.queueManager.getQueue(guildId);
         this.stopRevision += 1;
         this.voiceOperationRevision += 1;
+        this.playbackSessionRevision += 1;
+        this.playbackMutationRevision += 1;
+        this.pendingTrackStarts = [];
         const player = this.shoukaku.players.get(guildId);
         this.intentionalVoiceLeaveDepth += 1;
         const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
@@ -834,6 +850,7 @@ export class MusicPlayerManager {
         this.playbackRestartRequired = false;
         this.pendingTrackStarts = [];
         this.trackPlaybackRevision += 1;
+        this.appliedPaused = null;
         this.appliedVolume = null;
         this.pauseRevision += 1;
         this.volumeRevision += 1;
@@ -862,26 +879,33 @@ export class MusicPlayerManager {
   async togglePause(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; paused: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, paused: false, message: 'Nothing is playing' };
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) {
+      return { success: false, paused: false, message: 'Playback is stopping' };
+    }
 
     const pauseTransition = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
       const queue = await this.queueManager.getQueue(guildId);
       if (!queue) return null;
 
       const previousPaused = queue.paused;
+      if (this.appliedPaused === null) this.appliedPaused = previousPaused;
       const newPaused = !queue.paused;
       queue.paused = newPaused;
       await this.queueManager.saveQueue(queue);
       const revision = ++this.pauseRevision;
-      return { previousPaused, newPaused, revision };
+      const state = { finalPaused: newPaused };
+      const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+        state.finalPaused = await this.reconcilePlayerPauseState(player, newPaused, revision);
+      });
+      return { previousPaused, newPaused, revision, state, playback };
     });
     if (!pauseTransition) return { success: false, paused: false, message: 'No active queue' };
 
     try {
-      const finalPaused = await this.reconcilePlayerPauseState(
-        player,
-        pauseTransition.newPaused,
-        pauseTransition.revision,
-      );
+      await pauseTransition.playback;
+      const finalPaused = pauseTransition.state.finalPaused;
       this.auditControlApplied(context, 'pause', finalPaused ? 'paused' : 'resumed');
       if (finalPaused) {
         this.resetInactivityTimer(guildId);
@@ -925,9 +949,12 @@ export class MusicPlayerManager {
   async setVolume(guildId: string, volume: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
 
     const clamped = Math.max(0, Math.min(150, volume));
     const transition = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
       let previousVolume: number | null = null;
       let revision: number | null = null;
       if (!context.internal) {
@@ -949,6 +976,7 @@ export class MusicPlayerManager {
         }),
       };
     });
+    if (!transition) return { success: false, message: 'Playback is stopping' };
     try {
       await transition.playback;
     } catch (error) {
@@ -976,7 +1004,10 @@ export class MusicPlayerManager {
 
   /** Set loop mode. */
   async setLoopMode(guildId: string, mode: LoopMode, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
     const updated = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return false;
       const queue = await this.queueManager.getQueue(guildId);
       if (!queue) return false;
       queue.loopMode = mode;
@@ -992,8 +1023,15 @@ export class MusicPlayerManager {
 
   /** Cycle through loop modes: off → queue → track → off. */
   async cycleLoopMode(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; mode: LoopMode; message: string }> {
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) {
+      return { success: false, mode: 'off', message: 'Playback is stopping' };
+    }
     const queue = await this.queueManager.getQueue(guildId);
     if (!queue) return { success: false, mode: 'off', message: 'No active queue' };
+    if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+      return { success: false, mode: queue.loopMode, message: 'Playback is stopping' };
+    }
 
     const cycle: LoopMode[] = ['off', 'queue', 'track'];
     const currentIdx = cycle.indexOf(queue.loopMode);
@@ -1006,7 +1044,12 @@ export class MusicPlayerManager {
 
   /** Shuffle the queue. */
   async shuffle(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
-    const success = await this.withQueueMutation(() => this.queueManager.shuffle(guildId));
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
+    const success = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return false;
+      return this.queueManager.shuffle(guildId);
+    });
     if (!success) return { success: false, message: 'No active queue to shuffle' };
     this.auditControlApplied(context, 'shuffle');
     return { success: true, message: '🔀 Queue shuffled' };
@@ -1014,7 +1057,12 @@ export class MusicPlayerManager {
 
   /** Remove a track from the queue by position (1-indexed, relative to upcoming). */
   async remove(guildId: string, position: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
     return this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+        return { success: false, message: 'Playback is stopping' };
+      }
       const queue = await this.queueManager.getQueue(guildId);
       if (!queue) return { success: false, message: 'No active queue' };
 
@@ -1043,8 +1091,13 @@ export class MusicPlayerManager {
     fromPosition: number,
     toPosition: number,
   ): Promise<{ success: boolean; message: string }> {
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
     const userIsDJ = await this.isDJ(userId);
     return this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+        return { success: false, message: 'Playback is stopping' };
+      }
       const queue = await this.queueManager.getQueue(guildId);
       if (!queue) return { success: false, message: 'No active queue' };
 
@@ -1135,9 +1188,16 @@ export class MusicPlayerManager {
   // ── Now Playing Updates ─────────────────────────────────
 
   /** Send or update the now-playing embed. */
-  async sendNowPlaying(guildId: string, scheduledEntry?: QueueEntry): Promise<void> {
+  async sendNowPlaying(
+    guildId: string,
+    scheduledEntry?: QueueEntry,
+    expectedSessionRevision?: number,
+  ): Promise<void> {
+    const sessionIsCurrent = (): boolean => (
+      expectedSessionRevision === undefined || expectedSessionRevision === this.playbackSessionRevision
+    );
     const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return;
+    if (!queue || !sessionIsCurrent()) return;
 
     const current = scheduledEntry ?? queue.entries[queue.currentIndex];
     if (!current) return;
@@ -1151,18 +1211,26 @@ export class MusicPlayerManager {
 
     // Try to edit existing now-playing message
     const existingMsgId = await this.queueManager.getNowPlayingMessage(guildId);
+    if (!sessionIsCurrent()) return;
     if (existingMsgId) {
       try {
         const msg = await textChannel.messages.fetch(existingMsgId);
+        if (!sessionIsCurrent()) return;
         await msg.edit({ embeds, components });
         return;
       } catch {
+        if (!sessionIsCurrent()) return;
         // Message deleted, send new one
       }
     }
 
     // Send new now-playing message
+    if (!sessionIsCurrent()) return;
     const msg = await textChannel.send({ embeds, components });
+    if (!sessionIsCurrent()) {
+      await msg.delete().catch(() => undefined);
+      return;
+    }
     await this.queueManager.setNowPlayingMessage(guildId, msg.id);
   }
 
@@ -1184,15 +1252,21 @@ export class MusicPlayerManager {
       if (player) {
         const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
-          if (!latestQueue || latestQueue.voiceChannelId !== channelId || latestQueue.paused) return null;
+          if (this.stopInProgress || !latestQueue || latestQueue.voiceChannelId !== channelId || latestQueue.paused) return null;
           const previousPaused = latestQueue.paused;
+          if (this.appliedPaused === null) this.appliedPaused = previousPaused;
           latestQueue.paused = true;
           await this.queueManager.saveQueue(latestQueue);
-          return { previousPaused, newPaused: true, revision: ++this.pauseRevision };
+          const revision = ++this.pauseRevision;
+          const state = { finalPaused: true };
+          const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+            state.finalPaused = await this.reconcilePlayerPauseState(player, true, revision);
+          });
+          return { previousPaused, newPaused: true, revision, state, playback };
         });
         if (transition !== null) {
           try {
-            await this.reconcilePlayerPauseState(player, transition.newPaused, transition.revision);
+            await transition.playback;
           } catch (error) {
             await this.rollbackPauseTransition(this.guild.id, transition);
             throw error;
@@ -1208,15 +1282,21 @@ export class MusicPlayerManager {
       if (player) {
         const transition = await this.withQueueMutation(async () => {
           const latestQueue = await this.queueManager.getQueue(this.guild.id);
-          if (!latestQueue || latestQueue.voiceChannelId !== channelId || !latestQueue.paused) return null;
+          if (this.stopInProgress || !latestQueue || latestQueue.voiceChannelId !== channelId || !latestQueue.paused) return null;
           const previousPaused = latestQueue.paused;
+          if (this.appliedPaused === null) this.appliedPaused = previousPaused;
           latestQueue.paused = false;
           await this.queueManager.saveQueue(latestQueue);
-          return { previousPaused, newPaused: false, revision: ++this.pauseRevision };
+          const revision = ++this.pauseRevision;
+          const state = { finalPaused: false };
+          const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+            state.finalPaused = await this.reconcilePlayerPauseState(player, false, revision);
+          });
+          return { previousPaused, newPaused: false, revision, state, playback };
         });
         if (transition !== null) {
           try {
-            await this.reconcilePlayerPauseState(player, transition.newPaused, transition.revision);
+            await transition.playback;
           } catch (error) {
             await this.rollbackPauseTransition(this.guild.id, transition);
             throw error;
@@ -1333,25 +1413,41 @@ export class MusicPlayerManager {
   }
 
   private setupPlayerEvents(player: Player): void {
-    player.on('start', () => {
+    player.on('start', (data?: TrackStartEvent) => {
       if (this.disposed) return;
-      const scheduledEntry = this.pendingTrackStarts.shift();
-      this.queueExhausted = false;
-      this.playbackRestartRequired = false;
-      this.sendNowPlaying(this.guild.id, scheduledEntry).catch((err) => {
-        log.error('Failed to send now-playing:', { error: String(err) });
-      });
-      this.clearInactivityTimer(this.guild.id);
+      const encodedTrack = data?.track.encoded;
+      const pendingIndex = encodedTrack
+        ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
+        : 0;
+      const scheduledStart = pendingIndex >= 0
+        ? this.pendingTrackStarts.splice(pendingIndex, 1)[0]
+        : undefined;
+      const expectedSessionRevision = scheduledStart?.sessionRevision ?? this.playbackSessionRevision;
 
       // Emit track.started event
       this.queueManager.getQueue(this.guild.id).then((queue) => {
-        if (this.disposed) return;
+        if (
+          this.disposed ||
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          !queue
+        ) return;
+        const queueEntry = queue.currentIndex < queue.entries.length
+          ? queue.entries[queue.currentIndex]
+          : null;
+        if (!scheduledStart && encodedTrack && queueEntry?.track !== encodedTrack) return;
+        this.queueExhausted = false;
+        if (scheduledStart?.playbackRevision === this.trackPlaybackRevision) {
+          this.playbackRestartRequired = false;
+        }
+        const scheduledEntry = scheduledStart?.entry;
+        this.sendNowPlaying(this.guild.id, scheduledEntry, expectedSessionRevision).catch((err) => {
+          log.error('Failed to send now-playing:', { error: String(err) });
+        });
+        this.clearInactivityTimer(this.guild.id);
         if (queue?.paused) {
           this.resetInactivityTimer(this.guild.id);
         }
-        const np = scheduledEntry ?? (queue && queue.currentIndex < queue.entries.length
-          ? queue.entries[queue.currentIndex]
-          : null);
+        const np = scheduledEntry ?? queueEntry;
         if (np) {
           this.eventBus.emit('track.started', this.guild.id, {
             title: np.title ?? 'Unknown',
@@ -1376,7 +1472,7 @@ export class MusicPlayerManager {
         textChannelId: string | null;
         playback: Promise<void> | null;
       }> => {
-        if (this.disposed || this.stopInProgress) {
+        if (this.disposed || this.stopInProgress || this.queueExhausted) {
           return { queueEnded: false, textChannelId: null, playback: null };
         }
         if (data.reason === 'replaced') {
@@ -1389,6 +1485,9 @@ export class MusicPlayerManager {
         const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
           ? currentQueue.entries[currentQueue.currentIndex]
           : null;
+        if (data.track?.encoded && np?.track !== data.track.encoded) {
+          return { queueEnded: false, textChannelId: null, playback: null };
+        }
         if (np) {
           this.eventBus.emit('track.ended', this.guild.id, {
             title: np.title ?? 'Unknown',
@@ -1418,6 +1517,8 @@ export class MusicPlayerManager {
     player.on('exception', async (data: TrackExceptionEvent) => {
       if (this.disposed) return;
       const expectedStopRevision = this.stopRevision;
+      const failedTrack = (data as TrackExceptionEvent & { track?: Track }).track?.encoded ?? player.track;
+      this.discardPendingTrackStart(failedTrack);
       log.error('Track exception:', data);
       const { shouldRecover, strategy } = this.selfHealer.recordFailure();
 
@@ -1460,9 +1561,10 @@ export class MusicPlayerManager {
       if (transition?.queueEnded) await this.sendQueueEndedNotice(transition.textChannelId);
     });
 
-    player.on('stuck', async () => {
+    player.on('stuck', async (data?: TrackStuckEvent) => {
       if (this.disposed) return;
       const expectedStopRevision = this.stopRevision;
+      this.discardPendingTrackStart(data?.track.encoded ?? player.track);
       log.warn('Track stuck, skipping...');
       const transition = await this.withQueueMutation(async () => {
         if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
@@ -1506,6 +1608,10 @@ export class MusicPlayerManager {
 
     this.reconnectingVoice = true;
     const recoveryRevision = ++this.voiceOperationRevision;
+    this.playbackSessionRevision += 1;
+    this.playbackMutationRevision += 1;
+    this.pendingTrackStarts = [];
+    this.trackPlaybackRevision += 1;
     const recoveryIsCurrent = (): boolean => recoveryRevision === this.voiceOperationRevision;
 
     try {
@@ -1547,12 +1653,31 @@ export class MusicPlayerManager {
             : null;
           const resumeTrack = async (encoded: string): Promise<boolean> => {
             if (await recoveryWasCancelled()) return false;
-            await newPlayer.playTrack({
-              track: { encoded },
-              position: currentTrack?.isStream ? 0 : resumePosition,
-              volume: queue.volume,
-              paused: queue.paused,
-            });
+            if (!currentTrack) return false;
+            const playbackRevision = ++this.trackPlaybackRevision;
+            const scheduledStart: PendingTrackStart = {
+              entry: currentTrack,
+              encodedTrack: encoded,
+              playbackRevision,
+              sessionRevision: this.playbackSessionRevision,
+            };
+            this.pendingTrackStarts.push(scheduledStart);
+            try {
+              await newPlayer.playTrack({
+                track: { encoded },
+                position: currentTrack.isStream ? 0 : resumePosition,
+                volume: queue.volume,
+                paused: queue.paused,
+              });
+            } catch (error) {
+              const pendingIndex = this.pendingTrackStarts.indexOf(scheduledStart);
+              if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+              throw error;
+            }
+            if (this.trackPlaybackRevision === playbackRevision) {
+              this.playbackRestartRequired = false;
+            }
+            this.appliedPaused = queue.paused;
             this.appliedVolume = queue.volume;
             return !(await recoveryWasCancelled());
           };
@@ -1623,7 +1748,11 @@ export class MusicPlayerManager {
   }
 
   private enqueuePlaybackMutation(operation: () => Promise<void>): Promise<void> {
-    const playback = this.playbackMutationTail.then(operation);
+    const operationRevision = this.playbackMutationRevision;
+    const playback = this.playbackMutationTail.then(async () => {
+      if (this.disposed || operationRevision !== this.playbackMutationRevision) return;
+      await operation();
+    });
     this.playbackMutationTail = playback.catch(() => undefined);
     return playback;
   }
@@ -1642,13 +1771,20 @@ export class MusicPlayerManager {
     afterStart?: () => Promise<void>,
   ): Promise<void> {
     const playbackRevision = ++this.trackPlaybackRevision;
+    const scheduledStart: PendingTrackStart = {
+      entry,
+      encodedTrack: entry.track,
+      playbackRevision,
+      sessionRevision: this.playbackSessionRevision,
+    };
     this.playbackRestartRequired = false;
     return this.enqueuePlaybackAfterQueueMutation(async () => {
-      this.pendingTrackStarts.push(entry);
+      this.pendingTrackStarts.push(scheduledStart);
       try {
         await player.playTrack({ track: { encoded: entry.track } });
+        this.appliedPaused = false;
       } catch (error) {
-        const pendingIndex = this.pendingTrackStarts.indexOf(entry);
+        const pendingIndex = this.pendingTrackStarts.indexOf(scheduledStart);
         if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
         if (this.trackPlaybackRevision === playbackRevision) {
           this.playbackRestartRequired = true;
@@ -1662,6 +1798,14 @@ export class MusicPlayerManager {
     });
   }
 
+  private discardPendingTrackStart(encodedTrack: string | null | undefined): void {
+    let pendingIndex = encodedTrack
+      ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
+      : 0;
+    if (pendingIndex < 0 && this.pendingTrackStarts.length === 1) pendingIndex = 0;
+    if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+  }
+
   private async completeQueueEndTransition(): Promise<string | null> {
     const totalPlayed = await this.getMusicStat('tracks_played_session');
     this.eventBus.emit('queue.ended', this.guild.id, {
@@ -1672,8 +1816,11 @@ export class MusicPlayerManager {
     const queue = await this.queueManager.getQueue(this.guild.id);
     this.queueExhausted = true;
     this.playbackRestartRequired = false;
+    this.pendingTrackStarts = [];
     this.trackPlaybackRevision += 1;
+    this.playbackSessionRevision += 1;
     this.pauseRevision += 1;
+    this.appliedPaused = false;
     if (queue) {
       queue.entries = [];
       queue.currentIndex = 0;
@@ -1723,6 +1870,7 @@ export class MusicPlayerManager {
 
     while (true) {
       await player.setPaused(paused);
+      this.appliedPaused = paused;
       const latest = await this.withQueueMutation(async () => {
         const queue = await this.queueManager.getQueue(this.guild.id);
         return { paused: queue?.paused ?? false, revision: this.pauseRevision };
@@ -1734,6 +1882,7 @@ export class MusicPlayerManager {
   }
 
   private async rollbackPauseTransition(guildId: string, transition: PauseTransition): Promise<void> {
+    const rollbackPaused = this.appliedPaused ?? transition.previousPaused;
     await this.withQueueMutation(async () => {
       const queue = await this.queueManager.getQueue(guildId);
       if (
@@ -1741,7 +1890,7 @@ export class MusicPlayerManager {
         queue.paused !== transition.newPaused ||
         this.pauseRevision !== transition.revision
       ) return;
-      queue.paused = transition.previousPaused;
+      queue.paused = rollbackPaused;
       await this.queueManager.saveQueue(queue);
       this.pauseRevision += 1;
     });
