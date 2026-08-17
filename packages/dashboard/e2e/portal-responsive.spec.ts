@@ -611,6 +611,48 @@ test('terminal license entitlements hide key rotation', async ({ page }, testInf
   });
 });
 
+test('expired grace-period license entitlements hide key rotation', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-expired-grace-license'));
+  await page.route('**/api/portal/licenses', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      data: [{
+        id: '33333333-3333-4333-8333-333333333333',
+        key_prefix: 'SMNI',
+        key_suffix: 'ABCD',
+        status: 'active',
+        max_devices: 2,
+        expires_at: null,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: {
+          name: 'Expired Grace License',
+          type: 'one_time',
+          product_license_config: {
+            rotation_policy: 'rotate-and-invalidate',
+            self_service_device_removal: true,
+          },
+        },
+        entitlements: [{
+          status: 'grace_period',
+          type: 'one_time',
+          grace_period_ends_at: '2020-01-01T00:00:00.000Z',
+        }],
+        license_sessions: [],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Expired Grace License/ }).click();
+  await expect(page.getByRole('button', { name: 'Rotate key' })).toHaveCount(0);
+  await testInfo.attach('licenses-desktop-expired-grace-no-rotation', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
+
 test('rotation success remains truthful when license refresh fails', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-refresh-session'));
   let licenseReads = 0;
@@ -733,7 +775,7 @@ test('device removal success remains truthful when license refresh fails', async
   expect(licenseReads).toBe(2);
 });
 
-test('a pending seller request cannot be replaced or edited before it settles', async ({ page }) => {
+test('a pending seller request cannot be replaced or edited before it settles', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-request-pending-session'));
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
@@ -785,12 +827,16 @@ test('a pending seller request cannot be replaced or edited before it settles', 
   await expect(page.getByRole('button', { name: 'Request refund' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Contact seller' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  await testInfo.attach('orders-pending-request-locked', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
 
   releaseRequest?.();
   await expect(page.getByRole('status')).toContainText('does not automatically move money');
 });
 
-test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async ({ page }) => {
+test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-rotation-pending-session'));
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 200,
@@ -842,6 +888,10 @@ test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async
   await expect(dialog).toBeVisible();
   await page.locator('.fixed.inset-0').click({ position: { x: 4, y: 4 } });
   await expect(dialog).toBeVisible();
+  await testInfo.attach('licenses-rotation-processing-locked', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
 
   releaseRotation?.();
   await expect(page.getByRole('status')).toContainText('replacement ending in WXYZ');
