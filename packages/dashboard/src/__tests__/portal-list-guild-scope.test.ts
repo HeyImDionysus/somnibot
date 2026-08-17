@@ -93,7 +93,9 @@ describe('portal list tenant scope', () => {
     expect(response.status).toBe(200);
     expect(eqCalls).toContainEqual(['license_keys', 'customer_id', SESSION.customer_id]);
     expect(eqCalls).toContainEqual(['license_keys', 'guild_id', SESSION.guild_id]);
-    expect(selectCalls.find(([table]) => table === 'license_keys')?.[1]).toContain('entitlements(status, type)');
+    expect(selectCalls.find(([table]) => table === 'license_keys')?.[1]).toContain(
+      'entitlements(status, type, grace_period_ends_at)',
+    );
   });
 
   it('exposes cancellation only for provider-backed purchase subscriptions', async () => {
