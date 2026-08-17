@@ -407,6 +407,36 @@ describe('MusicPlayerManager', () => {
       await expect(manager.queueManager.getQueue('g1'))
         .resolves.toMatchObject({ paused: false });
     });
+
+    it('reports each overlapping pause toggle under its own actor and requested state', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      let finishFirstPause: (() => void) | undefined;
+      player.setPaused.mockImplementationOnce(() => new Promise<void>((resolve) => {
+        finishFirstPause = resolve;
+      }));
+
+      const firstPause = manager.togglePause('g1', { userId: 'u1' });
+      await vi.waitFor(() => expect(player.setPaused).toHaveBeenCalledTimes(1));
+      const secondPause = manager.togglePause('g1', { userId: 'u2' });
+      finishFirstPause?.();
+
+      await expect(firstPause).resolves.toMatchObject({ success: true, paused: true, message: '⏸️ Paused' });
+      await expect(secondPause).resolves.toMatchObject({ success: true, paused: false, message: '▶️ Resumed' });
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'music.control_applied',
+        'g1',
+        { userId: 'u1', action: 'pause', value: 'paused' },
+      );
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'music.control_applied',
+        'g1',
+        { userId: 'u2', action: 'pause', value: 'resumed' },
+      );
+    });
   });
 
   describe('seek', () => {
@@ -778,6 +808,11 @@ describe('MusicPlayerManager', () => {
       const result = await manager.play('next song', 'u1', voiceChannel, textChannel);
 
       expect(result.success).toBe(true);
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'music.queued',
+        'g1',
+        expect.objectContaining({ sessionStarted: true }),
+      );
       expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
         track: expect.objectContaining({ encoded: 'base64track' }),
       }));
@@ -958,6 +993,45 @@ describe('MusicPlayerManager', () => {
       });
       expect(player.playTrack).toHaveBeenCalledTimes(2);
       expect(eventBus.emit).not.toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+    });
+
+    it('removes a failed duplicate start by playback revision', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'a', title: 'A', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'same', title: 'First Same', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+          { track: 'same', title: 'Second Same', uri: 'u3', duration: 120000, author: 'C', requestedBy: 'u3', isStream: false },
+          { track: 'd', title: 'D', uri: 'u4', duration: 120000, author: 'D', requestedBy: 'u4', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const exceptionHandler = getFailureHandler('exception');
+
+      await expect(manager.skip('g1', { userId: 'u1' })).resolves.toMatchObject({ success: true });
+      await expect(manager.skip('g1', { userId: 'u2' })).resolves.toMatchObject({ success: true });
+      const firstPlayback = player.playTrack.mock.calls[0]?.[0] as {
+        track: PlaybackEvent['track'] & {
+          userData: { somnibotPlayback: { playbackRevision: number } };
+        };
+      };
+      const secondPlayback = player.playTrack.mock.calls[1]?.[0] as {
+        track: PlaybackEvent['track'] & {
+          userData: { somnibotPlayback: { playbackRevision: number } };
+        };
+      };
+
+      await exceptionHandler({ track: secondPlayback.track, message: 'Second duplicate failed' });
+
+      const pending = (manager as unknown as {
+        pendingTrackStarts: Array<{ playbackRevision: number }>;
+      }).pendingTrackStarts;
+      expect(pending.map(({ playbackRevision }) => playbackRevision)).toContain(
+        firstPlayback.track.userData.somnibotPlayback.playbackRevision,
+      );
+      expect(pending.map(({ playbackRevision }) => playbackRevision)).not.toContain(
+        secondPlayback.track.userData.somnibotPlayback.playbackRevision,
+      );
     });
 
     it('does not replay a finished entry when play commits before its end callback', async () => {
@@ -1342,6 +1416,33 @@ describe('MusicPlayerManager', () => {
       expect(recoveredQueue?.currentIndex).toBe(0);
     });
 
+    it('does not report queue end until exhaustion persistence succeeds', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finishing', title: 'Finishing', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      valkey.set
+        .mockRejectedValueOnce(new Error('Valkey unavailable'))
+        .mockRejectedValueOnce(new Error('Valkey unavailable'))
+        .mockRejectedValueOnce(new Error('Valkey unavailable'));
+      const endHandler = getEndHandler();
+
+      await expect(endHandler({ reason: 'finished' })).rejects.toThrow('Valkey unavailable');
+      expect(eventBus.emit).not.toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+      const textChannel = guild.channels.cache.get('tc1') as { send: ReturnType<typeof vi.fn> };
+      expect(textChannel.send).not.toHaveBeenCalled();
+
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const playableTextChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+      await expect(manager.play('next song', 'u2', voiceChannel, playableTextChannel))
+        .resolves.toMatchObject({ success: true });
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        currentIndex: 0,
+        entries: [expect.objectContaining({ track: 'base64track' })],
+      });
+    });
+
     it('leaves a newly joined voice session when track resolution fails', async () => {
       shoukaku.players.clear();
       shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
@@ -1355,6 +1456,57 @@ describe('MusicPlayerManager', () => {
       await expect(manager.play('song', 'u1', voiceChannel, textChannel))
         .rejects.toThrow('Lavalink unavailable');
       expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
+    });
+
+    it('restarts a persisted queue after the first joined search fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'persisted', title: 'Persisted', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      player.node.rest.resolve.mockResolvedValueOnce({ loadType: 'empty', data: {} });
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('missing song', 'u2', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: false });
+      await expect(manager.play('working song', 'u3', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'persisted' }),
+      }));
+      expect(shoukaku.leaveVoiceChannel).not.toHaveBeenCalled();
+    });
+
+    it('lets stop clean up a voice join that resolves after stop claims ownership', async () => {
+      shoukaku.players.clear();
+      let finishJoin: (() => void) | undefined;
+      shoukaku.joinVoiceChannel.mockImplementationOnce(() => new Promise((resolve) => {
+        finishJoin = () => resolve(player);
+      }));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const playing = manager.play('song', 'u1', voiceChannel, textChannel);
+      await vi.waitFor(() => expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(1));
+      const stopping = manager.stop('g1', { userId: 'u2', reason: 'command' });
+      await vi.waitFor(() => {
+        expect((manager as unknown as { stopInProgress: boolean }).stopInProgress).toBe(true);
+      });
+      finishJoin?.();
+
+      await expect(stopping).resolves.toMatchObject({ success: true });
+      await expect(playing).resolves.toMatchObject({ success: false });
+      expect(player.stopTrack).toHaveBeenCalledTimes(1);
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
     });
 
     it('does not join voice when queue storage preflight fails', async () => {

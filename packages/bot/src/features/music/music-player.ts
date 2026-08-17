@@ -691,7 +691,7 @@ export class MusicPlayerManager {
       trackCount: addedEntries.length,
       playlistName: playlistName ?? null,
       queueLength: queue.entries.length,
-      sessionStarted: isNewQueue,
+      sessionStarted: isNewQueue || queueWasExhausted,
     });
 
     // If this is the first track (or queue was empty), start playing
@@ -842,12 +842,24 @@ export class MusicPlayerManager {
         this.playbackSessionRevision += 1;
         this.playbackMutationRevision += 1;
         this.pendingTrackStarts = [];
-        const player = this.shoukaku.players.get(guildId);
+        const player = this.shoukaku.players.get(guildId) ?? null;
+        const pendingPlayer = this.pendingVoiceJoin;
         this.intentionalVoiceLeaveDepth += 1;
         const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
-          if (!player) return;
-          await player.stopTrack();
-          await this.shoukaku.leaveVoiceChannel(guildId);
+          let playerToStop = player;
+          if (!playerToStop && pendingPlayer) {
+            try {
+              playerToStop = await pendingPlayer;
+            } catch {
+              return;
+            }
+          }
+          if (!playerToStop) return;
+          try {
+            await playerToStop.stopTrack();
+          } finally {
+            await this.shoukaku.leaveVoiceChannel(guildId);
+          }
         });
         return { queueBeforeStop, playback };
       } catch (error) {
@@ -899,6 +911,7 @@ export class MusicPlayerManager {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, paused: false, message: 'Nothing is playing' };
     const expectedStopRevision = this.stopRevision;
+    const expectedSessionRevision = this.playbackSessionRevision;
     if (this.stopInProgress) {
       return { success: false, paused: false, message: 'Playback is stopping' };
     }
@@ -918,15 +931,25 @@ export class MusicPlayerManager {
       const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
         state.finalPaused = await this.reconcilePlayerPauseState(player, newPaused, revision);
       });
-      return { previousPaused, newPaused, revision, state, playback };
+      return {
+        previousPaused,
+        newPaused,
+        revision,
+        sessionRevision: expectedSessionRevision,
+        state,
+        playback,
+      };
     });
     if (!pauseTransition) return { success: false, paused: false, message: 'No active queue' };
 
     try {
       await pauseTransition.playback;
-      const finalPaused = pauseTransition.state.finalPaused;
-      this.auditControlApplied(context, 'pause', finalPaused ? 'paused' : 'resumed');
-      if (finalPaused) {
+      const appliedPaused = pauseTransition.state.finalPaused;
+      const reportedPaused = pauseTransition.sessionRevision === this.playbackSessionRevision
+        ? pauseTransition.newPaused
+        : appliedPaused;
+      this.auditControlApplied(context, 'pause', reportedPaused ? 'paused' : 'resumed');
+      if (appliedPaused) {
         this.resetInactivityTimer(guildId);
       } else {
         this.clearInactivityTimer(guildId);
@@ -934,8 +957,8 @@ export class MusicPlayerManager {
 
       return {
         success: true,
-        paused: finalPaused,
-        message: finalPaused ? '⏸️ Paused' : '▶️ Resumed',
+        paused: reportedPaused,
+        message: reportedPaused ? '⏸️ Paused' : '▶️ Resumed',
       };
     } catch (error) {
       await this.rollbackPauseTransition(guildId, pauseTransition);
@@ -1595,7 +1618,7 @@ export class MusicPlayerManager {
         expectedPlaybackRevision !== this.trackPlaybackRevision
       ) return;
       const failedTrack = exceptionTrack?.encoded ?? player.track;
-      this.discardPendingTrackStart(failedTrack);
+      this.discardPendingTrackStart(failedTrack, expectedPlaybackRevision);
       log.error('Track exception:', data);
       const { shouldRecover, strategy } = this.selfHealer.recordFailure();
 
@@ -1659,7 +1682,7 @@ export class MusicPlayerManager {
         expectedPlaybackRevision !== undefined &&
         expectedPlaybackRevision !== this.trackPlaybackRevision
       ) return;
-      this.discardPendingTrackStart(data?.track.encoded ?? player.track);
+      this.discardPendingTrackStart(data?.track.encoded ?? player.track, expectedPlaybackRevision);
       log.warn('Track stuck, skipping...');
       const transition = await this.withQueueMutation(async () => {
         if (
@@ -1922,11 +1945,20 @@ export class MusicPlayerManager {
     });
   }
 
-  private discardPendingTrackStart(encodedTrack: string | null | undefined): void {
-    let pendingIndex = encodedTrack
-      ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
-      : 0;
-    if (pendingIndex < 0 && this.pendingTrackStarts.length === 1) pendingIndex = 0;
+  private discardPendingTrackStart(
+    encodedTrack: string | null | undefined,
+    playbackRevision?: number,
+  ): void {
+    let pendingIndex = playbackRevision === undefined
+      ? encodedTrack
+        ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
+        : 0
+      : this.pendingTrackStarts.findIndex((pending) => pending.playbackRevision === playbackRevision);
+    if (
+      playbackRevision === undefined &&
+      pendingIndex < 0 &&
+      this.pendingTrackStarts.length === 1
+    ) pendingIndex = 0;
     if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
   }
 
@@ -1953,24 +1985,33 @@ export class MusicPlayerManager {
     this.playbackSessionRevision += 1;
     this.pauseRevision += 1;
     this.appliedPaused = false;
-    const totalPlayed = await this.getMusicStat('tracks_played_session');
-    this.eventBus.emit('queue.ended', this.guild.id, {
-      totalTracksPlayed: totalPlayed,
-    });
-    await this.resetSessionStats();
-
     const queue = await this.queueManager.getQueue(this.guild.id);
     if (queue) {
       queue.entries = [];
       queue.currentIndex = 0;
       queue.paused = false;
       queue.shuffled = false;
-      try {
-        await this.queueManager.saveQueue(queue);
-      } catch (error) {
-        log.warn('Failed to persist the exhausted music queue:', (error as Error)?.message ?? error);
+      let lastPersistenceError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await this.queueManager.saveQueue(queue);
+          lastPersistenceError = undefined;
+          break;
+        } catch (error) {
+          lastPersistenceError = error;
+          log.warn(
+            `Failed to persist the exhausted music queue (${attempt}/3):`,
+            (error as Error)?.message ?? error,
+          );
+        }
       }
+      if (lastPersistenceError !== undefined) throw lastPersistenceError;
     }
+    const totalPlayed = await this.getMusicStat('tracks_played_session');
+    this.eventBus.emit('queue.ended', this.guild.id, {
+      totalTracksPlayed: totalPlayed,
+    });
+    await this.resetSessionStats();
     await this.queueManager.clearNowPlayingMessage(this.guild.id)
       .catch((error: unknown) => {
         log.warn('Failed to clear the previous now-playing message:', (error as Error)?.message ?? error);
@@ -2058,6 +2099,7 @@ export class MusicPlayerManager {
         log.warn('Failed to inspect the unused queue after an unsuccessful play request:', (error as Error)?.message ?? error);
       }
       if (queue && queue.entries.length > 0) {
+        this.playbackRestartRequired = true;
         this.uncommittedVoiceSession = false;
         this.uncommittedVoiceChannelId = null;
         return false;
