@@ -42,6 +42,7 @@ for (const session of ['signed out', 'signed in'] as const) {
 test('subscription cancellation and support requests are reachable and truthful on mobile', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-action-session'));
   let requestCount = 0;
+  let cancelRequestTiming: unknown;
 
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
@@ -76,20 +77,23 @@ test('subscription cancellation and support requests are reachable and truthful 
       }],
     }),
   }));
-  await page.route('**/api/portal/cancel', (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({
-      success: true,
-      deduped: false,
-      data: {
-        status: 'active',
-        cancellation_timing: 'end-of-term',
-        access_until: '2026-09-17T12:00:00.000Z',
-        cancellation_scheduled_at: '2026-08-17T12:00:00.000Z',
-      },
-    }),
-  }));
+  await page.route('**/api/portal/cancel', async (route) => {
+    cancelRequestTiming = (await route.request().postDataJSON()).cancellation_timing;
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        deduped: false,
+        data: {
+          status: 'active',
+          cancellation_timing: 'end-of-term',
+          access_until: '2026-09-17T12:00:00.000Z',
+          cancellation_scheduled_at: '2026-08-17T12:00:00.000Z',
+        },
+      }),
+    });
+  });
   await page.route('**/api/portal/requests', (route) => {
     requestCount += 1;
     return route.fulfill({
@@ -115,6 +119,7 @@ test('subscription cancellation and support requests are reachable and truthful 
     contentType: 'image/png',
   });
   await cancelDialog.getByRole('button', { name: 'Cancel renewal' }).click();
+  expect(cancelRequestTiming).toBe('end-of-term');
   await expect(page.getByRole('status')).toContainText('Renewal cancelled');
   await expect(page.getByRole('article').getByText('Renewal cancelled · Access through Sep 17, 2026')).toBeVisible();
   await testInfo.attach('orders-mobile-cancelled', {
@@ -289,6 +294,60 @@ test('grace-period cancellation uses the grace deadline', async ({ page }, testI
   });
 });
 
+test('cancelled grace-period readback uses the grace deadline', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-grace-readback-session'));
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      controls: {
+        self_service_cancellation: true,
+        cancellation_timing: 'end-of-term',
+        refund_requests_enabled: false,
+        service_requests_enabled: false,
+      },
+      data: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        order_number: 'ORD-GRACE-READBACK',
+        amount_cents: 100,
+        discount_cents: 0,
+        currency: 'USD',
+        status: 'completed',
+        source: 'paypal',
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: { name: 'Grace Readback Subscription', type: 'subscription' },
+        payments: [],
+        entitlements: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          status: 'grace_period',
+          type: 'subscription',
+          expires_at: '2026-08-01T12:00:00.000Z',
+          grace_period_ends_at: '2026-09-20T12:00:00.000Z',
+          cancelled_at: '2026-08-17T12:00:00.000Z',
+        }],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('table').getByText('Renewal cancelled · Access through Sep 20, 2026')).toBeVisible();
+  await expect(page.getByText(/Access through Aug 1, 2026/)).toHaveCount(0);
+});
+
+test('order load failure does not claim that purchase history is empty', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-order-failure-session'));
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'Order history could not be loaded.' }),
+  }));
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByText('Order history could not be loaded.')).toBeVisible();
+  await expect(page.getByText('No orders yet.')).toHaveCount(0);
+});
+
 ([
   { name: 'mobile', width: 375, height: 812 },
   { name: 'desktop', width: 1440, height: 900 },
@@ -416,10 +475,10 @@ test('disabled license policies hide rotation and device removal', async ({ page
         products: {
           name: 'Policy Controlled License',
           type: 'one_time',
-          product_license_config: [{
-            rotation_policy: 'disabled',
-            self_service_device_removal: false,
-          }],
+            product_license_config: {
+              rotation_policy: 'disabled',
+              self_service_device_removal: false,
+            },
         },
         license_sessions: [{
           id: '44444444-4444-4444-8444-444444444444',
@@ -500,4 +559,66 @@ test('rotation success remains truthful when license refresh fails', async ({ pa
     body: await page.screenshot({ fullPage: true }),
     contentType: 'image/png',
   });
+});
+
+test('device removal success remains truthful when license refresh fails', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-device-refresh-session'));
+  let licenseReads = 0;
+  await page.route('**/api/portal/licenses', (route) => {
+    licenseReads += 1;
+    if (licenseReads > 1) {
+      return route.fulfill({
+        status: 429,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Too many requests' }),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: [{
+          id: '33333333-3333-4333-8333-333333333333',
+          key_prefix: 'SMNI',
+          key_suffix: 'ABCD',
+          status: 'active',
+          max_devices: 2,
+          expires_at: null,
+          created_at: '2026-08-17T00:00:00.000Z',
+          products: {
+            name: 'Device Refresh License',
+            type: 'one_time',
+            product_license_config: {
+              rotation_policy: 'rotate-and-invalidate',
+              self_service_device_removal: true,
+            },
+          },
+          license_sessions: [{
+            id: '44444444-4444-4444-8444-444444444444',
+            device_name: 'Test workstation',
+            device_fingerprint: 'device-fingerprint',
+            ip_address: null,
+            active: true,
+            first_seen_at: '2026-08-17T00:00:00.000Z',
+            last_seen_at: '2026-08-17T00:00:00.000Z',
+          }],
+        }],
+      }),
+    });
+  });
+  await page.route('**/api/portal/licenses/sessions/*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ success: true, deduped: false }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Device Refresh License/ }).click();
+  await page.getByRole('button', { name: 'Remove device' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Remove device' }).click();
+  await expect(page.getByRole('status')).toContainText('can no longer use this license');
+  await expect(page.getByRole('status')).toContainText('could not be refreshed');
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  expect(licenseReads).toBe(2);
 });

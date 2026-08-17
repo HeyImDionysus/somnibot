@@ -131,7 +131,12 @@ export async function POST(
     return NextResponse.json({ error: 'Licence not found' }, { status: 404 });
   }
 
-  const productConfig = (key.products as { product_license_config?: Array<{ rotation_policy?: string; key_prefix?: string }> } | null)?.product_license_config?.[0];
+  const embeddedConfig = (key.products as {
+    product_license_config?:
+      | { rotation_policy?: string; key_prefix?: string }
+      | Array<{ rotation_policy?: string; key_prefix?: string }>;
+  } | null)?.product_license_config;
+  const productConfig = Array.isArray(embeddedConfig) ? embeddedConfig[0] : embeddedConfig;
   if (productConfig?.rotation_policy === 'disabled') {
     return NextResponse.json({ error: 'Key rotation is disabled for this product.' }, { status: 403 });
   }

@@ -158,6 +158,21 @@ describe('access control and recovery routing', () => {
     expect(db.rpcCalls).toHaveLength(1);
     expect(db.rpcCalls[0]![0]).toBe('commerce_rotate_license_and_stage_receipt');
   });
+
+  it('rejects an object-shaped disabled rotation policy', async () => {
+    const db = mockDb({
+      licence: {
+        ...LICENCE,
+        products: {
+          name: 'VIP Pass',
+          product_license_config: { rotation_policy: 'disabled', key_prefix: 'SMNI' },
+        },
+      },
+    });
+
+    expect((await POST(req('token'), params())).status).toBe(403);
+    expect(db.rpcCalls).toHaveLength(0);
+  });
 });
 
 describe('atomic secret carrier', () => {

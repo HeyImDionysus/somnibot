@@ -30,7 +30,15 @@ const GUILD = '222222222222222222';
  */
 function mockDb(opts: {
   portal?: { customer_id: string; guild_id: string } | null;
-  sessionRow?: { id: string; active: boolean } | null;
+  sessionRow?: {
+    id: string;
+    active: boolean;
+    license_keys?: {
+      products?: {
+        product_license_config?: { self_service_device_removal?: boolean };
+      };
+    };
+  } | null;
   updateError?: { message: string } | null;
 }) {
   const updates: Record<string, unknown>[] = [];
@@ -175,5 +183,23 @@ describe('deactivation', () => {
     const res = await DELETE(req('tok'), params());
 
     expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('rejects an object-shaped disabled device-removal policy', async () => {
+    const { updates } = mockDb({
+      portal: { customer_id: CUSTOMER, guild_id: GUILD },
+      sessionRow: {
+        id: SESSION_ID,
+        active: true,
+        license_keys: {
+          products: {
+            product_license_config: { self_service_device_removal: false },
+          },
+        },
+      },
+    });
+
+    expect((await DELETE(req('tok'), params())).status).toBe(403);
+    expect(updates).toHaveLength(0);
   });
 });

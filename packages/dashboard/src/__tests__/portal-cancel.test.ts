@@ -112,7 +112,7 @@ function makeRequest(body: Record<string, unknown>) {
   return new NextRequest('https://dash.example/api/portal/cancel', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-portal-token': 'tok-1' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ cancellation_timing: 'end-of-term', ...body }),
   });
 }
 
@@ -272,7 +272,7 @@ describe('POST /api/portal/cancel', () => {
     portalConfig.cancellation_timing = 'immediate';
     entitlement.expires_at = null;
 
-    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID, cancellation_timing: 'immediate' }));
     const json = await res.json();
 
     expect(res.status).toBe(200);
@@ -294,5 +294,15 @@ describe('POST /api/portal/cancel', () => {
     expect(res.status).toBe(200);
     expect(json.data.status).toBe('grace_period');
     expect(json.data.access_until).toBe('2026-08-26T00:00:00.000Z');
+  });
+
+  it('rejects cancellation when the confirmed timing no longer matches the store policy', async () => {
+    portalConfig.cancellation_timing = 'immediate';
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(409);
+    expect(paypalCancelCalls).toBe(0);
+    expect(entitlement.cancelled_at).toBeNull();
   });
 });

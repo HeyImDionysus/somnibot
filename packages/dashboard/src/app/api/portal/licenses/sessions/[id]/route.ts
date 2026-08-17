@@ -88,9 +88,15 @@ export async function DELETE(
   }
 
   const license = session.license_keys as {
-    products?: { product_license_config?: Array<{ self_service_device_removal?: boolean }> };
+    products?: {
+      product_license_config?:
+        | { self_service_device_removal?: boolean }
+        | Array<{ self_service_device_removal?: boolean }>;
+    };
   } | null;
-  const removalAllowed = license?.products?.product_license_config?.[0]?.self_service_device_removal ?? true;
+  const embeddedConfig = license?.products?.product_license_config;
+  const productConfig = Array.isArray(embeddedConfig) ? embeddedConfig[0] : embeddedConfig;
+  const removalAllowed = productConfig?.self_service_device_removal ?? true;
   if (!removalAllowed) {
     return NextResponse.json({ error: 'Self-service device removal is disabled for this product.' }, { status: 403 });
   }

@@ -29,6 +29,7 @@ function hashToken(token: string): string {
 
 const portalCancelSchema = z.object({
   entitlement_id: z.string().uuid(),
+  cancellation_timing: z.enum(['immediate', 'end-of-term']),
 });
 
 function scheduledResponse(entitlement: {
@@ -100,7 +101,13 @@ export async function POST(request: NextRequest) {
 
     const parsed = await parseBody(request, portalCancelSchema);
     if (!parsed.ok) return parsed.response;
-    const { entitlement_id } = parsed.data;
+    const { entitlement_id, cancellation_timing: confirmedTiming } = parsed.data;
+    if (confirmedTiming !== cancellationTiming) {
+      return NextResponse.json(
+        { error: 'The store cancellation policy changed. Reload this page and review the current terms before confirming again.' },
+        { status: 409 },
+      );
+    }
 
     // The entitlement MUST be a subscription owned by this customer in this guild.
     const { data: entitlement, error: entitlementError } = await admin

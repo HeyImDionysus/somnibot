@@ -88,6 +88,7 @@ export default function PortalOrders() {
   const [requesting, setRequesting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [controls, setControls] = useState<PortalControls | null>(null);
+  const [ordersLoaded, setOrdersLoaded] = useState(false);
   const requestReasonRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -119,6 +120,7 @@ export default function PortalOrders() {
         ) {
           setOrders(json.data);
           setControls(loadedControls as PortalControls);
+          setOrdersLoaded(true);
         } else {
           setNotice({ kind: 'error', message: json.error || 'Order history could not be loaded.' });
         }
@@ -149,7 +151,10 @@ export default function PortalOrders() {
       const response = await fetch('/api/portal/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-portal-token': token },
-        body: JSON.stringify({ entitlement_id: cancelEntitlement.id }),
+        body: JSON.stringify({
+          entitlement_id: cancelEntitlement.id,
+          cancellation_timing: controls?.cancellation_timing,
+        }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.success !== true) {
@@ -238,6 +243,7 @@ export default function PortalOrders() {
 
   const orderActions = (order: Order) => {
     const subscription = activeSubscription(order);
+    const subscriptionBoundary = subscription ? accessBoundary(subscription) : null;
     return (
       <div className="flex flex-wrap gap-2">
         {controls?.self_service_cancellation && subscription && !subscription.cancelled_at && (
@@ -247,7 +253,7 @@ export default function PortalOrders() {
         )}
         {subscription?.cancelled_at && (
           <span className="self-center text-xs text-discord-warning">
-            Renewal cancelled{subscription.expires_at ? ` · Access through ${formatDate(subscription.expires_at)}` : ''}
+            Renewal cancelled{subscriptionBoundary ? ` · Access through ${formatDate(subscriptionBoundary)}` : ''}
           </span>
         )}
         {controls?.refund_requests_enabled && !['refunded', 'cancelled'].includes(order.status) && (
@@ -326,10 +332,12 @@ export default function PortalOrders() {
       )}
 
       {orders.length === 0 ? (
-        <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
-          <ReceiptText className="mx-auto mb-3 text-discord-text-muted" size={36} aria-hidden="true" />
-          <p className="text-discord-text-muted">No orders yet.</p>
-        </div>
+        ordersLoaded ? (
+          <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
+            <ReceiptText className="mx-auto mb-3 text-discord-text-muted" size={36} aria-hidden="true" />
+            <p className="text-discord-text-muted">No orders yet.</p>
+          </div>
+        ) : null
       ) : (
         <>
           <div className="space-y-3 md:hidden">

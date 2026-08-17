@@ -29,16 +29,26 @@ interface LicenseKey {
   products: {
     name: string;
     type: string;
-    product_license_config?: Array<{
-      rotation_policy?: 'rotate-and-invalidate' | 'disabled';
-      self_service_device_removal?: boolean;
-    }>;
+    product_license_config?:
+      | {
+          rotation_policy?: 'rotate-and-invalidate' | 'disabled';
+          self_service_device_removal?: boolean;
+        }
+      | Array<{
+          rotation_policy?: 'rotate-and-invalidate' | 'disabled';
+          self_service_device_removal?: boolean;
+        }>;
   } | null;
   license_sessions: LicenseSession[];
 }
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function productLicenseConfig(product: LicenseKey['products']) {
+  const config = product?.product_license_config;
+  return Array.isArray(config) ? config[0] : config;
 }
 
 export default function PortalLicenses() {
@@ -85,9 +95,17 @@ export default function PortalLicenses() {
       if (!response.ok || body.success !== true) {
         throw new Error(body.error || 'The device could not be removed.');
       }
-      await loadKeys();
-      setNotice({ kind: 'success', message: 'The device session was removed and can no longer use this license.' });
+      const successMessage = 'The device session was removed and can no longer use this license.';
       setRemoveTarget(null);
+      setNotice({ kind: 'success', message: successMessage });
+      try {
+        await loadKeys();
+      } catch {
+        setNotice({
+          kind: 'success',
+          message: `${successMessage} The license list could not be refreshed; reload this page to see the latest device count.`,
+        });
+      }
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'The device could not be removed.' });
     } finally {
@@ -176,7 +194,7 @@ export default function PortalLicenses() {
       ) : (
         keys.map((key) => {
           const activeSessions = key.license_sessions?.filter(s => s.active) || [];
-          const licenseConfig = key.products?.product_license_config?.[0];
+          const licenseConfig = productLicenseConfig(key.products);
           const rotationAllowed = licenseConfig?.rotation_policy !== 'disabled';
           const removalAllowed = licenseConfig?.self_service_device_removal !== false;
           return (
