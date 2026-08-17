@@ -15,7 +15,7 @@ import {
   ButtonStyle,
   type ButtonInteraction,
 } from 'discord.js';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
@@ -392,12 +392,28 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function paypalApprovalLink(payload: Record<string, unknown>): string | null {
+function paypalProviderBinding(apiBase: string, clientId: string): string | null {
+  if (!clientId || clientId.trim() !== clientId) return null;
+  try {
+    const url = new URL(apiBase);
+    if (url.protocol !== 'https:' || url.username || url.password) return null;
+    return createHash('sha256')
+      .update(`${url.origin}\0${clientId}`)
+      .digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function paypalActionLink(
+  payload: Record<string, unknown>,
+  relation: 'approve' | 'payer-action',
+): string | null {
   if (!Array.isArray(payload.links)) return null;
   for (const link of payload.links) {
     if (
       isUnknownRecord(link)
-      && link.rel === 'approve'
+      && link.rel === relation
       && isPayPalApprovalUrl(link.href)
     ) {
       return link.href;
@@ -407,7 +423,11 @@ function paypalApprovalLink(payload: Record<string, unknown>): string | null {
 }
 
 type PayPalCheckoutInspection =
-  | { state: 'usable'; approvalUrl: string }
+  | {
+      state: 'usable';
+      approvalUrl: string;
+      checkoutType: 'one_time' | 'subscription';
+    }
   | { state: 'processing' }
   | {
       state: 'unpayable';
@@ -426,13 +446,13 @@ async function inspectPayPalCheckout(
   guildId: string,
   customerId: string,
   productId: string,
-  productType: 'one_time' | 'subscription',
+  providerBinding: string,
 ): Promise<PayPalCheckoutInspection> {
   if (!block.orderId || !block.approvalUrl) return { state: 'unavailable' };
 
   const { data, error } = await supabase
     .from('orders')
-    .select('id, paypal_order_id, paypal_subscription_id, checkout_approval_url')
+    .select('id, paypal_order_id, paypal_subscription_id, checkout_approval_url, created_at')
     .eq('id', block.orderId)
     .eq('guild_id', guildId)
     .eq('customer_id', customerId)
@@ -450,29 +470,43 @@ async function inspectPayPalCheckout(
     return { state: 'unavailable' };
   }
 
-  const expectedProviderId = productType === 'one_time'
-    ? data.paypal_order_id
-    : data.paypal_subscription_id;
-  const unexpectedProviderId = productType === 'one_time'
-    ? data.paypal_subscription_id
-    : data.paypal_order_id;
+  const hasOrderId = typeof data.paypal_order_id === 'string'
+    && data.paypal_order_id.length > 0;
+  const hasSubscriptionId = typeof data.paypal_subscription_id === 'string'
+    && data.paypal_subscription_id.length > 0;
+  if (hasOrderId === hasSubscriptionId) {
+    log.error('Pending order has an invalid provider identity', { orderId: block.orderId });
+    return { state: 'unavailable' };
+  }
+
+  const providerKind = hasOrderId ? 'capture' : 'subscription';
+  const checkoutType = hasOrderId ? 'one_time' : 'subscription';
+  const expectedProviderId = hasOrderId
+    ? data.paypal_order_id as string
+    : data.paypal_subscription_id as string;
+  const resourceName = hasOrderId ? 'order' : 'subscription';
+  const endpoint = hasOrderId
+    ? `/v2/checkout/orders/${encodeURIComponent(expectedProviderId)}`
+    : `/v1/billing/subscriptions/${encodeURIComponent(expectedProviderId)}`;
+
+  const { data: intent, error: intentError } = await supabase
+    .from('commerce_checkout_intents')
+    .select('provider_binding')
+    .eq('order_id', block.orderId)
+    .eq('status', 'bound')
+    .maybeSingle();
   if (
-    typeof expectedProviderId !== 'string'
-    || expectedProviderId.length === 0
-    || unexpectedProviderId !== null
+    intentError
+    || !isUnknownRecord(intent)
+    || intent.provider_binding !== providerBinding
   ) {
-    log.error('Provider checkout identity does not match product billing type', {
+    log.warn('Pending checkout is not bound to the current PayPal provider identity', {
       orderId: block.orderId,
-      productType,
+      detail: intentError?.message,
     });
     return { state: 'unavailable' };
   }
 
-  const providerKind = productType === 'one_time' ? 'capture' : 'subscription';
-  const resourceName = productType === 'one_time' ? 'order' : 'subscription';
-  const endpoint = productType === 'one_time'
-    ? `/v2/checkout/orders/${encodeURIComponent(expectedProviderId)}`
-    : `/v1/billing/subscriptions/${encodeURIComponent(expectedProviderId)}`;
   let response: Response;
   try {
     response = await fetch(`${paypalApiBase}${endpoint}`, {
@@ -488,10 +522,13 @@ async function inspectPayPalCheckout(
     return { state: 'unavailable' };
   }
 
-  const proofPrefix = productType === 'one_time'
+  const proofPrefix = hasOrderId
     ? 'paypal-order-get'
     : 'paypal-subscription-get';
   if (response.status === 404) {
+    if (!hasOrderId) {
+      return { state: 'unavailable' };
+    }
     return {
       state: 'unpayable',
       providerKind,
@@ -516,7 +553,7 @@ async function inspectPayPalCheckout(
     return { state: 'unavailable' };
   }
 
-  if (productType === 'one_time') {
+  if (hasOrderId) {
     if (payload.status === 'VOIDED') {
       return {
         state: 'unpayable',
@@ -534,12 +571,74 @@ async function inspectPayPalCheckout(
     }
   } else {
     if (payload.status === 'CANCELLED' || payload.status === 'EXPIRED') {
+      const createdAt = Date.parse(String(data.created_at));
+      if (!Number.isFinite(createdAt)) {
+        log.error('Pending subscription has an invalid creation timestamp', {
+          orderId: block.orderId,
+        });
+        return { state: 'unavailable' };
+      }
+      const transactionUrl = new URL(
+        `${paypalApiBase}/v1/billing/subscriptions/${encodeURIComponent(expectedProviderId)}/transactions`,
+      );
+      transactionUrl.searchParams.set(
+        'start_time',
+        new Date(createdAt - 5 * 60 * 1000).toISOString(),
+      );
+      transactionUrl.searchParams.set('end_time', new Date().toISOString());
+      let transactionResponse: Response;
+      try {
+        transactionResponse = await fetch(transactionUrl.toString(), {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(PAYPAL_FETCH_TIMEOUT_MS),
+        });
+      } catch (providerError) {
+        log.warn('PayPal subscription transaction lookup failed', {
+          orderId: block.orderId,
+          error: String(providerError),
+        });
+        return { state: 'unavailable' };
+      }
+      if (!transactionResponse.ok) {
+        log.warn('PayPal subscription transaction history was unavailable', {
+          orderId: block.orderId,
+          status: transactionResponse.status,
+        });
+        return { state: 'unavailable' };
+      }
+      const transactionPayload: unknown = await transactionResponse.json().catch(() => null);
+      if (
+        !isUnknownRecord(transactionPayload)
+        || !Array.isArray(transactionPayload.transactions)
+        || (
+          transactionPayload.total_items !== undefined
+          && (
+            !Number.isInteger(transactionPayload.total_items)
+            || (transactionPayload.total_items as number) < 0
+          )
+        )
+      ) {
+        log.error('PayPal subscription transaction history was malformed', {
+          orderId: block.orderId,
+        });
+        return { state: 'unavailable' };
+      }
+      if (
+        transactionPayload.transactions.length > 0
+        || (
+          transactionPayload.total_items !== undefined
+          && transactionPayload.total_items !== 0
+        )
+      ) {
+        return { state: 'processing' };
+      }
       return {
         state: 'unpayable',
         providerKind,
         providerId: expectedProviderId,
         proofKind: payload.status === 'CANCELLED' ? 'provider_cancelled' : 'provider_expired',
-        proofReference: `${proofPrefix}:${payload.status}`,
+        proofReference: `paypal-subscription-transactions:${payload.status}:0`,
       };
     }
     if (
@@ -552,14 +651,51 @@ async function inspectPayPalCheckout(
     if (payload.status !== 'APPROVAL_PENDING') return { state: 'unavailable' };
   }
 
-  const providerApprovalUrl = paypalApprovalLink(payload);
+  const actionRelation = payload.status === 'PAYER_ACTION_REQUIRED'
+    ? 'payer-action'
+    : 'approve';
+  const providerApprovalUrl = paypalActionLink(payload, actionRelation);
+  if (
+    hasOrderId
+    && payload.status === 'PAYER_ACTION_REQUIRED'
+    && providerApprovalUrl
+    && providerApprovalUrl !== block.approvalUrl
+  ) {
+    const { data: refreshed, error: refreshError } = await supabase.rpc(
+      'commerce_refresh_pending_checkout_approval_url',
+      {
+        p_order_id: block.orderId,
+        p_guild_id: guildId,
+        p_customer_id: customerId,
+        p_product_id: productId,
+        p_provider_kind: providerKind,
+        p_provider_id: expectedProviderId,
+        p_provider_binding: providerBinding,
+        p_old_approval_url: block.approvalUrl,
+        p_new_approval_url: providerApprovalUrl,
+      },
+    );
+    if (
+      refreshError
+      || !isUnknownRecord(refreshed)
+      || refreshed.order_id !== block.orderId
+      || refreshed.checkout_approval_url !== providerApprovalUrl
+    ) {
+      log.error('Failed to persist the provider-required payer action URL', {
+        orderId: block.orderId,
+        detail: refreshError?.message,
+      });
+      return { state: 'unavailable' };
+    }
+    return { state: 'usable', approvalUrl: providerApprovalUrl, checkoutType };
+  }
   if (providerApprovalUrl !== block.approvalUrl) {
     log.warn(`PayPal ${resourceName} approval link no longer matches stored checkout`, {
       orderId: block.orderId,
     });
     return { state: 'unavailable' };
   }
-  return { state: 'usable', approvalUrl: providerApprovalUrl };
+  return { state: 'usable', approvalUrl: providerApprovalUrl, checkoutType };
 }
 
 type CheckoutReservationBlock = {
@@ -918,6 +1054,11 @@ export async function handleBuyButton(
   }
 
   let cachedPayPalToken: string | null | undefined;
+  const providerBinding = paypalProviderBinding(paypalApiBase, paypalClientId);
+  if (!providerBinding) {
+    await replyCheckoutUnavailable(interaction, supabase, guildId);
+    return;
+  }
   const requirePayPalToken = async (): Promise<string | null> => {
     if (cachedPayPalToken === undefined) {
       cachedPayPalToken = await getPayPalToken(
@@ -1000,7 +1141,7 @@ export async function handleBuyButton(
           guildId,
           existingCustomer.id,
           productId,
-          product.type,
+          providerBinding,
         );
         if (providerCheckout.state === 'unavailable') {
           await replyCheckoutUnavailable(interaction, supabase, guildId);
@@ -1011,7 +1152,7 @@ export async function handleBuyButton(
             embeds: [
               brandedEmbed(brandKit, {
                 intent: 'primary',
-                title: product.type === 'subscription'
+                title: providerCheckout.checkoutType === 'subscription'
                   ? `🔄 Resume Subscription: ${product.name}`
                   : `🛒 Resume Purchase: ${product.name}`,
                 description:
@@ -1021,7 +1162,9 @@ export async function handleBuyButton(
             components: [
               new ActionRowBuilder<ButtonBuilder>().addComponents(
                 new ButtonBuilder()
-                  .setLabel(product.type === 'subscription' ? 'Continue Subscription' : 'Continue Purchase')
+                  .setLabel(providerCheckout.checkoutType === 'subscription'
+                    ? 'Continue Subscription'
+                    : 'Continue Purchase')
                   .setStyle(ButtonStyle.Link)
                   .setURL(providerCheckout.approvalUrl)
                   .setEmoji('💳'),
@@ -1138,6 +1281,7 @@ export async function handleBuyButton(
     customer_id: customerId,
     product_id: productId,
     gift_checkout_token: giftIntentId,
+    provider_binding: providerBinding,
   });
   if (checkoutIntentError) {
     log.error('Failed to persist checkout identity:', checkoutIntentError.message);

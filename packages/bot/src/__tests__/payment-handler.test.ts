@@ -9,6 +9,7 @@
  * with an attacker-chosen paypal_plan_id.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -463,6 +464,16 @@ function makeQueryEngine(
           checkout_active: false,
           disposition: deactivationAttempts > 1 ? 'already_deactivated' : 'deactivated',
           proof_id: 'checkout-proof-1',
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_refresh_pending_checkout_approval_url') {
+      return {
+        data: {
+          order_id: args?.p_order_id,
+          checkout_approval_url: args?.p_new_approval_url,
+          disposition: 'refreshed',
         },
         error: null,
       };
@@ -1294,6 +1305,22 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
   });
 
   const customer = { id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' };
+  const providerBinding = createHash('sha256')
+    .update('https://api.paypal.example\0client-id')
+    .digest('hex');
+
+  function boundCheckoutIntent(
+    orderId = 'order-live',
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      token: '00000000-0000-4000-8000-000000000099',
+      order_id: orderId,
+      status: 'bound',
+      provider_binding: providerBinding,
+      ...overrides,
+    };
+  }
 
   function pendingOrder(overrides: Record<string, unknown> = {}) {
     return {
@@ -1320,11 +1347,15 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
     } = {},
     extraTables: Record<string, unknown[]> = {},
   ) {
+    const boundIntents = orders
+      .filter((order) => typeof order.checkout_approval_url === 'string')
+      .map((order) => boundCheckoutIntent(String(order.id)));
     const engine = makeQueryEngine({
       products: [oneTimeProduct],
       customers: [customer],
       entitlements: [],
       orders,
+      commerce_checkout_intents: boundIntents,
       ...extraTables,
     }, options);
     const fetchMock = makePayPalFetch();
@@ -1397,6 +1428,7 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
         paypal_subscription_id: 'I-LIVE-SUBSCRIPTION',
         checkout_approval_url: approvalUrl,
       })],
+      commerce_checkout_intents: [boundCheckoutIntent()],
     });
     const providerFetch = makePayPalFetch();
     const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
@@ -1429,6 +1461,88 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
     )).toBe(false);
     expect(lastEmbedText(interaction)).toContain(approvalUrl);
     expect(lastEmbedText(interaction)).toContain('PayPal confirmed');
+  });
+
+  it('uses the provider identity on the pending order after the product billing type changes', async () => {
+    const approvalUrl = 'https://www.sandbox.paypal.com/billing/subscriptions?ba_token=LIVE';
+    const { supabase, interaction } = setup([
+      pendingOrder({
+        paypal_order_id: null,
+        paypal_subscription_id: 'I-LIVE-SUBSCRIPTION',
+        checkout_approval_url: approvalUrl,
+      }),
+    ]);
+    const providerFetch = makePayPalFetch();
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (
+        String(url).endsWith('/v1/billing/subscriptions/I-LIVE-SUBSCRIPTION')
+        && init?.method === 'GET'
+      ) {
+        return new Response(JSON.stringify({
+          id: 'I-LIVE-SUBSCRIPTION',
+          status: 'APPROVAL_PENDING',
+          links: [{ rel: 'approve', href: approvalUrl }],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return providerFetch(url, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.paypal.example/v1/billing/subscriptions/I-LIVE-SUBSCRIPTION',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(fetchMock.mock.calls.some(([url]) =>
+      String(url).includes('/v2/checkout/orders/I-LIVE-SUBSCRIPTION')
+    )).toBe(false);
+    expect(lastEmbedText(interaction)).toContain('Resume Subscription');
+  });
+
+  it('persists a changed payer-action URL before exposing it', async () => {
+    const approvalUrl = 'https://www.sandbox.paypal.com/checkoutnow?token=PAYPAL-LIVE-1';
+    const payerActionUrl = `${approvalUrl}&flow=3ds`;
+    const { supabase, rpc, interaction } = setup([
+      pendingOrder({ checkout_approval_url: approvalUrl }),
+    ]);
+    const providerFetch = makePayPalFetch();
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (
+        String(url).endsWith('/v2/checkout/orders/PAYPAL-LIVE-1')
+        && init?.method === 'GET'
+      ) {
+        return new Response(JSON.stringify({
+          id: 'PAYPAL-LIVE-1',
+          status: 'PAYER_ACTION_REQUIRED',
+          links: [{ rel: 'payer-action', href: payerActionUrl }],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return providerFetch(url, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(rpc).toHaveBeenCalledWith('commerce_refresh_pending_checkout_approval_url', {
+      p_order_id: 'order-live',
+      p_guild_id: VICTIM_GUILD,
+      p_customer_id: 'cust-1',
+      p_product_id: 'prod-1',
+      p_provider_kind: 'capture',
+      p_provider_id: 'PAYPAL-LIVE-1',
+      p_provider_binding: providerBinding,
+      p_old_approval_url: approvalUrl,
+      p_new_approval_url: payerActionUrl,
+    });
+    expect(lastEmbedText(interaction)).toContain(payerActionUrl);
+    expect(lastEmbedText(interaction)).not.toContain(`${approvalUrl}\"`);
   });
 
   it('fails closed on a transient PayPal lookup error instead of risking a second charge', async () => {
@@ -1544,7 +1658,48 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
     expect(lastEmbedText(interaction)).not.toContain(staleApprovalUrl);
   });
 
-  it('deactivates a provider-expired subscription checkout and creates a fresh approval link', async () => {
+  it('fails closed on an account-scoped 404 when the checkout has no matching provider binding', async () => {
+    const staleApprovalUrl = 'https://www.sandbox.paypal.com/checkoutnow?token=PAYPAL-OTHER-ACCOUNT';
+    const { supabase, rpc, interaction } = setup(
+      [pendingOrder({
+        paypal_order_id: 'PAYPAL-OTHER-ACCOUNT',
+        checkout_approval_url: staleApprovalUrl,
+      })],
+      {},
+      {
+        commerce_checkout_intents: [boundCheckoutIntent('order-live', {
+          provider_binding: '0'.repeat(64),
+        })],
+      },
+    );
+    const providerFetch = makePayPalFetch();
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (
+        String(url).endsWith('/v2/checkout/orders/PAYPAL-OTHER-ACCOUNT')
+        && init?.method === 'GET'
+      ) {
+        return new Response(JSON.stringify({ name: 'RESOURCE_NOT_FOUND' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return providerFetch(url, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(rpc.mock.calls.some(([name]) => name === 'commerce_deactivate_pending_checkout')).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith('/v2/checkout/orders') && init?.method === 'POST'
+    )).toBe(false);
+    expect(lastEmbedText(interaction)).toContain('temporarily unavailable');
+  });
+
+  it('fails closed when a subscription lookup returns 404 because prior charges cannot be disproved', async () => {
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
     const staleApprovalUrl = 'https://www.sandbox.paypal.com/billing/subscriptions?ba_token=OLD';
     const engine = makeQueryEngine({
@@ -1560,6 +1715,7 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
           checkout_approval_url: staleApprovalUrl,
         }),
       ],
+      commerce_checkout_intents: [boundCheckoutIntent()],
     });
     const providerFetch = makePayPalFetch();
     const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
@@ -1582,21 +1738,113 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
       'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
     );
 
+    expect(engine.rpc.mock.calls.some(([name]) =>
+      name === 'commerce_deactivate_pending_checkout'
+    )).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith('/v1/billing/subscriptions') && init?.method === 'POST'
+    )).toBe(false);
+    expect(lastEmbedText(interaction)).toContain('temporarily unavailable');
+  });
+
+  it('does not retire a cancelled subscription that has any payment history', async () => {
+    const staleApprovalUrl = 'https://www.sandbox.paypal.com/billing/subscriptions?ba_token=PAID';
+    const engine = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [customer],
+      entitlements: [],
+      plans: [legitPlan],
+      orders: [pendingOrder({
+        paypal_order_id: null,
+        paypal_subscription_id: 'I-CANCELLED-PAID',
+        checkout_approval_url: staleApprovalUrl,
+      })],
+      commerce_checkout_intents: [boundCheckoutIntent()],
+    });
+    const providerFetch = makePayPalFetch();
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const target = String(url);
+      if (target.endsWith('/v1/billing/subscriptions/I-CANCELLED-PAID')) {
+        return new Response(JSON.stringify({ id: 'I-CANCELLED-PAID', status: 'CANCELLED' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (target.includes('/v1/billing/subscriptions/I-CANCELLED-PAID/transactions?')) {
+        return new Response(JSON.stringify({
+          transactions: [{ id: 'SALE-1', status: 'COMPLETED' }],
+          total_items: 1,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return providerFetch(url, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const interaction = makeInteraction();
+
+    await handleBuyButton(
+      interaction, engine.supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(engine.rpc.mock.calls.some(([name]) => name === 'commerce_deactivate_pending_checkout')).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith('/v1/billing/subscriptions') && init?.method === 'POST'
+    )).toBe(false);
+    expect(lastEmbedText(interaction)).toContain('Payment Already Processing');
+  });
+
+  it('retires a cancelled subscription only after PayPal proves it has no transactions', async () => {
+    const staleApprovalUrl = 'https://www.sandbox.paypal.com/billing/subscriptions?ba_token=UNPAID';
+    const engine = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [customer],
+      entitlements: [],
+      plans: [legitPlan],
+      orders: [pendingOrder({
+        paypal_order_id: null,
+        paypal_subscription_id: 'I-CANCELLED-UNPAID',
+        checkout_approval_url: staleApprovalUrl,
+      })],
+      commerce_checkout_intents: [boundCheckoutIntent()],
+    });
+    const providerFetch = makePayPalFetch();
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const target = String(url);
+      if (target.endsWith('/v1/billing/subscriptions/I-CANCELLED-UNPAID')) {
+        return new Response(JSON.stringify({ id: 'I-CANCELLED-UNPAID', status: 'CANCELLED' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (target.includes('/v1/billing/subscriptions/I-CANCELLED-UNPAID/transactions?')) {
+        return new Response(JSON.stringify({ transactions: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return providerFetch(url, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const interaction = makeInteraction();
+
+    await handleBuyButton(
+      interaction, engine.supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
     expect(engine.rpc).toHaveBeenCalledWith('commerce_deactivate_pending_checkout', {
       p_order_id: 'order-live',
       p_guild_id: VICTIM_GUILD,
       p_customer_id: 'cust-1',
       p_product_id: 'prod-1',
       p_provider_kind: 'subscription',
-      p_provider_id: 'I-OLD-STILL-PAYABLE',
-      p_proof_kind: 'provider_expired',
-      p_proof_reference: 'paypal-subscription-get:404',
+      p_provider_id: 'I-CANCELLED-UNPAID',
+      p_proof_kind: 'provider_cancelled',
+      p_proof_reference: 'paypal-subscription-transactions:CANCELLED:0',
     });
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith('/v1/billing/subscriptions') && init?.method === 'POST'
     )).toBe(true);
-    expect(lastEmbedText(interaction)).toContain('https://www.sandbox.paypal.com/approve');
-    expect(lastEmbedText(interaction)).not.toContain(staleApprovalUrl);
   });
 
   it('blocks a completed unknown-delivery hold before requesting a PayPal token', async () => {

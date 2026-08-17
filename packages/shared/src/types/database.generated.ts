@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 269 migration files in packages/supabase/migrations/
+ * Source: 270 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1656,6 +1656,7 @@ export interface DbCommerceCheckoutIntents {
   expires_at: string;
   cancel_reason: string | null;
   approval_exposed_at: string | null;
+  provider_binding: string | null;
 }
 
 export interface DbCommerceDownloadDeliveries {
