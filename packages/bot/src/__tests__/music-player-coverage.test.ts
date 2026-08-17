@@ -265,6 +265,14 @@ describe('MusicPlayerManager', () => {
         track: expect.objectContaining({ encoded: 'base64track' }),
       }));
     });
+
+    it('does not attach adopted-player handlers when queue loading fails', async () => {
+      valkey.get.mockRejectedValueOnce(new Error('Valkey unavailable'));
+
+      await expect(manager.init()).rejects.toThrow('Valkey unavailable');
+
+      expect(player.on).not.toHaveBeenCalled();
+    });
   });
 
   describe('shutdown', () => {
@@ -1134,6 +1142,27 @@ describe('MusicPlayerManager', () => {
       );
     });
 
+    it.each(['exception', 'stuck'] as const)(
+      'ignores an identity-less delayed %s for a replaced track',
+      async (eventName) => {
+        await valkey.set('queue:g1', JSON.stringify({
+          guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+          entries: [
+            { track: 'old', title: 'Old', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+            { track: 'current', title: 'Current', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+            { track: 'next', title: 'Next', uri: 'u3', duration: 120000, author: 'C', requestedBy: 'u3', isStream: false },
+          ],
+          currentIndex: 1, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+        }));
+
+        await getFailureHandler(eventName)({ track: { encoded: 'old' } });
+
+        await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({ currentIndex: 1 });
+        expect(player.playTrack).not.toHaveBeenCalled();
+        expect(eventBus.emit).not.toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+      },
+    );
+
     it('starts the next track when skip-vote cleanup fails', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
@@ -1971,6 +2000,44 @@ describe('MusicPlayerManager', () => {
       await expect(firstPlay).resolves.toMatchObject({ success: true });
       await expect(manager.queueManager.getQueue('g1'))
         .resolves.toMatchObject({ voiceChannelId: 'vc1' });
+    });
+
+    it('releases an unused join after the final cross-channel request rejects', async () => {
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      let finishFirstResolution: ((result: Awaited<ReturnType<typeof player.node.rest.resolve>>) => void) | undefined;
+      player.node.rest.resolve.mockImplementationOnce(() => new Promise((resolve) => {
+        finishFirstResolution = resolve;
+      }));
+      let finishSecondPreflight: (() => void) | undefined;
+      valkey.get
+        .mockResolvedValueOnce(null)
+        .mockImplementationOnce(() => new Promise<string | null>((resolve) => {
+          finishSecondPreflight = () => resolve(null);
+        }));
+      const voiceChannelA = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const voiceChannelB = { ...voiceChannelA, id: 'vc2' } as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      const firstPlay = manager.play('missing song', 'u1', voiceChannelA, textChannel);
+      await vi.waitFor(() => expect(player.node.rest.resolve).toHaveBeenCalledTimes(1));
+      const secondPlay = manager.play('other channel', 'u2', voiceChannelB, textChannel);
+      await vi.waitFor(() => expect(valkey.get).toHaveBeenCalledTimes(2));
+      finishFirstResolution?.({ loadType: 'empty', data: {} });
+      await expect(firstPlay).resolves.toMatchObject({ success: false });
+      expect(shoukaku.leaveVoiceChannel).not.toHaveBeenCalled();
+
+      finishSecondPreflight?.();
+      await expect(secondPlay).resolves.toEqual({
+        success: false,
+        message: 'Voice is already connected in another channel — please use that channel.',
+      });
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
     });
 
     it('removes an unused queue when the first resolved search is empty', async () => {

@@ -178,8 +178,8 @@ export class MusicPlayerManager {
     // Without this, the bot could sit alone indefinitely after a restart.
     const existingPlayer = this.shoukaku.players?.get(this.guild.id);
     if (existingPlayer) {
-      this.setupPlayerEvents(existingPlayer);
       const queue = await this.queueManager.getQueue(this.guild.id);
+      this.setupPlayerEvents(existingPlayer);
       if (!existingPlayer.track && queue && queue.currentIndex < queue.entries.length) {
         this.playbackRestartRequired = true;
       }
@@ -490,7 +490,7 @@ export class MusicPlayerManager {
         this.uncommittedVoiceChannelId !== null &&
         this.uncommittedVoiceChannelId !== voiceChannel.id
       ) {
-        await this.completePlayRequest(requestRevision, false);
+        await this.completePlayRequest(requestRevision, true);
         return {
           success: false,
           message: 'Voice is already connected in another channel — please use that channel.',
@@ -1680,6 +1680,14 @@ export class MusicPlayerManager {
         ) return null;
         const activeQueue = await this.queueManager.getQueue(this.guild.id);
         if (!activeQueue) return null;
+        const activeEntry = activeQueue.currentIndex < activeQueue.entries.length
+          ? activeQueue.entries[activeQueue.currentIndex]
+          : null;
+        if (
+          !playbackIdentity &&
+          exceptionTrack?.encoded &&
+          activeEntry?.track !== exceptionTrack.encoded
+        ) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) {
           const queueEnd = await this.completeQueueEndTransition();
@@ -1713,7 +1721,8 @@ export class MusicPlayerManager {
         expectedPlaybackRevision !== undefined &&
         expectedPlaybackRevision !== this.trackPlaybackRevision
       ) return;
-      this.discardPendingTrackStart(data?.track.encoded ?? player.track, expectedPlaybackRevision);
+      const stuckTrack = data?.track.encoded ?? player.track;
+      this.discardPendingTrackStart(stuckTrack, expectedPlaybackRevision);
       log.warn('Track stuck, skipping...');
       const transition = await this.withQueueMutation(async () => {
         if (
@@ -1726,6 +1735,14 @@ export class MusicPlayerManager {
         ) return null;
         const activeQueue = await this.queueManager.getQueue(this.guild.id);
         if (!activeQueue) return null;
+        const activeEntry = activeQueue.currentIndex < activeQueue.entries.length
+          ? activeQueue.entries[activeQueue.currentIndex]
+          : null;
+        if (
+          !playbackIdentity &&
+          data?.track.encoded &&
+          activeEntry?.track !== data.track.encoded
+        ) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) {
           const queueEnd = await this.completeQueueEndTransition();
