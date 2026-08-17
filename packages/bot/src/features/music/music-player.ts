@@ -92,6 +92,11 @@ type PendingTrackStart = {
   sessionRevision: number;
 };
 
+type QueueEndState = {
+  textChannelId: string | null;
+  sessionRevision: number;
+};
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 5000,
@@ -132,8 +137,10 @@ export class MusicPlayerManager {
   private pendingVoiceChannelId: string | null = null;
   private pendingTrackStarts: PendingTrackStart[] = [];
   private trackPlaybackRevision = 0;
+  private latestStartedPlaybackRevision = 0;
   private playbackSessionRevision = 0;
   private playbackMutationRevision = 0;
+  private nowPlayingMutationTail: Promise<void> = Promise.resolve();
   private playbackRestartRequired = false;
   private pauseRevision = 0;
   private appliedPaused: boolean | null = null;
@@ -654,6 +661,7 @@ export class MusicPlayerManager {
         playback: null,
       };
     }
+    if (queueWasExhausted) this.playbackSessionRevision += 1;
     const ownsUncommittedVoiceSession = joinedVoiceSession && this.uncommittedVoiceSession;
     this.uncommittedVoiceSession = false;
     this.uncommittedVoiceChannelId = null;
@@ -1192,46 +1200,65 @@ export class MusicPlayerManager {
     guildId: string,
     scheduledEntry?: QueueEntry,
     expectedSessionRevision?: number,
+    expectedPlaybackRevision?: number,
   ): Promise<void> {
+    const previousUpdate = this.nowPlayingMutationTail;
+    let releaseUpdate: (() => void) | undefined;
+    this.nowPlayingMutationTail = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    await previousUpdate;
     const sessionIsCurrent = (): boolean => (
-      expectedSessionRevision === undefined || expectedSessionRevision === this.playbackSessionRevision
+      (expectedSessionRevision === undefined || expectedSessionRevision === this.playbackSessionRevision) &&
+      (expectedPlaybackRevision === undefined || expectedPlaybackRevision === this.latestStartedPlaybackRevision)
     );
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue || !sessionIsCurrent()) return;
+    try {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue || !sessionIsCurrent()) return;
 
-    const current = scheduledEntry ?? queue.entries[queue.currentIndex];
-    if (!current) return;
+      const current = scheduledEntry ?? queue.entries[queue.currentIndex];
+      if (!current) return;
 
-    const textChannel = this.guild.channels.cache.get(queue.textChannelId);
-    if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
+      const textChannel = this.guild.channels.cache.get(queue.textChannelId);
+      if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
 
-    const position = this.getPlayerPosition(guildId);
-    const activeFilters = this.getActiveFilters(guildId);
-    const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
+      const position = this.getPlayerPosition(guildId);
+      const activeFilters = this.getActiveFilters(guildId);
+      const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
 
-    // Try to edit existing now-playing message
-    const existingMsgId = await this.queueManager.getNowPlayingMessage(guildId);
-    if (!sessionIsCurrent()) return;
-    if (existingMsgId) {
-      try {
-        const msg = await textChannel.messages.fetch(existingMsgId);
-        if (!sessionIsCurrent()) return;
-        await msg.edit({ embeds, components });
-        return;
-      } catch {
-        if (!sessionIsCurrent()) return;
-        // Message deleted, send new one
+      // Try to edit existing now-playing message
+      const existingMsgId = await this.queueManager.getNowPlayingMessage(guildId);
+      if (!sessionIsCurrent()) return;
+      if (existingMsgId) {
+        try {
+          const msg = await textChannel.messages.fetch(existingMsgId);
+          if (!sessionIsCurrent()) return;
+          await msg.edit({ embeds, components });
+          if (!sessionIsCurrent()) {
+            await msg.delete().catch(() => undefined);
+          }
+          return;
+        } catch {
+          if (!sessionIsCurrent()) return;
+          // Message deleted, send new one
+        }
       }
-    }
 
-    // Send new now-playing message
-    if (!sessionIsCurrent()) return;
-    const msg = await textChannel.send({ embeds, components });
-    if (!sessionIsCurrent()) {
-      await msg.delete().catch(() => undefined);
-      return;
+      // Send new now-playing message
+      if (!sessionIsCurrent()) return;
+      const msg = await textChannel.send({ embeds, components });
+      if (!sessionIsCurrent()) {
+        await msg.delete().catch(() => undefined);
+        return;
+      }
+      await this.queueManager.setNowPlayingMessage(guildId, msg.id);
+      if (!sessionIsCurrent()) {
+        await this.queueManager.clearNowPlayingMessage(guildId).catch(() => undefined);
+        await msg.delete().catch(() => undefined);
+      }
+    } finally {
+      releaseUpdate?.();
     }
-    await this.queueManager.setNowPlayingMessage(guildId, msg.id);
   }
 
   // ── Voice State Handling ────────────────────────────────
@@ -1422,6 +1449,13 @@ export class MusicPlayerManager {
       const scheduledStart = pendingIndex >= 0
         ? this.pendingTrackStarts.splice(pendingIndex, 1)[0]
         : undefined;
+      if (
+        scheduledStart &&
+        scheduledStart.playbackRevision < this.latestStartedPlaybackRevision
+      ) return;
+      if (scheduledStart) {
+        this.latestStartedPlaybackRevision = scheduledStart.playbackRevision;
+      }
       const expectedSessionRevision = scheduledStart?.sessionRevision ?? this.playbackSessionRevision;
 
       // Emit track.started event
@@ -1440,7 +1474,12 @@ export class MusicPlayerManager {
           this.playbackRestartRequired = false;
         }
         const scheduledEntry = scheduledStart?.entry;
-        this.sendNowPlaying(this.guild.id, scheduledEntry, expectedSessionRevision).catch((err) => {
+        this.sendNowPlaying(
+          this.guild.id,
+          scheduledEntry,
+          expectedSessionRevision,
+          scheduledStart?.playbackRevision,
+        ).catch((err) => {
           log.error('Failed to send now-playing:', { error: String(err) });
         });
         this.clearInactivityTimer(this.guild.id);
@@ -1467,26 +1506,33 @@ export class MusicPlayerManager {
     });
 
     player.on('end', async (data: TrackEndEvent) => {
+      const expectedSessionRevision = this.playbackSessionRevision;
       const transition = await this.withQueueMutation(async (): Promise<{
         queueEnded: boolean;
         textChannelId: string | null;
+        sessionRevision: number | null;
         playback: Promise<void> | null;
       }> => {
-        if (this.disposed || this.stopInProgress || this.queueExhausted) {
-          return { queueEnded: false, textChannelId: null, playback: null };
+        if (
+          this.disposed ||
+          this.stopInProgress ||
+          this.queueExhausted ||
+          expectedSessionRevision !== this.playbackSessionRevision
+        ) {
+          return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         }
         if (data.reason === 'replaced') {
-          return { queueEnded: false, textChannelId: null, playback: null };
+          return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         }
 
         // Emit track.ended event for the track that just finished
         const currentQueue = await this.queueManager.getQueue(this.guild.id);
-        if (this.disposed) return { queueEnded: false, textChannelId: null, playback: null };
+        if (this.disposed) return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
           ? currentQueue.entries[currentQueue.currentIndex]
           : null;
         if (data.track?.encoded && np?.track !== data.track.encoded) {
-          return { queueEnded: false, textChannelId: null, playback: null };
+          return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         }
         if (np) {
           this.eventBus.emit('track.ended', this.guild.id, {
@@ -1498,25 +1544,28 @@ export class MusicPlayerManager {
         }
 
         const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
-        if (this.disposed) return { queueEnded: false, textChannelId: null, playback: null };
+        if (this.disposed) return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
 
         if (queueEnded || !track) {
-          const textChannelId = await this.completeQueueEndTransition();
-          return { queueEnded: true, textChannelId, playback: null };
+          const queueEnd = await this.completeQueueEndTransition();
+          return { queueEnded: true, ...queueEnd, playback: null };
         }
 
         await this.queueManager.clearVoteSkip(this.guild.id);
         const playback = this.enqueueTrackPlaybackAfterQueueMutation(player, track);
-        return { queueEnded: false, textChannelId: null, playback };
+        return { queueEnded: false, textChannelId: null, sessionRevision: null, playback };
       });
 
       if (transition.playback) await transition.playback;
-      if (transition.queueEnded) await this.sendQueueEndedNotice(transition.textChannelId);
+      if (transition.queueEnded && transition.sessionRevision !== null) {
+        await this.sendQueueEndedNotice(transition.textChannelId, transition.sessionRevision);
+      }
     });
 
     player.on('exception', async (data: TrackExceptionEvent) => {
       if (this.disposed) return;
       const expectedStopRevision = this.stopRevision;
+      const expectedSessionRevision = this.playbackSessionRevision;
       const failedTrack = (data as TrackExceptionEvent & { track?: Track }).track?.encoded ?? player.track;
       this.discardPendingTrackStart(failedTrack);
       log.error('Track exception:', data);
@@ -1539,54 +1588,73 @@ export class MusicPlayerManager {
       }
 
       const transition = await this.withQueueMutation(async () => {
-        if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
+        if (
+          this.stopInProgress ||
+          this.stopRevision !== expectedStopRevision ||
+          this.queueExhausted ||
+          expectedSessionRevision !== this.playbackSessionRevision
+        ) return null;
         const activeQueue = await this.queueManager.getQueue(this.guild.id);
         if (!activeQueue) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) {
+          const queueEnd = await this.completeQueueEndTransition();
           return {
             queueEnded: true,
-            textChannelId: await this.completeQueueEndTransition(),
+            ...queueEnd,
             playback: null,
           };
         }
         return {
           queueEnded: false,
           textChannelId: null,
+          sessionRevision: null,
           playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
         };
       });
       if (this.disposed) return;
       if (transition?.playback) await transition.playback;
-      if (transition?.queueEnded) await this.sendQueueEndedNotice(transition.textChannelId);
+      if (transition?.queueEnded && transition.sessionRevision !== null) {
+        await this.sendQueueEndedNotice(transition.textChannelId, transition.sessionRevision);
+      }
     });
 
     player.on('stuck', async (data?: TrackStuckEvent) => {
       if (this.disposed) return;
       const expectedStopRevision = this.stopRevision;
+      const expectedSessionRevision = this.playbackSessionRevision;
       this.discardPendingTrackStart(data?.track.encoded ?? player.track);
       log.warn('Track stuck, skipping...');
       const transition = await this.withQueueMutation(async () => {
-        if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
+        if (
+          this.stopInProgress ||
+          this.stopRevision !== expectedStopRevision ||
+          this.queueExhausted ||
+          expectedSessionRevision !== this.playbackSessionRevision
+        ) return null;
         const activeQueue = await this.queueManager.getQueue(this.guild.id);
         if (!activeQueue) return null;
         const { track } = await this.queueManager.nextTrack(this.guild.id);
         if (!track) {
+          const queueEnd = await this.completeQueueEndTransition();
           return {
             queueEnded: true,
-            textChannelId: await this.completeQueueEndTransition(),
+            ...queueEnd,
             playback: null,
           };
         }
         return {
           queueEnded: false,
           textChannelId: null,
+          sessionRevision: null,
           playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
         };
       });
       if (this.disposed) return;
       if (transition?.playback) await transition.playback;
-      if (transition?.queueEnded) await this.sendQueueEndedNotice(transition.textChannelId);
+      if (transition?.queueEnded && transition.sessionRevision !== null) {
+        await this.sendQueueEndedNotice(transition.textChannelId, transition.sessionRevision);
+      }
     });
 
     player.on('closed', async (event: WebSocketClosedEvent) => {
@@ -1806,7 +1874,10 @@ export class MusicPlayerManager {
     if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
   }
 
-  private async completeQueueEndTransition(): Promise<string | null> {
+  private async completeQueueEndTransition(): Promise<QueueEndState> {
+    if (this.queueExhausted) {
+      return { textChannelId: null, sessionRevision: this.playbackSessionRevision };
+    }
     const totalPlayed = await this.getMusicStat('tracks_played_session');
     this.eventBus.emit('queue.ended', this.guild.id, {
       totalTracksPlayed: totalPlayed,
@@ -1841,11 +1912,17 @@ export class MusicPlayerManager {
         log.warn('Failed to clear skip votes for the exhausted queue:', (error as Error)?.message ?? error);
       });
     this.resetInactivityTimer(this.guild.id);
-    return queue?.textChannelId ?? null;
+    return {
+      textChannelId: queue?.textChannelId ?? null,
+      sessionRevision: this.playbackSessionRevision,
+    };
   }
 
-  private async sendQueueEndedNotice(textChannelId: string | null): Promise<void> {
-    if (!textChannelId) return;
+  private async sendQueueEndedNotice(
+    textChannelId: string | null,
+    expectedSessionRevision: number,
+  ): Promise<void> {
+    if (!textChannelId || expectedSessionRevision !== this.playbackSessionRevision) return;
     const textChannel = this.guild.channels.cache.get(textChannelId);
     if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
     const notice = await textChannel.send({
@@ -1853,7 +1930,7 @@ export class MusicPlayerManager {
     }).catch((error: unknown) => {
       log.warn('Failed to send the queue-ended notice:', (error as Error)?.message ?? error);
     });
-    if (notice && !this.queueExhausted) {
+    if (notice && expectedSessionRevision !== this.playbackSessionRevision) {
       await notice.delete().catch((error: unknown) => {
         log.warn('Failed to remove a stale queue-ended notice:', (error as Error)?.message ?? error);
       });

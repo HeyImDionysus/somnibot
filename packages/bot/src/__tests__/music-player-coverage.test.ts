@@ -1116,12 +1116,47 @@ describe('MusicPlayerManager', () => {
           'g1',
           expect.objectContaining({ track: 'b', title: 'B' }),
           expect.any(Number),
+          expect.any(Number),
         );
         expect(eventBus.emit).toHaveBeenCalledWith('track.started', 'g1', expect.objectContaining({ title: 'B' }));
       });
 
       finishFirstPlayback?.();
       await Promise.all([firstSkip, secondSkip]);
+    });
+
+    it('prevents an older start from overwriting the latest now-playing message', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'a', title: 'A', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'b', title: 'B', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+          { track: 'c', title: 'C', uri: 'u3', duration: 120000, author: 'C', requestedBy: 'u3', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      await expect(manager.skip('g1', { userId: 'u1' })).resolves.toMatchObject({ success: true });
+      await expect(manager.skip('g1', { userId: 'u2' })).resolves.toMatchObject({ success: true });
+      const textChannel = guild.channels.cache.get('tc1') as { send: ReturnType<typeof vi.fn> };
+      const oldMessage = { id: 'old-message', edit: vi.fn(), delete: vi.fn().mockResolvedValue(undefined) };
+      const latestMessage = { id: 'latest-message', edit: vi.fn(), delete: vi.fn().mockResolvedValue(undefined) };
+      let finishOldSend: (() => void) | undefined;
+      textChannel.send
+        .mockImplementationOnce(() => new Promise<typeof oldMessage>((resolve) => {
+          finishOldSend = () => resolve(oldMessage);
+        }))
+        .mockResolvedValueOnce(latestMessage);
+      const startHandler = getStartHandler();
+
+      startHandler({ track: { encoded: 'b' } });
+      await vi.waitFor(() => expect(textChannel.send).toHaveBeenCalledTimes(1));
+      startHandler({ track: { encoded: 'c' } });
+      finishOldSend?.();
+
+      await vi.waitFor(() => expect(textChannel.send).toHaveBeenCalledTimes(2));
+      expect(oldMessage.delete).toHaveBeenCalledTimes(1);
+      expect(latestMessage.delete).not.toHaveBeenCalled();
+      expect(valkey.set).toHaveBeenCalledWith('nowplaying:g1', 'latest-message', 'EX', 7200);
     });
 
     it('does not let an older delayed start clear a newer failed-play restart', async () => {
@@ -1178,6 +1213,7 @@ describe('MusicPlayerManager', () => {
         expect(sendNowPlaying).toHaveBeenCalledWith(
           'g1',
           expect.objectContaining({ track: 'c', title: 'C' }),
+          expect.any(Number),
           expect.any(Number),
         );
         expect(eventBus.emit).toHaveBeenCalledWith('track.started', 'g1', expect.objectContaining({ title: 'C' }));
@@ -1678,6 +1714,37 @@ describe('MusicPlayerManager', () => {
       await expect(manager.queueManager.getQueue('g1'))
         .resolves.toMatchObject({ entries: [expect.objectContaining({ track: 'base64track' })] });
       expect(noticeResult.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it('deletes a delayed queue-ended notice after a later session also ends', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'first', title: 'First', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const textChannel = guild.channels.cache.get('tc1') as { send: ReturnType<typeof vi.fn> };
+      const firstNotice = { id: 'first-notice', edit: vi.fn(), delete: vi.fn().mockResolvedValue(undefined) };
+      const secondNotice = { id: 'second-notice', edit: vi.fn(), delete: vi.fn().mockResolvedValue(undefined) };
+      let finishFirstNotice: (() => void) | undefined;
+      textChannel.send
+        .mockImplementationOnce(() => new Promise<typeof firstNotice>((resolve) => {
+          finishFirstNotice = () => resolve(firstNotice);
+        }))
+        .mockResolvedValueOnce(secondNotice);
+      const endHandler = getEndHandler();
+
+      const firstEnding = endHandler({ reason: 'finished', track: { encoded: 'first' } });
+      await vi.waitFor(() => expect(textChannel.send).toHaveBeenCalledTimes(1));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const playableTextChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+      await expect(manager.play('second song', 'u2', voiceChannel, playableTextChannel))
+        .resolves.toMatchObject({ success: true });
+      await endHandler({ reason: 'finished', track: { encoded: 'base64track' } });
+
+      finishFirstNotice?.();
+      await firstEnding;
+      expect(firstNotice.delete).toHaveBeenCalledTimes(1);
+      expect(secondNotice.delete).not.toHaveBeenCalled();
     });
 
     it('does not let a paused-state writer restore an exhausted track', async () => {
