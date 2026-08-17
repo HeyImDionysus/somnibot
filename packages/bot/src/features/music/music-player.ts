@@ -1946,13 +1946,6 @@ export class MusicPlayerManager {
     if (this.queueExhausted) {
       return { textChannelId: null, sessionRevision: this.playbackSessionRevision };
     }
-    const totalPlayed = await this.getMusicStat('tracks_played_session');
-    this.eventBus.emit('queue.ended', this.guild.id, {
-      totalTracksPlayed: totalPlayed,
-    });
-    await this.resetSessionStats();
-
-    const queue = await this.queueManager.getQueue(this.guild.id);
     this.queueExhausted = true;
     this.playbackRestartRequired = false;
     this.pendingTrackStarts = [];
@@ -1960,6 +1953,13 @@ export class MusicPlayerManager {
     this.playbackSessionRevision += 1;
     this.pauseRevision += 1;
     this.appliedPaused = false;
+    const totalPlayed = await this.getMusicStat('tracks_played_session');
+    this.eventBus.emit('queue.ended', this.guild.id, {
+      totalTracksPlayed: totalPlayed,
+    });
+    await this.resetSessionStats();
+
+    const queue = await this.queueManager.getQueue(this.guild.id);
     if (queue) {
       queue.entries = [];
       queue.currentIndex = 0;

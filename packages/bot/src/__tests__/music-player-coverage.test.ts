@@ -1685,6 +1685,35 @@ describe('MusicPlayerManager', () => {
       expect(eventBus.emit).not.toHaveBeenCalledWith('track.started', 'g1', expect.any(Object));
     });
 
+    it('invalidates a delayed start before queue-end cleanup awaits storage', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      const storedQueue = await manager.queueManager.getQueue('g1');
+      expect(storedQueue).not.toBeNull();
+      let queueReadStarted = false;
+      let finishQueueRead: (() => void) | undefined;
+      valkey.get.mockImplementationOnce(() => new Promise<string | null>((resolve) => {
+        queueReadStarted = true;
+        finishQueueRead = () => resolve(JSON.stringify(storedQueue));
+      }));
+      const startHandler = getStartHandler();
+      const endHandler = getEndHandler();
+
+      startHandler({ track: { encoded: 'finished' } });
+      await vi.waitFor(() => expect(queueReadStarted).toBe(true));
+      await endHandler({ reason: 'finished', track: { encoded: 'finished' } });
+      finishQueueRead?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(eventBus.emit).toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+      expect(eventBus.emit).not.toHaveBeenCalledWith('track.started', 'g1', expect.any(Object));
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({ entries: [] });
+    });
+
     it('does not let an old start consume the next session start record', async () => {
       player.node.rest.resolve
         .mockResolvedValueOnce({
