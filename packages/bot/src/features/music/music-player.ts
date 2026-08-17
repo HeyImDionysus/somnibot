@@ -12,7 +12,7 @@ import {
   type VoiceBasedChannel,
   ChannelType,
 } from 'discord.js';
-import type { Shoukaku, Player, Track, TrackExceptionEvent, TrackEndEvent, WebSocketClosedEvent } from 'shoukaku';
+import type { Shoukaku, Player, Track, TrackExceptionEvent, TrackEndEvent, TrackStartEvent, TrackStuckEvent, WebSocketClosedEvent } from 'shoukaku';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
@@ -66,6 +66,48 @@ export type StopReason = 'command' | 'auto_leave' | 'inactivity' | 'connection_l
  */
 export type ControlActor = { userId?: string; internal?: boolean };
 
+type PlayResult = {
+  success: boolean;
+  message?: string;
+  entry?: QueueEntry;
+  count?: number;
+  playlistName?: string;
+};
+
+type PlayMutationResult = {
+  response: PlayResult;
+  playback: Promise<void> | null;
+};
+
+type PauseTransition = {
+  previousPaused: boolean;
+  newPaused: boolean;
+  revision: number;
+};
+
+type PendingTrackStart = {
+  entry: QueueEntry;
+  encodedTrack: string;
+  playbackRevision: number;
+  sessionRevision: number;
+};
+
+type PlaybackIdentity = {
+  playbackRevision: number;
+  sessionRevision: number;
+};
+
+type PlaybackEventTrack = Track & {
+  userData?: {
+    somnibotPlayback?: Partial<PlaybackIdentity>;
+  };
+};
+
+type QueueEndState = {
+  textChannelId: string | null;
+  sessionRevision: number;
+};
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 5000,
@@ -92,6 +134,29 @@ export class MusicPlayerManager {
   private reconnectingVoice = false;
   private intentionalVoiceLeaveDepth = 0;
   private disposed = false;
+  private queueMutationTail: Promise<void> = Promise.resolve();
+  private playbackMutationTail: Promise<void> = Promise.resolve();
+  private queueExhausted = false;
+  private stopInProgress = false;
+  private stopRevision = 0;
+  private playRequestRevision = 0;
+  private pendingPlayRequests = new Set<number>();
+  private uncommittedVoiceSession = false;
+  private uncommittedVoiceChannelId: string | null = null;
+  private uncommittedVoiceCleanupInProgress = false;
+  private pendingVoiceJoin: Promise<Player> | null = null;
+  private pendingVoiceChannelId: string | null = null;
+  private pendingTrackStarts: PendingTrackStart[] = [];
+  private trackPlaybackRevision = 0;
+  private latestStartedPlaybackRevision = 0;
+  private playbackSessionRevision = 0;
+  private playbackMutationRevision = 0;
+  private nowPlayingMutationTail: Promise<void> = Promise.resolve();
+  private playbackRestartRequired = false;
+  private pauseRevision = 0;
+  private appliedPaused: boolean | null = null;
+  private volumeRevision = 0;
+  private appliedVolume: number | null = null;
 
   constructor(
     private readonly guild: Guild,
@@ -114,6 +179,10 @@ export class MusicPlayerManager {
     const existingPlayer = this.shoukaku.players?.get(this.guild.id);
     if (existingPlayer) {
       const queue = await this.queueManager.getQueue(this.guild.id);
+      this.setupPlayerEvents(existingPlayer);
+      if (!existingPlayer.track && queue && queue.currentIndex < queue.entries.length) {
+        this.playbackRestartRequired = true;
+      }
       if (queue?.voiceChannelId) {
         const vc = this.guild.channels.cache.get(queue.voiceChannelId);
         if (vc?.isVoiceBased()) {
@@ -133,6 +202,9 @@ export class MusicPlayerManager {
   shutdown(): void {
     this.disposed = true;
     this.voiceOperationRevision += 1;
+    this.playbackSessionRevision += 1;
+    this.playbackMutationRevision += 1;
+    this.pendingTrackStarts = [];
     for (const timer of this.autoLeaveTimers.values()) clearTimeout(timer);
     for (const timer of this.inactivityTimers.values()) clearTimeout(timer);
     this.autoLeaveTimers.clear();
@@ -340,6 +412,170 @@ export class MusicPlayerManager {
     if (this.reconnectingVoice) {
       return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
     }
+    if (this.uncommittedVoiceCleanupInProgress) {
+      return { success: false, message: 'Voice is resetting — please try again shortly.' };
+    }
+    if (this.stopInProgress) {
+      return { success: false, message: 'Playback is stopping — please try again shortly.' };
+    }
+    const requestRevision = ++this.playRequestRevision;
+    this.pendingPlayRequests.add(requestRevision);
+    const expectedStopRevision = this.stopRevision;
+
+    let queueBeforeResolve: GuildQueue | null;
+    try {
+      queueBeforeResolve = await this.queueManager.getQueue(this.guild.id);
+    } catch (err) {
+      await this.raiseStoreOutageAlert(userId, 'load_queue', err);
+      await this.completePlayRequest(requestRevision, true);
+      return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+    }
+    if (queueBeforeResolve && !this.queueExhausted) {
+      const capacityRejection = this.getCapacityRejection(queueBeforeResolve, userId);
+      if (capacityRejection) {
+        await this.completePlayRequest(requestRevision, true);
+        return capacityRejection;
+      }
+    }
+    if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+      await this.completePlayRequest(requestRevision, false);
+      return { success: false, message: 'Playback is stopping — please try again shortly.' };
+    }
+
+    const searchQuery = this.resolveSearchQuery(query);
+    let player = this.shoukaku.players.get(this.guild.id) ?? null;
+    try {
+      if (!player) {
+        if (this.pendingVoiceJoin) {
+          if (this.pendingVoiceChannelId !== voiceChannel.id) {
+            await this.completePlayRequest(requestRevision, false);
+            return {
+              success: false,
+              message: 'Voice is already connecting in another channel — please use that channel or try again shortly.',
+            };
+          }
+          player = await this.pendingVoiceJoin;
+        } else {
+          const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
+          if (!node) {
+            await this.completePlayRequest(requestRevision, false);
+            return { success: false, message: 'No Lavalink nodes available' };
+          }
+
+          this.voiceOperationRevision += 1;
+          const join = this.shoukaku.joinVoiceChannel({
+            guildId: this.guild.id,
+            channelId: voiceChannel.id,
+            // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
+            shardId: this.guild.shardId,
+            deaf: true,
+          });
+          this.pendingVoiceJoin = join;
+          this.pendingVoiceChannelId = voiceChannel.id;
+          try {
+            player = await join;
+            this.setupPlayerEvents(player);
+            this.uncommittedVoiceSession = true;
+            this.uncommittedVoiceChannelId = voiceChannel.id;
+          } finally {
+            if (this.pendingVoiceJoin === join) {
+              this.pendingVoiceJoin = null;
+              this.pendingVoiceChannelId = null;
+            }
+          }
+        }
+      }
+      if (
+        this.uncommittedVoiceSession &&
+        this.uncommittedVoiceChannelId !== null &&
+        this.uncommittedVoiceChannelId !== voiceChannel.id
+      ) {
+        await this.completePlayRequest(requestRevision, true);
+        return {
+          success: false,
+          message: 'Voice is already connected in another channel — please use that channel.',
+        };
+      }
+      const activePlayer = player;
+      const expectedVoiceRevision = this.voiceOperationRevision;
+
+      const result = await activePlayer.node.rest.resolve(searchQuery);
+      if (
+        this.stopInProgress ||
+        this.stopRevision !== expectedStopRevision ||
+        this.voiceOperationRevision !== expectedVoiceRevision
+      ) {
+        await this.completePlayRequest(requestRevision, false);
+        return { success: false, message: 'Playback was stopped before the track could be queued.' };
+      }
+      await this.waitForPlaybackMutations();
+      const transition = await this.withQueueMutation(() => this.playWithinQueueMutation(
+        userId,
+        voiceChannel,
+        textChannel,
+        activePlayer,
+        result,
+        requestRevision,
+        expectedVoiceRevision,
+        expectedStopRevision,
+      ));
+      if (transition.playback) await transition.playback;
+      await this.completePlayRequest(requestRevision, !transition.response.success);
+      return transition.response;
+    } catch (error) {
+      await this.completePlayRequest(requestRevision, true);
+      throw error;
+    }
+  }
+
+  private getCapacityRejection(
+    queue: GuildQueue,
+    userId: string,
+  ): { success: false; message: string } | null {
+    if (queue.entries.length >= this.config.maxQueueLength) {
+      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
+        userId,
+        reason: 'queue_full',
+        limit: this.config.maxQueueLength,
+      });
+      return { success: false, message: `Queue is full (max ${this.config.maxQueueLength} tracks)` };
+    }
+
+    const maxPerUser = this.config.perUserQueueCap;
+    const userQueueCount = queue.entries.filter((entry) => entry.requestedBy === userId).length;
+    if (userQueueCount >= maxPerUser) {
+      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
+        userId,
+        reason: 'user_limit',
+        limit: maxPerUser,
+      });
+      return { success: false, message: `You've reached the per-user limit of ${maxPerUser} queued tracks` };
+    }
+
+    return null;
+  }
+
+  private async playWithinQueueMutation(
+    userId: string,
+    voiceChannel: VoiceBasedChannel,
+    textChannel: TextChannel,
+    player: Player,
+    result: Awaited<ReturnType<Player['node']['rest']['resolve']>>,
+    requestRevision: number,
+    expectedVoiceRevision: number,
+    expectedStopRevision: number,
+  ): Promise<PlayMutationResult> {
+
+    if (
+      this.stopInProgress ||
+      this.stopRevision !== expectedStopRevision ||
+      this.voiceOperationRevision !== expectedVoiceRevision
+    ) {
+      return {
+        response: { success: false, message: 'Playback was stopped before the track could be queued.' },
+        playback: null,
+      };
+    }
 
     // Get or create queue. [music-collaborative-queue] The queue lives in the
     // Valkey store; if that store is unreachable, raise a durable owner alert
@@ -349,7 +585,10 @@ export class MusicPlayerManager {
       existingQueue = await this.queueManager.getQueue(this.guild.id);
     } catch (err) {
       await this.raiseStoreOutageAlert(userId, 'load_queue', err);
-      return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
+      return {
+        response: { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' },
+        playback: null,
+      };
     }
 
     const isNewQueue = !existingQueue;
@@ -363,66 +602,31 @@ export class MusicPlayerManager {
         textChannel.id,
         this.config.defaultVolume,
       );
-      try {
-        await this.queueManager.saveQueue(queue);
-      } catch (err) {
-        await this.raiseStoreOutageAlert(userId, 'save_queue', err);
-        return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
-      }
+    }
+
+    if (this.uncommittedVoiceSession) {
+      queue.voiceChannelId = this.uncommittedVoiceChannelId ?? voiceChannel.id;
+      queue.textChannelId = textChannel.id;
+    }
+
+    const queueWasExhausted = this.queueExhausted || Boolean(
+      existingQueue && existingQueue.entries.length === 0,
+    );
+    if (queueWasExhausted) {
+      queue.entries = [];
+      queue.currentIndex = 0;
+      queue.paused = false;
+      queue.shuffled = false;
+      this.pauseRevision += 1;
     }
 
     // Check queue size limit — [music-collaborative-queue] capacity lane.
-    if (queue.entries.length >= this.config.maxQueueLength) {
-      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
-        userId,
-        reason: 'queue_full',
-        limit: this.config.maxQueueLength,
-      });
-      return { success: false, message: `Queue is full (max ${this.config.maxQueueLength} tracks)` };
-    }
-
-    // V9 Audit §12.P2: Per-user queue limit — prevent one user from monopolizing the queue.
-    const userQueueCount = queue.entries.filter((e) => e.requestedBy === userId).length;
-    const maxPerUser = this.config.perUserQueueCap;
-    if (userQueueCount >= maxPerUser) {
-      this.eventBus.emit('music.capacity_rejected', this.guild.id, {
-        userId,
-        reason: 'user_limit',
-        limit: maxPerUser,
-      });
-      return { success: false, message: `You've reached the per-user limit of ${maxPerUser} queued tracks` };
-    }
-
-    // Resolve search query
-    const searchQuery = this.resolveSearchQuery(query);
-
-    // Get or create a Shoukaku player
-    let player = this.shoukaku.players.get(this.guild.id) ?? null;
-
-    if (!player) {
-      const node = this.shoukaku.options.nodeResolver(this.shoukaku.nodes);
-      if (!node) {
-        return { success: false, message: 'No Lavalink nodes available' };
-      }
-
-      this.voiceOperationRevision += 1;
-      player = await this.shoukaku.joinVoiceChannel({
-        guildId: this.guild.id,
-        channelId: voiceChannel.id,
-        // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
-        shardId: this.guild.shardId,
-        deaf: true,
-      });
-
-      this.setupPlayerEvents(player);
-    }
-
-    // Search for tracks
-    const result = await player.node.rest.resolve(searchQuery);
+    const capacityRejection = this.getCapacityRejection(queue, userId);
+    if (capacityRejection) return { response: capacityRejection, playback: null };
 
     if (!result || result.loadType === 'empty' || result.loadType === 'error') {
       this.selfHealer.recordFailure();
-      return { success: false, message: 'No results found for your query' };
+      return { response: { success: false, message: 'No results found for your query' }, playback: null };
     }
 
     this.selfHealer.recordSuccess();
@@ -449,25 +653,40 @@ export class MusicPlayerManager {
         : result.data;
 
       if (!track) {
-        return { success: false, message: 'No results found for your query' };
+        return { response: { success: false, message: 'No results found for your query' }, playback: null };
       }
 
       const entry = this.trackToEntry(track, userId);
 
       if (!this.config.allowDuplicates && queue.entries.some((e) => e.uri === entry.uri)) {
-        return { success: false, message: 'This track is already in the queue' };
+        return { response: { success: false, message: 'This track is already in the queue' }, playback: null };
       }
 
       addedEntries = [entry];
     }
 
     if (addedEntries.length === 0) {
-      return { success: false, message: 'No tracks could be added (duplicates filtered)' };
+      return {
+        response: { success: false, message: 'No tracks could be added (duplicates filtered)' },
+        playback: null,
+      };
     }
 
     // Add to queue
     queue.entries.push(...addedEntries);
-    await this.queueManager.saveQueue(queue);
+    try {
+      await this.queueManager.saveQueue(queue);
+    } catch (err) {
+      await this.raiseStoreOutageAlert(userId, 'save_queue', err);
+      return {
+        response: { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' },
+        playback: null,
+      };
+    }
+    if (queueWasExhausted) this.playbackSessionRevision += 1;
+    const ownsUncommittedVoiceSession = this.uncommittedVoiceSession;
+    this.uncommittedVoiceSession = false;
+    this.uncommittedVoiceChannelId = null;
 
     // Audit the persisted ADD side of the shared queue before playback setup.
     // music.skipped / music.stopped record only removals, so without this the
@@ -483,20 +702,23 @@ export class MusicPlayerManager {
       trackCount: addedEntries.length,
       playlistName: playlistName ?? null,
       queueLength: queue.entries.length,
-      sessionStarted: isNewQueue,
+      sessionStarted: isNewQueue || queueWasExhausted,
     });
 
     // If this is the first track (or queue was empty), start playing
-    const shouldPlay = isNewQueue || queue.entries.length === addedEntries.length ||
-      !player.track;
+    const shouldPlay = isNewQueue || queueWasExhausted || ownsUncommittedVoiceSession || this.playbackRestartRequired ||
+      queue.entries.length === addedEntries.length;
 
+    let playback: Promise<void> | null = null;
     if (shouldPlay) {
       const firstEntry = queue.entries[queue.currentIndex];
       if (firstEntry) {
-        await player.playTrack({ track: { encoded: firstEntry.track } });
-        // Re-applying the queue's own stored volume is a restore, not a
-        // member-initiated control change — internal, so it writes no row.
-        await this.setVolume(this.guild.id, queue.volume, { internal: true });
+        this.queueExhausted = false;
+        const volume = queue.volume;
+        playback = this.enqueueTrackPlaybackAfterQueueMutation(player, firstEntry, async () => {
+          await player.setGlobalVolume(volume);
+          this.appliedVolume = volume;
+        });
       }
     }
 
@@ -504,14 +726,19 @@ export class MusicPlayerManager {
     this.resetInactivityTimer(this.guild.id);
 
     if (addedEntries.length === 1 && addedEntries[0]) {
-      const position = queue.entries.length - queue.currentIndex;
-      return { success: true, entry: addedEntries[0], message: undefined, count: 1 };
+      return {
+        response: { success: true, entry: addedEntries[0], message: undefined, count: 1 },
+        playback,
+      };
     }
 
     return {
-      success: true,
-      count: addedEntries.length,
-      playlistName,
+      response: {
+        success: true,
+        count: addedEntries.length,
+        playlistName,
+      },
+      playback,
     };
   }
 
@@ -527,12 +754,25 @@ export class MusicPlayerManager {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
 
-    await this.queueManager.clearVoteSkip(guildId);
-
-    // Capture the track being skipped for the audit trail before we advance.
-    const skipped = await this.queueManager.getCurrentTrack(guildId);
-
-    const { track, queueEnded } = await this.queueManager.nextTrack(guildId);
+    const transition = await this.withQueueMutation(async () => {
+      if (this.stopInProgress) return null;
+      await this.queueManager.clearVoteSkip(guildId);
+      const skippedTrack = await this.queueManager.getCurrentTrack(guildId);
+      const queueTransition = await this.queueManager.nextTrack(guildId);
+      let playback: Promise<void>;
+      if (queueTransition.queueEnded || !queueTransition.track) {
+        playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+          await player.stopTrack();
+        });
+      } else {
+        playback = this.enqueueTrackPlaybackAfterQueueMutation(player, queueTransition.track);
+      }
+      return { skipped: skippedTrack, ...queueTransition, playback };
+    });
+    if (!transition) {
+      return { success: false, message: 'Playback is stopping — please try again shortly.' };
+    }
+    const { skipped, track, queueEnded, playback } = transition;
 
     // [music-player-fairness] Audit the skip outcome — proves which fairness
     // path resolved the skip and who invoked it.
@@ -545,12 +785,8 @@ export class MusicPlayerManager {
       queueEnded: queueEnded || !track,
     });
 
-    if (queueEnded || !track) {
-      await player.stopTrack();
-      return { success: true, message: '⏭️ Skipped — queue ended' };
-    }
-
-    await player.playTrack({ track: { encoded: track.track } });
+    await playback;
+    if (queueEnded || !track) return { success: true, message: '⏭️ Skipped — queue ended' };
     return { success: true, message: `⏭️ Skipped to **${track.title}**` };
   }
 
@@ -607,17 +843,61 @@ export class MusicPlayerManager {
     guildId: string,
     context: { userId?: string; reason?: StopReason } = {},
   ): Promise<{ success: boolean; message: string }> {
-    const queueBeforeStop = await this.queueManager.getQueue(guildId);
-    this.voiceOperationRevision += 1;
-    this.intentionalVoiceLeaveDepth += 1;
-    try {
-      const player = this.shoukaku.players.get(guildId);
-      if (player) {
-        await player.stopTrack();
-        await this.shoukaku.leaveVoiceChannel(guildId);
+    const stopClaim = await this.withQueueMutation(async () => {
+      if (this.stopInProgress) return null;
+      this.stopInProgress = true;
+      try {
+        const queueBeforeStop = await this.queueManager.getQueue(guildId);
+        this.stopRevision += 1;
+        this.voiceOperationRevision += 1;
+        this.playbackSessionRevision += 1;
+        this.playbackMutationRevision += 1;
+        this.pendingTrackStarts = [];
+        const player = this.shoukaku.players.get(guildId) ?? null;
+        const pendingPlayer = this.pendingVoiceJoin;
+        this.intentionalVoiceLeaveDepth += 1;
+        const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+          let playerToStop = player;
+          if (!playerToStop && pendingPlayer) {
+            try {
+              playerToStop = await pendingPlayer;
+            } catch {
+              return;
+            }
+          }
+          if (!playerToStop) return;
+          try {
+            await playerToStop.stopTrack();
+          } catch (error) {
+            log.warn('Failed to stop the current track during queue teardown:', (error as Error)?.message ?? error);
+          }
+          await this.clearVoiceConnectionForRecovery(guildId, 'Stop voice cleanup');
+        });
+        return { queueBeforeStop, playback };
+      } catch (error) {
+        this.stopInProgress = false;
+        throw error;
       }
+    });
+    if (!stopClaim) {
+      return { success: true, message: '⏹️ Playback is already stopping' };
+    }
+    try {
+      await stopClaim.playback;
 
-      await this.queueManager.destroyQueue(guildId);
+      await this.withQueueMutation(async () => {
+        await this.queueManager.destroyQueue(guildId);
+        this.queueExhausted = false;
+        this.uncommittedVoiceSession = false;
+        this.uncommittedVoiceChannelId = null;
+        this.playbackRestartRequired = false;
+        this.pendingTrackStarts = [];
+        this.trackPlaybackRevision += 1;
+        this.appliedPaused = null;
+        this.appliedVolume = null;
+        this.pauseRevision += 1;
+        this.volumeRevision += 1;
+      });
       this.clearTimers(guildId);
 
       // [music-collaborative-queue] Audit the queue teardown /
@@ -626,11 +906,14 @@ export class MusicPlayerManager {
       this.eventBus.emit('music.stopped', this.guild.id, {
         userId: context.userId,
         reason: context.reason ?? 'command',
-        trackCount: queueBeforeStop?.entries.length ?? 0,
+        trackCount: stopClaim.queueBeforeStop?.entries.length ?? 0,
       });
 
       return { success: true, message: '⏹️ Stopped playback and cleared the queue' };
     } finally {
+      await this.withQueueMutation(async () => {
+        this.stopInProgress = false;
+      });
       this.intentionalVoiceLeaveDepth -= 1;
     }
   }
@@ -639,27 +922,60 @@ export class MusicPlayerManager {
   async togglePause(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; paused: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, paused: false, message: 'Nothing is playing' };
-
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, paused: false, message: 'No active queue' };
-
-    const newPaused = !queue.paused;
-    await player.setPaused(newPaused);
-    queue.paused = newPaused;
-    await this.queueManager.saveQueue(queue);
-    this.auditControlApplied(context, 'pause', newPaused ? 'paused' : 'resumed');
-
-    if (newPaused) {
-      this.resetInactivityTimer(guildId);
-    } else {
-      this.clearInactivityTimer(guildId);
+    const expectedStopRevision = this.stopRevision;
+    const expectedSessionRevision = this.playbackSessionRevision;
+    if (this.stopInProgress) {
+      return { success: false, paused: false, message: 'Playback is stopping' };
     }
 
-    return {
-      success: true,
-      paused: newPaused,
-      message: newPaused ? '⏸️ Paused' : '▶️ Resumed',
-    };
+    const pauseTransition = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return null;
+
+      const previousPaused = queue.paused;
+      if (this.appliedPaused === null) this.appliedPaused = previousPaused;
+      const newPaused = !queue.paused;
+      queue.paused = newPaused;
+      await this.queueManager.saveQueue(queue);
+      const revision = ++this.pauseRevision;
+      const state = { finalPaused: newPaused };
+      const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+        state.finalPaused = await this.reconcilePlayerPauseState(player, newPaused, revision);
+      });
+      return {
+        previousPaused,
+        newPaused,
+        revision,
+        sessionRevision: expectedSessionRevision,
+        state,
+        playback,
+      };
+    });
+    if (!pauseTransition) return { success: false, paused: false, message: 'No active queue' };
+
+    try {
+      await pauseTransition.playback;
+      const appliedPaused = pauseTransition.state.finalPaused;
+      const reportedPaused = pauseTransition.sessionRevision === this.playbackSessionRevision
+        ? pauseTransition.newPaused
+        : appliedPaused;
+      this.auditControlApplied(context, 'pause', reportedPaused ? 'paused' : 'resumed');
+      if (appliedPaused) {
+        this.resetInactivityTimer(guildId);
+      } else {
+        this.clearInactivityTimer(guildId);
+      }
+
+      return {
+        success: true,
+        paused: reportedPaused,
+        message: reportedPaused ? '⏸️ Paused' : '▶️ Resumed',
+      };
+    } catch (error) {
+      await this.rollbackPauseTransition(guildId, pauseTransition);
+      throw error;
+    }
   }
 
   /** Seek to a position in the current track. */
@@ -687,14 +1003,53 @@ export class MusicPlayerManager {
   async setVolume(guildId: string, volume: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
     const player = this.shoukaku.players.get(guildId);
     if (!player) return { success: false, message: 'Nothing is playing' };
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
 
     const clamped = Math.max(0, Math.min(150, volume));
-    await player.setGlobalVolume(clamped);
-
-    const queue = await this.queueManager.getQueue(guildId);
-    if (queue) {
-      queue.volume = clamped;
-      await this.queueManager.saveQueue(queue);
+    const transition = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return null;
+      let previousVolume: number | null = null;
+      let revision: number | null = null;
+      if (!context.internal) {
+        const queue = await this.queueManager.getQueue(guildId);
+        if (queue) {
+          previousVolume = queue.volume;
+          queue.volume = clamped;
+          await this.queueManager.saveQueue(queue);
+          revision = ++this.volumeRevision;
+          if (this.appliedVolume === null) this.appliedVolume = previousVolume;
+        }
+      }
+      return {
+        previousVolume,
+        revision,
+        playback: this.enqueuePlaybackAfterQueueMutation(async () => {
+          await player.setGlobalVolume(clamped);
+          this.appliedVolume = clamped;
+        }),
+      };
+    });
+    if (!transition) return { success: false, message: 'Playback is stopping' };
+    try {
+      await transition.playback;
+    } catch (error) {
+      const rollbackVolume = this.appliedVolume ?? transition.previousVolume;
+      const failedRevision = transition.revision;
+      if (rollbackVolume !== null && failedRevision !== null) {
+        await this.withQueueMutation(async () => {
+          const queue = await this.queueManager.getQueue(guildId);
+          if (
+            !queue ||
+            queue.volume !== clamped ||
+            this.volumeRevision !== failedRevision
+          ) return;
+          queue.volume = rollbackVolume;
+          await this.queueManager.saveQueue(queue);
+          this.volumeRevision += 1;
+        });
+      }
+      throw error;
     }
 
     this.auditControlApplied(context, 'volume', clamped);
@@ -703,11 +1058,17 @@ export class MusicPlayerManager {
 
   /** Set loop mode. */
   async setLoopMode(guildId: string, mode: LoopMode, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, message: 'No active queue' };
-
-    queue.loopMode = mode;
-    await this.queueManager.saveQueue(queue);
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
+    const updated = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return false;
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return false;
+      queue.loopMode = mode;
+      await this.queueManager.saveQueue(queue);
+      return true;
+    });
+    if (!updated) return { success: false, message: 'No active queue' };
 
     this.auditControlApplied(context, 'loop', mode);
     const labels = { off: '▶️ Loop off', track: '🔂 Looping track', queue: '🔁 Looping queue' };
@@ -716,8 +1077,15 @@ export class MusicPlayerManager {
 
   /** Cycle through loop modes: off → queue → track → off. */
   async cycleLoopMode(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; mode: LoopMode; message: string }> {
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) {
+      return { success: false, mode: 'off', message: 'Playback is stopping' };
+    }
     const queue = await this.queueManager.getQueue(guildId);
     if (!queue) return { success: false, mode: 'off', message: 'No active queue' };
+    if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+      return { success: false, mode: queue.loopMode, message: 'Playback is stopping' };
+    }
 
     const cycle: LoopMode[] = ['off', 'queue', 'track'];
     const currentIdx = cycle.indexOf(queue.loopMode);
@@ -730,7 +1098,12 @@ export class MusicPlayerManager {
 
   /** Shuffle the queue. */
   async shuffle(guildId: string, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
-    const success = await this.queueManager.shuffle(guildId);
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
+    const success = await this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) return false;
+      return this.queueManager.shuffle(guildId);
+    });
     if (!success) return { success: false, message: 'No active queue to shuffle' };
     this.auditControlApplied(context, 'shuffle');
     return { success: true, message: '🔀 Queue shuffled' };
@@ -738,19 +1111,26 @@ export class MusicPlayerManager {
 
   /** Remove a track from the queue by position (1-indexed, relative to upcoming). */
   async remove(guildId: string, position: number, context: ControlActor = {}): Promise<{ success: boolean; message: string }> {
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, message: 'No active queue' };
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
+    return this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+        return { success: false, message: 'Playback is stopping' };
+      }
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return { success: false, message: 'No active queue' };
 
-    const index = queue.currentIndex + position;
-    if (index <= queue.currentIndex || index >= queue.entries.length) {
-      return { success: false, message: 'Invalid position' };
-    }
+      const index = queue.currentIndex + position;
+      if (index <= queue.currentIndex || index >= queue.entries.length) {
+        return { success: false, message: 'Invalid position' };
+      }
 
-    const removed = await this.queueManager.removeEntry(guildId, index);
-    if (!removed) return { success: false, message: 'Failed to remove track' };
+      const removed = await this.queueManager.removeEntry(guildId, index);
+      if (!removed) return { success: false, message: 'Failed to remove track' };
 
-    this.auditControlApplied(context, 'remove', removed.title);
-    return { success: true, message: `🗑️ Removed **${removed.title}** from the queue` };
+      this.auditControlApplied(context, 'remove', removed.title);
+      return { success: true, message: `🗑️ Removed **${removed.title}** from the queue` };
+    });
   }
 
   /**
@@ -765,38 +1145,44 @@ export class MusicPlayerManager {
     fromPosition: number,
     toPosition: number,
   ): Promise<{ success: boolean; message: string }> {
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return { success: false, message: 'No active queue' };
-
-    const fromIndex = queue.currentIndex + fromPosition;
-    const toIndex = queue.currentIndex + toPosition;
-    if (fromIndex <= queue.currentIndex || fromIndex >= queue.entries.length) {
-      return { success: false, message: 'Invalid source position' };
-    }
-    if (toIndex <= queue.currentIndex || toIndex >= queue.entries.length) {
-      return { success: false, message: 'Invalid target position' };
-    }
-
-    const entry = queue.entries[fromIndex];
-    if (!entry) return { success: false, message: 'Invalid source position' };
-
-    if (!(await this.isDJ(userId))) {
-      if (!this.config.requesterMoveEnabled) {
-        this.auditPermissionDenied(userId, 'move');
-        return { success: false, message: 'Only a DJ can move tracks here.' };
+    const expectedStopRevision = this.stopRevision;
+    if (this.stopInProgress) return { success: false, message: 'Playback is stopping' };
+    const userIsDJ = await this.isDJ(userId);
+    return this.withQueueMutation(async () => {
+      if (this.stopInProgress || this.stopRevision !== expectedStopRevision) {
+        return { success: false, message: 'Playback is stopping' };
       }
-      if (entry.requestedBy !== userId) {
-        this.auditPermissionDenied(userId, 'move');
-        return { success: false, message: 'You can only move tracks you requested.' };
-      }
-    }
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue) return { success: false, message: 'No active queue' };
 
-    const moved = await this.queueManager.moveEntry(guildId, fromIndex, toIndex);
-    if (!moved) return { success: false, message: 'Failed to move track' };
-    // A denied move already audits (auditPermissionDenied above) — an allowed
-    // one must too, or the trail only ever shows moves that did not happen.
-    this.auditControlApplied({ userId }, 'move', `${fromPosition}→${toPosition}`);
-    return { success: true, message: `↔️ Moved **${entry.title}** to position ${toPosition}` };
+      const fromIndex = queue.currentIndex + fromPosition;
+      const toIndex = queue.currentIndex + toPosition;
+      if (fromIndex <= queue.currentIndex || fromIndex >= queue.entries.length) {
+        return { success: false, message: 'Invalid source position' };
+      }
+      if (toIndex <= queue.currentIndex || toIndex >= queue.entries.length) {
+        return { success: false, message: 'Invalid target position' };
+      }
+
+      const entry = queue.entries[fromIndex];
+      if (!entry) return { success: false, message: 'Invalid source position' };
+
+      if (!userIsDJ) {
+        if (!this.config.requesterMoveEnabled) {
+          this.auditPermissionDenied(userId, 'move');
+          return { success: false, message: 'Only a DJ can move tracks here.' };
+        }
+        if (entry.requestedBy !== userId) {
+          this.auditPermissionDenied(userId, 'move');
+          return { success: false, message: 'You can only move tracks you requested.' };
+        }
+      }
+
+      const moved = await this.queueManager.moveEntry(guildId, fromIndex, toIndex);
+      if (!moved) return { success: false, message: 'Failed to move track' };
+      this.auditControlApplied({ userId }, 'move', `${fromPosition}→${toPosition}`);
+      return { success: true, message: `↔️ Moved **${entry.title}** to position ${toPosition}` };
+    });
   }
 
   /** Get the current player position in ms. */
@@ -856,35 +1242,69 @@ export class MusicPlayerManager {
   // ── Now Playing Updates ─────────────────────────────────
 
   /** Send or update the now-playing embed. */
-  async sendNowPlaying(guildId: string): Promise<void> {
-    const queue = await this.queueManager.getQueue(guildId);
-    if (!queue) return;
+  async sendNowPlaying(
+    guildId: string,
+    scheduledEntry?: QueueEntry,
+    expectedSessionRevision?: number,
+    expectedPlaybackRevision?: number,
+  ): Promise<void> {
+    const previousUpdate = this.nowPlayingMutationTail;
+    let releaseUpdate: (() => void) | undefined;
+    this.nowPlayingMutationTail = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    await previousUpdate;
+    const sessionIsCurrent = (): boolean => (
+      (expectedSessionRevision === undefined || expectedSessionRevision === this.playbackSessionRevision) &&
+      (expectedPlaybackRevision === undefined || expectedPlaybackRevision === this.latestStartedPlaybackRevision)
+    );
+    try {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (!queue || !sessionIsCurrent()) return;
 
-    const current = queue.entries[queue.currentIndex];
-    if (!current) return;
+      const current = scheduledEntry ?? queue.entries[queue.currentIndex];
+      if (!current) return;
 
-    const textChannel = this.guild.channels.cache.get(queue.textChannelId);
-    if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
+      const textChannel = this.guild.channels.cache.get(queue.textChannelId);
+      if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
 
-    const position = this.getPlayerPosition(guildId);
-    const activeFilters = this.getActiveFilters(guildId);
-    const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
+      const position = this.getPlayerPosition(guildId);
+      const activeFilters = this.getActiveFilters(guildId);
+      const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
 
-    // Try to edit existing now-playing message
-    const existingMsgId = await this.queueManager.getNowPlayingMessage(guildId);
-    if (existingMsgId) {
-      try {
-        const msg = await textChannel.messages.fetch(existingMsgId);
-        await msg.edit({ embeds, components });
-        return;
-      } catch {
-        // Message deleted, send new one
+      // Try to edit existing now-playing message
+      const existingMsgId = await this.queueManager.getNowPlayingMessage(guildId);
+      if (!sessionIsCurrent()) return;
+      if (existingMsgId) {
+        try {
+          const msg = await textChannel.messages.fetch(existingMsgId);
+          if (!sessionIsCurrent()) return;
+          await msg.edit({ embeds, components });
+          if (!sessionIsCurrent()) {
+            await msg.delete().catch(() => undefined);
+          }
+          return;
+        } catch {
+          if (!sessionIsCurrent()) return;
+          // Message deleted, send new one
+        }
       }
-    }
 
-    // Send new now-playing message
-    const msg = await textChannel.send({ embeds, components });
-    await this.queueManager.setNowPlayingMessage(guildId, msg.id);
+      // Send new now-playing message
+      if (!sessionIsCurrent()) return;
+      const msg = await textChannel.send({ embeds, components });
+      if (!sessionIsCurrent()) {
+        await msg.delete().catch(() => undefined);
+        return;
+      }
+      await this.queueManager.setNowPlayingMessage(guildId, msg.id);
+      if (!sessionIsCurrent()) {
+        await this.queueManager.clearNowPlayingMessage(guildId).catch(() => undefined);
+        await msg.delete().catch(() => undefined);
+      }
+    } finally {
+      releaseUpdate?.();
+    }
   }
 
   // ── Voice State Handling ────────────────────────────────
@@ -892,7 +1312,11 @@ export class MusicPlayerManager {
   /** Called when voice state changes — handles auto-pause/resume/leave. */
   async handleVoiceStateChange(channelId: string): Promise<void> {
     const queue = await this.queueManager.getQueue(this.guild.id);
-    if (!queue || queue.voiceChannelId !== channelId) return;
+    const matchesQueuedSession = queue?.voiceChannelId === channelId;
+    const matchesUncommittedSession = !queue &&
+      this.uncommittedVoiceSession &&
+      this.uncommittedVoiceChannelId === channelId;
+    if (!matchesQueuedSession && !matchesUncommittedSession) return;
 
     const voiceChannel = this.guild.channels.cache.get(channelId);
     if (!voiceChannel || !voiceChannel.isVoiceBased()) return;
@@ -902,10 +1326,29 @@ export class MusicPlayerManager {
     if (humanMembers.size === 0) {
       // Bot is alone — auto-pause and start leave timer
       const player = this.shoukaku.players.get(this.guild.id);
-      if (player && !queue.paused) {
-        await player.setPaused(true);
-        queue.paused = true;
-        await this.queueManager.saveQueue(queue);
+      if (player && queue) {
+        const transition = await this.withQueueMutation(async () => {
+          const latestQueue = await this.queueManager.getQueue(this.guild.id);
+          if (this.stopInProgress || !latestQueue || latestQueue.voiceChannelId !== channelId || latestQueue.paused) return null;
+          const previousPaused = latestQueue.paused;
+          if (this.appliedPaused === null) this.appliedPaused = previousPaused;
+          latestQueue.paused = true;
+          await this.queueManager.saveQueue(latestQueue);
+          const revision = ++this.pauseRevision;
+          const state = { finalPaused: true };
+          const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+            state.finalPaused = await this.reconcilePlayerPauseState(player, true, revision);
+          });
+          return { previousPaused, newPaused: true, revision, state, playback };
+        });
+        if (transition !== null) {
+          try {
+            await transition.playback;
+          } catch (error) {
+            await this.rollbackPauseTransition(this.guild.id, transition);
+            throw error;
+          }
+        }
       }
       this.startAutoLeaveTimer(this.guild.id);
     } else {
@@ -913,10 +1356,29 @@ export class MusicPlayerManager {
       this.clearAutoLeaveTimer(this.guild.id);
 
       const player = this.shoukaku.players.get(this.guild.id);
-      if (player && queue.paused) {
-        await player.setPaused(false);
-        queue.paused = false;
-        await this.queueManager.saveQueue(queue);
+      if (player && queue) {
+        const transition = await this.withQueueMutation(async () => {
+          const latestQueue = await this.queueManager.getQueue(this.guild.id);
+          if (this.stopInProgress || !latestQueue || latestQueue.voiceChannelId !== channelId || !latestQueue.paused) return null;
+          const previousPaused = latestQueue.paused;
+          if (this.appliedPaused === null) this.appliedPaused = previousPaused;
+          latestQueue.paused = false;
+          await this.queueManager.saveQueue(latestQueue);
+          const revision = ++this.pauseRevision;
+          const state = { finalPaused: false };
+          const playback = this.enqueuePlaybackAfterQueueMutation(async () => {
+            state.finalPaused = await this.reconcilePlayerPauseState(player, false, revision);
+          });
+          return { previousPaused, newPaused: false, revision, state, playback };
+        });
+        if (transition !== null) {
+          try {
+            await transition.playback;
+          } catch (error) {
+            await this.rollbackPauseTransition(this.guild.id, transition);
+            throw error;
+          }
+        }
       }
     }
   }
@@ -1028,22 +1490,61 @@ export class MusicPlayerManager {
   }
 
   private setupPlayerEvents(player: Player): void {
-    player.on('start', () => {
+    player.on('start', (data?: TrackStartEvent) => {
       if (this.disposed) return;
-      this.sendNowPlaying(this.guild.id).catch((err) => {
-        log.error('Failed to send now-playing:', { error: String(err) });
-      });
-      this.clearInactivityTimer(this.guild.id);
+      const encodedTrack = data?.track.encoded;
+      const playbackIdentity = this.getPlaybackIdentity(data?.track);
+      const pendingIndex = playbackIdentity
+        ? this.pendingTrackStarts.findIndex(
+          (pending) => pending.playbackRevision === playbackIdentity.playbackRevision,
+        )
+        : encodedTrack
+          ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
+          : 0;
+      const scheduledStart = pendingIndex >= 0
+        ? this.pendingTrackStarts.splice(pendingIndex, 1)[0]
+        : undefined;
+      if (playbackIdentity && !scheduledStart) return;
+      if (
+        scheduledStart &&
+        scheduledStart.playbackRevision < this.latestStartedPlaybackRevision
+      ) return;
+      if (scheduledStart) {
+        this.latestStartedPlaybackRevision = scheduledStart.playbackRevision;
+      }
+      const expectedSessionRevision = scheduledStart?.sessionRevision ?? this.playbackSessionRevision;
+      if (expectedSessionRevision !== this.playbackSessionRevision) return;
+      if (scheduledStart) this.clearInactivityTimer(this.guild.id);
 
       // Emit track.started event
       this.queueManager.getQueue(this.guild.id).then((queue) => {
-        if (this.disposed) return;
+        if (
+          this.disposed ||
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          !queue
+        ) return;
+        const queueEntry = queue.currentIndex < queue.entries.length
+          ? queue.entries[queue.currentIndex]
+          : null;
+        if (!scheduledStart && encodedTrack && queueEntry?.track !== encodedTrack) return;
+        this.queueExhausted = false;
+        if (scheduledStart?.playbackRevision === this.trackPlaybackRevision) {
+          this.playbackRestartRequired = false;
+        }
+        const scheduledEntry = scheduledStart?.entry;
+        this.sendNowPlaying(
+          this.guild.id,
+          scheduledEntry,
+          expectedSessionRevision,
+          scheduledStart?.playbackRevision,
+        ).catch((err) => {
+          log.error('Failed to send now-playing:', { error: String(err) });
+        });
+        if (!scheduledStart) this.clearInactivityTimer(this.guild.id);
         if (queue?.paused) {
           this.resetInactivityTimer(this.guild.id);
         }
-        const np = queue && queue.currentIndex < queue.entries.length
-          ? queue.entries[queue.currentIndex]
-          : null;
+        const np = scheduledEntry ?? queueEntry;
         if (np) {
           this.eventBus.emit('track.started', this.guild.id, {
             title: np.title ?? 'Unknown',
@@ -1063,57 +1564,96 @@ export class MusicPlayerManager {
     });
 
     player.on('end', async (data: TrackEndEvent) => {
-      if (this.disposed) return;
-      if (data.reason === 'replaced') return; // Track was replaced (skip)
-
-      // Emit track.ended event for the track that just finished
-      const currentQueue = await this.queueManager.getQueue(this.guild.id);
-      if (this.disposed) return;
-      const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
-        ? currentQueue.entries[currentQueue.currentIndex]
-        : null;
-      if (np) {
-        this.eventBus.emit('track.ended', this.guild.id, {
-          title: np.title ?? 'Unknown',
-          author: np.author ?? 'Unknown',
-          uri: np.uri ?? '',
-          reason: data.reason === 'finished' ? 'finished' : 'skipped',
-        });
-      }
-
-      const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
-      if (this.disposed) return;
-
-      if (queueEnded || !track) {
-        // Queue ended — emit event
-        const totalPlayed = await this.getMusicStat('tracks_played_session');
-        this.eventBus.emit('queue.ended', this.guild.id, {
-          totalTracksPlayed: totalPlayed,
-        });
-        await this.resetSessionStats();
-
-        await this.queueManager.clearNowPlayingMessage(this.guild.id);
-        this.resetInactivityTimer(this.guild.id);
-
-        const queue = await this.queueManager.getQueue(this.guild.id);
-        if (queue) {
-          const textChannel = this.guild.channels.cache.get(queue.textChannelId);
-          if (textChannel && textChannel.type === ChannelType.GuildText) {
-            await textChannel.send({
-              embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
-            }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-          }
+      const playbackIdentity = this.getPlaybackIdentity(data.track);
+      const expectedSessionRevision = playbackIdentity?.sessionRevision ?? this.playbackSessionRevision;
+      const expectedPlaybackRevision = playbackIdentity?.playbackRevision;
+      const transition = await this.withQueueMutation(async (): Promise<{
+        queueEnded: boolean;
+        textChannelId: string | null;
+        sessionRevision: number | null;
+        playback: Promise<void> | null;
+      }> => {
+        if (
+          this.disposed ||
+          this.stopInProgress ||
+          this.queueExhausted ||
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          (expectedPlaybackRevision !== undefined &&
+            expectedPlaybackRevision !== this.trackPlaybackRevision)
+        ) {
+          return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         }
-        return;
-      }
+        if (data.reason === 'replaced') {
+          return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
+        }
 
-      // Play next track
-      await player.playTrack({ track: { encoded: track.track } });
-      await this.queueManager.clearVoteSkip(this.guild.id);
+        // Emit track.ended event for the track that just finished
+        let currentQueue: GuildQueue | null;
+        try {
+          currentQueue = await this.queueManager.getQueue(this.guild.id);
+        } catch (error) {
+          this.playbackRestartRequired = true;
+          throw error;
+        }
+        if (this.disposed) return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
+        const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
+          ? currentQueue.entries[currentQueue.currentIndex]
+          : null;
+        if (!playbackIdentity && data.track?.encoded && np?.track !== data.track.encoded) {
+          return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
+        }
+        if (np) {
+          this.eventBus.emit('track.ended', this.guild.id, {
+            title: np.title ?? 'Unknown',
+            author: np.author ?? 'Unknown',
+            uri: np.uri ?? '',
+            reason: data.reason === 'finished' ? 'finished' : 'skipped',
+          });
+        }
+
+        let track: QueueEntry | null;
+        let queueEnded: boolean;
+        try {
+          ({ track, queueEnded } = await this.queueManager.nextTrack(this.guild.id));
+        } catch (error) {
+          this.playbackRestartRequired = true;
+          throw error;
+        }
+        if (this.disposed) return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
+
+        if (queueEnded || !track) {
+          const queueEnd = await this.completeQueueEndTransition();
+          return { queueEnded: true, ...queueEnd, playback: null };
+        }
+
+        try {
+          await this.queueManager.clearVoteSkip(this.guild.id);
+        } catch (error) {
+          log.warn('Failed to clear skip votes while advancing the music queue:', (error as Error)?.message ?? error);
+        }
+        const playback = this.enqueueTrackPlaybackAfterQueueMutation(player, track);
+        return { queueEnded: false, textChannelId: null, sessionRevision: null, playback };
+      });
+
+      if (transition.playback) await transition.playback;
+      if (transition.queueEnded && transition.sessionRevision !== null) {
+        await this.sendQueueEndedNotice(transition.textChannelId, transition.sessionRevision);
+      }
     });
 
     player.on('exception', async (data: TrackExceptionEvent) => {
       if (this.disposed) return;
+      const expectedStopRevision = this.stopRevision;
+      const exceptionTrack = (data as TrackExceptionEvent & { track?: PlaybackEventTrack }).track;
+      const playbackIdentity = this.getPlaybackIdentity(exceptionTrack);
+      const expectedSessionRevision = playbackIdentity?.sessionRevision ?? this.playbackSessionRevision;
+      const expectedPlaybackRevision = playbackIdentity?.playbackRevision;
+      if (
+        expectedPlaybackRevision !== undefined &&
+        expectedPlaybackRevision !== this.trackPlaybackRevision
+      ) return;
+      const failedTrack = exceptionTrack?.encoded ?? player.track;
+      this.discardPendingTrackStart(failedTrack, expectedPlaybackRevision);
       log.error('Track exception:', data);
       const { shouldRecover, strategy } = this.selfHealer.recordFailure();
 
@@ -1133,20 +1673,100 @@ export class MusicPlayerManager {
         }
       }
 
-      const { track } = await this.queueManager.nextTrack(this.guild.id);
+      const transition = await this.withQueueMutation(async () => {
+        if (
+          this.stopInProgress ||
+          this.stopRevision !== expectedStopRevision ||
+          this.queueExhausted ||
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          (expectedPlaybackRevision !== undefined &&
+            expectedPlaybackRevision !== this.trackPlaybackRevision)
+        ) return null;
+        const activeQueue = await this.queueManager.getQueue(this.guild.id);
+        if (!activeQueue) return null;
+        const activeEntry = activeQueue.currentIndex < activeQueue.entries.length
+          ? activeQueue.entries[activeQueue.currentIndex]
+          : null;
+        if (
+          !playbackIdentity &&
+          exceptionTrack?.encoded &&
+          activeEntry?.track !== exceptionTrack.encoded
+        ) return null;
+        const { track } = await this.queueManager.nextTrack(this.guild.id);
+        if (!track) {
+          const queueEnd = await this.completeQueueEndTransition();
+          return {
+            queueEnded: true,
+            ...queueEnd,
+            playback: null,
+          };
+        }
+        return {
+          queueEnded: false,
+          textChannelId: null,
+          sessionRevision: null,
+          playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
+        };
+      });
       if (this.disposed) return;
-      if (track) {
-        await player.playTrack({ track: { encoded: track.track } });
+      if (transition?.playback) await transition.playback;
+      if (transition?.queueEnded && transition.sessionRevision !== null) {
+        await this.sendQueueEndedNotice(transition.textChannelId, transition.sessionRevision);
       }
     });
 
-    player.on('stuck', async () => {
+    player.on('stuck', async (data?: TrackStuckEvent) => {
       if (this.disposed) return;
+      const expectedStopRevision = this.stopRevision;
+      const playbackIdentity = this.getPlaybackIdentity(data?.track);
+      const expectedSessionRevision = playbackIdentity?.sessionRevision ?? this.playbackSessionRevision;
+      const expectedPlaybackRevision = playbackIdentity?.playbackRevision;
+      if (
+        expectedPlaybackRevision !== undefined &&
+        expectedPlaybackRevision !== this.trackPlaybackRevision
+      ) return;
+      const stuckTrack = data?.track.encoded ?? player.track;
+      this.discardPendingTrackStart(stuckTrack, expectedPlaybackRevision);
       log.warn('Track stuck, skipping...');
-      const { track } = await this.queueManager.nextTrack(this.guild.id);
+      const transition = await this.withQueueMutation(async () => {
+        if (
+          this.stopInProgress ||
+          this.stopRevision !== expectedStopRevision ||
+          this.queueExhausted ||
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          (expectedPlaybackRevision !== undefined &&
+            expectedPlaybackRevision !== this.trackPlaybackRevision)
+        ) return null;
+        const activeQueue = await this.queueManager.getQueue(this.guild.id);
+        if (!activeQueue) return null;
+        const activeEntry = activeQueue.currentIndex < activeQueue.entries.length
+          ? activeQueue.entries[activeQueue.currentIndex]
+          : null;
+        if (
+          !playbackIdentity &&
+          data?.track.encoded &&
+          activeEntry?.track !== data.track.encoded
+        ) return null;
+        const { track } = await this.queueManager.nextTrack(this.guild.id);
+        if (!track) {
+          const queueEnd = await this.completeQueueEndTransition();
+          return {
+            queueEnded: true,
+            ...queueEnd,
+            playback: null,
+          };
+        }
+        return {
+          queueEnded: false,
+          textChannelId: null,
+          sessionRevision: null,
+          playback: this.enqueueTrackPlaybackAfterQueueMutation(player, track),
+        };
+      });
       if (this.disposed) return;
-      if (track) {
-        await player.playTrack({ track: { encoded: track.track } });
+      if (transition?.playback) await transition.playback;
+      if (transition?.queueEnded && transition.sessionRevision !== null) {
+        await this.sendQueueEndedNotice(transition.textChannelId, transition.sessionRevision);
       }
     });
 
@@ -1169,6 +1789,10 @@ export class MusicPlayerManager {
 
     this.reconnectingVoice = true;
     const recoveryRevision = ++this.voiceOperationRevision;
+    this.playbackSessionRevision += 1;
+    this.playbackMutationRevision += 1;
+    this.pendingTrackStarts = [];
+    this.trackPlaybackRevision += 1;
     const recoveryIsCurrent = (): boolean => recoveryRevision === this.voiceOperationRevision;
 
     try {
@@ -1210,12 +1834,40 @@ export class MusicPlayerManager {
             : null;
           const resumeTrack = async (encoded: string): Promise<boolean> => {
             if (await recoveryWasCancelled()) return false;
-            await newPlayer.playTrack({
-              track: { encoded },
-              position: currentTrack?.isStream ? 0 : resumePosition,
-              volume: queue.volume,
-              paused: queue.paused,
-            });
+            if (!currentTrack) return false;
+            const playbackRevision = ++this.trackPlaybackRevision;
+            const scheduledStart: PendingTrackStart = {
+              entry: currentTrack,
+              encodedTrack: encoded,
+              playbackRevision,
+              sessionRevision: this.playbackSessionRevision,
+            };
+            this.pendingTrackStarts.push(scheduledStart);
+            try {
+              await newPlayer.playTrack({
+                track: {
+                  encoded,
+                  userData: {
+                    somnibotPlayback: {
+                      playbackRevision,
+                      sessionRevision: scheduledStart.sessionRevision,
+                    },
+                  },
+                },
+                position: currentTrack.isStream ? 0 : resumePosition,
+                volume: queue.volume,
+                paused: queue.paused,
+              });
+            } catch (error) {
+              const pendingIndex = this.pendingTrackStarts.indexOf(scheduledStart);
+              if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+              throw error;
+            }
+            if (this.trackPlaybackRevision === playbackRevision) {
+              this.playbackRestartRequired = false;
+            }
+            this.appliedPaused = queue.paused;
+            this.appliedVolume = queue.volume;
             return !(await recoveryWasCancelled());
           };
 
@@ -1267,6 +1919,282 @@ export class MusicPlayerManager {
     } catch (error) {
       log.warn(`${phase} failed:`, error);
       return false;
+    }
+  }
+
+  private async withQueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.queueMutationTail;
+    let release: (() => void) | undefined;
+    this.queueMutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+    }
+  }
+
+  private async waitForPlaybackMutations(): Promise<void> {
+    let pendingPlayback = this.playbackMutationTail;
+    while (true) {
+      await pendingPlayback;
+      if (pendingPlayback === this.playbackMutationTail) return;
+      pendingPlayback = this.playbackMutationTail;
+    }
+  }
+
+  private enqueuePlaybackMutation(operation: () => Promise<void>): Promise<void> {
+    const operationRevision = this.playbackMutationRevision;
+    const playback = this.playbackMutationTail.then(async () => {
+      if (this.disposed || operationRevision !== this.playbackMutationRevision) return;
+      await operation();
+    });
+    this.playbackMutationTail = playback.catch(() => undefined);
+    return playback;
+  }
+
+  private enqueuePlaybackAfterQueueMutation(operation: () => Promise<void>): Promise<void> {
+    const queueRelease = this.queueMutationTail;
+    const operationRevision = this.playbackMutationRevision;
+    const stopWasInProgress = this.stopInProgress;
+    return this.enqueuePlaybackMutation(async () => {
+      await queueRelease;
+      if (
+        this.disposed ||
+        operationRevision !== this.playbackMutationRevision ||
+        (!stopWasInProgress && this.stopInProgress)
+      ) return;
+      await operation();
+    });
+  }
+
+  private enqueueTrackPlaybackAfterQueueMutation(
+    player: Player,
+    entry: QueueEntry,
+    afterStart?: () => Promise<void>,
+  ): Promise<void> {
+    const playbackRevision = ++this.trackPlaybackRevision;
+    const scheduledStart: PendingTrackStart = {
+      entry,
+      encodedTrack: entry.track,
+      playbackRevision,
+      sessionRevision: this.playbackSessionRevision,
+    };
+    this.playbackRestartRequired = false;
+    return this.enqueuePlaybackAfterQueueMutation(async () => {
+      this.pendingTrackStarts.push(scheduledStart);
+      try {
+        await player.playTrack({
+          track: {
+            encoded: entry.track,
+            userData: {
+              somnibotPlayback: {
+                playbackRevision,
+                sessionRevision: scheduledStart.sessionRevision,
+              },
+            },
+          },
+        });
+        this.appliedPaused = false;
+      } catch (error) {
+        const pendingIndex = this.pendingTrackStarts.indexOf(scheduledStart);
+        if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+        if (this.trackPlaybackRevision === playbackRevision) {
+          this.playbackRestartRequired = true;
+        }
+        throw error;
+      }
+      if (this.trackPlaybackRevision === playbackRevision) {
+        this.playbackRestartRequired = false;
+      }
+      if (afterStart) await afterStart();
+    });
+  }
+
+  private discardPendingTrackStart(
+    encodedTrack: string | null | undefined,
+    playbackRevision?: number,
+  ): void {
+    let pendingIndex = playbackRevision === undefined
+      ? encodedTrack
+        ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
+        : 0
+      : this.pendingTrackStarts.findIndex((pending) => pending.playbackRevision === playbackRevision);
+    if (
+      playbackRevision === undefined &&
+      pendingIndex < 0 &&
+      this.pendingTrackStarts.length === 1
+    ) pendingIndex = 0;
+    if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+  }
+
+  private getPlaybackIdentity(track: Track | undefined): PlaybackIdentity | null {
+    const identity = (track as PlaybackEventTrack | undefined)?.userData?.somnibotPlayback;
+    if (
+      typeof identity?.playbackRevision !== 'number' ||
+      typeof identity.sessionRevision !== 'number'
+    ) return null;
+    return {
+      playbackRevision: identity.playbackRevision,
+      sessionRevision: identity.sessionRevision,
+    };
+  }
+
+  private async completeQueueEndTransition(): Promise<QueueEndState> {
+    if (this.queueExhausted) {
+      return { textChannelId: null, sessionRevision: this.playbackSessionRevision };
+    }
+    this.queueExhausted = true;
+    this.playbackRestartRequired = false;
+    this.pendingTrackStarts = [];
+    this.trackPlaybackRevision += 1;
+    this.playbackSessionRevision += 1;
+    this.pauseRevision += 1;
+    this.appliedPaused = false;
+    const queue = await this.queueManager.getQueue(this.guild.id);
+    if (queue) {
+      queue.entries = [];
+      queue.currentIndex = 0;
+      queue.paused = false;
+      queue.shuffled = false;
+      let lastPersistenceError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await this.queueManager.saveQueue(queue);
+          lastPersistenceError = undefined;
+          break;
+        } catch (error) {
+          lastPersistenceError = error;
+          log.warn(
+            `Failed to persist the exhausted music queue (${attempt}/3):`,
+            (error as Error)?.message ?? error,
+          );
+        }
+      }
+      if (lastPersistenceError !== undefined) throw lastPersistenceError;
+    }
+    const totalPlayed = await this.getMusicStat('tracks_played_session');
+    this.eventBus.emit('queue.ended', this.guild.id, {
+      totalTracksPlayed: totalPlayed,
+    });
+    await this.resetSessionStats();
+    await this.queueManager.clearNowPlayingMessage(this.guild.id)
+      .catch((error: unknown) => {
+        log.warn('Failed to clear the previous now-playing message:', (error as Error)?.message ?? error);
+      });
+    await this.queueManager.clearVoteSkip(this.guild.id)
+      .catch((error: unknown) => {
+        log.warn('Failed to clear skip votes for the exhausted queue:', (error as Error)?.message ?? error);
+      });
+    this.resetInactivityTimer(this.guild.id);
+    return {
+      textChannelId: queue?.textChannelId ?? null,
+      sessionRevision: this.playbackSessionRevision,
+    };
+  }
+
+  private async sendQueueEndedNotice(
+    textChannelId: string | null,
+    expectedSessionRevision: number,
+  ): Promise<void> {
+    if (!textChannelId || expectedSessionRevision !== this.playbackSessionRevision) return;
+    const textChannel = this.guild.channels.cache.get(textChannelId);
+    if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
+    const notice = await textChannel.send({
+      embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
+    }).catch((error: unknown) => {
+      log.warn('Failed to send the queue-ended notice:', (error as Error)?.message ?? error);
+    });
+    if (notice && expectedSessionRevision !== this.playbackSessionRevision) {
+      await notice.delete().catch((error: unknown) => {
+        log.warn('Failed to remove a stale queue-ended notice:', (error as Error)?.message ?? error);
+      });
+    }
+  }
+
+  private async reconcilePlayerPauseState(
+    player: Player,
+    requestedPaused: boolean,
+    requestedRevision: number,
+  ): Promise<boolean> {
+    let paused = requestedPaused;
+    let revision = requestedRevision;
+
+    while (true) {
+      await player.setPaused(paused);
+      this.appliedPaused = paused;
+      const latest = await this.withQueueMutation(async () => {
+        const queue = await this.queueManager.getQueue(this.guild.id);
+        return { paused: queue?.paused ?? false, revision: this.pauseRevision };
+      });
+      if (latest.paused === paused && latest.revision === revision) return paused;
+      paused = latest.paused;
+      revision = latest.revision;
+    }
+  }
+
+  private async rollbackPauseTransition(guildId: string, transition: PauseTransition): Promise<void> {
+    const rollbackPaused = this.appliedPaused ?? transition.previousPaused;
+    await this.withQueueMutation(async () => {
+      const queue = await this.queueManager.getQueue(guildId);
+      if (
+        !queue ||
+        queue.paused !== transition.newPaused ||
+        this.pauseRevision !== transition.revision
+      ) return;
+      queue.paused = rollbackPaused;
+      await this.queueManager.saveQueue(queue);
+      this.pauseRevision += 1;
+    });
+  }
+
+  private async completePlayRequest(requestRevision: number, shouldCleanUp: boolean): Promise<void> {
+    const shouldLeaveVoice = await this.withQueueMutation(async () => {
+      this.pendingPlayRequests.delete(requestRevision);
+      if (
+        !shouldCleanUp ||
+        this.stopInProgress ||
+        !this.uncommittedVoiceSession ||
+        this.pendingPlayRequests.size > 0
+      ) return false;
+
+      let queue: GuildQueue | null = null;
+      try {
+        queue = await this.queueManager.getQueue(this.guild.id);
+      } catch (error) {
+        log.warn('Failed to inspect the unused queue after an unsuccessful play request:', (error as Error)?.message ?? error);
+      }
+      if (queue && queue.entries.length > 0) {
+        this.playbackRestartRequired = true;
+        this.uncommittedVoiceSession = false;
+        this.uncommittedVoiceChannelId = null;
+        return false;
+      }
+
+      if (queue) {
+        try {
+          await this.queueManager.destroyQueue(this.guild.id);
+        } catch (error) {
+          log.warn('Failed to remove an unused queue after an unsuccessful play request:', (error as Error)?.message ?? error);
+        }
+      }
+
+      this.uncommittedVoiceSession = false;
+      this.uncommittedVoiceChannelId = null;
+      this.uncommittedVoiceCleanupInProgress = true;
+      this.voiceOperationRevision += 1;
+      this.intentionalVoiceLeaveDepth += 1;
+      return true;
+    });
+    if (!shouldLeaveVoice) return;
+
+    try {
+      await this.clearVoiceConnectionForRecovery(this.guild.id, 'Failed-play voice cleanup');
+    } finally {
+      this.intentionalVoiceLeaveDepth -= 1;
+      this.uncommittedVoiceCleanupInProgress = false;
     }
   }
 

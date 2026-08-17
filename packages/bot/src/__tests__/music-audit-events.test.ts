@@ -281,9 +281,7 @@ describe('music audit events', () => {
     queueSpies.createQueue.mockReturnValue({
       guildId: 'g1', entries: [], currentIndex: 0, volume: 50, voiceChannelId: 'vc1',
     });
-    queueSpies.saveQueue
-      .mockResolvedValueOnce(undefined)
-      .mockImplementationOnce(() => populatedSave);
+    queueSpies.saveQueue.mockImplementationOnce(() => populatedSave);
     player.node.rest.resolve.mockResolvedValue({
       loadType: 'search',
       data: [{ encoded: 'enc', info: { title: 'Song', author: 'Artist', length: 1000, uri: 'u', isStream: false } }],
@@ -296,9 +294,9 @@ describe('music audit events', () => {
       { id: 'vc1' } as never,
       { id: 'tc1' } as never,
     );
-    await vi.waitFor(() => expect(queueSpies.saveQueue).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(queueSpies.saveQueue).toHaveBeenCalledTimes(1));
 
-    expect(queueSpies.saveQueue.mock.calls[1]![0]).toMatchObject({
+    expect(queueSpies.saveQueue.mock.calls[0]![0]).toMatchObject({
       entries: [expect.objectContaining({ title: 'Song', requestedBy: 'u1' })],
     });
     expect(eventBus.emit.mock.calls.filter((call) => call[0] === 'music.queued')).toHaveLength(0);
@@ -313,7 +311,7 @@ describe('music audit events', () => {
       'g1',
       expect.objectContaining({ userId: 'u1', title: 'Song', trackCount: 1 }),
     ]);
-    expect(queueSpies.saveQueue.mock.invocationCallOrder[1])
+    expect(queueSpies.saveQueue.mock.invocationCallOrder[0])
       .toBeLessThan(eventBus.emit.mock.invocationCallOrder[0]!);
     expect(eventBus.emit.mock.invocationCallOrder[0])
       .toBeLessThan(player.playTrack.mock.invocationCallOrder[0]!);
@@ -324,9 +322,7 @@ describe('music audit events', () => {
     queueSpies.createQueue.mockReturnValue({
       guildId: 'g1', entries: [], currentIndex: 0, volume: 50, voiceChannelId: 'vc1',
     });
-    queueSpies.saveQueue
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('queue write failed'));
+    queueSpies.saveQueue.mockRejectedValueOnce(new Error('queue write failed'));
     player.node.rest.resolve.mockResolvedValue({
       loadType: 'search',
       data: [{ encoded: 'enc', info: { title: 'Song', author: 'Artist', length: 1000, uri: 'u', isStream: false } }],
@@ -334,7 +330,10 @@ describe('music audit events', () => {
 
     await expect(
       manager.play('song', 'u1', { id: 'vc1' } as never, { id: 'tc1' } as never),
-    ).rejects.toThrow('queue write failed');
+    ).resolves.toEqual({
+      success: false,
+      message: 'Music storage is temporarily unavailable — please try again shortly.',
+    });
 
     expect(eventBus.emit.mock.calls.filter((call) => call[0] === 'music.queued')).toHaveLength(0);
     expect(player.playTrack).not.toHaveBeenCalled();
