@@ -46,7 +46,7 @@ CREATE TRIGGER commerce_checkout_intents_preserve_provider_binding
   EXECUTE FUNCTION public.commerce_preserve_checkout_provider_binding();
 
 -- Direct API writes cannot replace an already-issued approval URL. The
--- SECURITY DEFINER refresh RPC below is the only sanctioned transition and
+-- The privileged refresh RPC below is the only sanctioned transition and
 -- rechecks the order, provider, prior URL, and provider binding under locks.
 CREATE OR REPLACE FUNCTION public.commerce_guard_checkout_approval_url()
 RETURNS TRIGGER
