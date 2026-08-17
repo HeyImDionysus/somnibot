@@ -3,7 +3,10 @@
  */
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { KeyRound } from 'lucide-react';
+import { Button } from '@/components/shared/button';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 interface LicenseSession {
   id: string;
@@ -35,57 +38,101 @@ export default function PortalLicenses() {
   const [keys, setKeys] = useState<LicenseKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [removing, setRemoving] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<LicenseSession | null>(null);
+  const [rotateTarget, setRotateTarget] = useState<LicenseKey | null>(null);
+  const [mutation, setMutation] = useState<'remove' | 'rotate' | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
 
-  const removeDevice = async (sessionId: string) => {
+  const loadKeys = useCallback(async () => {
     const token = localStorage.getItem('portal_token');
-    if (!token) return;
-    setRemoving(sessionId);
+    if (!token) {
+      window.location.href = '/portal';
+      return;
+    }
+    const response = await fetch('/api/portal/licenses', {
+      headers: { 'x-portal-token': token },
+    });
+    if (response.status === 401) {
+      localStorage.removeItem('portal_token');
+      window.location.href = '/portal';
+      return;
+    }
+    const body = await response.json();
+    if (!response.ok || body.success !== true || !Array.isArray(body.data)) {
+      throw new Error(body.error || 'Licenses could not be loaded.');
+    }
+    setKeys(body.data);
+  }, []);
+
+  const removeDevice = async () => {
+    const token = localStorage.getItem('portal_token');
+    if (!token || !removeTarget) return;
+    setMutation('remove');
+    setNotice(null);
     try {
-      const response = await fetch(`/api/portal/licenses/sessions/${sessionId}`, {
+      const response = await fetch(`/api/portal/licenses/sessions/${removeTarget.id}`, {
         method: 'DELETE',
         headers: { 'x-portal-token': token },
       });
-      if (response.ok) {
-        setKeys((current) => current.map((key) => ({
-          ...key,
-          license_sessions: key.license_sessions.map((session) =>
-            session.id === sessionId ? { ...session, active: false } : session),
-        })));
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.success !== true) {
+        throw new Error(body.error || 'The device could not be removed.');
       }
+      await loadKeys();
+      setNotice({ kind: 'success', message: 'The device session was removed and can no longer use this license.' });
+      setRemoveTarget(null);
+    } catch (error) {
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'The device could not be removed.' });
     } finally {
-      setRemoving(null);
+      setMutation(null);
+    }
+  };
+
+  const rotateKey = async () => {
+    const token = localStorage.getItem('portal_token');
+    if (!token || !rotateTarget) return;
+    setMutation('rotate');
+    setNotice(null);
+    try {
+      const response = await fetch(`/api/portal/licenses/${rotateTarget.id}/rotate`, {
+        method: 'POST',
+        headers: { 'x-portal-token': token },
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.success !== true) {
+        throw new Error(body.error || 'The license key could not be rotated.');
+      }
+      await loadKeys();
+      setNotice({
+        kind: 'success',
+        message: body.alreadyRotated
+          ? `This key was already rotated. Check your Discord DMs for the replacement ending in ${body.newKeySuffix}.`
+          : `The old key stopped working. A replacement ending in ${body.newKeySuffix} is on its way by Discord DM.`,
+      });
+      setRotateTarget(null);
+    } catch (error) {
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'The license key could not be rotated.' });
+    } finally {
+      setMutation(null);
     }
   };
 
   useEffect(() => {
     async function load() {
-      const token = localStorage.getItem('portal_token');
-      // V11 Re-Audit UX-1: Redirect to portal login if no token instead of
-      // silently leaving the user on an infinite loading spinner.
-      if (!token) {
-        window.location.href = '/portal';
-        return;
-      }
       try {
-        const res = await fetch('/api/portal/licenses', { headers: { 'x-portal-token': token } });
-        if (res.status === 401) {
-          localStorage.removeItem('portal_token');
-          window.location.href = '/portal';
-          return;
-        }
-        const json = await res.json();
-        if (json.success) setKeys(json.data);
+        await loadKeys();
+      } catch (error) {
+        setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Licenses could not be loaded.' });
       } finally {
         setLoading(false);
       }
     }
-    load();
-  }, []);
+    void load();
+  }, [loadKeys]);
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24">
+      <div className="flex items-center justify-center py-24" role="status" aria-label="Loading licenses">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-discord-accent border-t-transparent" />
       </div>
     );
@@ -95,12 +142,23 @@ export default function PortalLicenses() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-discord-text-primary">Your Licenses</h1>
-        <p className="mt-1 text-sm text-discord-text-muted">View your license keys and active device sessions.</p>
+        <p className="mt-1 text-sm text-discord-text-muted">View licenses, replace a compromised key, and remove old devices.</p>
       </div>
+
+      {notice && (
+        <div
+          role={notice.kind === 'error' ? 'alert' : 'status'}
+          className={`rounded-input border p-3 text-sm ${notice.kind === 'error'
+            ? 'border-discord-danger/40 bg-discord-danger/10 text-discord-danger'
+            : 'border-discord-success/40 bg-discord-success/10 text-discord-text-primary'}`}
+        >
+          {notice.message}
+        </div>
+      )}
 
       {keys.length === 0 ? (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
-          <div className="text-4xl mb-3">🔑</div>
+          <KeyRound className="mx-auto mb-3 text-discord-text-muted" size={36} aria-hidden="true" />
           <p className="text-discord-text-muted">No licenses yet. Purchased products will appear here.</p>
         </div>
       ) : (
@@ -110,6 +168,7 @@ export default function PortalLicenses() {
             <div key={key.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
               <button
                 onClick={() => setExpandedId(expandedId === key.id ? null : key.id)}
+                aria-expanded={expandedId === key.id}
                 className="w-full text-left px-4 py-4 hover:bg-discord-bg-tertiary/30 transition-colors rounded-lg"
               >
                 <div className="flex items-center justify-between">
@@ -142,6 +201,17 @@ export default function PortalLicenses() {
                     <div>Max Devices: {key.max_devices}</div>
                   </div>
 
+                  {key.status === 'active' && (
+                    <div className="rounded-input border border-discord-warning/30 bg-discord-warning/10 p-3">
+                      <p className="text-xs text-discord-text-secondary">
+                        Replace this key if it was shared or exposed. The current key stops working immediately, and the replacement is delivered only through Discord DM.
+                      </p>
+                      <Button className="mt-3" size="sm" variant="danger" onClick={() => setRotateTarget(key)}>
+                        Rotate key
+                      </Button>
+                    </div>
+                  )}
+
                   <div>
                     <h4 className="text-xs font-semibold uppercase text-discord-text-muted mb-2">Active Sessions</h4>
                     {activeSessions.length === 0 ? (
@@ -149,8 +219,8 @@ export default function PortalLicenses() {
                     ) : (
                       <div className="space-y-1">
                         {activeSessions.map((session) => (
-                          <div key={session.id} className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-2">
-                            <div>
+                          <div key={session.id} className="flex flex-col items-start gap-2 rounded-md bg-discord-bg-tertiary p-2 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="min-w-0">
                               <span className="text-xs text-discord-text-primary">
                                 {session.device_name || session.device_fingerprint.slice(0, 16)}
                               </span>
@@ -158,17 +228,17 @@ export default function PortalLicenses() {
                                 <span className="ml-2 text-[10px] text-discord-text-muted">{session.ip_address}</span>
                               )}
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end">
                               <span className="text-[10px] text-discord-text-muted">
                                 Last seen: {formatDate(session.last_seen_at)}
                               </span>
                               <button
                                 type="button"
-                                disabled={removing === session.id}
-                                onClick={() => void removeDevice(session.id)}
-                                className="rounded-md bg-discord-danger/20 px-2 py-1 text-[10px] text-discord-danger disabled:opacity-50"
+                                disabled={mutation !== null}
+                                onClick={() => setRemoveTarget(session)}
+                                className="inline-flex h-8 items-center rounded-input bg-discord-danger/20 px-3 text-xs font-medium text-discord-danger transition-standard hover:bg-discord-danger/30 disabled:opacity-50"
                               >
-                                {removing === session.id ? 'Removing…' : 'Remove'}
+                                Remove device
                               </button>
                             </div>
                           </div>
@@ -182,6 +252,28 @@ export default function PortalLicenses() {
           );
         })
       )}
+
+      <ConfirmDialog
+        open={Boolean(removeTarget)}
+        title="Remove this device?"
+        description={`${removeTarget?.device_name || 'This device'} will be signed out of the license. It can be activated again later if a seat is available.`}
+        confirmLabel="Remove device"
+        variant="danger"
+        loading={mutation === 'remove'}
+        onConfirm={removeDevice}
+        onCancel={() => setRemoveTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(rotateTarget)}
+        title={`Rotate the key for ${rotateTarget?.products?.name || 'this product'}?`}
+        description="The current key stops working immediately. The replacement is delivered only through Discord DM, and this action cannot be undone."
+        confirmLabel="Rotate key"
+        variant="danger"
+        loading={mutation === 'rotate'}
+        onConfirm={rotateKey}
+        onCancel={() => setRotateTarget(null)}
+      />
     </div>
   );
 }

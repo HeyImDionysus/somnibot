@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
 
     const { data: orders } = await admin
       .from('orders')
-      .select('*, products(name, type), payments(id, amount_cents, currency, status, provider, created_at)')
+      .select('id, order_number, amount_cents, discount_cents, currency, status, source, created_at, products(name, type), payments(id, amount_cents, currency, status, provider, created_at), entitlements(id, status, type, expires_at, cancelled_at)')
       .eq('customer_id', session.customer_id)
       .order('created_at', { ascending: false })
       .limit(500);
