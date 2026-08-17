@@ -1141,6 +1141,39 @@ describe('MusicPlayerManager', () => {
       await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({ currentIndex: 1 });
     });
 
+    it('restarts the persisted current entry after queue advancement fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'next', title: 'Next', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      valkey.set.mockRejectedValueOnce(new Error('Valkey unavailable'));
+
+      await expect(getEndHandler()({ reason: 'finished', track: { encoded: 'finished' } }))
+        .rejects.toThrow('Valkey unavailable');
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('new request', 'u3', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'finished' }),
+      }));
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        currentIndex: 0,
+        entries: [
+          expect.objectContaining({ track: 'finished' }),
+          expect.objectContaining({ track: 'next' }),
+          expect.objectContaining({ requestedBy: 'u3' }),
+        ],
+      });
+    });
+
     it('does not replay a finished entry when play commits before its end callback', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',

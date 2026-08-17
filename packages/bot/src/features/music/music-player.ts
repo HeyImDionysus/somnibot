@@ -1600,7 +1600,14 @@ export class MusicPlayerManager {
           });
         }
 
-        const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
+        let track: QueueEntry | null;
+        let queueEnded: boolean;
+        try {
+          ({ track, queueEnded } = await this.queueManager.nextTrack(this.guild.id));
+        } catch (error) {
+          this.playbackRestartRequired = true;
+          throw error;
+        }
         if (this.disposed) return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
 
         if (queueEnded || !track) {
