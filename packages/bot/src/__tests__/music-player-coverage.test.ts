@@ -344,6 +344,26 @@ describe('MusicPlayerManager', () => {
       const result = await manager.stop('g1');
       expect(result.success).toBe(true);
     });
+
+    it('finishes queue teardown when Lavalink rejects the track stop', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      player.stopTrack.mockRejectedValueOnce(new Error('Lavalink unavailable'));
+
+      await expect(manager.stop('g1', { userId: 'u1', reason: 'command' }))
+        .resolves.toMatchObject({ success: true });
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'music.stopped',
+        'g1',
+        expect.objectContaining({ userId: 'u1', reason: 'command', trackCount: 1 }),
+      );
+    });
   });
 
   describe('togglePause', () => {

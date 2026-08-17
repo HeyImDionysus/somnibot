@@ -859,9 +859,10 @@ export class MusicPlayerManager {
           if (!playerToStop) return;
           try {
             await playerToStop.stopTrack();
-          } finally {
-            await this.shoukaku.leaveVoiceChannel(guildId);
+          } catch (error) {
+            log.warn('Failed to stop the current track during queue teardown:', (error as Error)?.message ?? error);
           }
+          await this.shoukaku.leaveVoiceChannel(guildId);
         });
         return { queueBeforeStop, playback };
       } catch (error) {
