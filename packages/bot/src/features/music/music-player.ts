@@ -92,6 +92,17 @@ type PendingTrackStart = {
   sessionRevision: number;
 };
 
+type PlaybackIdentity = {
+  playbackRevision: number;
+  sessionRevision: number;
+};
+
+type PlaybackEventTrack = Track & {
+  userData?: {
+    somnibotPlayback?: Partial<PlaybackIdentity>;
+  };
+};
+
 type QueueEndState = {
   textChannelId: string | null;
   sessionRevision: number;
@@ -1443,12 +1454,18 @@ export class MusicPlayerManager {
     player.on('start', (data?: TrackStartEvent) => {
       if (this.disposed) return;
       const encodedTrack = data?.track.encoded;
-      const pendingIndex = encodedTrack
-        ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
-        : 0;
+      const playbackIdentity = this.getPlaybackIdentity(data?.track);
+      const pendingIndex = playbackIdentity
+        ? this.pendingTrackStarts.findIndex(
+          (pending) => pending.playbackRevision === playbackIdentity.playbackRevision,
+        )
+        : encodedTrack
+          ? this.pendingTrackStarts.findIndex((pending) => pending.encodedTrack === encodedTrack)
+          : 0;
       const scheduledStart = pendingIndex >= 0
         ? this.pendingTrackStarts.splice(pendingIndex, 1)[0]
         : undefined;
+      if (playbackIdentity && !scheduledStart) return;
       if (
         scheduledStart &&
         scheduledStart.playbackRevision < this.latestStartedPlaybackRevision
@@ -1506,7 +1523,9 @@ export class MusicPlayerManager {
     });
 
     player.on('end', async (data: TrackEndEvent) => {
-      const expectedSessionRevision = this.playbackSessionRevision;
+      const playbackIdentity = this.getPlaybackIdentity(data.track);
+      const expectedSessionRevision = playbackIdentity?.sessionRevision ?? this.playbackSessionRevision;
+      const expectedPlaybackRevision = playbackIdentity?.playbackRevision;
       const transition = await this.withQueueMutation(async (): Promise<{
         queueEnded: boolean;
         textChannelId: string | null;
@@ -1517,7 +1536,9 @@ export class MusicPlayerManager {
           this.disposed ||
           this.stopInProgress ||
           this.queueExhausted ||
-          expectedSessionRevision !== this.playbackSessionRevision
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          (expectedPlaybackRevision !== undefined &&
+            expectedPlaybackRevision !== this.trackPlaybackRevision)
         ) {
           return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         }
@@ -1565,8 +1586,15 @@ export class MusicPlayerManager {
     player.on('exception', async (data: TrackExceptionEvent) => {
       if (this.disposed) return;
       const expectedStopRevision = this.stopRevision;
-      const expectedSessionRevision = this.playbackSessionRevision;
-      const failedTrack = (data as TrackExceptionEvent & { track?: Track }).track?.encoded ?? player.track;
+      const exceptionTrack = (data as TrackExceptionEvent & { track?: PlaybackEventTrack }).track;
+      const playbackIdentity = this.getPlaybackIdentity(exceptionTrack);
+      const expectedSessionRevision = playbackIdentity?.sessionRevision ?? this.playbackSessionRevision;
+      const expectedPlaybackRevision = playbackIdentity?.playbackRevision;
+      if (
+        expectedPlaybackRevision !== undefined &&
+        expectedPlaybackRevision !== this.trackPlaybackRevision
+      ) return;
+      const failedTrack = exceptionTrack?.encoded ?? player.track;
       this.discardPendingTrackStart(failedTrack);
       log.error('Track exception:', data);
       const { shouldRecover, strategy } = this.selfHealer.recordFailure();
@@ -1592,7 +1620,9 @@ export class MusicPlayerManager {
           this.stopInProgress ||
           this.stopRevision !== expectedStopRevision ||
           this.queueExhausted ||
-          expectedSessionRevision !== this.playbackSessionRevision
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          (expectedPlaybackRevision !== undefined &&
+            expectedPlaybackRevision !== this.trackPlaybackRevision)
         ) return null;
         const activeQueue = await this.queueManager.getQueue(this.guild.id);
         if (!activeQueue) return null;
@@ -1622,7 +1652,13 @@ export class MusicPlayerManager {
     player.on('stuck', async (data?: TrackStuckEvent) => {
       if (this.disposed) return;
       const expectedStopRevision = this.stopRevision;
-      const expectedSessionRevision = this.playbackSessionRevision;
+      const playbackIdentity = this.getPlaybackIdentity(data?.track);
+      const expectedSessionRevision = playbackIdentity?.sessionRevision ?? this.playbackSessionRevision;
+      const expectedPlaybackRevision = playbackIdentity?.playbackRevision;
+      if (
+        expectedPlaybackRevision !== undefined &&
+        expectedPlaybackRevision !== this.trackPlaybackRevision
+      ) return;
       this.discardPendingTrackStart(data?.track.encoded ?? player.track);
       log.warn('Track stuck, skipping...');
       const transition = await this.withQueueMutation(async () => {
@@ -1630,7 +1666,9 @@ export class MusicPlayerManager {
           this.stopInProgress ||
           this.stopRevision !== expectedStopRevision ||
           this.queueExhausted ||
-          expectedSessionRevision !== this.playbackSessionRevision
+          expectedSessionRevision !== this.playbackSessionRevision ||
+          (expectedPlaybackRevision !== undefined &&
+            expectedPlaybackRevision !== this.trackPlaybackRevision)
         ) return null;
         const activeQueue = await this.queueManager.getQueue(this.guild.id);
         if (!activeQueue) return null;
@@ -1732,7 +1770,15 @@ export class MusicPlayerManager {
             this.pendingTrackStarts.push(scheduledStart);
             try {
               await newPlayer.playTrack({
-                track: { encoded },
+                track: {
+                  encoded,
+                  userData: {
+                    somnibotPlayback: {
+                      playbackRevision,
+                      sessionRevision: scheduledStart.sessionRevision,
+                    },
+                  },
+                },
                 position: currentTrack.isStream ? 0 : resumePosition,
                 volume: queue.volume,
                 paused: queue.paused,
@@ -1849,7 +1895,17 @@ export class MusicPlayerManager {
     return this.enqueuePlaybackAfterQueueMutation(async () => {
       this.pendingTrackStarts.push(scheduledStart);
       try {
-        await player.playTrack({ track: { encoded: entry.track } });
+        await player.playTrack({
+          track: {
+            encoded: entry.track,
+            userData: {
+              somnibotPlayback: {
+                playbackRevision,
+                sessionRevision: scheduledStart.sessionRevision,
+              },
+            },
+          },
+        });
         this.appliedPaused = false;
       } catch (error) {
         const pendingIndex = this.pendingTrackStarts.indexOf(scheduledStart);
@@ -1872,6 +1928,18 @@ export class MusicPlayerManager {
       : 0;
     if (pendingIndex < 0 && this.pendingTrackStarts.length === 1) pendingIndex = 0;
     if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+  }
+
+  private getPlaybackIdentity(track: Track | undefined): PlaybackIdentity | null {
+    const identity = (track as PlaybackEventTrack | undefined)?.userData?.somnibotPlayback;
+    if (
+      typeof identity?.playbackRevision !== 'number' ||
+      typeof identity.sessionRevision !== 'number'
+    ) return null;
+    return {
+      playbackRevision: identity.playbackRevision,
+      sessionRevision: identity.sessionRevision,
+    };
   }
 
   private async completeQueueEndTransition(): Promise<QueueEndState> {

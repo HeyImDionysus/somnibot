@@ -718,24 +718,33 @@ describe('MusicPlayerManager', () => {
   });
 
   describe('queue-end restart', () => {
-    function getStartHandler(): (event?: { track: { encoded: string } }) => void {
+    type PlaybackEvent = {
+      track: {
+        encoded: string;
+        userData?: unknown;
+      };
+    };
+
+    function getStartHandler(): (event?: PlaybackEvent) => void {
       const eventSetup = manager as unknown as {
         setupPlayerEvents(target: ReturnType<typeof makePlayer>): void;
       };
       eventSetup.setupPlayerEvents(player);
       const startRegistration = player.on.mock.calls.find(([event]) => event === 'start');
       expect(startRegistration).toBeDefined();
-      return startRegistration?.[1] as (event?: { track: { encoded: string } }) => void;
+      return startRegistration?.[1] as (event?: PlaybackEvent) => void;
     }
 
-    function getEndHandler(): (event: { reason: string; track?: { encoded: string } }) => Promise<void> {
+    function getEndHandler(): (event: { reason: string; track?: PlaybackEvent['track'] }) => Promise<void> {
       const eventSetup = manager as unknown as {
         setupPlayerEvents(target: ReturnType<typeof makePlayer>): void;
       };
       eventSetup.setupPlayerEvents(player);
       const endRegistration = player.on.mock.calls.find(([event]) => event === 'end');
       expect(endRegistration).toBeDefined();
-      return endRegistration?.[1] as (event: { reason: string; track?: { encoded: string } }) => Promise<void>;
+      return endRegistration?.[1] as (
+        event: { reason: string; track?: PlaybackEvent['track'] },
+      ) => Promise<void>;
     }
 
     function getFailureHandler(eventName: 'exception' | 'stuck'): (...args: unknown[]) => Promise<void> {
@@ -769,7 +778,9 @@ describe('MusicPlayerManager', () => {
       const result = await manager.play('next song', 'u1', voiceChannel, textChannel);
 
       expect(result.success).toBe(true);
-      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'base64track' }),
+      }));
       const restartedQueue = await manager.queueManager.getQueue('g1');
       expect(restartedQueue?.currentIndex).toBe(0);
       expect(restartedQueue?.entries).toHaveLength(1);
@@ -799,7 +810,9 @@ describe('MusicPlayerManager', () => {
         await expect(manager.play('next song', 'u2', voiceChannel, textChannel))
           .resolves.toMatchObject({ success: true });
         expect(player.playTrack).toHaveBeenCalledTimes(1);
-        expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+        expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+          track: expect.objectContaining({ encoded: 'base64track' }),
+        }));
       },
     );
 
@@ -898,6 +911,55 @@ describe('MusicPlayerManager', () => {
       });
     });
 
+    it('does not let a delayed failure end advance a newer replay of the same track', async () => {
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+      const startHandler = getStartHandler();
+      const exceptionHandler = getFailureHandler('exception');
+      const endHandler = getEndHandler();
+
+      await expect(manager.play('same song', 'u1', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+      const firstPlayback = player.playTrack.mock.calls[0]?.[0] as {
+        track: PlaybackEvent['track'];
+      };
+      startHandler({ track: firstPlayback.track });
+      await vi.waitFor(() => {
+        expect(eventBus.emit).toHaveBeenCalledWith(
+          'track.started',
+          'g1',
+          expect.objectContaining({ requestedBy: 'u1' }),
+        );
+      });
+
+      await expect(manager.play('same song', 'u2', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+      await exceptionHandler({ track: firstPlayback.track, message: 'Playback failed' });
+      const secondPlayback = player.playTrack.mock.calls[1]?.[0] as {
+        track: PlaybackEvent['track'];
+      };
+      startHandler({ track: secondPlayback.track });
+      await vi.waitFor(() => {
+        expect(eventBus.emit).toHaveBeenCalledWith(
+          'track.started',
+          'g1',
+          expect.objectContaining({ requestedBy: 'u2' }),
+        );
+      });
+
+      await endHandler({ reason: 'finished', track: firstPlayback.track });
+
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        currentIndex: 1,
+        entries: [
+          expect.objectContaining({ track: 'base64track', requestedBy: 'u1' }),
+          expect.objectContaining({ track: 'base64track', requestedBy: 'u2' }),
+        ],
+      });
+      expect(player.playTrack).toHaveBeenCalledTimes(2);
+      expect(eventBus.emit).not.toHaveBeenCalledWith('queue.ended', 'g1', expect.any(Object));
+    });
+
     it('does not replay a finished entry when play commits before its end callback', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
@@ -917,7 +979,9 @@ describe('MusicPlayerManager', () => {
 
       await getEndHandler()({ reason: 'finished' });
       expect(player.playTrack).toHaveBeenCalledTimes(1);
-      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'next' } });
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'next' }),
+      }));
     });
 
     it('does not duplicate the advanced entry when the end callback commits first', async () => {
@@ -946,7 +1010,9 @@ describe('MusicPlayerManager', () => {
       finishPlayback?.();
       await ending;
       expect(player.playTrack).toHaveBeenCalledTimes(1);
-      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'next' } });
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'next' }),
+      }));
     });
 
     it('restarts the persisted current entry after an earlier playback start fails', async () => {
@@ -981,7 +1047,9 @@ describe('MusicPlayerManager', () => {
         .resolves.toMatchObject({ success: true });
 
       expect(player.playTrack).toHaveBeenCalledTimes(2);
-      expect(player.playTrack).toHaveBeenNthCalledWith(2, { track: { encoded: 'first-track' } });
+      expect(player.playTrack).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'first-track' }),
+      }));
       await expect(manager.queueManager.getQueue('g1'))
         .resolves.toMatchObject({ currentIndex: 0, entries: [{ track: 'first-track' }, { track: 'second-track' }] });
     });
@@ -1004,7 +1072,9 @@ describe('MusicPlayerManager', () => {
       expect(queue?.entries).toHaveLength(1);
       expect(queue?.currentIndex).toBe(0);
       expect(player.playTrack).toHaveBeenCalledTimes(1);
-      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'base64track' }),
+      }));
     });
 
     it('releases the queue lock before starting a newly committed track', async () => {
@@ -1077,12 +1147,16 @@ describe('MusicPlayerManager', () => {
       });
 
       expect(player.playTrack).toHaveBeenCalledTimes(1);
-      expect(player.playTrack).toHaveBeenNthCalledWith(1, { track: { encoded: 'b' } });
+      expect(player.playTrack).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'b' }),
+      }));
       finishFirstPlayback?.();
       await Promise.all([firstSkip, secondSkip]);
 
       expect(player.playTrack).toHaveBeenCalledTimes(2);
-      expect(player.playTrack).toHaveBeenNthCalledWith(2, { track: { encoded: 'c' } });
+      expect(player.playTrack).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'c' }),
+      }));
     });
 
     it('attributes a delayed start event to its scheduled entry', async () => {
@@ -1188,7 +1262,9 @@ describe('MusicPlayerManager', () => {
         .resolves.toMatchObject({ success: true });
 
       expect(player.playTrack).toHaveBeenCalledTimes(3);
-      expect(player.playTrack).toHaveBeenNthCalledWith(3, { track: { encoded: 'c' } });
+      expect(player.playTrack).toHaveBeenNthCalledWith(3, expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'c' }),
+      }));
     });
 
     it('attributes the next start after a pre-start exception to the replacement track', async () => {
@@ -1206,8 +1282,14 @@ describe('MusicPlayerManager', () => {
       const exceptionHandler = getFailureHandler('exception');
 
       await expect(manager.skip('g1', { userId: 'u1' })).resolves.toMatchObject({ success: true });
-      await exceptionHandler({ message: 'Track B failed before start' });
-      startHandler();
+      const failedPlayback = player.playTrack.mock.calls[0]?.[0] as {
+        track: PlaybackEvent['track'];
+      };
+      await exceptionHandler({ track: failedPlayback.track, message: 'Track B failed before start' });
+      const replacementPlayback = player.playTrack.mock.calls[1]?.[0] as {
+        track: PlaybackEvent['track'];
+      };
+      startHandler({ track: replacementPlayback.track });
 
       await vi.waitFor(() => {
         expect(sendNowPlaying).toHaveBeenCalledWith(
@@ -1344,7 +1426,9 @@ describe('MusicPlayerManager', () => {
       await expect(firstPlay).resolves.toMatchObject({ success: true });
 
       expect(player.playTrack).toHaveBeenCalledTimes(1);
-      expect(player.playTrack).toHaveBeenCalledWith({ track: { encoded: 'base64track' } });
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'base64track' }),
+      }));
       await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
         currentIndex: 0,
         entries: [
@@ -1832,7 +1916,7 @@ describe('MusicPlayerManager', () => {
         .toBeLessThan(shoukaku.joinVoiceChannel.mock.invocationCallOrder[0]);
       expect(shoukaku.joinVoiceChannel).toHaveBeenCalledWith(expect.objectContaining({ deaf: true }));
       expect(player.playTrack).toHaveBeenCalledWith({
-        track: { encoded: 'base64track' },
+        track: expect.objectContaining({ encoded: 'base64track' }),
         position: 60000,
         volume: 37,
         paused: true,
