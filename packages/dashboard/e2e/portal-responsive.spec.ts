@@ -732,3 +732,118 @@ test('device removal success remains truthful when license refresh fails', async
   await expect(page.getByRole('alertdialog')).toHaveCount(0);
   expect(licenseReads).toBe(2);
 });
+
+test('a pending seller request cannot be replaced or edited before it settles', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-request-pending-session'));
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      controls: {
+        self_service_cancellation: false,
+        cancellation_timing: 'end-of-term',
+        refund_requests_enabled: true,
+        service_requests_enabled: true,
+      },
+      data: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        order_number: 'ORD-PENDING-REQUEST',
+        amount_cents: 100,
+        discount_cents: 0,
+        currency: 'USD',
+        status: 'completed',
+        source: 'purchase',
+        can_self_service_cancel: false,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: { name: 'Pending Request Product' },
+        payments: [],
+        entitlements: [],
+      }],
+    }),
+  }));
+  let releaseRequest: (() => void) | undefined;
+  const heldRequest = new Promise<void>((resolve) => {
+    releaseRequest = resolve;
+  });
+  await page.route('**/api/portal/requests', async (route) => {
+    await heldRequest;
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, deduped: false }),
+    });
+  });
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Request refund' }).click();
+  const reason = page.getByLabel('What should the seller know? (optional)');
+  await reason.fill('Keep this exact draft attached to the pending request.');
+  await page.getByRole('button', { name: 'Send request' }).click();
+
+  await expect(reason).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Request refund' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Contact seller' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+  releaseRequest?.();
+  await expect(page.getByRole('status')).toContainText('does not automatically move money');
+});
+
+test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-rotation-pending-session'));
+  await page.route('**/api/portal/licenses', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      data: [{
+        id: '33333333-3333-4333-8333-333333333333',
+        key_prefix: 'SMNI',
+        key_suffix: 'ABCD',
+        status: 'active',
+        max_devices: 2,
+        expires_at: null,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: {
+          name: 'Pending Rotation License',
+          type: 'one_time',
+          product_license_config: {
+            rotation_policy: 'rotate-and-invalidate',
+            self_service_device_removal: true,
+          },
+        },
+        entitlements: [{ status: 'active', type: 'one_time', grace_period_ends_at: null }],
+        license_sessions: [],
+      }],
+    }),
+  }));
+  let releaseRotation: (() => void) | undefined;
+  const heldRotation = new Promise<void>((resolve) => {
+    releaseRotation = resolve;
+  });
+  await page.route('**/api/portal/licenses/*/rotate', async (route) => {
+    await heldRotation;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, alreadyRotated: false, newKeySuffix: 'WXYZ' }),
+    });
+  });
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Pending Rotation License/ }).click();
+  await page.getByRole('button', { name: 'Rotate key' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await dialog.getByRole('button', { name: 'Rotate key' }).click();
+  await expect(dialog).toHaveAttribute('aria-busy', 'true');
+
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+  await page.locator('.fixed.inset-0').click({ position: { x: 4, y: 4 } });
+  await expect(dialog).toBeVisible();
+
+  releaseRotation?.();
+  await expect(page.getByRole('status')).toContainText('replacement ending in WXYZ');
+  await expect(dialog).toHaveCount(0);
+});

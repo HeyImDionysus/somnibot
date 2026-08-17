@@ -40,8 +40,8 @@ interface LicenseKey {
         }>;
   } | null;
   entitlements?:
-    | { status: string; type: string }
-    | Array<{ status: string; type: string }>;
+    | { status: string; type: string; grace_period_ends_at: string | null }
+    | Array<{ status: string; type: string; grace_period_ends_at: string | null }>;
   license_sessions: LicenseSession[];
 }
 
@@ -57,7 +57,12 @@ function productLicenseConfig(product: LicenseKey['products']) {
 function hasUsableEntitlement(key: LicenseKey): boolean {
   const embedded = key.entitlements;
   const entitlements = Array.isArray(embedded) ? embedded : embedded ? [embedded] : [];
-  return entitlements.some((entitlement) => ['active', 'grace_period'].includes(entitlement.status));
+  return entitlements.some((entitlement) => entitlement.status === 'active'
+    || (
+      entitlement.status === 'grace_period'
+      && typeof entitlement.grace_period_ends_at === 'string'
+      && Date.parse(entitlement.grace_period_ends_at) > Date.now()
+    ));
 }
 
 export default function PortalLicenses() {
@@ -252,7 +257,7 @@ export default function PortalLicenses() {
                       <p className="text-xs text-discord-text-secondary">
                         Replace this key if it was shared or exposed. The current key stops working immediately, and the replacement is delivered only through Discord DM.
                       </p>
-                      <Button className="mt-3" size="sm" variant="danger" onClick={() => setRotateTarget(key)}>
+                      <Button className="mt-3" size="sm" variant="danger" disabled={mutation !== null} onClick={() => setRotateTarget(key)}>
                         Rotate key
                       </Button>
                     </div>

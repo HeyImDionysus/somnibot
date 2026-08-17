@@ -199,6 +199,7 @@ export default function PortalOrders() {
   };
 
   const openRequest = (order: Order, type: RequestType) => {
+    if (requesting) return;
     setRequestTarget(order);
     setRequestType(type);
     setRequestReason('');
@@ -258,12 +259,12 @@ export default function PortalOrders() {
           </span>
         )}
         {controls?.refund_requests_enabled && !['refunded', 'cancelled'].includes(order.status) && (
-          <Button size="sm" variant="secondary" onClick={() => openRequest(order, 'refund')}>
+          <Button size="sm" variant="secondary" disabled={requesting} onClick={() => openRequest(order, 'refund')}>
             Request refund
           </Button>
         )}
         {controls?.service_requests_enabled && (
-          <Button size="sm" variant="ghost" onClick={() => openRequest(order, 'service')}>
+          <Button size="sm" variant="ghost" disabled={requesting} onClick={() => openRequest(order, 'service')}>
             Contact seller
           </Button>
         )}
@@ -317,9 +318,10 @@ export default function PortalOrders() {
                 id="portal-request-reason"
                 ref={requestReasonRef}
                 maxLength={2000}
+                disabled={requesting}
                 value={requestReason}
                 onChange={(event) => setRequestReason(event.target.value)}
-                className="mt-1 min-h-24 w-full resize-y rounded-input border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-discord-accent"
+                className="mt-1 min-h-24 w-full resize-y rounded-input border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-discord-accent"
               />
               <div className="mt-3 flex flex-wrap justify-end gap-2">
                 <Button variant="ghost" onClick={() => setRequestTarget(null)} disabled={requesting}>Cancel</Button>

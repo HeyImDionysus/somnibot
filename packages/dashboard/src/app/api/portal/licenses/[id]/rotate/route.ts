@@ -120,7 +120,7 @@ export async function POST(
   // anything else, so a customer cannot probe for other customers' key ids.
   const { data: key, error: lookupError } = await admin
     .from('license_keys')
-    .select('id, status, revocation_reason, rotated_to_key_id, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency, entitlements(id, status, type, license_key_id, order_id, customer_id, guild_id, product_id)), products(name, product_license_config(rotation_policy, key_prefix))')
+    .select('id, status, revocation_reason, rotated_to_key_id, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency, entitlements(id, status, type, grace_period_ends_at, license_key_id, order_id, customer_id, guild_id, product_id)), products(name, product_license_config(rotation_policy, key_prefix))')
     .eq('id', licenseKeyId)
     .eq('customer_id', portalSession.customer_id)
     .eq('guild_id', portalSession.guild_id)
@@ -144,6 +144,7 @@ export async function POST(
   type EmbeddedEntitlement = {
     status?: unknown;
     type?: unknown;
+    grace_period_ends_at?: unknown;
     license_key_id?: unknown;
     order_id?: unknown;
     customer_id?: unknown;
@@ -163,7 +164,14 @@ export async function POST(
       ? [embeddedEntitlements]
       : [];
   const hasUsableEntitlement = entitlements.some((entitlement) =>
-    ['active', 'grace_period'].includes(String(entitlement.status))
+    (
+      entitlement.status === 'active'
+      || (
+        entitlement.status === 'grace_period'
+        && typeof entitlement.grace_period_ends_at === 'string'
+        && Date.parse(entitlement.grace_period_ends_at) > Date.now()
+      )
+    )
     && (
       entitlement.license_key_id === key.id
       || (

@@ -37,6 +37,7 @@ let portalConfig: {
   self_service_cancellation: boolean;
   cancellation_timing: 'end-of-term' | 'immediate';
 };
+let portalConfigError: unknown;
 
 function makeAdmin() {
   return {
@@ -57,7 +58,7 @@ function makeAdmin() {
         const chain: any = {
           select: () => chain,
           eq: () => chain,
-          maybeSingle: async () => ({ data: portalConfig, error: null }),
+          maybeSingle: async () => ({ data: portalConfig, error: portalConfigError }),
         };
         return chain;
       }
@@ -135,6 +136,7 @@ beforeEach(() => {
     self_service_cancellation: true,
     cancellation_timing: 'end-of-term',
   };
+  portalConfigError = null;
   entitlement = {
     id: ENT_ID,
     status: 'active',
@@ -283,6 +285,16 @@ describe('POST /api/portal/cancel', () => {
 
     expect(res.status).toBe(409);
     expect(paypalCancelCalls).toBe(0);
+  });
+
+  it('fails closed when the store cancellation policy cannot be loaded', async () => {
+    portalConfigError = { message: 'database unavailable' };
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(503);
+    expect(paypalCancelCalls).toBe(0);
+    expect(entitlement.cancelled_at).toBeNull();
   });
 
   it('allows immediate cancellation without a paid-through boundary and reports immediate access loss', async () => {

@@ -99,7 +99,7 @@ export function ConfirmDialog({
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onCancelRef.current();
+        if (!loading) onCancelRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -129,14 +129,16 @@ export function ConfirmDialog({
       document.body.style.overflow = previousOverflow;
       previousFocusRef.current?.focus();
     };
-  }, [open]);
+  }, [loading, open]);
 
   if (!open) return null;
 
   return (
     <div
       className="fixed inset-0 z-[9998] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-[2px]"
-      onClick={onCancel}
+      onClick={() => {
+        if (!loading) onCancel();
+      }}
     >
       <div
         ref={dialogRef}

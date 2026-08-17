@@ -82,11 +82,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
     }
 
-    const { data: portalConfig } = await admin
+    const { data: portalConfig, error: portalConfigError } = await admin
       .from('guild_config')
       .select('self_service_cancellation, cancellation_timing')
       .eq('guild_id', session.guild_id)
       .maybeSingle();
+    if (portalConfigError) {
+      return NextResponse.json(
+        { error: 'Could not verify the store cancellation policy. Please try again.' },
+        { status: 503 },
+      );
+    }
     const selfServiceEnabled = portalConfig?.self_service_cancellation !== false;
     if (!selfServiceEnabled) {
       return NextResponse.json(

@@ -215,6 +215,25 @@ describe('access control and recovery routing', () => {
     expect(db.rpcCalls).toHaveLength(0);
   });
 
+  it('rejects rotation when the linked grace period already expired', async () => {
+    const db = mockDb({
+      licence: {
+        ...LICENCE,
+        orders: {
+          ...LICENCE.orders,
+          entitlements: [{
+            ...LICENCE.orders.entitlements[0],
+            status: 'grace_period',
+            grace_period_ends_at: '2020-01-01T00:00:00.000Z',
+          }],
+        },
+      },
+    });
+
+    expect((await POST(req('token'), params())).status).toBe(409);
+    expect(db.rpcCalls).toHaveLength(0);
+  });
+
   it('rejects rotation when active access is not linked to the predecessor key', async () => {
     const db = mockDb({
       licence: {

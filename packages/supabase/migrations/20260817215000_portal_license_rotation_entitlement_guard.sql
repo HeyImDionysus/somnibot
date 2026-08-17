@@ -49,7 +49,13 @@ BEGIN
       AND entitlement.customer_id = v_old.customer_id
       AND entitlement.product_id = v_old.product_id
       AND entitlement.guild_id = v_old.guild_id
-      AND entitlement.status IN ('active', 'grace_period')
+      AND (
+        entitlement.status = 'active'
+        OR (
+          entitlement.status = 'grace_period'
+          AND entitlement.grace_period_ends_at > v_now
+        )
+      )
     FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION USING

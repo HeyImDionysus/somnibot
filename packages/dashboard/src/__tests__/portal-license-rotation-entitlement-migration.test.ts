@@ -14,7 +14,9 @@ describe('portal license rotation entitlement guard migration', () => {
 
     expect(entitlementLock).toBeGreaterThan(-1);
     expect(predecessorRevocation).toBeGreaterThan(entitlementLock);
-    expect(migration).toContain("entitlement.status IN ('active', 'grace_period')");
+    expect(migration).toContain("entitlement.status = 'active'");
+    expect(migration).toContain("entitlement.status = 'grace_period'");
+    expect(migration).toContain('entitlement.grace_period_ends_at > v_now');
     expect(migration).toContain('entitlement.license_key_id = v_old.id');
     expect(migration).toContain('entitlement.order_id = v_old.order_id');
     expect(migration).toContain('entitlement.customer_id = v_old.customer_id');

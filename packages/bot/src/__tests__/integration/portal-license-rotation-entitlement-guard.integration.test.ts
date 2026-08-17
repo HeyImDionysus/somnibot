@@ -53,7 +53,7 @@ async function cleanFixtures(): Promise<void> {
 }
 
 async function createFixture(
-  entitlementStatus: 'active' | 'cancelled',
+  entitlementStatus: 'active' | 'cancelled' | 'grace_period',
   linkEntitlementToKey: boolean,
 ): Promise<RotationFixture> {
   const { data: customer, error: customerError } = await supa
@@ -147,6 +147,9 @@ async function createFixture(
       granted_role_ids: [],
       granted_channel_ids: [],
       ...(entitlementStatus === 'cancelled' ? { cancelled_at: new Date().toISOString() } : {}),
+      ...(entitlementStatus === 'grace_period'
+        ? { grace_period_ends_at: '2020-01-01T00:00:00.000Z' }
+        : {}),
     })
     .select('id')
     .single();
@@ -244,6 +247,7 @@ describe('portal license rotation entitlement guard', () => {
   it.each([
     { label: 'terminal', status: 'cancelled' as const, linked: true },
     { label: 'unlinked', status: 'active' as const, linked: false },
+    { label: 'expired grace-period', status: 'grace_period' as const, linked: true },
   ])(
     'rejects a $label entitlement without changing keys, links, or delivery',
     async ({ status, linked }) => {
@@ -269,4 +273,120 @@ describe('portal license rotation entitlement guard', () => {
       });
     },
   );
+
+  it('keeps cancellation fulfillment behind a later local grace deadline', async () => {
+    const [customer] = await sql<{ id: string }[]>`
+      INSERT INTO public.customers (
+        guild_id, discord_id, discord_username
+      ) VALUES (
+        ${GUILD_ID}, ${CUSTOMER_DISCORD_ID}, ${nextValue('grace-customer')}
+      )
+      RETURNING id
+    `;
+    if (!customer) throw new Error('grace customer fixture returned no id');
+
+    const [product] = await sql<{ id: string }[]>`
+      INSERT INTO public.products (
+        guild_id, name, type, delivery_type, price_cents, currency,
+        active, granted_role_ids, granted_channel_ids
+      ) VALUES (
+        ${GUILD_ID}, ${nextValue('grace-product')}, 'subscription',
+        'access_pass', 1499, 'USD', true, ARRAY[]::TEXT[], ARRAY[]::TEXT[]
+      )
+      RETURNING id
+    `;
+    if (!product) throw new Error('grace product fixture returned no id');
+
+    const paypalPlanId = nextValue('PAYPAL-PLAN');
+    const [plan] = await sql<{ id: string }[]>`
+      INSERT INTO public.plans (
+        product_id, guild_id, name, paypal_plan_id, interval_unit,
+        interval_count, price_cents, currency, active
+      ) VALUES (
+        ${product.id}::UUID, ${GUILD_ID}, ${nextValue('grace-plan')},
+        ${paypalPlanId}, 'MONTH', 1, 1499, 'USD', true
+      )
+      RETURNING id
+    `;
+    if (!plan) throw new Error('grace plan fixture returned no id');
+
+    const paypalSubscriptionId = nextValue('PAYPAL-SUBSCRIPTION');
+    const orderNumber = nextValue('ORD-GRACE-CANCEL');
+    const [order] = await sql<{ id: string }[]>`
+      INSERT INTO public.orders (
+        order_number, customer_id, guild_id, product_id, plan_id,
+        paypal_subscription_id, amount_cents, currency, source, status,
+        checkout_active
+      ) VALUES (
+        ${orderNumber}, ${customer.id}::UUID, ${GUILD_ID}, ${product.id}::UUID,
+        ${plan.id}::UUID, ${paypalSubscriptionId}, 1499, 'USD', 'purchase',
+        'completed', false
+      )
+      RETURNING id
+    `;
+    if (!order) throw new Error('grace order fixture returned no id');
+
+    const graceUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+    const [entitlement] = await sql<{ id: string }[]>`
+      INSERT INTO public.entitlements (
+        customer_id, guild_id, product_id, plan_id, order_id, type, status,
+        source, granted_role_ids, granted_channel_ids, grace_period_ends_at
+      ) VALUES (
+        ${customer.id}::UUID, ${GUILD_ID}, ${product.id}::UUID, ${plan.id}::UUID,
+        ${order.id}::UUID, 'subscription', 'grace_period', 'purchase',
+        ARRAY[]::TEXT[], ARRAY[]::TEXT[], ${graceUntil}::TIMESTAMPTZ
+      )
+      RETURNING id
+    `;
+    if (!entitlement) throw new Error('grace entitlement fixture returned no id');
+
+    const webhookEventId = nextValue('WH-GRACE-CANCEL');
+    const providerOccurredAt = new Date().toISOString();
+    const providerPaidThroughAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const [action] = await sql<{ id: string; next_retry_at: string }[]>`
+      INSERT INTO public.bot_action_queue (
+        guild_id, action, payload, status, idempotency_key, next_retry_at
+      ) VALUES (
+        ${GUILD_ID},
+        'fulfill_cancellation',
+        pg_catalog.jsonb_build_object(
+          'fulfillment_type', 'subscription_cancelled',
+          'guild_id', ${GUILD_ID}::TEXT,
+          'customer_id', ${customer.id}::TEXT,
+          'discord_id', ${CUSTOMER_DISCORD_ID}::TEXT,
+          'product_id', ${product.id}::TEXT,
+          'product_name', 'Grace product',
+          'order_id', ${order.id}::TEXT,
+          'order_number', ${orderNumber}::TEXT,
+          'plan_id', ${plan.id}::TEXT,
+          'paypal_subscription_id', ${paypalSubscriptionId}::TEXT,
+          'amount_cents', 1499,
+          'currency', 'USD',
+          'granted_role_ids', pg_catalog.jsonb_build_array(),
+          'granted_channel_ids', pg_catalog.jsonb_build_array(),
+          'entitlement_type', 'subscription',
+          'webhook_event_id', ${webhookEventId}::TEXT,
+          'provider_event_type', 'BILLING.SUBSCRIPTION.CANCELLED',
+          'provider_occurred_at', ${providerOccurredAt}::TEXT,
+          'provider_paid_through_at', ${providerPaidThroughAt}::TEXT,
+          'lifecycle_generation', 1
+        ),
+        'pending',
+        ${`paypal:lifecycle:${webhookEventId}:subscription_cancelled`},
+        ${providerPaidThroughAt}::TIMESTAMPTZ
+      )
+      RETURNING id, next_retry_at::TEXT
+    `;
+    if (!action) throw new Error('grace cancellation action fixture returned no id');
+    expect(Date.parse(action.next_retry_at)).toBeGreaterThanOrEqual(Date.parse(graceUntil));
+
+    const [reset] = await sql<{ next_retry_at: string }[]>`
+      UPDATE public.bot_action_queue
+      SET next_retry_at = NULL
+      WHERE id = ${action.id}::UUID
+      RETURNING next_retry_at::TEXT
+    `;
+    if (!reset) throw new Error('grace cancellation action reset returned no row');
+    expect(Date.parse(reset.next_retry_at)).toBeGreaterThanOrEqual(Date.parse(graceUntil));
+  });
 });
