@@ -251,6 +251,19 @@ describe('MusicPlayerManager', () => {
       expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
         track: expect.objectContaining({ encoded: 'persisted' }),
       }));
+      const playback = player.playTrack.mock.calls[0]?.[0] as {
+        track: { encoded: string; userData?: unknown };
+      };
+      const endRegistration = player.on.mock.calls.find(([event]) => event === 'end');
+      expect(endRegistration).toBeDefined();
+
+      await endRegistration?.[1]({ reason: 'finished', track: playback.track });
+
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({ currentIndex: 1 });
+      expect(player.playTrack).toHaveBeenCalledTimes(2);
+      expect(player.playTrack).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'base64track' }),
+      }));
     });
   });
 
@@ -1174,6 +1187,31 @@ describe('MusicPlayerManager', () => {
       });
     });
 
+    it('restarts the persisted current entry after end metadata loading fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [
+          { track: 'finished', title: 'Finished', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false },
+          { track: 'next', title: 'Next', uri: 'u2', duration: 120000, author: 'B', requestedBy: 'u2', isStream: false },
+        ],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      valkey.get.mockRejectedValueOnce(new Error('Valkey unavailable'));
+
+      await expect(getEndHandler()({ reason: 'finished', track: { encoded: 'finished' } }))
+        .rejects.toThrow('Valkey unavailable');
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('new request', 'u3', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: true });
+
+      expect(player.playTrack).toHaveBeenCalledTimes(1);
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'finished' }),
+      }));
+    });
+
     it('does not replay a finished entry when play commits before its end callback', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
@@ -1664,6 +1702,26 @@ describe('MusicPlayerManager', () => {
       await expect(manager.play('song', 'u1', voiceChannel, textChannel))
         .rejects.toThrow('Lavalink unavailable');
       expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('g1');
+    });
+
+    it('force-clears a newly joined voice session when failed-play cleanup keeps rejecting', async () => {
+      shoukaku.players.clear();
+      shoukaku.joinVoiceChannel.mockImplementationOnce(async () => {
+        shoukaku.players.set('g1', player);
+        return player;
+      });
+      player.node.rest.resolve.mockResolvedValueOnce({ loadType: 'empty', data: {} });
+      shoukaku.leaveVoiceChannel.mockRejectedValue(new Error('Voice unavailable'));
+      const voiceChannel = guild.channels.cache.get('vc1') as Parameters<MusicPlayerManager['play']>[2];
+      const textChannel = guild.channels.cache.get('tc1') as Parameters<MusicPlayerManager['play']>[3];
+
+      await expect(manager.play('missing song', 'u1', voiceChannel, textChannel))
+        .resolves.toMatchObject({ success: false });
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(3);
+      expect(player.clean).toHaveBeenCalledTimes(1);
+      expect(shoukaku.players.has('g1')).toBe(false);
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
     });
 
     it('restarts a persisted queue after the first joined search fails', async () => {

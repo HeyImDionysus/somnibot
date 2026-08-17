@@ -178,6 +178,7 @@ export class MusicPlayerManager {
     // Without this, the bot could sit alone indefinitely after a restart.
     const existingPlayer = this.shoukaku.players?.get(this.guild.id);
     if (existingPlayer) {
+      this.setupPlayerEvents(existingPlayer);
       const queue = await this.queueManager.getQueue(this.guild.id);
       if (!existingPlayer.track && queue && queue.currentIndex < queue.entries.length) {
         this.playbackRestartRequired = true;
@@ -1583,7 +1584,13 @@ export class MusicPlayerManager {
         }
 
         // Emit track.ended event for the track that just finished
-        const currentQueue = await this.queueManager.getQueue(this.guild.id);
+        let currentQueue: GuildQueue | null;
+        try {
+          currentQueue = await this.queueManager.getQueue(this.guild.id);
+        } catch (error) {
+          this.playbackRestartRequired = true;
+          throw error;
+        }
         if (this.disposed) return { queueEnded: false, textChannelId: null, sessionRevision: null, playback: null };
         const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
           ? currentQueue.entries[currentQueue.currentIndex]
@@ -2156,9 +2163,7 @@ export class MusicPlayerManager {
     if (!shouldLeaveVoice) return;
 
     try {
-      await this.shoukaku.leaveVoiceChannel(this.guild.id);
-    } catch (error) {
-      log.warn('Failed to leave voice after an unsuccessful play request:', (error as Error)?.message ?? error);
+      await this.clearVoiceConnectionForRecovery(this.guild.id, 'Failed-play voice cleanup');
     } finally {
       this.intentionalVoiceLeaveDepth -= 1;
       this.uncommittedVoiceCleanupInProgress = false;
