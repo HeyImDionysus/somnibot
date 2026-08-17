@@ -68,4 +68,30 @@ describe('launcher-managed Lavalink artifact', () => {
       { redirect: 'follow' },
     );
   });
+
+  it('generates the supported YouTube plugin config instead of broken built-in sources', async () => {
+    // Given a stale managed Lavalink artifact that the launcher must replace.
+    const directory = path.join(testState.userDataPath, 'lavalink');
+    await fsp.mkdir(directory, { recursive: true });
+    await fsp.writeFile(path.join(directory, 'Lavalink.jar'), 'legacy-jar');
+    await fsp.writeFile(path.join(directory, 'Lavalink.version'), '4.0.8\n');
+    const currentJar = Buffer.from('dave-capable-jar');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(currentJar, {
+      status: 200,
+      headers: { 'content-length': String(currentJar.length) },
+    })));
+
+    // When launcher startup refreshes the managed Lavalink runtime.
+    const result = await ensureCurrentLavalinkJar();
+
+    // Then its generated config uses the supported plugin and keeps arbitrary HTTP disabled.
+    expect(result).toEqual({ ok: true });
+    const config = await fsp.readFile(path.join(directory, 'application.yml'), 'utf8');
+    expect(config).toContain('      youtube: false');
+    expect(config).toContain('      http: false');
+    expect(config).toContain(
+      '    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"',
+    );
+    expect(config).toContain('plugins:\n  youtube:\n    enabled: true');
+  });
 });

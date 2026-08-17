@@ -1,4 +1,5 @@
 export const LAVALINK_VERSION = '4.2.2';
+export const LAVALINK_YOUTUBE_PLUGIN_VERSION = '1.18.2';
 
 export const LAVALINK_JAR_URL =
   `https://github.com/lavalink-devs/Lavalink/releases/download/${LAVALINK_VERSION}/Lavalink.jar`;
