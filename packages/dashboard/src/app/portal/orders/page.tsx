@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CircleHelp, ReceiptText } from 'lucide-react';
 import { Button } from '@/components/shared/button';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
@@ -19,6 +19,7 @@ interface Entitlement {
   status: string;
   type: string;
   expires_at: string | null;
+  grace_period_ends_at: string | null;
   cancelled_at: string | null;
 }
 
@@ -38,6 +39,12 @@ interface Order {
 
 type RequestType = 'refund' | 'service';
 type Notice = { kind: 'success' | 'error'; message: string };
+type PortalControls = {
+  self_service_cancellation: boolean;
+  cancellation_timing: 'end-of-term' | 'immediate';
+  refund_requests_enabled: boolean;
+  service_requests_enabled: boolean;
+};
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -64,6 +71,12 @@ function activeSubscription(order: Order): Entitlement | null {
     && ['active', 'grace_period'].includes(entitlement.status)) ?? null;
 }
 
+function accessBoundary(entitlement: Entitlement): string | null {
+  return entitlement.status === 'grace_period'
+    ? entitlement.grace_period_ends_at
+    : entitlement.expires_at;
+}
+
 export default function PortalOrders() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
@@ -74,6 +87,8 @@ export default function PortalOrders() {
   const [requestReason, setRequestReason] = useState('');
   const [requesting, setRequesting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [controls, setControls] = useState<PortalControls | null>(null);
+  const requestReasonRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     async function load() {
@@ -92,8 +107,18 @@ export default function PortalOrders() {
           return;
         }
         const json = await res.json();
-        if (res.ok && json.success && Array.isArray(json.data)) {
+        const loadedControls = json.controls as Partial<PortalControls> | undefined;
+        if (
+          res.ok
+          && json.success
+          && Array.isArray(json.data)
+          && typeof loadedControls?.self_service_cancellation === 'boolean'
+          && ['end-of-term', 'immediate'].includes(String(loadedControls.cancellation_timing))
+          && typeof loadedControls.refund_requests_enabled === 'boolean'
+          && typeof loadedControls.service_requests_enabled === 'boolean'
+        ) {
           setOrders(json.data);
+          setControls(loadedControls as PortalControls);
         } else {
           setNotice({ kind: 'error', message: json.error || 'Order history could not be loaded.' });
         }
@@ -105,6 +130,10 @@ export default function PortalOrders() {
     }
     void load();
   }, []);
+
+  useEffect(() => {
+    if (requestTarget) requestReasonRef.current?.focus();
+  }, [requestTarget]);
 
   const cancelEntitlement = useMemo(
     () => cancelTarget ? activeSubscription(cancelTarget) : null,
@@ -140,12 +169,17 @@ export default function PortalOrders() {
                 : entitlement),
           }
         : order));
-      const until = body.data.access_until ? formatDate(body.data.access_until) : 'the paid-through date';
+      const immediate = body.data.cancellation_timing === 'immediate';
+      const until = body.data.access_until ? formatDate(body.data.access_until) : 'the current access deadline';
       setNotice({
         kind: 'success',
-        message: body.deduped
-          ? `Renewal was already cancelled. Access remains available through ${until}.`
-          : `Renewal cancelled. Access remains available through ${until}.`,
+        message: immediate
+          ? body.deduped
+            ? 'The subscription was already cancelled. Access ended immediately.'
+            : 'Subscription cancelled. Access ended immediately.'
+          : body.deduped
+            ? `Renewal was already cancelled. Access remains available through ${until}.`
+            : `Renewal cancelled. Access remains available through ${until}.`,
       });
       setCancelTarget(null);
     } catch (error) {
@@ -206,7 +240,7 @@ export default function PortalOrders() {
     const subscription = activeSubscription(order);
     return (
       <div className="flex flex-wrap gap-2">
-        {subscription && !subscription.cancelled_at && (
+        {controls?.self_service_cancellation && subscription && !subscription.cancelled_at && (
           <Button size="sm" variant="danger" onClick={() => setCancelTarget(order)}>
             Cancel renewal
           </Button>
@@ -216,14 +250,16 @@ export default function PortalOrders() {
             Renewal cancelled{subscription.expires_at ? ` · Access through ${formatDate(subscription.expires_at)}` : ''}
           </span>
         )}
-        {!['refunded', 'cancelled'].includes(order.status) && (
+        {controls?.refund_requests_enabled && !['refunded', 'cancelled'].includes(order.status) && (
           <Button size="sm" variant="secondary" onClick={() => openRequest(order, 'refund')}>
             Request refund
           </Button>
         )}
-        <Button size="sm" variant="ghost" onClick={() => openRequest(order, 'service')}>
-          Contact seller
-        </Button>
+        {controls?.service_requests_enabled && (
+          <Button size="sm" variant="ghost" onClick={() => openRequest(order, 'service')}>
+            Contact seller
+          </Button>
+        )}
       </div>
     );
   };
@@ -272,6 +308,7 @@ export default function PortalOrders() {
               </label>
               <textarea
                 id="portal-request-reason"
+                ref={requestReasonRef}
                 maxLength={2000}
                 value={requestReason}
                 onChange={(event) => setRequestReason(event.target.value)}
@@ -350,7 +387,9 @@ export default function PortalOrders() {
       <ConfirmDialog
         open={Boolean(cancelTarget && cancelEntitlement)}
         title={`Cancel renewal for ${cancelTarget?.products?.name || 'this subscription'}?`}
-        description={`PayPal renewal will stop. Your current access remains available through ${cancelEntitlement?.expires_at ? formatDate(cancelEntitlement.expires_at) : 'the paid-through date'}.`}
+        description={controls?.cancellation_timing === 'immediate'
+          ? 'PayPal renewal will stop and your access ends immediately.'
+          : `PayPal renewal will stop. Your current access remains available through ${cancelEntitlement && accessBoundary(cancelEntitlement) ? formatDate(accessBoundary(cancelEntitlement)!) : 'the current access deadline'}.`}
         confirmLabel="Cancel renewal"
         variant="danger"
         loading={cancelling}

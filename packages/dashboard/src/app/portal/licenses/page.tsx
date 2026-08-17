@@ -26,7 +26,14 @@ interface LicenseKey {
   max_devices: number;
   expires_at: string | null;
   created_at: string;
-  products: { name: string; type: string } | null;
+  products: {
+    name: string;
+    type: string;
+    product_license_config?: Array<{
+      rotation_policy?: 'rotate-and-invalidate' | 'disabled';
+      self_service_device_removal?: boolean;
+    }>;
+  } | null;
   license_sessions: LicenseSession[];
 }
 
@@ -102,14 +109,19 @@ export default function PortalLicenses() {
       if (!response.ok || body.success !== true) {
         throw new Error(body.error || 'The license key could not be rotated.');
       }
-      await loadKeys();
-      setNotice({
-        kind: 'success',
-        message: body.alreadyRotated
-          ? `This key was already rotated. Check your Discord DMs for the replacement ending in ${body.newKeySuffix}.`
-          : `The old key stopped working. A replacement ending in ${body.newKeySuffix} is on its way by Discord DM.`,
-      });
+      const successMessage = body.alreadyRotated
+        ? `This key was already rotated. Check your Discord DMs for the replacement ending in ${body.newKeySuffix}.`
+        : `The old key stopped working. A replacement ending in ${body.newKeySuffix} is on its way by Discord DM.`;
       setRotateTarget(null);
+      setNotice({ kind: 'success', message: successMessage });
+      try {
+        await loadKeys();
+      } catch {
+        setNotice({
+          kind: 'success',
+          message: `${successMessage} The license list could not be refreshed; reload this page to see the latest key ending.`,
+        });
+      }
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'The license key could not be rotated.' });
     } finally {
@@ -164,6 +176,9 @@ export default function PortalLicenses() {
       ) : (
         keys.map((key) => {
           const activeSessions = key.license_sessions?.filter(s => s.active) || [];
+          const licenseConfig = key.products?.product_license_config?.[0];
+          const rotationAllowed = licenseConfig?.rotation_policy !== 'disabled';
+          const removalAllowed = licenseConfig?.self_service_device_removal !== false;
           return (
             <div key={key.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
               <button
@@ -201,7 +216,7 @@ export default function PortalLicenses() {
                     <div>Max Devices: {key.max_devices}</div>
                   </div>
 
-                  {key.status === 'active' && (
+                  {key.status === 'active' && rotationAllowed && (
                     <div className="rounded-input border border-discord-warning/30 bg-discord-warning/10 p-3">
                       <p className="text-xs text-discord-text-secondary">
                         Replace this key if it was shared or exposed. The current key stops working immediately, and the replacement is delivered only through Discord DM.
@@ -232,14 +247,16 @@ export default function PortalLicenses() {
                               <span className="text-[10px] text-discord-text-muted">
                                 Last seen: {formatDate(session.last_seen_at)}
                               </span>
-                              <button
-                                type="button"
-                                disabled={mutation !== null}
-                                onClick={() => setRemoveTarget(session)}
-                                className="inline-flex h-8 items-center rounded-input bg-discord-danger/20 px-3 text-xs font-medium text-discord-danger transition-standard hover:bg-discord-danger/30 disabled:opacity-50"
-                              >
-                                Remove device
-                              </button>
+                              {removalAllowed && (
+                                <button
+                                  type="button"
+                                  disabled={mutation !== null}
+                                  onClick={() => setRemoveTarget(session)}
+                                  className="inline-flex h-8 items-center rounded-input bg-discord-danger/20 px-3 text-xs font-medium text-discord-danger transition-standard hover:bg-discord-danger/30 disabled:opacity-50"
+                                >
+                                  Remove device
+                                </button>
+                              )}
                             </div>
                           </div>
                         ))}

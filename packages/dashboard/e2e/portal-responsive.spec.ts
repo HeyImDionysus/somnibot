@@ -48,6 +48,12 @@ test('subscription cancellation and support requests are reachable and truthful 
     contentType: 'application/json',
     body: JSON.stringify({
       success: true,
+      controls: {
+        self_service_cancellation: true,
+        cancellation_timing: 'end-of-term',
+        refund_requests_enabled: true,
+        service_requests_enabled: true,
+      },
       data: [{
         id: '11111111-1111-4111-8111-111111111111',
         order_number: 'ORD-1001',
@@ -64,6 +70,7 @@ test('subscription cancellation and support requests are reachable and truthful 
           status: 'active',
           type: 'subscription',
           expires_at: '2026-09-17T12:00:00.000Z',
+          grace_period_ends_at: null,
           cancelled_at: null,
         }],
       }],
@@ -77,6 +84,7 @@ test('subscription cancellation and support requests are reachable and truthful 
       deduped: false,
       data: {
         status: 'active',
+        cancellation_timing: 'end-of-term',
         access_until: '2026-09-17T12:00:00.000Z',
         cancellation_scheduled_at: '2026-08-17T12:00:00.000Z',
       },
@@ -115,6 +123,7 @@ test('subscription cancellation and support requests are reachable and truthful 
   });
 
   await page.getByRole('button', { name: 'Request refund' }).click();
+  await expect(page.getByLabel('What should the seller know? (optional)')).toBeFocused();
   await page.getByLabel('What should the seller know? (optional)').fill('Please review this test order.');
   await testInfo.attach('orders-mobile-refund-request', {
     body: await page.screenshot({ fullPage: true }),
@@ -137,6 +146,147 @@ test('subscription cancellation and support requests are reachable and truthful 
     scrollWidth: document.documentElement.scrollWidth,
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test('disabled portal controls hide unavailable customer actions', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-policy-session'));
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      controls: {
+        self_service_cancellation: false,
+        cancellation_timing: 'end-of-term',
+        refund_requests_enabled: false,
+        service_requests_enabled: false,
+      },
+      data: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        order_number: 'ORD-POLICY',
+        amount_cents: 100,
+        discount_cents: 0,
+        currency: 'USD',
+        status: 'completed',
+        source: 'paypal',
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: { name: 'Policy Controlled Subscription', type: 'subscription' },
+        payments: [],
+        entitlements: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          status: 'active',
+          type: 'subscription',
+          expires_at: '2026-09-17T12:00:00.000Z',
+          grace_period_ends_at: null,
+          cancelled_at: null,
+        }],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('tbody').getByText('Policy Controlled Subscription')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel renewal' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Request refund' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Contact seller' })).toHaveCount(0);
+  await testInfo.attach('orders-desktop-disabled-controls', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
+
+test('immediate cancellation warns that access ends now', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-immediate-session'));
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      controls: {
+        self_service_cancellation: true,
+        cancellation_timing: 'immediate',
+        refund_requests_enabled: false,
+        service_requests_enabled: false,
+      },
+      data: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        order_number: 'ORD-IMMEDIATE',
+        amount_cents: 100,
+        discount_cents: 0,
+        currency: 'USD',
+        status: 'completed',
+        source: 'paypal',
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: { name: 'Immediate Subscription', type: 'subscription' },
+        payments: [],
+        entitlements: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          status: 'active',
+          type: 'subscription',
+          expires_at: '2026-09-17T12:00:00.000Z',
+          grace_period_ends_at: null,
+          cancelled_at: null,
+        }],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Cancel renewal' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toContainText('your access ends immediately');
+  await expect(dialog).not.toContainText('Sep 17, 2026');
+  await testInfo.attach('orders-desktop-immediate-confirmation', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
+
+test('grace-period cancellation uses the grace deadline', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-grace-session'));
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      controls: {
+        self_service_cancellation: true,
+        cancellation_timing: 'end-of-term',
+        refund_requests_enabled: false,
+        service_requests_enabled: false,
+      },
+      data: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        order_number: 'ORD-GRACE',
+        amount_cents: 100,
+        discount_cents: 0,
+        currency: 'USD',
+        status: 'completed',
+        source: 'paypal',
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: { name: 'Grace Subscription', type: 'subscription' },
+        payments: [],
+        entitlements: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          status: 'grace_period',
+          type: 'subscription',
+          expires_at: '2026-08-01T12:00:00.000Z',
+          grace_period_ends_at: '2026-09-20T12:00:00.000Z',
+          cancelled_at: null,
+        }],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Cancel renewal' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toContainText('Sep 20, 2026');
+  await expect(dialog).not.toContainText('Aug 1, 2026');
+  await testInfo.attach('orders-desktop-grace-confirmation', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
 });
 
 ([
@@ -163,7 +313,14 @@ test('subscription cancellation and support requests are reachable and truthful 
           max_devices: 2,
           expires_at: null,
           created_at: '2026-08-17T00:00:00.000Z',
-          products: { name: 'Final Release License', type: 'one_time' },
+          products: {
+            name: 'Final Release License',
+            type: 'one_time',
+            product_license_config: [{
+              rotation_policy: 'rotate-and-invalidate',
+              self_service_device_removal: true,
+            }],
+          },
           license_sessions: [{
             id: '44444444-4444-4444-8444-444444444444',
             device_name: 'Test workstation',
@@ -240,3 +397,107 @@ test('subscription cancellation and support requests are reachable and truthful 
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 }));
+
+test('disabled license policies hide rotation and device removal', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-policy-session'));
+  await page.route('**/api/portal/licenses', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      data: [{
+        id: '33333333-3333-4333-8333-333333333333',
+        key_prefix: 'SMNI',
+        key_suffix: 'ABCD',
+        status: 'active',
+        max_devices: 2,
+        expires_at: null,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: {
+          name: 'Policy Controlled License',
+          type: 'one_time',
+          product_license_config: [{
+            rotation_policy: 'disabled',
+            self_service_device_removal: false,
+          }],
+        },
+        license_sessions: [{
+          id: '44444444-4444-4444-8444-444444444444',
+          device_name: 'Test workstation',
+          device_fingerprint: 'device-fingerprint',
+          ip_address: null,
+          active: true,
+          first_seen_at: '2026-08-17T00:00:00.000Z',
+          last_seen_at: '2026-08-17T00:00:00.000Z',
+        }],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Policy Controlled License/ }).click();
+  await expect(page.getByRole('button', { name: 'Rotate key' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Remove device' })).toHaveCount(0);
+  await testInfo.attach('licenses-desktop-disabled-controls', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
+
+test('rotation success remains truthful when license refresh fails', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-refresh-session'));
+  let licenseReads = 0;
+  await page.route('**/api/portal/licenses', (route) => {
+    licenseReads += 1;
+    if (licenseReads > 1) {
+      return route.fulfill({
+        status: 429,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Too many requests' }),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: [{
+          id: '33333333-3333-4333-8333-333333333333',
+          key_prefix: 'SMNI',
+          key_suffix: 'ABCD',
+          status: 'active',
+          max_devices: 2,
+          expires_at: null,
+          created_at: '2026-08-17T00:00:00.000Z',
+          products: {
+            name: 'Refresh Test License',
+            type: 'one_time',
+            product_license_config: [{
+              rotation_policy: 'rotate-and-invalidate',
+              self_service_device_removal: true,
+            }],
+          },
+          license_sessions: [],
+        }],
+      }),
+    });
+  });
+  await page.route('**/api/portal/licenses/*/rotate', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ success: true, alreadyRotated: false, newKeySuffix: 'WXYZ' }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Refresh Test License/ }).click();
+  await page.getByRole('button', { name: 'Rotate key' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Rotate key' }).click();
+  await expect(page.getByRole('status')).toContainText('The old key stopped working');
+  await expect(page.getByRole('status')).toContainText('could not be refreshed');
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  expect(licenseReads).toBe(2);
+  await testInfo.attach('licenses-desktop-rotation-refresh-failed', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});

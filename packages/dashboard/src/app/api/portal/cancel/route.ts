@@ -1,16 +1,14 @@
 /**
  * POST /api/portal/cancel — Buyer self-service subscription cancellation.
  *
- * Commerce-portal contracts self-service-cancellation (default ON) with
- * cancellation-timing = end-of-term: the buyer schedules cancellation, keeps
- * access until the current term ends, and the subscription does not renew.
+ * Commerce-portal contracts self-service-cancellation (default ON). The store
+ * chooses whether access ends immediately or at the current access boundary.
  *
  * This route:
  *  - authenticates the portal customer via x-portal-token,
  *  - verifies the target subscription entitlement belongs to the customer,
  *  - cancels the PayPal subscription so it stops renewing,
- *  - marks the entitlement's cancellation as scheduled (status stays 'active'
- *    until expires_at — end of the current term),
+ *  - applies the configured immediate or end-of-term access effect,
  *  - is idempotent: a second confirm resolves to the single scheduled
  *    cancellation without a second provider call or state change.
  *
@@ -33,7 +31,14 @@ const portalCancelSchema = z.object({
   entitlement_id: z.string().uuid(),
 });
 
-function scheduledResponse(entitlement: { id: string; status: string; expires_at: string | null; cancelled_at: string | null }, deduped: boolean) {
+function scheduledResponse(entitlement: {
+  id: string;
+  status: string;
+  expires_at: string | null;
+  grace_period_ends_at: string | null;
+  cancelled_at: string | null;
+}, deduped: boolean) {
+  const immediate = entitlement.status === 'revoked';
   return NextResponse.json({
     success: true,
     deduped,
@@ -41,8 +46,12 @@ function scheduledResponse(entitlement: { id: string; status: string; expires_at
     data: {
       entitlement_id: entitlement.id,
       status: entitlement.status,
-      // Access continues until the end of the current term.
-      access_until: entitlement.expires_at,
+      cancellation_timing: immediate ? 'immediate' : 'end-of-term',
+      access_until: immediate
+        ? entitlement.expires_at
+        : entitlement.status === 'grace_period'
+          ? entitlement.grace_period_ends_at
+          : entitlement.expires_at,
       cancellation_scheduled_at: entitlement.cancelled_at,
     },
   });
@@ -96,7 +105,7 @@ export async function POST(request: NextRequest) {
     // The entitlement MUST be a subscription owned by this customer in this guild.
     const { data: entitlement, error: entitlementError } = await admin
       .from('entitlements')
-      .select('id, status, type, expires_at, cancelled_at, order_id')
+      .select('id, status, type, expires_at, grace_period_ends_at, cancelled_at, order_id')
       .eq('id', entitlement_id)
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
@@ -119,9 +128,12 @@ export async function POST(request: NextRequest) {
     if (!['active', 'grace_period'].includes(entitlement.status)) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
     }
+    const accessUntil = entitlement.status === 'grace_period'
+      ? entitlement.grace_period_ends_at
+      : entitlement.expires_at;
     if (
-      typeof entitlement.expires_at !== 'string'
-      || !Number.isFinite(Date.parse(entitlement.expires_at))
+      cancellationTiming === 'end-of-term'
+      && (typeof accessUntil !== 'string' || !Number.isFinite(Date.parse(accessUntil)))
     ) {
       return NextResponse.json(
         { error: 'The paid-through date is unavailable. Cancellation was not scheduled.' },
@@ -220,7 +232,7 @@ export async function POST(request: NextRequest) {
       .eq('id', entitlement.id)
       .eq('customer_id', session.customer_id)
       .is('cancelled_at', null)
-      .select('id, status, expires_at, cancelled_at')
+      .select('id, status, expires_at, grace_period_ends_at, cancelled_at')
       .maybeSingle();
 
     if (updateError) {
@@ -235,6 +247,7 @@ export async function POST(request: NextRequest) {
         || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(updated.status))
         || (cancellationTiming === 'immediate' && updated.status !== 'revoked')
         || (cancellationTiming === 'end-of-term' && updated.expires_at !== entitlement.expires_at)
+        || (cancellationTiming === 'end-of-term' && updated.grace_period_ends_at !== entitlement.grace_period_ends_at)
         || typeof updated.cancelled_at !== 'string'
         || !Number.isFinite(Date.parse(updated.cancelled_at))
       ) {
@@ -249,7 +262,7 @@ export async function POST(request: NextRequest) {
     // A concurrent confirm already scheduled it — resolve to that single entry.
     const { data: current, error: currentError } = await admin
       .from('entitlements')
-      .select('id, status, expires_at, cancelled_at')
+      .select('id, status, expires_at, grace_period_ends_at, cancelled_at')
       .eq('id', entitlement.id)
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
@@ -261,6 +274,7 @@ export async function POST(request: NextRequest) {
       || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(current.status))
       || (cancellationTiming === 'immediate' && current.status !== 'revoked')
       || (cancellationTiming === 'end-of-term' && current.expires_at !== entitlement.expires_at)
+      || (cancellationTiming === 'end-of-term' && current.grace_period_ends_at !== entitlement.grace_period_ends_at)
       || typeof current.cancelled_at !== 'string'
       || !Number.isFinite(Date.parse(current.cancelled_at))
     ) {

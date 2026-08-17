@@ -33,6 +33,10 @@ let entitlementUpdateError: any;
 let suppressEntitlementUpdate: boolean;
 let currentReadError: any;
 let entitlementSelectCalls: number;
+let portalConfig: {
+  self_service_cancellation: boolean;
+  cancellation_timing: 'end-of-term' | 'immediate';
+};
 
 function makeAdmin() {
   return {
@@ -46,6 +50,14 @@ function makeAdmin() {
           select: () => chain,
           eq: () => chain,
           maybeSingle: async () => ({ data: orderResult, error: orderError }),
+        };
+        return chain;
+      }
+      if (table === 'guild_config') {
+        const chain: any = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: async () => ({ data: portalConfig, error: null }),
         };
         return chain;
       }
@@ -71,7 +83,13 @@ function makeAdmin() {
             }
             entitlement = { ...entitlement, ...updateObj };
             return {
-              data: { id: entitlement.id, status: entitlement.status, expires_at: entitlement.expires_at, cancelled_at: entitlement.cancelled_at },
+              data: {
+                id: entitlement.id,
+                status: entitlement.status,
+                expires_at: entitlement.expires_at,
+                grace_period_ends_at: entitlement.grace_period_ends_at,
+                cancelled_at: entitlement.cancelled_at,
+              },
               error: null,
             };
           }
@@ -113,11 +131,16 @@ beforeEach(() => {
   suppressEntitlementUpdate = false;
   currentReadError = null;
   entitlementSelectCalls = 0;
+  portalConfig = {
+    self_service_cancellation: true,
+    cancellation_timing: 'end-of-term',
+  };
   entitlement = {
     id: ENT_ID,
     status: 'active',
     type: 'subscription',
     expires_at: '2026-08-23T00:00:00.000Z',
+    grace_period_ends_at: null,
     cancelled_at: null,
     order_id: 'order-1',
   };
@@ -135,6 +158,7 @@ describe('POST /api/portal/cancel', () => {
     const json = await res.json();
     expect(json.message).toBe('cancellation-scheduled');
     expect(json.data.status).toBe('active');
+    expect(json.data.cancellation_timing).toBe('end-of-term');
     expect(json.data.access_until).toBe('2026-08-23T00:00:00.000Z');
     expect(json.data.cancellation_scheduled_at).toBeTruthy();
     expect(entitlement.status).toBe('active'); // not revoked immediately
@@ -242,5 +266,33 @@ describe('POST /api/portal/cancel', () => {
 
     expect(res.status).toBe(409);
     expect(paypalCancelCalls).toBe(0);
+  });
+
+  it('allows immediate cancellation without a paid-through boundary and reports immediate access loss', async () => {
+    portalConfig.cancellation_timing = 'immediate';
+    entitlement.expires_at = null;
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.data.status).toBe('revoked');
+    expect(json.data.cancellation_timing).toBe('immediate');
+    expect(json.data.access_until).toBeTruthy();
+    expect(entitlement.status).toBe('revoked');
+    expect(paypalCancelCalls).toBe(1);
+  });
+
+  it('uses the grace deadline as the access boundary for a grace-period cancellation', async () => {
+    entitlement.status = 'grace_period';
+    entitlement.expires_at = '2026-08-01T00:00:00.000Z';
+    entitlement.grace_period_ends_at = '2026-08-26T00:00:00.000Z';
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.data.status).toBe('grace_period');
+    expect(json.data.access_until).toBe('2026-08-26T00:00:00.000Z');
   });
 });
