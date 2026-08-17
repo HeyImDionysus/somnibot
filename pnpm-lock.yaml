@@ -25,6 +25,9 @@ patchedDependencies:
   react-scan@0.5.7:
     hash: dgd2syoubzg3hvhb6uoizgjxcm
     path: patches/react-scan@0.5.7.patch
+  shoukaku@4.3.0:
+    hash: v2c23dytlli32wtivwiflvigxm
+    path: patches/shoukaku@4.3.0.patch
 
 importers:
 
@@ -74,7 +77,7 @@ importers:
         version: 3.4.9
       shoukaku:
         specifier: ^4.1.0
-        version: 4.3.0
+        version: 4.3.0(patch_hash=v2c23dytlli32wtivwiflvigxm)
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -10479,7 +10482,7 @@ snapshots:
 
   shebang-regex@3.0.0: {}
 
-  shoukaku@4.3.0:
+  shoukaku@4.3.0(patch_hash=v2c23dytlli32wtivwiflvigxm):
     dependencies:
       ws: 8.21.0
     transitivePeerDependencies:
