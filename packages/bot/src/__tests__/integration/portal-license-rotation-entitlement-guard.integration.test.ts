@@ -48,12 +48,6 @@ async function cleanFixtures(): Promise<void> {
   await sql`DELETE FROM public.payment_refunds WHERE guild_id = ${GUILD_ID}`;
   await sql`DELETE FROM public.payments WHERE guild_id = ${GUILD_ID}`;
   await sql`DELETE FROM public.orders WHERE guild_id = ${GUILD_ID}`;
-  await sql`
-    DELETE FROM public.product_license_config
-     WHERE product_id IN (
-       SELECT id FROM public.products WHERE guild_id = ${GUILD_ID}
-     )
-  `;
   await sql`DELETE FROM public.products WHERE guild_id = ${GUILD_ID}`;
   await sql`DELETE FROM public.customers WHERE guild_id = ${GUILD_ID}`;
 }
