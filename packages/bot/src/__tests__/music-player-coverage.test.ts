@@ -387,6 +387,26 @@ describe('MusicPlayerManager', () => {
         expect.objectContaining({ userId: 'u1', reason: 'command', trackCount: 1 }),
       );
     });
+
+    it('finishes queue teardown when the first voice leave fails', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 't1', title: 'Song', uri: 'u', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
+      }));
+      shoukaku.leaveVoiceChannel.mockRejectedValueOnce(new Error('Voice unavailable'));
+
+      await expect(manager.stop('g1', { userId: 'u1', reason: 'command' }))
+        .resolves.toMatchObject({ success: true });
+
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(2);
+      await expect(manager.queueManager.getQueue('g1')).resolves.toBeNull();
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'music.stopped',
+        'g1',
+        expect.objectContaining({ userId: 'u1', reason: 'command', trackCount: 1 }),
+      );
+    });
   });
 
   describe('togglePause', () => {

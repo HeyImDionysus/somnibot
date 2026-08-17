@@ -870,7 +870,7 @@ export class MusicPlayerManager {
           } catch (error) {
             log.warn('Failed to stop the current track during queue teardown:', (error as Error)?.message ?? error);
           }
-          await this.shoukaku.leaveVoiceChannel(guildId);
+          await this.clearVoiceConnectionForRecovery(guildId, 'Stop voice cleanup');
         });
         return { queueBeforeStop, playback };
       } catch (error) {
