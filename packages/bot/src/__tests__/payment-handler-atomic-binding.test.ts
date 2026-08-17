@@ -8,9 +8,12 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 
 import { handleBuyButton } from '../features/commerce/payment-handler.js';
 
-const migration = readFileSync(new URL('../../../supabase/migrations/20260804142000_atomic_paid_checkout_intent_binding.sql', import.meta.url), 'utf8');
-const recoveryMigration = readFileSync(new URL('../../../supabase/migrations/20260804143000_paid_checkout_exposure_recovery.sql', import.meta.url), 'utf8');
-const noOrderRecoveryMigration = readFileSync(new URL('../../../supabase/migrations/20260804144000_checkout_recovery_no_order_cleanup.sql', import.meta.url), 'utf8');
+const normalizedSource = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
+  .replaceAll('\r\n', '\n');
+const migration = normalizedSource('../../../supabase/migrations/20260804142000_atomic_paid_checkout_intent_binding.sql');
+const recoveryMigration = normalizedSource('../../../supabase/migrations/20260804143000_paid_checkout_exposure_recovery.sql');
+const noOrderRecoveryMigration = normalizedSource('../../../supabase/migrations/20260804144000_checkout_recovery_no_order_cleanup.sql');
+const providerBindingMigration = normalizedSource('../../../supabase/migrations/20260817180000_paypal_checkout_provider_binding.sql');
 const handlerSource = readFileSync(new URL('../features/commerce/payment-handler.ts', import.meta.url), 'utf8');
 
 function interaction(customId = 'store:buy:prod-1') {
@@ -145,6 +148,13 @@ describe('atomic paid checkout intent binding', () => {
     expect(noOrderRecoveryMigration).toContain('linked order missing');
     expect(noOrderRecoveryMigration).toContain('linked order identity mismatch');
     expect(noOrderRecoveryMigration).toContain('REVOKE ALL ON FUNCTION');
+    expect(providerBindingMigration).toContain('provider_binding');
+    expect(providerBindingMigration).toContain('uniq_commerce_checkout_intents_bound_order');
+    expect(providerBindingMigration).toContain('commerce_refresh_pending_checkout_approval_url');
+    expect(providerBindingMigration).toContain('FOR UPDATE');
+    expect(providerBindingMigration).toContain("SET search_path = ''");
+    expect(providerBindingMigration).toContain('REVOKE ALL ON FUNCTION');
+    expect(providerBindingMigration).toContain('TO service_role');
     expect(handlerSource).toContain("'commerce_reap_unexposed_paid_checkouts_for_product'");
     expect(handlerSource).not.toContain("update({ provider_id:");
     expect(handlerSource).not.toContain("update({ plan_id:");
