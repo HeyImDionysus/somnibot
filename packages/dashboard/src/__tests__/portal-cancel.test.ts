@@ -276,10 +276,10 @@ describe('POST /api/portal/cancel', () => {
     const json = await res.json();
 
     expect(res.status).toBe(200);
-    expect(json.data.status).toBe('revoked');
+    expect(json.data.status).toBe('cancelled');
     expect(json.data.cancellation_timing).toBe('immediate');
     expect(json.data.access_until).toBeTruthy();
-    expect(entitlement.status).toBe('revoked');
+    expect(entitlement.status).toBe('cancelled');
     expect(paypalCancelCalls).toBe(1);
   });
 

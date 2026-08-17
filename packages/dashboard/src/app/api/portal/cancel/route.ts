@@ -37,8 +37,8 @@ function scheduledResponse(entitlement: {
   expires_at: string | null;
   grace_period_ends_at: string | null;
   cancelled_at: string | null;
-}, deduped: boolean) {
-  const immediate = entitlement.status === 'revoked';
+}, deduped: boolean, cancellationTiming: 'immediate' | 'end-of-term') {
+  const immediate = cancellationTiming === 'immediate';
   return NextResponse.json({
     success: true,
     deduped,
@@ -46,7 +46,7 @@ function scheduledResponse(entitlement: {
     data: {
       entitlement_id: entitlement.id,
       status: entitlement.status,
-      cancellation_timing: immediate ? 'immediate' : 'end-of-term',
+      cancellation_timing: cancellationTiming,
       access_until: immediate
         ? entitlement.expires_at
         : entitlement.status === 'grace_period'
@@ -120,10 +120,8 @@ export async function POST(request: NextRequest) {
     if (!entitlement || entitlement.type !== 'subscription') {
       return NextResponse.json({ error: 'Subscription not found' }, { status: 404 });
     }
-    // Idempotent replay: an immediate cancellation is already revoked, while
-    // an end-of-term cancellation remains active/grace_period.
     if (entitlement.cancelled_at) {
-      return scheduledResponse(entitlement, true);
+      return scheduledResponse(entitlement, true, cancellationTiming);
     }
     if (!['active', 'grace_period'].includes(entitlement.status)) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
@@ -224,7 +222,7 @@ export async function POST(request: NextRequest) {
     // default end-of-term policy keeps the entitlement active through expiry.
     const now = new Date().toISOString();
     const cancellationUpdate = cancellationTiming === 'immediate'
-      ? { cancelled_at: now, status: 'revoked', expires_at: now, updated_at: now }
+      ? { cancelled_at: now, status: 'cancelled', expires_at: now, updated_at: now }
       : { cancelled_at: now, updated_at: now };
     const { data: updated, error: updateError } = await admin
       .from('entitlements')
@@ -245,7 +243,7 @@ export async function POST(request: NextRequest) {
       if (
         updated.id !== entitlement.id
         || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(updated.status))
-        || (cancellationTiming === 'immediate' && updated.status !== 'revoked')
+        || (cancellationTiming === 'immediate' && updated.status !== 'cancelled')
         || (cancellationTiming === 'end-of-term' && updated.expires_at !== entitlement.expires_at)
         || (cancellationTiming === 'end-of-term' && updated.grace_period_ends_at !== entitlement.grace_period_ends_at)
         || typeof updated.cancelled_at !== 'string'
@@ -256,7 +254,7 @@ export async function POST(request: NextRequest) {
           { status: 503 },
         );
       }
-      return scheduledResponse(updated, false);
+      return scheduledResponse(updated, false, cancellationTiming);
     }
 
     // A concurrent confirm already scheduled it — resolve to that single entry.
@@ -272,7 +270,7 @@ export async function POST(request: NextRequest) {
       || !current
       || current.id !== entitlement.id
       || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(current.status))
-      || (cancellationTiming === 'immediate' && current.status !== 'revoked')
+      || (cancellationTiming === 'immediate' && current.status !== 'cancelled')
       || (cancellationTiming === 'end-of-term' && current.expires_at !== entitlement.expires_at)
       || (cancellationTiming === 'end-of-term' && current.grace_period_ends_at !== entitlement.grace_period_ends_at)
       || typeof current.cancelled_at !== 'string'
@@ -283,7 +281,7 @@ export async function POST(request: NextRequest) {
         { status: 503 },
       );
     }
-    return scheduledResponse(current, true);
+    return scheduledResponse(current, true, cancellationTiming);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });
