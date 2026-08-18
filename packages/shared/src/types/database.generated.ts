@@ -2583,6 +2583,28 @@ export interface DbPolls {
   closed_at: string | null;
 }
 
+export interface DbPortalCancellationOperations {
+  id: string;
+  request_id: string;
+  entitlement_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  paypal_subscription_id: string;
+  cancellation_timing: 'immediate' | 'end-of-term';
+  access_until: string;
+  status: 'pending' | 'uncertain' | 'provider_confirmed' | 'completed' | 'failed';
+  provider_http_status: number | null;
+  provider_debug_id: string | null;
+  provider_status: 'ACTIVE' | 'SUSPENDED' | 'CANCELLED' | 'EXPIRED' | null;
+  reconciliation_state: 'not_required' | 'pending' | 'confirmed_cancelled' | 'confirmed_active' | 'unavailable';
+  failure_code: 'provider_rejected' | 'provider_uncertain' | 'local_commit_failed' | null;
+  created_at: string;
+  updated_at: string;
+  provider_confirmed_at: string | null;
+  completed_at: string | null;
+}
+
 export interface DbPredictionBets {
   id: string;
   prediction_id: string;
