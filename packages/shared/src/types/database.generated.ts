@@ -1218,6 +1218,7 @@ export interface DbAuditLog {
   category: string;
   correlation_id: string | null;
   occurrence_key: string | null;
+  unscoped_occurrence_key: string | null;
 }
 
 export interface DbWebhookEvent {

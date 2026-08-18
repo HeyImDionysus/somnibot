@@ -10,39 +10,123 @@
  * fail the underlying request.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { headers } from 'next/headers';
+import { createAdminSupabase } from '@/lib/supabase/admin';
 
 export interface RbacAuditEntry {
-  guildId: string;
+  guildId: string | null;
   actorId: string;
   action: string;
   targetType?: string;
   targetId?: string | null;
   details?: Record<string, unknown>;
+  readonly category?: string;
+  readonly correlationId?: string;
+  readonly occurrenceKey?: string;
   /** false for denied/blocked attempts. */
   success?: boolean;
 }
 
-/**
- * Write an rbac.* audit_logs row via the service-role client. Best-effort.
- */
+export interface DashboardRequestMetadata {
+  readonly route: string;
+  readonly method: string;
+  readonly occurrenceId: string;
+}
+
+export interface DashboardAuthorizationDenial {
+  // Unauthenticated denials have no authoritative guild; never substitute a caller-controlled selector.
+  readonly guildId: string | null;
+  readonly actorId: string;
+  readonly permission: string;
+  readonly reason: string;
+  readonly status: 401 | 403;
+}
+
+function boundedHeader(value: string | null, fallback: string): string {
+  const normalized = value?.trim() ?? '';
+  return normalized.length > 0 && normalized.length <= 256 ? normalized : fallback;
+}
+
+export async function readDashboardRequestMetadata(): Promise<DashboardRequestMetadata> {
+  const requestHeaders = await headers();
+  return {
+    route: boundedHeader(requestHeaders.get('x-somnibot-request-route'), 'unknown'),
+    method: boundedHeader(requestHeaders.get('x-somnibot-request-method'), 'UNKNOWN'),
+    occurrenceId: boundedHeader(
+      requestHeaders.get('x-somnibot-request-occurrence-id'),
+      'unknown',
+    ),
+  };
+}
+
 export async function writeRbacAudit(
   admin: SupabaseClient,
   entry: RbacAuditEntry,
 ): Promise<void> {
   try {
-    await admin.from('audit_logs').insert({
+    const row = {
       guild_id: entry.guildId,
       actor_type: 'dashboard',
       actor_id: entry.actorId,
       action: entry.action,
-      category: 'rbac',
+      category: entry.category ?? 'rbac',
       target_type: entry.targetType ?? 'dashboard_role',
       target_id: entry.targetId ?? null,
       details: entry.details ?? {},
+      ...(entry.correlationId ? { correlation_id: entry.correlationId } : {}),
+      ...(entry.occurrenceKey ? { occurrence_key: entry.occurrenceKey } : {}),
+      ...(entry.guildId === null && entry.occurrenceKey
+        ? { unscoped_occurrence_key: entry.occurrenceKey }
+        : {}),
       success: entry.success ?? true,
-    });
+    };
+
+    if (entry.occurrenceKey) {
+      if (entry.guildId === null) {
+        await admin.from('audit_logs').upsert(row, {
+          onConflict: 'unscoped_occurrence_key',
+          ignoreDuplicates: true,
+        });
+        return;
+      }
+      await admin.from('audit_logs').upsert(row, {
+        onConflict: 'guild_id,occurrence_key',
+        ignoreDuplicates: true,
+      });
+      return;
+    }
+
+    await admin.from('audit_logs').insert(row);
   } catch {
     // Audit logging must never break the RBAC flow.
+  }
+}
+
+export async function auditDashboardAuthorizationDenial(
+  denial: DashboardAuthorizationDenial,
+): Promise<void> {
+  try {
+    const request = await readDashboardRequestMetadata();
+    await writeRbacAudit(createAdminSupabase(), {
+      guildId: denial.guildId,
+      actorId: denial.actorId,
+      action: 'dashboard.authorization_denied',
+      category: 'security',
+      targetType: 'dashboard_route',
+      targetId: request.route,
+      details: {
+        route: request.route,
+        method: request.method,
+        required_permission: denial.permission,
+        reason: denial.reason,
+        status: denial.status,
+      },
+      correlationId: `dashboard.authorization_denied:${request.occurrenceId}`,
+      occurrenceKey: `dashboard.authorization_denied:${request.occurrenceId}`,
+      success: false,
+    });
+  } catch {
+    // Audit construction must not change the authorization response.
   }
 }
 

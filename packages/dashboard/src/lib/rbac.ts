@@ -1,7 +1,6 @@
 /**
  * RBAC helper — resolves the current user's dashboard permissions.
  * Used by API routes and server components for authorization.
- *
  * V5 Audit §1.1 — requirePermission now throws typed AuthError with
  * proper HTTP status codes (401/403) instead of generic Error that
  * resulted in 500 responses.
@@ -12,6 +11,7 @@ import { cookies, headers } from 'next/headers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { resolveLauncherLocalAuth } from '@/lib/api/launcher-local-auth';
+import { auditDashboardAuthorizationDenial } from '@/lib/rbac-audit';
 import type { DashboardPermission } from '@somnibot/shared';
 
 export interface AuthContext {
@@ -223,7 +223,6 @@ export async function getAuthContext(): Promise<AuthContext | null> {
 
 /**
  * Require specific permission. Returns auth context or throws AuthError.
- *
  * Throws AuthError(401) if unauthenticated, AuthError(403) if lacking permission.
  * Callers should catch with `authErrorResponse()` for proper HTTP status codes.
  */
@@ -231,11 +230,21 @@ export async function requirePermission(
   permission: DashboardPermission | null,
 ): Promise<AuthContext> {
   const ctx = await getAuthContext();
-  if (!ctx) throw new AuthError('Unauthorized', 401);
+  if (!ctx) {
+    if (permission !== null) await auditDashboardAuthorizationDenial({
+      guildId: null, actorId: 'anonymous', permission, reason: 'unauthenticated', status: 401,
+    });
+    throw new AuthError('Unauthorized', 401);
+  }
 
   if (permission === null) return ctx;
   if (ctx.permissions.includes('dashboard.full_access')) return ctx;
-  if (!ctx.permissions.includes(permission)) throw new AuthError('Forbidden', 403);
+  if (!ctx.permissions.includes(permission)) {
+    await auditDashboardAuthorizationDenial({
+      guildId: ctx.guildId, actorId: ctx.discordId, permission, reason: 'permission_denied', status: 403,
+    });
+    throw new AuthError('Forbidden', 403);
+  }
 
   return ctx;
 }
