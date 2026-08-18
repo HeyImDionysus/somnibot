@@ -56,6 +56,46 @@ describe('ChannelPicker form controls', () => {
 
     expect(removeButton).toContain('type="button"');
   });
+
+  it('uses a native labelled disclosure without nested interactive controls', () => {
+    const markup = renderToStaticMarkup(React.createElement(
+      'form',
+      null,
+      React.createElement(ChannelPicker, {
+        value: 'channel-1',
+        label: 'Discord destination',
+        onChange: () => undefined,
+      }),
+    ));
+    const trigger = markup.match(/<button[^>]*aria-haspopup="listbox"[^>]*>/)?.[0];
+    const triggerId = trigger?.match(/\sid="([^"]+)"/)?.[1];
+
+    expect(markup).not.toContain('role="button"');
+    expect(trigger).toContain('type="button"');
+    expect(trigger).toContain('aria-expanded="false"');
+    expect(trigger).toMatch(/aria-controls="[^"]+"/);
+    expect(triggerId).toBeTruthy();
+    expect(markup).toContain(`for="${triggerId}"`);
+    expect(markup.indexOf('aria-label="Clear channel selection"'))
+      .toBeGreaterThan(markup.indexOf('</button>'));
+  });
+
+  it('associates hint and field error text with the invalid trigger', () => {
+    const markup = renderToStaticMarkup(React.createElement(ChannelPicker, {
+      value: null,
+      label: 'Discord destination',
+      hint: 'Choose a channel SomniBot can reach.',
+      error: 'Choose a destination from a fresh live Discord snapshot.',
+      onChange: () => undefined,
+    }));
+    const trigger = markup.match(/<button[^>]*aria-haspopup="listbox"[^>]*>/)?.[0];
+    const describedBy = trigger?.match(/aria-describedby="([^"]+)"/)?.[1]?.split(' ') ?? [];
+
+    expect(trigger).toContain('aria-invalid="true"');
+    expect(describedBy).toHaveLength(2);
+    for (const id of describedBy) expect(markup).toContain(`id="${id}"`);
+    expect(markup).toContain('role="alert"');
+  });
 });
 
 describe('snapshotAuthorityAsOf (round 27: gates Send Now via onAuthorityChange)', () => {
