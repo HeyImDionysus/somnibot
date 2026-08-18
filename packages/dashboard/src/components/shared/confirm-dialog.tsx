@@ -78,6 +78,7 @@ export function ConfirmDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const onCancelRef = useRef(onCancel);
+  const loadingRef = useRef(loading);
   const generatedId = useId();
   const titleId = `${generatedId}-title`;
   const descriptionId = `${generatedId}-description`;
@@ -99,7 +100,7 @@ export function ConfirmDialog({
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onCancelRef.current();
+        if (!loadingRef.current) onCancelRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -131,12 +132,23 @@ export function ConfirmDialog({
     };
   }, [open]);
 
+  useEffect(() => {
+    loadingRef.current = loading;
+    if (open && loading) {
+      dialogRef.current?.focus();
+    } else if (open) {
+      cancelRef.current?.focus();
+    }
+  }, [loading, open]);
+
   if (!open) return null;
 
   return (
     <div
       className="fixed inset-0 z-[9998] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-[2px]"
-      onClick={onCancel}
+      onClick={() => {
+        if (!loading) onCancel();
+      }}
     >
       <div
         ref={dialogRef}

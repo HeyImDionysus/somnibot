@@ -120,7 +120,7 @@ export async function POST(
   // anything else, so a customer cannot probe for other customers' key ids.
   const { data: key, error: lookupError } = await admin
     .from('license_keys')
-    .select('id, status, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency), products(name, product_license_config(rotation_policy, key_prefix))')
+    .select('id, status, revocation_reason, rotated_to_key_id, customer_id, guild_id, product_id, bound_discord_id, order_id, orders!license_keys_order_id_fkey(order_number, amount_cents, currency, entitlements!entitlements_order_id_fkey(id, status, type, expires_at, grace_period_ends_at, license_key_id, order_id, customer_id, guild_id, product_id)), products(name, product_license_config(rotation_policy, key_prefix))')
     .eq('id', licenseKeyId)
     .eq('customer_id', portalSession.customer_id)
     .eq('guild_id', portalSession.guild_id)
@@ -131,9 +131,74 @@ export async function POST(
     return NextResponse.json({ error: 'Licence not found' }, { status: 404 });
   }
 
-  const productConfig = (key.products as { product_license_config?: Array<{ rotation_policy?: string; key_prefix?: string }> } | null)?.product_license_config?.[0];
+  const embeddedConfig = (key.products as {
+    product_license_config?:
+      | { rotation_policy?: string; key_prefix?: string }
+      | Array<{ rotation_policy?: string; key_prefix?: string }>;
+  } | null)?.product_license_config;
+  const productConfig = Array.isArray(embeddedConfig) ? embeddedConfig[0] : embeddedConfig;
   if (productConfig?.rotation_policy === 'disabled') {
     return NextResponse.json({ error: 'Key rotation is disabled for this product.' }, { status: 403 });
+  }
+
+  type EmbeddedEntitlement = {
+    status?: unknown;
+    type?: unknown;
+    expires_at?: unknown;
+    grace_period_ends_at?: unknown;
+    license_key_id?: unknown;
+    order_id?: unknown;
+    customer_id?: unknown;
+    guild_id?: unknown;
+    product_id?: unknown;
+  };
+  const order = key.orders as {
+    order_number?: unknown;
+    amount_cents?: unknown;
+    currency?: unknown;
+    entitlements?: EmbeddedEntitlement | EmbeddedEntitlement[];
+  } | null;
+  const embeddedEntitlements = order?.entitlements;
+  const entitlements = Array.isArray(embeddedEntitlements)
+    ? embeddedEntitlements
+    : embeddedEntitlements
+      ? [embeddedEntitlements]
+      : [];
+  const hasUsableEntitlement = entitlements.some((entitlement) =>
+    (
+      (
+        entitlement.status === 'active'
+        && (
+          entitlement.expires_at === null
+          || (
+            typeof entitlement.expires_at === 'string'
+            && Date.parse(entitlement.expires_at) > Date.now()
+          )
+        )
+      )
+      || (
+        entitlement.status === 'grace_period'
+        && typeof entitlement.grace_period_ends_at === 'string'
+        && Date.parse(entitlement.grace_period_ends_at) > Date.now()
+      )
+    )
+    && (
+      entitlement.license_key_id === key.id
+      || (
+        key.status === 'revoked'
+        && key.revocation_reason === 'rotated'
+        && entitlement.license_key_id === key.rotated_to_key_id
+      )
+    )
+    && entitlement.order_id === key.order_id
+    && entitlement.customer_id === key.customer_id
+    && entitlement.guild_id === key.guild_id
+    && entitlement.product_id === key.product_id);
+  if (!hasUsableEntitlement) {
+    return NextResponse.json(
+      { error: 'This licence no longer has active access and cannot be rotated.' },
+      { status: 409 },
+    );
   }
 
   // Do not short-circuit revoked rows here. A committed rotation revokes its
@@ -181,9 +246,18 @@ export async function POST(
     );
     result = response.data;
     rpcError = response.error;
-    if (!rpcError) break;
+    if (
+      !rpcError
+      || rpcError.message === 'license_rotate_key_without_receipt_stage: entitlement is not usable'
+    ) break;
   }
 
+  if (rpcError?.message === 'license_rotate_key_without_receipt_stage: entitlement is not usable') {
+    return NextResponse.json(
+      { error: 'This licence no longer has active access and cannot be rotated.' },
+      { status: 409 },
+    );
+  }
   if (rpcError) return dbError(rpcError, 'portal/licenses/rotate');
 
   const status = (result as { status?: string } | null)?.status;
@@ -207,9 +281,9 @@ export async function POST(
     );
   }
 
-  const orderNumber = (key.orders as { order_number?: unknown } | null)?.order_number;
-  const amountCents = (key.orders as { amount_cents?: unknown } | null)?.amount_cents;
-  const currency = (key.orders as { currency?: unknown } | null)?.currency;
+  const orderNumber = order?.order_number;
+  const amountCents = order?.amount_cents;
+  const currency = order?.currency;
   if (
     typeof orderNumber !== 'string'
     || orderNumber.length === 0

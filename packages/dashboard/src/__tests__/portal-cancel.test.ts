@@ -33,6 +33,11 @@ let entitlementUpdateError: any;
 let suppressEntitlementUpdate: boolean;
 let currentReadError: any;
 let entitlementSelectCalls: number;
+let portalConfig: {
+  self_service_cancellation: boolean;
+  cancellation_timing: 'end-of-term' | 'immediate';
+};
+let portalConfigError: unknown;
 
 function makeAdmin() {
   return {
@@ -49,15 +54,30 @@ function makeAdmin() {
         };
         return chain;
       }
+      if (table === 'guild_config') {
+        const chain: any = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: async () => ({ data: portalConfig, error: portalConfigError }),
+        };
+        return chain;
+      }
       // entitlements
       let mode: 'select' | 'update' = 'select';
       let updateObj: any = null;
-      let guardCancelledNull = false;
+      const equalityGuards = new Map<string, unknown>();
+      const nullGuards = new Set<string>();
       const chain: any = {
         select: () => chain,
         update: (obj: any) => { mode = 'update'; updateObj = obj; return chain; },
-        eq: () => chain,
-        is: (col: string) => { if (col === 'cancelled_at') guardCancelledNull = true; return chain; },
+        eq: (col: string, value: unknown) => {
+          if (mode === 'update') equalityGuards.set(col, value);
+          return chain;
+        },
+        is: (col: string, value: unknown) => {
+          if (mode === 'update' && value === null) nullGuards.add(col);
+          return chain;
+        },
         maybeSingle: async () => {
           if (mode === 'update') {
             if (entitlementUpdateError) {
@@ -66,12 +86,23 @@ function makeAdmin() {
             if (suppressEntitlementUpdate) {
               return { data: null, error: null };
             }
-            if (guardCancelledNull && entitlement.cancelled_at) {
+            if (
+              [...equalityGuards].some(([column, value]) => entitlement[column] !== value)
+              || [...nullGuards].some((column) => entitlement[column] !== null)
+            ) {
               return { data: null, error: null };
             }
             entitlement = { ...entitlement, ...updateObj };
             return {
-              data: { id: entitlement.id, status: entitlement.status, expires_at: entitlement.expires_at, cancelled_at: entitlement.cancelled_at },
+              data: {
+                id: entitlement.id,
+                status: entitlement.status,
+                expires_at: entitlement.expires_at,
+                grace_period_ends_at: entitlement.grace_period_ends_at,
+                cancelled_at: entitlement.cancelled_at,
+                portal_cancellation_timing: entitlement.portal_cancellation_timing,
+                portal_cancellation_access_until: entitlement.portal_cancellation_access_until,
+              },
               error: null,
             };
           }
@@ -94,7 +125,7 @@ function makeRequest(body: Record<string, unknown>) {
   return new NextRequest('https://dash.example/api/portal/cancel', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-portal-token': 'tok-1' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ cancellation_timing: 'end-of-term', ...body }),
   });
 }
 
@@ -113,12 +144,22 @@ beforeEach(() => {
   suppressEntitlementUpdate = false;
   currentReadError = null;
   entitlementSelectCalls = 0;
+  portalConfig = {
+    self_service_cancellation: true,
+    cancellation_timing: 'end-of-term',
+  };
+  portalConfigError = null;
   entitlement = {
     id: ENT_ID,
+    customer_id: SESSION.customer_id,
+    guild_id: SESSION.guild_id,
     status: 'active',
     type: 'subscription',
     expires_at: '2026-08-23T00:00:00.000Z',
+    grace_period_ends_at: null,
     cancelled_at: null,
+    portal_cancellation_timing: null,
+    portal_cancellation_access_until: null,
     order_id: 'order-1',
   };
   (createAdminSupabase as any).mockReturnValue(makeAdmin());
@@ -130,15 +171,29 @@ beforeEach(() => {
 
 describe('POST /api/portal/cancel', () => {
   it('schedules cancellation: keeps status active, keeps term-end expiry, cancels the provider sub', async () => {
+    global.fetch = vi.fn(async (url: URL | RequestInfo) => {
+      if (String(url).endsWith('/cancel')) {
+        expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
+        expect(entitlement.portal_cancellation_access_until).toBe('2026-08-23T00:00:00.000Z');
+        expect(entitlement.cancelled_at).toBeNull();
+        paypalCancelCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
     const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.message).toBe('cancellation-scheduled');
     expect(json.data.status).toBe('active');
+    expect(json.data.cancellation_timing).toBe('end-of-term');
     expect(json.data.access_until).toBe('2026-08-23T00:00:00.000Z');
     expect(json.data.cancellation_scheduled_at).toBeTruthy();
     expect(entitlement.status).toBe('active'); // not revoked immediately
     expect(entitlement.cancelled_at).toBeTruthy();
+    expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
+    expect(entitlement.portal_cancellation_access_until).toBe('2026-08-23T00:00:00.000Z');
     expect(paypalCancelCalls).toBe(1);
   });
 
@@ -149,6 +204,46 @@ describe('POST /api/portal/cancel', () => {
     expect(json2.message).toBe('cancellation-scheduled');
     expect(json2.deduped).toBe(true);
     expect(paypalCancelCalls).toBe(1); // no second provider call
+  });
+
+  it('reports the persisted end-of-term timing when policy changes before a replay', async () => {
+    await POST(makeRequest({ entitlement_id: ENT_ID }));
+    portalConfig.cancellation_timing = 'immediate';
+
+    const replay = await POST(makeRequest({
+      entitlement_id: ENT_ID,
+    }));
+    const body = await replay.json();
+
+    expect(replay.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.data.cancellation_timing).toBe('end-of-term');
+    expect(body.data.access_until).toBe('2026-08-23T00:00:00.000Z');
+    expect(paypalCancelCalls).toBe(1);
+  });
+
+  it('keeps the persisted end-of-term timing after scheduled fulfillment makes status terminal', async () => {
+    await POST(makeRequest({ entitlement_id: ENT_ID }));
+    entitlement.status = 'cancelled';
+
+    const replay = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const body = await replay.json();
+
+    expect(replay.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.data.cancellation_timing).toBe('end-of-term');
+    expect(body.data.access_until).toBe('2026-08-23T00:00:00.000Z');
+    expect(paypalCancelCalls).toBe(1);
+  });
+
+  it('does not classify a provider-side cancellation as a portal replay', async () => {
+    entitlement.status = 'cancelled';
+    entitlement.cancelled_at = '2026-08-18T00:00:00.000Z';
+
+    const response = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(response.status).toBe(409);
+    expect(paypalCancelCalls).toBe(0);
   });
 
   it('404s a non-subscription or foreign entitlement', async () => {
@@ -215,6 +310,41 @@ describe('POST /api/portal/cancel', () => {
 
     expect(res.status).toBe(502);
     expect(entitlement.cancelled_at).toBeNull();
+    expect(entitlement.portal_cancellation_timing).toBeNull();
+    expect(entitlement.portal_cancellation_access_until).toBeNull();
+  });
+
+  it('resumes a locally reserved cancellation after an ambiguous provider failure', async () => {
+    let providerAttempts = 0;
+    global.fetch = vi.fn(async (url: URL | RequestInfo) => {
+      if (String(url).endsWith('/cancel')) {
+        paypalCancelCalls += 1;
+        providerAttempts += 1;
+        return providerAttempts === 1
+          ? new Response(null, { status: 500 })
+          : new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const first = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    expect(first.status).toBe(502);
+    expect(entitlement.cancelled_at).toBeNull();
+    expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
+
+    portalConfig.cancellation_timing = 'immediate';
+    const mismatchedRetry = await POST(makeRequest({
+      entitlement_id: ENT_ID,
+      cancellation_timing: 'immediate',
+    }));
+    expect(mismatchedRetry.status).toBe(409);
+    expect(entitlement.cancelled_at).toBeNull();
+    expect(paypalCancelCalls).toBe(1);
+
+    const retry = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    expect(retry.status).toBe(200);
+    expect(entitlement.cancelled_at).not.toBeNull();
+    expect(paypalCancelCalls).toBe(2);
   });
 
   it('does not fabricate success when the local schedule update fails', async () => {
@@ -242,5 +372,96 @@ describe('POST /api/portal/cancel', () => {
 
     expect(res.status).toBe(409);
     expect(paypalCancelCalls).toBe(0);
+  });
+
+  it('fails closed when the store cancellation policy cannot be loaded', async () => {
+    portalConfigError = { message: 'database unavailable' };
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(503);
+    expect(paypalCancelCalls).toBe(0);
+    expect(entitlement.cancelled_at).toBeNull();
+  });
+
+  it('allows immediate cancellation without a paid-through boundary and reports immediate access loss', async () => {
+    portalConfig.cancellation_timing = 'immediate';
+    entitlement.expires_at = null;
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID, cancellation_timing: 'immediate' }));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.data.status).toBe('cancelled');
+    expect(json.data.cancellation_timing).toBe('immediate');
+    expect(json.data.access_until).toBeTruthy();
+    expect(entitlement.status).toBe('cancelled');
+    expect(entitlement.portal_cancellation_timing).toBe('immediate');
+    expect(paypalCancelCalls).toBe(1);
+  });
+
+  it('does not overwrite a concurrent lifecycle expiry after the provider cancellation', async () => {
+    portalConfig.cancellation_timing = 'immediate';
+    global.fetch = vi.fn(async (url: URL | RequestInfo) => {
+      if (String(url).endsWith('/cancel')) {
+        paypalCancelCalls += 1;
+        entitlement.status = 'expired';
+        entitlement.expires_at = '2026-08-17T23:59:59.000Z';
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const response = await POST(makeRequest({
+      entitlement_id: ENT_ID,
+      cancellation_timing: 'immediate',
+    }));
+
+    expect(response.status).toBe(503);
+    expect(entitlement.status).toBe('expired');
+    expect(entitlement.cancelled_at).toBeNull();
+    expect(entitlement.portal_cancellation_timing).toBe('immediate');
+    expect(entitlement.portal_cancellation_access_until).not.toBeNull();
+    expect(paypalCancelCalls).toBe(1);
+  });
+
+  it('uses the grace deadline as the access boundary for a grace-period cancellation', async () => {
+    entitlement.status = 'grace_period';
+    entitlement.expires_at = '2026-08-01T00:00:00.000Z';
+    entitlement.grace_period_ends_at = '2026-08-26T00:00:00.000Z';
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.data.status).toBe('grace_period');
+    expect(json.data.access_until).toBe('2026-08-26T00:00:00.000Z');
+  });
+
+  it('keeps the grace access boundary after scheduled fulfillment makes status terminal', async () => {
+    entitlement.status = 'grace_period';
+    entitlement.expires_at = '2026-08-01T00:00:00.000Z';
+    entitlement.grace_period_ends_at = '2026-08-26T00:00:00.000Z';
+    await POST(makeRequest({ entitlement_id: ENT_ID }));
+    entitlement.status = 'cancelled';
+
+    const replay = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const body = await replay.json();
+
+    expect(replay.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.data.cancellation_timing).toBe('end-of-term');
+    expect(body.data.access_until).toBe('2026-08-26T00:00:00.000Z');
+    expect(paypalCancelCalls).toBe(1);
+  });
+
+  it('rejects cancellation when the confirmed timing no longer matches the store policy', async () => {
+    portalConfig.cancellation_timing = 'immediate';
+
+    const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(res.status).toBe(409);
+    expect(paypalCancelCalls).toBe(0);
+    expect(entitlement.cancelled_at).toBeNull();
   });
 });

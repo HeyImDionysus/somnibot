@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 270 migration files in packages/supabase/migrations/
+ * Source: 272 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1104,6 +1104,8 @@ export interface DbEntitlement {
   created_at: string;
   updated_at: string;
   commerce_required_order_status: string | null;
+  portal_cancellation_timing: string | null;
+  portal_cancellation_access_until: string | null;
 }
 
 export interface DbProductLicenseConfig {

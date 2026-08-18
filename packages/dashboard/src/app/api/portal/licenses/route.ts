@@ -11,6 +11,16 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+function configuredMaxDevices(products: unknown): number {
+  const product = Array.isArray(products) ? products[0] : products;
+  if (!product || typeof product !== 'object') return 3;
+  const rawConfig = Reflect.get(product, 'product_license_config');
+  const config = Array.isArray(rawConfig) ? rawConfig[0] : rawConfig;
+  if (!config || typeof config !== 'object') return 3;
+  const value = Reflect.get(config, 'max_devices');
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : 3;
+}
+
 async function getPortalCustomer(request: NextRequest) {
   const token = request.headers.get('x-portal-token');
   if (!token) return null;
@@ -42,14 +52,24 @@ export async function GET(request: NextRequest) {
     const admin = createAdminSupabase();
 
     // Get license keys
-    const { data: keys } = await admin
+    const { data: keys, error: keysError } = await admin
       .from('license_keys')
-      .select('*, products(name, type), license_sessions(id, device_name, device_fingerprint, ip_address, active, first_seen_at, last_seen_at)')
+      .select('id, key_prefix, key_suffix, status, expires_at, created_at, products(name, type, product_license_config(max_devices, rotation_policy, self_service_device_removal)), entitlements!entitlements_license_key_id_fkey(status, type, expires_at, grace_period_ends_at), license_sessions(id, device_name, device_fingerprint, ip_address, active, first_seen_at, last_seen_at)')
       .eq('customer_id', session.customer_id)
+      .eq('guild_id', session.guild_id)
       .order('created_at', { ascending: false })
       .limit(500);
+    if (keysError) {
+      return NextResponse.json({ error: 'Licenses could not be loaded.' }, { status: 503 });
+    }
 
-    return NextResponse.json({ success: true, data: keys || [] });
+    return NextResponse.json({
+      success: true,
+      data: (keys || []).map((key) => ({
+        ...key,
+        max_devices: configuredMaxDevices(key.products),
+      })),
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });

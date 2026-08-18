@@ -41,14 +41,43 @@ export async function GET(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
-    const { data: orders } = await admin
+    const { data: portalConfig, error: configError } = await admin
+      .from('guild_config')
+      .select('self_service_cancellation, cancellation_timing, refund_requests_enabled, service_requests_enabled')
+      .eq('guild_id', session.guild_id)
+      .maybeSingle();
+    if (configError) {
+      return NextResponse.json({ error: 'Portal controls could not be loaded.' }, { status: 503 });
+    }
+
+    const { data: orders, error: ordersError } = await admin
       .from('orders')
-      .select('*, products(name, type), payments(id, amount_cents, currency, status, provider, created_at)')
+      .select('id, order_number, amount_cents, discount_cents, currency, status, source, paypal_subscription_id, created_at, products(name, type), payments(id, amount_cents, currency, status, provider, created_at), entitlements!entitlements_order_id_fkey(id, status, type, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, portal_cancellation_access_until)')
       .eq('customer_id', session.customer_id)
+      .eq('guild_id', session.guild_id)
       .order('created_at', { ascending: false })
       .limit(500);
+    if (ordersError) {
+      return NextResponse.json({ error: 'Order history could not be loaded.' }, { status: 503 });
+    }
 
-    return NextResponse.json({ success: true, data: orders || [] });
+    return NextResponse.json({
+      success: true,
+      data: (orders || []).map(({ paypal_subscription_id: subscriptionId, ...order }) => ({
+        ...order,
+        can_self_service_cancel:
+          (order.source === 'purchase' || order.source === null)
+          && typeof subscriptionId === 'string'
+          && subscriptionId.length > 0
+          && subscriptionId.trim() === subscriptionId,
+      })),
+      controls: {
+        self_service_cancellation: portalConfig?.self_service_cancellation !== false,
+        cancellation_timing: portalConfig?.cancellation_timing === 'immediate' ? 'immediate' : 'end-of-term',
+        refund_requests_enabled: portalConfig?.refund_requests_enabled !== false,
+        service_requests_enabled: portalConfig?.service_requests_enabled !== false,
+      },
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });

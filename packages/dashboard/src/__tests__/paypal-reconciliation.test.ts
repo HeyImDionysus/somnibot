@@ -4595,6 +4595,57 @@ describe('runPayPalReconciliation', () => {
     expect(result.unsettledLocalPayments).toEqual([]);
   });
 
+  it('tolerates a terminal fulfillment action deferred to a future access boundary', async () => {
+    withLedger({
+      orders: [{
+        id: ORDER_UUID,
+        guild_id: GUILD_ID,
+        amount_cents: 2500,
+        status: 'completed',
+        created_at: IN_WINDOW,
+        paypal_order_id: null,
+        paypal_subscription_id: 'SUB-1',
+      }],
+    });
+    resolvers['commerce_subscription_lifecycle_heads'] = () => ({
+      data: [{
+        paypal_subscription_id: 'SUB-1',
+        last_event_priority: 60,
+        last_provider_event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+        last_webhook_event_id: 'WH-CANCEL',
+      }],
+      error: null,
+    });
+    resolvers['bot_action_queue'] = (op) => {
+      const wantsStaged = op.filters.some(
+        (f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'staged',
+      );
+      return {
+        data: wantsStaged
+          ? []
+          : [{
+              idempotency_key: 'paypal:lifecycle:WH-CANCEL:subscription_cancelled',
+              status: 'pending',
+              created_at: IN_WINDOW,
+              next_retry_at: '2026-07-27T13:00:00.000Z',
+            }],
+        error: null,
+      };
+    };
+    scriptProviderObjects({
+      subscriptions: {
+        'SUB-1': subscriptionObject({ status: 'CANCELLED', lastPaymentTime: null }),
+      },
+    });
+
+    const result = completedResult(await runPayPalReconciliation(
+      supabase as never,
+      { now: NOW, settlementLagMs: 15 * 60 * 1000 },
+    ));
+
+    expect(result.unsettledLocalPayments).toEqual([]);
+  });
+
   it('reports an over-refunded ledger behind a fully refunded sale', async () => {
     // The sale is fully refunded at 2500, but the local ledger claims 3000:
     // the status-only fallback used to check only the UNDER direction.
