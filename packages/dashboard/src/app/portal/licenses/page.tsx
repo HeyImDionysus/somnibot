@@ -117,7 +117,7 @@ export default function PortalLicenses() {
       if (!response.ok || body.success !== true) {
         throw new Error(body.error || 'The device could not be removed.');
       }
-      const successMessage = 'The device session was removed and can no longer use this license.';
+      const successMessage = 'The device was signed out and its license seat is now available. Rotate the key if this device must not reconnect.';
       setRemoveTarget(null);
       setNotice({ kind: 'success', message: successMessage });
       try {

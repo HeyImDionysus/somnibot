@@ -38,6 +38,7 @@ function scheduledResponse(entitlement: {
   expires_at: string | null;
   grace_period_ends_at: string | null;
   cancelled_at: string | null;
+  portal_cancellation_timing: string | null;
 }, deduped: boolean, cancellationTiming: 'immediate' | 'end-of-term') {
   const immediate = cancellationTiming === 'immediate';
   return NextResponse.json({
@@ -58,8 +59,13 @@ function scheduledResponse(entitlement: {
   });
 }
 
-function persistedCancellationTiming(entitlement: { status: string }): 'immediate' | 'end-of-term' {
-  return entitlement.status === 'cancelled' ? 'immediate' : 'end-of-term';
+function persistedCancellationTiming(
+  entitlement: { portal_cancellation_timing: string | null },
+): 'immediate' | 'end-of-term' | null {
+  return entitlement.portal_cancellation_timing === 'immediate'
+    || entitlement.portal_cancellation_timing === 'end-of-term'
+    ? entitlement.portal_cancellation_timing
+    : null;
 }
 
 export async function POST(request: NextRequest) {
@@ -116,7 +122,7 @@ export async function POST(request: NextRequest) {
     // The entitlement MUST be a subscription owned by this customer in this guild.
     const { data: entitlement, error: entitlementError } = await admin
       .from('entitlements')
-      .select('id, status, type, expires_at, grace_period_ends_at, cancelled_at, order_id')
+      .select('id, status, type, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, order_id')
       .eq('id', entitlement_id)
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
@@ -132,7 +138,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Subscription not found' }, { status: 404 });
     }
     if (entitlement.cancelled_at) {
-      return scheduledResponse(entitlement, true, persistedCancellationTiming(entitlement));
+      const appliedTiming = persistedCancellationTiming(entitlement);
+      if (!appliedTiming) {
+        return NextResponse.json(
+          { error: 'This subscription was cancelled outside the customer portal.' },
+          { status: 409 },
+        );
+      }
+      return scheduledResponse(entitlement, true, appliedTiming);
     }
     if (confirmedTiming !== cancellationTiming) {
       return NextResponse.json(
@@ -239,15 +252,35 @@ export async function POST(request: NextRequest) {
     // default end-of-term policy keeps the entitlement active through expiry.
     const now = new Date().toISOString();
     const cancellationUpdate = cancellationTiming === 'immediate'
-      ? { cancelled_at: now, status: 'cancelled', expires_at: now, updated_at: now }
-      : { cancelled_at: now, updated_at: now };
-    const { data: updated, error: updateError } = await admin
+      ? {
+          cancelled_at: now,
+          portal_cancellation_timing: cancellationTiming,
+          status: 'cancelled',
+          expires_at: now,
+          updated_at: now,
+        }
+      : { cancelled_at: now, portal_cancellation_timing: cancellationTiming, updated_at: now };
+    const guardedUpdate = admin
       .from('entitlements')
       .update(cancellationUpdate)
       .eq('id', entitlement.id)
       .eq('customer_id', session.customer_id)
+      .eq('guild_id', session.guild_id)
+      .eq('status', entitlement.status)
       .is('cancelled_at', null)
-      .select('id, status, expires_at, grace_period_ends_at, cancelled_at')
+      .is('portal_cancellation_timing', null);
+    if (entitlement.expires_at === null) {
+      guardedUpdate.is('expires_at', null);
+    } else {
+      guardedUpdate.eq('expires_at', entitlement.expires_at);
+    }
+    if (entitlement.grace_period_ends_at === null) {
+      guardedUpdate.is('grace_period_ends_at', null);
+    } else {
+      guardedUpdate.eq('grace_period_ends_at', entitlement.grace_period_ends_at);
+    }
+    const { data: updated, error: updateError } = await guardedUpdate
+      .select('id, status, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing')
       .maybeSingle();
 
     if (updateError) {
@@ -263,6 +296,7 @@ export async function POST(request: NextRequest) {
         || (cancellationTiming === 'immediate' && updated.status !== 'cancelled')
         || (cancellationTiming === 'end-of-term' && updated.expires_at !== entitlement.expires_at)
         || (cancellationTiming === 'end-of-term' && updated.grace_period_ends_at !== entitlement.grace_period_ends_at)
+        || updated.portal_cancellation_timing !== cancellationTiming
         || typeof updated.cancelled_at !== 'string'
         || !Number.isFinite(Date.parse(updated.cancelled_at))
       ) {
@@ -277,7 +311,7 @@ export async function POST(request: NextRequest) {
     // A concurrent confirm already scheduled it — resolve to that single entry.
     const { data: current, error: currentError } = await admin
       .from('entitlements')
-      .select('id, status, expires_at, grace_period_ends_at, cancelled_at')
+      .select('id, status, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing')
       .eq('id', entitlement.id)
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
@@ -295,6 +329,12 @@ export async function POST(request: NextRequest) {
       );
     }
     const appliedTiming = persistedCancellationTiming(current);
+    if (!appliedTiming) {
+      return NextResponse.json(
+        { error: 'The provider cancelled renewal, but the local schedule is unconfirmed. Please retry.' },
+        { status: 503 },
+      );
+    }
     if (
       appliedTiming === 'end-of-term'
       && (

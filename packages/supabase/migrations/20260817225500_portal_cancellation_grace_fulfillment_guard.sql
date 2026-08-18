@@ -1,3 +1,16 @@
+ALTER TABLE public.entitlements
+  ADD COLUMN IF NOT EXISTS portal_cancellation_timing TEXT;
+
+ALTER TABLE public.entitlements
+  DROP CONSTRAINT IF EXISTS entitlements_portal_cancellation_timing_check;
+ALTER TABLE public.entitlements
+  ADD CONSTRAINT entitlements_portal_cancellation_timing_check
+  CHECK (portal_cancellation_timing IS NULL
+    OR portal_cancellation_timing IN ('immediate', 'end-of-term'));
+
+COMMENT ON COLUMN public.entitlements.portal_cancellation_timing IS
+  'Applied buyer-portal cancellation policy. NULL for provider, seller, and lifecycle cancellations.';
+
 CREATE OR REPLACE FUNCTION public.commerce_preserve_cancellation_grace_boundary()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -22,6 +35,7 @@ BEGIN
      AND entitlement.product_id::TEXT = NEW.payload ->> 'product_id'
      AND entitlement.type = 'subscription'
      AND entitlement.status = 'grace_period'
+     AND entitlement.portal_cancellation_timing = 'end-of-term'
      AND entitlement.grace_period_ends_at > pg_catalog.clock_timestamp();
 
   IF v_grace_until IS NOT NULL
@@ -55,6 +69,7 @@ WITH grace_boundaries AS (
    AND entitlement.product_id::TEXT = queue.payload ->> 'product_id'
    AND entitlement.type = 'subscription'
    AND entitlement.status = 'grace_period'
+   AND entitlement.portal_cancellation_timing = 'end-of-term'
    AND entitlement.grace_period_ends_at > pg_catalog.clock_timestamp()
   WHERE queue.action = 'fulfill_cancellation'
     AND queue.status IN ('staged', 'pending', 'failed')

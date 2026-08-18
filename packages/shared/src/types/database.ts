@@ -1274,6 +1274,7 @@ export interface DbEntitlement {
   starts_at: string;
   expires_at: string | null;
   cancelled_at: string | null;
+  portal_cancellation_timing: 'immediate' | 'end-of-term' | null;
   created_at: string;
   updated_at: string;
   commerce_required_order_status: 'completed' | null;

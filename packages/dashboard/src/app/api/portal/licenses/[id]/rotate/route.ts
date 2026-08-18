@@ -120,7 +120,7 @@ export async function POST(
   // anything else, so a customer cannot probe for other customers' key ids.
   const { data: key, error: lookupError } = await admin
     .from('license_keys')
-    .select('id, status, revocation_reason, rotated_to_key_id, customer_id, guild_id, product_id, bound_discord_id, order_id, orders(order_number, amount_cents, currency, entitlements(id, status, type, expires_at, grace_period_ends_at, license_key_id, order_id, customer_id, guild_id, product_id)), products(name, product_license_config(rotation_policy, key_prefix))')
+    .select('id, status, revocation_reason, rotated_to_key_id, customer_id, guild_id, product_id, bound_discord_id, order_id, orders!license_keys_order_id_fkey(order_number, amount_cents, currency, entitlements!entitlements_order_id_fkey(id, status, type, expires_at, grace_period_ends_at, license_key_id, order_id, customer_id, guild_id, product_id)), products(name, product_license_config(rotation_policy, key_prefix))')
     .eq('id', licenseKeyId)
     .eq('customer_id', portalSession.customer_id)
     .eq('guild_id', portalSession.guild_id)

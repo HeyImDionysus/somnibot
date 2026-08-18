@@ -509,7 +509,7 @@ test('license load failure does not claim that the account has no licenses', asy
     contentType: 'image/png',
   });
   await removeDialog.getByRole('button', { name: 'Remove device' }).click();
-  await expect(page.getByRole('status')).toContainText('can no longer use this license');
+  await expect(page.getByRole('status')).toContainText('signed out and its license seat is now available');
   await testInfo.attach(`licenses-${viewport.name}-device-removed`, {
     body: await page.screenshot({ fullPage: true }),
     contentType: 'image/png',
@@ -812,7 +812,7 @@ test('device removal success remains truthful when license refresh fails', async
   await page.getByRole('button', { name: /Device Refresh License/ }).click();
   await page.getByRole('button', { name: 'Remove device' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Remove device' }).click();
-  await expect(page.getByRole('status')).toContainText('can no longer use this license');
+  await expect(page.getByRole('status')).toContainText('signed out and its license seat is now available');
   await expect(page.getByRole('status')).toContainText('could not be refreshed');
   await expect(page.getByRole('alertdialog')).toHaveCount(0);
   expect(licenseReads).toBe(2);

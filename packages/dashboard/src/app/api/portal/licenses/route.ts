@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
     // Get license keys
     const { data: keys, error: keysError } = await admin
       .from('license_keys')
-      .select('id, key_prefix, key_suffix, status, max_devices, expires_at, created_at, products(name, type, product_license_config(rotation_policy, self_service_device_removal)), entitlements(status, type, expires_at, grace_period_ends_at), license_sessions(id, device_name, device_fingerprint, ip_address, active, first_seen_at, last_seen_at)')
+      .select('id, key_prefix, key_suffix, status, max_devices, expires_at, created_at, products(name, type, product_license_config(rotation_policy, self_service_device_removal)), entitlements!entitlements_license_key_id_fkey(status, type, expires_at, grace_period_ends_at), license_sessions(id, device_name, device_fingerprint, ip_address, active, first_seen_at, last_seen_at)')
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
       .order('created_at', { ascending: false })

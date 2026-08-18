@@ -1104,6 +1104,7 @@ export interface DbEntitlement {
   created_at: string;
   updated_at: string;
   commerce_required_order_status: string | null;
+  portal_cancellation_timing: string | null;
 }
 
 export interface DbProductLicenseConfig {

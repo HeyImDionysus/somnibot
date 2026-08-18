@@ -282,6 +282,21 @@ describe('portal license rotation entitlement guard', () => {
     },
   );
 
+  it('resolves the portal license entitlement embeds through explicit relationships', async () => {
+    const fixture = await createFixture('active', true);
+    const { data, error } = await supa
+      .from('license_keys')
+      .select('id, entitlements!entitlements_license_key_id_fkey(id), orders!license_keys_order_id_fkey(id, entitlements!entitlements_order_id_fkey(id))')
+      .eq('id', fixture.keyId)
+      .single();
+
+    expect(error).toBeNull();
+    expect(data?.id).toBe(fixture.keyId);
+    expect(data?.entitlements).toMatchObject([{ id: fixture.entitlementId }]);
+    const order = Array.isArray(data?.orders) ? data.orders[0] : data?.orders;
+    expect(order?.entitlements).toMatchObject([{ id: fixture.entitlementId }]);
+  });
+
   it('keeps cancellation fulfillment behind a later local grace deadline', async () => {
     const [customer] = await sql<{ id: string }[]>`
       INSERT INTO public.customers (
@@ -351,7 +366,7 @@ describe('portal license rotation entitlement guard', () => {
     const webhookEventId = nextValue('WH-GRACE-CANCEL');
     const providerOccurredAt = new Date().toISOString();
     const providerPaidThroughAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const [action] = await sql<{ id: string; next_retry_at: string }[]>`
+    const [providerAction] = await sql<{ id: string; next_retry_at: string }[]>`
       INSERT INTO public.bot_action_queue (
         guild_id, action, payload, status, idempotency_key, next_retry_at
       ) VALUES (
@@ -380,12 +395,41 @@ describe('portal license rotation entitlement guard', () => {
           'lifecycle_generation', 1
         ),
         'pending',
-        ${`paypal:lifecycle:${webhookEventId}:subscription_cancelled`},
+        ${`paypal:lifecycle:${webhookEventId}:provider-cancelled`},
         ${providerPaidThroughAt}::TIMESTAMPTZ
       )
       RETURNING id, next_retry_at::TEXT
     `;
-    if (!action) throw new Error('grace cancellation action fixture returned no id');
+    if (!providerAction) throw new Error('provider cancellation action fixture returned no id');
+    expect(Date.parse(providerAction.next_retry_at)).toBeLessThan(Date.parse(graceUntil));
+
+    const portalCancelledAt = new Date().toISOString();
+    const [marked] = await sql<{ id: string }[]>`
+      UPDATE public.entitlements
+      SET
+        cancelled_at = ${portalCancelledAt}::TIMESTAMPTZ,
+        portal_cancellation_timing = 'end-of-term'
+      WHERE id = ${entitlement.id}::UUID
+      RETURNING id
+    `;
+    if (!marked) throw new Error('portal cancellation marker update returned no row');
+
+    const [action] = await sql<{ id: string; next_retry_at: string }[]>`
+      INSERT INTO public.bot_action_queue (
+        guild_id, action, payload, status, idempotency_key, next_retry_at
+      )
+      SELECT
+        guild_id,
+        action,
+        payload,
+        status,
+        ${`paypal:lifecycle:${webhookEventId}:portal-cancelled`},
+        ${providerPaidThroughAt}::TIMESTAMPTZ
+      FROM public.bot_action_queue
+      WHERE id = ${providerAction.id}::UUID
+      RETURNING id, next_retry_at::TEXT
+    `;
+    if (!action) throw new Error('portal cancellation action fixture returned no id');
     expect(Date.parse(action.next_retry_at)).toBeGreaterThanOrEqual(Date.parse(graceUntil));
 
     const [reset] = await sql<{ next_retry_at: string }[]>`
