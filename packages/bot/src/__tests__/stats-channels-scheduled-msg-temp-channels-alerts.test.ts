@@ -252,6 +252,9 @@ describe('StatsChannelManager', () => {
       pending_cleanup_channel_ids: null,
     }];
     let xpQueryCount = 0;
+    let currentTime = 1_700_000_000_000;
+    const firstCycle = new Date(Math.floor(currentTime / 60_000) * 60_000).toISOString();
+    vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
     const supabase = createClient('https://test.supabase.co', 'test-anon-key', {
       global: {
         fetch: async (input, init) => {
@@ -274,7 +277,7 @@ describe('StatsChannelManager', () => {
           }
           if (url.pathname.endsWith('/rpc/sum_guild_xp')) {
             xpQueryCount += 1;
-            if (xpQueryCount === 1) {
+            if (xpQueryCount <= 3) {
               return new Response(JSON.stringify({ message: 'temporary XP query failure' }), {
                 status: 503,
                 headers: { 'content-type': 'application/json' },
@@ -295,7 +298,7 @@ describe('StatsChannelManager', () => {
     const manager = new (await import('../features/stats-channels/stats-manager.js')).StatsChannelManager(
       statsGuild,
       supabase,
-      60,
+      1,
     );
 
     await manager.reload();
@@ -305,7 +308,31 @@ describe('StatsChannelManager', () => {
       supabase,
       expect.objectContaining({
         action: 'stats_channels.query_retried',
-        occurrenceKey: 'stats_channels.query_retried:sc-retry:total_xp_earned:4',
+        occurrenceKey: `stats_channels.query_retried:sc-retry:total_xp_earned:4:${firstCycle}`,
+      }),
+    );
+
+    await manager.reload();
+
+    expect(counter.setName).not.toHaveBeenCalled();
+    expect(writeAuditLog).toHaveBeenNthCalledWith(
+      2,
+      supabase,
+      expect.objectContaining({
+        occurrenceKey: `stats_channels.query_retried:sc-retry:total_xp_earned:4:${firstCycle}`,
+      }),
+    );
+
+    currentTime += 60_000;
+    const laterCycle = new Date(Math.floor(currentTime / 60_000) * 60_000).toISOString();
+    await manager.reload();
+
+    expect(counter.setName).not.toHaveBeenCalled();
+    expect(writeAuditLog).toHaveBeenNthCalledWith(
+      3,
+      supabase,
+      expect.objectContaining({
+        occurrenceKey: `stats_channels.query_retried:sc-retry:total_xp_earned:4:${laterCycle}`,
       }),
     );
 
@@ -313,7 +340,7 @@ describe('StatsChannelManager', () => {
 
     expect(counter.setName).toHaveBeenCalledTimes(1);
     expect(counter.setName).toHaveBeenCalledWith('Tickets: 7');
-    expect(writeAuditLog).toHaveBeenCalledTimes(1);
+    expect(writeAuditLog).toHaveBeenCalledTimes(3);
   });
 });
 

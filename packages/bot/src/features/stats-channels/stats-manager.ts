@@ -119,11 +119,14 @@ export class StatsChannelManager {
 
     // Fetch all needed stats once
     const stats = await this.gatherStats();
+    const updateCycle = new Date(
+      Math.floor(Date.now() / this.intervalMs) * this.intervalMs,
+    ).toISOString();
 
     for (const config of this.channels) {
       try {
         if (stats.unavailableStatTypes.has(config.stat_type)) {
-          await this.recordQueryRetry(config);
+          await this.recordQueryRetry(config, updateCycle);
           continue;
         }
 
@@ -700,7 +703,10 @@ export class StatsChannelManager {
     this.alertedDegradedChannels.delete(config.id);
   }
 
-  private async recordQueryRetry(config: StatsChannelConfig): Promise<void> {
+  private async recordQueryRetry(
+    config: StatsChannelConfig,
+    updateCycle: string,
+  ): Promise<void> {
     const heldValue = config.last_value ?? 'initial';
     await writeAuditLog(this.supabase, {
       guildId: config.guild_id,
@@ -713,9 +719,10 @@ export class StatsChannelManager {
       details: {
         stat_type: config.stat_type,
         held_last_value: config.last_value,
+        update_cycle: updateCycle,
       },
       correlationId: `stats:${config.id}`,
-      occurrenceKey: `stats_channels.query_retried:${config.id}:${config.stat_type}:${heldValue}`,
+      occurrenceKey: `stats_channels.query_retried:${config.id}:${config.stat_type}:${heldValue}:${updateCycle}`,
       success: false,
       errorMessage: `Unable to refresh ${config.stat_type}; retained the last accurate value`,
     });
