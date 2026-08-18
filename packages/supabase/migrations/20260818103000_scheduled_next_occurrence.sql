@@ -202,7 +202,7 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  IF TG_OP = 'INSERT' AND NEW.start_date IS NOT NULL AND NEW.start_date > pg_catalog.now() THEN
+  IF NEW.start_date IS NOT NULL AND NEW.start_date > pg_catalog.now() THEN
     calculation_floor := NEW.start_date - pg_catalog.make_interval(mins => 1);
   ELSE
     calculation_floor := pg_catalog.date_trunc('minute', pg_catalog.now());
