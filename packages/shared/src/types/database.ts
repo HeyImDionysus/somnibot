@@ -930,6 +930,7 @@ export interface DbScheduledMessage {
   current_sends: number;
   active: boolean;
   last_sent_at: string | null;
+  next_occurrence_at: string | null;
   created_at: string;
   updated_at: string;
 }

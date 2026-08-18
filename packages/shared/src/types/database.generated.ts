@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 272 migration files in packages/supabase/migrations/
+ * Source: 273 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -931,6 +931,7 @@ export interface DbScheduledMessage {
   last_error: string | null;
   failed_at: string | null;
   missed_run_policy: 'skip-missed' | 'send-latest';
+  next_occurrence_at: string | null;
 }
 
 // — Commerce — Products —
