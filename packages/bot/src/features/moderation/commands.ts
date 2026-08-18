@@ -24,7 +24,7 @@ import {
 import { executeEscalation, getEscalationAction } from './escalation.js';
 import { postModLogEntry } from './mod-log.js';
 import { writeAuditLog } from '../../services/audit.js';
-import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { raiseOwnerAlert, resolveOwnerAlertWithStatus } from '../../services/alert-service.js';
 
 const log = createLogger('ModCommands');
 
@@ -65,26 +65,136 @@ async function auditModerationPersistenceFailure(
 ): Promise<void> {
   const guildId = interaction.guildId!;
   const error = `Discord ${type} applied but infraction persistence failed`;
-  await writeAuditLog(client.supabase, {
-    guildId,
-    actorType: 'discord',
-    actorId: interaction.user.id,
-    action: `moderation.${type}.persistence_failed`,
-    category: 'moderation',
-    targetType: 'member',
-    targetId,
-    details,
-    occurrenceKey: `moderation:${interaction.id}:${type}:persistence-failed`,
-    success: false,
-    errorMessage: error,
-  });
-  await raiseOwnerAlert(client.supabase, guildId, {
-    alertType: 'moderation_infraction_persist_failed',
-    severity: 'critical',
-    title: 'Moderation action needs reconciliation',
-    message: `${error} for <@${targetId}>. Review the audit log and reconcile the member state.`,
-    metadata: { command: type, target_id: targetId, interaction_id: interaction.id, ...details },
-  }).catch(() => {});
+  try {
+    const alert = await raiseOwnerAlert(client.supabase, guildId, {
+      alertType: 'moderation_infraction_persist_failed',
+      severity: 'critical',
+      title: 'Moderation action needs reconciliation',
+      message: `${error} for <@${targetId}>. Review the audit log and reconcile the member state.`,
+      metadata: { command: type, target_id: targetId, interaction_id: interaction.id, ...details },
+      client,
+    });
+    if (!alert.inserted) return;
+
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: `moderation.${type}.persistence_failed`,
+      category: 'moderation',
+      targetType: 'member',
+      targetId,
+      details,
+      occurrenceKey: `moderation:${interaction.id}:${type}:persistence-failed`,
+      success: false,
+      errorMessage: error,
+    });
+  } catch (auditError) {
+    log.error('Could not record moderation persistence degradation:',
+      auditError instanceof Error ? auditError.message : String(auditError));
+  }
+}
+
+async function auditModerationPersistenceRecovery(
+  client: SomniClient,
+  interaction: ChatInputCommandInteraction,
+  type: 'warn' | 'mute' | 'kick' | 'ban',
+): Promise<void> {
+  const guildId = interaction.guildId!;
+  try {
+    const resolution = await resolveOwnerAlertWithStatus(
+      client.supabase,
+      guildId,
+      'moderation_infraction_persist_failed',
+      undefined,
+      {
+        client,
+        notice: 'Moderation infraction persistence recovered. New moderation actions are recording normally.',
+      },
+    );
+    if (!resolution.succeeded || resolution.resolvedCount === 0) return;
+
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'moderation.infraction_persistence_recovered',
+      category: 'moderation',
+      details: { command: type, resolved_alerts: resolution.resolvedCount },
+      occurrenceKey: `moderation:${interaction.id}:infraction-persistence-recovered`,
+      success: true,
+    });
+  } catch (auditError) {
+    log.error('Could not record moderation persistence recovery:',
+      auditError instanceof Error ? auditError.message : String(auditError));
+  }
+}
+
+async function auditModerationConfigDegradation(
+  client: SomniClient,
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const guildId = interaction.guildId!;
+  try {
+    const alert = await raiseOwnerAlert(client.supabase, guildId, {
+      alertType: 'moderation_config_unreadable',
+      severity: 'critical',
+      title: 'Moderation settings are unavailable',
+      message: 'SomniBot could not read moderation settings, so /warn was not applied.',
+      metadata: { command: 'warn' },
+      client,
+    });
+    if (!alert.inserted) return;
+
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'moderation.config_degraded',
+      category: 'moderation',
+      details: { command: 'warn' },
+      occurrenceKey: `moderation:${interaction.id}:config-degraded`,
+      success: false,
+      errorMessage: 'Could not read moderation configuration',
+    });
+  } catch (auditError) {
+    log.error('Could not record unreadable moderation configuration:',
+      auditError instanceof Error ? auditError.message : String(auditError));
+  }
+}
+
+async function auditModerationConfigRecovery(
+  client: SomniClient,
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  const guildId = interaction.guildId!;
+  try {
+    const resolution = await resolveOwnerAlertWithStatus(
+      client.supabase,
+      guildId,
+      'moderation_config_unreadable',
+      undefined,
+      {
+        client,
+        notice: 'Moderation settings are available again. /warn can be applied normally.',
+      },
+    );
+    if (!resolution.succeeded || resolution.resolvedCount === 0) return;
+
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'discord',
+      actorId: interaction.user.id,
+      action: 'moderation.config_recovered',
+      category: 'moderation',
+      details: { command: 'warn', resolved_alerts: resolution.resolvedCount },
+      occurrenceKey: `moderation:${interaction.id}:config-recovered`,
+      success: true,
+    });
+  } catch (auditError) {
+    log.error('Could not record moderation configuration recovery:',
+      auditError instanceof Error ? auditError.message : String(auditError));
+  }
 }
 
 // ── Command Builders ──────────────────────────────────────
@@ -252,6 +362,7 @@ export async function handleWarnCommand(
 
   if (configError) {
     log.error('Could not read moderation config for /warn:', configError.message);
+    await auditModerationConfigDegradation(client, interaction);
     await interaction.editReply(
       '⚠️ Could not read the moderation settings for this server, so no warning was recorded. '
       + 'Nothing was applied — please try again in a moment.',
@@ -279,6 +390,11 @@ export async function handleWarnCommand(
     return;
   }
   const { infraction, replayed } = created;
+
+  if (!replayed) {
+    await auditModerationConfigRecovery(client, interaction);
+    await auditModerationPersistenceRecovery(client, interaction, 'warn');
+  }
 
   // Replayed delivery — the original /warn already ran the full side-effect
   // block (events, DM, mod log, escalation). Re-running it would double-DM,
@@ -460,6 +576,10 @@ export async function handleMuteCommand(
     return;
   }
 
+  if (!created.replayed) {
+    await auditModerationPersistenceRecovery(client, interaction, 'mute');
+  }
+
   // Replayed delivery — skip the side-effect block (events, DM, mod log).
   if (created?.replayed) {
     log.info(`Replayed /mute for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
@@ -605,6 +725,10 @@ export async function handleKickCommand(
     return;
   }
 
+  if (!created.replayed) {
+    await auditModerationPersistenceRecovery(client, interaction, 'kick');
+  }
+
   // Replayed delivery — skip the side-effect block (events, mod log).
   if (created?.replayed) {
     log.info(`Replayed /kick for ${member.id} (correlation ${interaction.id}) — side effects skipped`);
@@ -733,6 +857,10 @@ export async function handleBanCommand(
       '⚠️ Ban was applied but its moderation record could not be saved. An owner alert was raised.',
     );
     return;
+  }
+
+  if (!created.replayed) {
+    await auditModerationPersistenceRecovery(client, interaction, 'ban');
   }
 
   // Replayed delivery — the original /ban already suspended entitlements,

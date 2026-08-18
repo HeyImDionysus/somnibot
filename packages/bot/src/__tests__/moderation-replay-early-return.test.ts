@@ -44,6 +44,19 @@ vi.mock('../features/moderation/mod-log.js', () => ({
   postModLogEntry: vi.fn().mockResolvedValue(undefined),
 }));
 
+const { mockRaiseOwnerAlert, mockResolveOwnerAlertWithStatus, mockWriteAuditLog } = vi.hoisted(() => ({
+  mockRaiseOwnerAlert: vi.fn(),
+  mockResolveOwnerAlertWithStatus: vi.fn(),
+  mockWriteAuditLog: vi.fn(),
+}));
+vi.mock('../services/alert-service.js', () => ({
+  raiseOwnerAlert: mockRaiseOwnerAlert,
+  resolveOwnerAlertWithStatus: mockResolveOwnerAlertWithStatus,
+}));
+vi.mock('../services/audit.js', () => ({
+  writeAuditLog: mockWriteAuditLog,
+}));
+
 vi.mock('../features/branding/brand-kit.js', () => ({
   resolveBrandKit: vi.fn().mockResolvedValue({
     primaryColor: 0x123456,
@@ -140,6 +153,9 @@ const REPLAYED = { infraction: { id: 'inf-original', type: 'warn' }, replayed: t
 beforeEach(() => {
   vi.clearAllMocks();
   mockCreateInfraction.mockResolvedValue(REPLAYED);
+  mockRaiseOwnerAlert.mockResolvedValue({ inserted: false, delivered: false });
+  mockResolveOwnerAlertWithStatus.mockResolvedValue({ resolvedCount: 0, succeeded: true });
+  mockWriteAuditLog.mockResolvedValue(undefined);
 });
 
 // ── Tests ────────────────────────────────────────────────────
@@ -235,5 +251,53 @@ describe('replayed /ban', () => {
     const tables = (c.supabase.from as any).mock.calls.map((call: any[]) => call[0]);
     expect(tables).not.toContain('customers');
     expect(tables).not.toContain('entitlements');
+  });
+});
+
+describe('unreconciled punishment persistence', () => {
+  it('writes one failure audit and never records recovery when rollback fails', async () => {
+    const target = member();
+    target.timeout
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('rollback unavailable'));
+    mockCreateInfraction.mockResolvedValue(null);
+    mockRaiseOwnerAlert.mockResolvedValue({ inserted: true, delivered: false });
+
+    await handleMuteCommand(interaction(target) as never, client() as never);
+
+    expect(mockWriteAuditLog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'moderation.mute.persistence_failed',
+        details: expect.objectContaining({ rollback_succeeded: false }),
+        success: false,
+      }),
+    );
+    expect(mockRaiseOwnerAlert).toHaveBeenCalledWith(
+      expect.anything(),
+      'g1',
+      expect.objectContaining({
+        alertType: 'moderation_infraction_persist_failed',
+        severity: 'critical',
+      }),
+    );
+    expect(mockResolveOwnerAlertWithStatus).not.toHaveBeenCalled();
+  });
+
+  it('records one recovery audit when a fresh persistence succeeds after an alert episode', async () => {
+    const target = member();
+    mockCreateInfraction.mockResolvedValue({ infraction: { id: 'inf-new' }, replayed: false });
+    mockResolveOwnerAlertWithStatus.mockResolvedValue({ resolvedCount: 1, succeeded: true });
+
+    await handleMuteCommand(interaction(target) as never, client() as never);
+
+    expect(mockWriteAuditLog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'moderation.infraction_persistence_recovered',
+        occurrenceKey: expect.stringContaining('infraction-persistence-recovered'),
+        success: true,
+      }),
+    );
   });
 });

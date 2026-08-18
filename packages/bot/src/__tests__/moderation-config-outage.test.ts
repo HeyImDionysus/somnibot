@@ -17,12 +17,27 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 
-const { mockCreateInfraction } = vi.hoisted(() => ({
+const {
+  mockCreateInfraction,
+  mockRaiseOwnerAlert,
+  mockResolveOwnerAlertWithStatus,
+  mockWriteAuditLog,
+} = vi.hoisted(() => ({
   mockCreateInfraction: vi.fn(),
+  mockRaiseOwnerAlert: vi.fn(),
+  mockResolveOwnerAlertWithStatus: vi.fn(),
+  mockWriteAuditLog: vi.fn(),
 }));
 vi.mock('../features/moderation/infraction-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../features/moderation/infraction-service.js')>()),
   createInfraction: mockCreateInfraction,
+}));
+vi.mock('../services/alert-service.js', () => ({
+  raiseOwnerAlert: mockRaiseOwnerAlert,
+  resolveOwnerAlertWithStatus: mockResolveOwnerAlertWithStatus,
+}));
+vi.mock('../services/audit.js', () => ({
+  writeAuditLog: mockWriteAuditLog,
 }));
 
 import { handleWarnCommand } from '../features/moderation/commands.js';
@@ -114,6 +129,9 @@ beforeEach(() => {
     infraction: { id: 'inf-1' },
     replayed: false,
   });
+  mockRaiseOwnerAlert.mockResolvedValue({ inserted: false, delivered: false });
+  mockResolveOwnerAlertWithStatus.mockResolvedValue({ resolvedCount: 0, succeeded: true });
+  mockWriteAuditLog.mockResolvedValue(undefined);
 });
 
 describe('/warn with an unreadable moderation config', () => {
@@ -147,6 +165,114 @@ describe('/warn with an unreadable moderation config', () => {
     await handleWarnCommand(makeInteraction() as never, client as never);
 
     expect(client.eventBus.emit).not.toHaveBeenCalled();
+  });
+
+  it('records one durable degradation row for a repeated unreadable-config episode', async () => {
+    mockRaiseOwnerAlert
+      .mockResolvedValueOnce({ inserted: true, delivered: false })
+      .mockResolvedValueOnce({ inserted: false, insertErrorCode: '23505', delivered: false });
+
+    await handleWarnCommand(
+      makeInteraction() as never,
+      makeClient(makeSupa({ configError: { message: 'connection reset' } })) as never,
+    );
+    await handleWarnCommand(
+      makeInteraction() as never,
+      makeClient(makeSupa({ configError: { message: 'connection reset' } })) as never,
+    );
+
+    expect(mockRaiseOwnerAlert).toHaveBeenCalledTimes(2);
+    expect(mockWriteAuditLog).toHaveBeenCalledTimes(1);
+    expect(mockWriteAuditLog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'moderation.config_degraded',
+        occurrenceKey: expect.stringContaining('config-degraded'),
+        success: false,
+      }),
+    );
+  });
+
+  it('preserves the truthful outage reply when owner-alert persistence fails', async () => {
+    mockRaiseOwnerAlert.mockRejectedValueOnce(new Error('alert store unavailable'));
+    const interaction = makeInteraction();
+
+    await expect(
+      handleWarnCommand(
+        interaction as never,
+        makeClient(makeSupa({ configError: { message: 'connection reset' } })) as never,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(mockCreateInfraction).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('Nothing was applied'));
+  });
+
+  it('preserves the truthful outage reply when degradation-audit persistence fails', async () => {
+    mockRaiseOwnerAlert.mockResolvedValueOnce({ inserted: true, delivered: false });
+    mockWriteAuditLog.mockRejectedValueOnce(new Error('audit store unavailable'));
+    const interaction = makeInteraction();
+
+    await expect(
+      handleWarnCommand(
+        interaction as never,
+        makeClient(makeSupa({ configError: { message: 'connection reset' } })) as never,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(mockCreateInfraction).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('Nothing was applied'));
+  });
+
+  it('records one recovery row after the durable config alert resolves', async () => {
+    mockRaiseOwnerAlert.mockResolvedValueOnce({ inserted: true, delivered: false });
+    mockResolveOwnerAlertWithStatus
+      .mockResolvedValueOnce({ resolvedCount: 1, succeeded: true })
+      .mockResolvedValueOnce({ resolvedCount: 0, succeeded: true });
+
+    await handleWarnCommand(
+      makeInteraction() as never,
+      makeClient(makeSupa({ configError: { message: 'connection reset' } })) as never,
+    );
+    await handleWarnCommand(makeInteraction() as never, makeClient(makeSupa()) as never);
+    await handleWarnCommand(makeInteraction() as never, makeClient(makeSupa()) as never);
+
+    expect(mockCreateInfraction).toHaveBeenCalledTimes(2);
+    expect(mockWriteAuditLog).toHaveBeenCalledTimes(2);
+    expect(mockWriteAuditLog).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'moderation.config_recovered',
+        occurrenceKey: expect.stringContaining('config-recovered'),
+        success: true,
+      }),
+    );
+  });
+
+  it('does not settle config recovery until a fresh infraction persists', async () => {
+    mockRaiseOwnerAlert.mockResolvedValueOnce({ inserted: true, delivered: false });
+    mockCreateInfraction.mockResolvedValue(null);
+
+    await handleWarnCommand(
+      makeInteraction() as never,
+      makeClient(makeSupa({ configError: { message: 'connection reset' } })) as never,
+    );
+    await handleWarnCommand(makeInteraction() as never, makeClient(makeSupa()) as never);
+
+    expect(mockResolveOwnerAlertWithStatus).not.toHaveBeenCalled();
+    expect(mockWriteAuditLog).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not block a fresh warning when recovery audit persistence fails', async () => {
+    mockResolveOwnerAlertWithStatus.mockResolvedValueOnce({ resolvedCount: 1, succeeded: true });
+    mockWriteAuditLog.mockRejectedValueOnce(new Error('audit store unavailable'));
+    const interaction = makeInteraction();
+
+    await expect(handleWarnCommand(interaction as never, makeClient(makeSupa()) as never))
+      .resolves.toBeUndefined();
+
+    expect(mockCreateInfraction).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('warned'));
   });
 
   it('still warns normally when the config reads cleanly', async () => {
