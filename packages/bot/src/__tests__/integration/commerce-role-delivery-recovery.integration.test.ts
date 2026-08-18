@@ -20,6 +20,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
 import { getTestDbUrl, requireSupabase } from './helpers.js';
+import { recordRoleDeliveryOutcome } from '../../features/commerce/role-delivery-audit.js';
 
 const RUN_ID = `${Date.now()}-${randomUUID().slice(0, 8)}`;
 const GUILD_ID = `test-role-recovery-${RUN_ID}`;
@@ -772,7 +773,14 @@ async function finishRetry(
     p_error: error,
   });
   expect(finished.error).toBeNull();
-  return onlyRow<{ disposition: string }>(finished.data, 'delivery retry').disposition;
+  const disposition = onlyRow<{ disposition: string }>(finished.data, 'delivery retry').disposition;
+  await recordRoleDeliveryOutcome(supa, {
+    guildId: GUILD_ID,
+    intentId: delivery.intentId,
+    outcome: 'retry',
+    disposition,
+  });
+  return disposition;
 }
 
 async function finishLive(delivery: ActiveDelivery): Promise<string> {
@@ -788,6 +796,12 @@ async function finishLive(delivery: ActiveDelivery): Promise<string> {
     'live delivery confirmation',
   ).disposition;
   expect(['confirmed_open', 'settled']).toContain(disposition);
+  await recordRoleDeliveryOutcome(supa, {
+    guildId: GUILD_ID,
+    intentId: delivery.intentId,
+    outcome: 'live',
+    disposition,
+  });
 
   for (const intentKind of ['purchase_completed_event', 'receipt_dm']) {
     const begun = await supa.rpc('commerce_begin_fulfillment_outward_intent', {
@@ -971,6 +985,84 @@ afterAll(async () => {
 });
 
 describe('exact bound carrier recovery', () => {
+  it('records one unresolved audit and one correlated reconciliation after retry convergence', async () => {
+    const roleId = nextSnowflake();
+    const fixture = await createPaidFixture({ permanentRoleId: roleId });
+    const failed = await failDelivery(fixture);
+    expect(failed.finishDisposition).toBe('safe_retry');
+
+    expect(await retryDlq(failed.dlqId)).toMatchObject({
+      action_id: failed.actionId,
+      action_status: 'pending',
+      disposition: 'reopened',
+    });
+    const nextClaim = await claimAction(failed.actionId);
+    const nextBegin = await beginDelivery(fixture, failed.actionId, nextClaim.claim_token);
+    const recovered: ActiveDelivery = {
+      actionId: failed.actionId,
+      claimToken: nextClaim.claim_token,
+      intentId: nextBegin.intent_id,
+      mutationToken: nextBegin.mutation_token,
+      orderId: fixture.orderId,
+      outwardGenerationId: nextBegin.outward_generation_id,
+    };
+    expect(recovered.intentId).toBe(failed.intentId);
+    await promotePermanent(fixture, recovered);
+    expect(await finishLive(recovered)).toBe('confirmed_open');
+    await recordRoleDeliveryOutcome(supa, {
+      guildId: GUILD_ID,
+      intentId: failed.intentId,
+      outcome: 'retry',
+      disposition: failed.finishDisposition,
+    });
+    await recordRoleDeliveryOutcome(supa, {
+      guildId: GUILD_ID,
+      intentId: failed.intentId,
+      outcome: 'live',
+      disposition: 'confirmed_open',
+    });
+
+    const { data: audits, error: auditError } = await supa
+      .from('audit_logs')
+      .select('action,correlation_id,occurrence_key,details,success')
+      .eq('guild_id', GUILD_ID)
+      .eq('correlation_id', failed.intentId)
+      .in('action', [
+        'commerce.role_delivery.unresolved',
+        'commerce.role_delivery.reconciled',
+      ]);
+    expect(auditError).toBeNull();
+    expect(audits).toHaveLength(2);
+    expect(audits?.map((row) => row.action).sort()).toEqual([
+      'commerce.role_delivery.reconciled',
+      'commerce.role_delivery.unresolved',
+    ]);
+    expect(new Set(audits?.map((row) => row.occurrence_key)).size).toBe(2);
+    expect(audits?.every((row) => row.success === (row.action.endsWith('.reconciled')))).toBe(true);
+    expect(JSON.stringify(audits)).not.toContain('deterministic downstream stage failure');
+
+    const { data: intent, error: intentError } = await supa
+      .from('commerce_role_delivery_intents')
+      .select('state,owned_role_ids,delivery_confirmed_at,last_error')
+      .eq('id', failed.intentId)
+      .single();
+    expect(intentError).toBeNull();
+    expect(intent).toMatchObject({
+      state: 'open',
+      owned_role_ids: [roleId],
+      last_error: null,
+    });
+    expect(intent?.delivery_confirmed_at).toEqual(expect.any(String));
+
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .select('status,granted_role_ids')
+      .eq('id', fixture.entitlementId)
+      .single();
+    expect(entitlementError).toBeNull();
+    expect(entitlement).toEqual({ status: 'active', granted_role_ids: [roleId] });
+  });
+
   it('reopens partial confirmed authority repeatedly and selects only the newest unretried DLQ generation', async () => {
     const fixture = await createPaidFixture({
       permanentRoleId: nextSnowflake(),

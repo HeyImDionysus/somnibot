@@ -9,6 +9,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 import { createLogger } from '@somnibot/shared';
+import { recordRoleDeliveryOutcome } from './role-delivery-audit.js';
 
 const log = createLogger('Entitlement');
 
@@ -1824,6 +1825,14 @@ export class EntitlementService {
     }
     if (disposition !== 'run_origin_cleanup') {
       this.activePurchaseRoleDeliveryAttempt = null;
+    }
+    if (outcome === 'retry' || outcome === 'live') {
+      await recordRoleDeliveryOutcome(this.supabase, {
+        guildId: this.guild.id,
+        intentId: attempt.intentId,
+        outcome,
+        disposition,
+      });
     }
     return {
       state: row.intent_state,

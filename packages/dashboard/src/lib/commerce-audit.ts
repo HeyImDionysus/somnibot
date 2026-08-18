@@ -37,7 +37,7 @@ export async function writeCommerceAudit(
   entry: CommerceAuditEntry,
 ): Promise<void> {
   try {
-    await admin.from('audit_logs').insert({
+    const row = {
       guild_id: entry.guildId,
       actor_type: entry.actorType ?? 'dashboard',
       actor_id: entry.actorId,
@@ -48,7 +48,15 @@ export async function writeCommerceAudit(
       details: entry.details ?? {},
       occurrence_key: entry.occurrenceKey ?? null,
       success: entry.success ?? true,
-    });
+    };
+    if (entry.occurrenceKey) {
+      await admin.from('audit_logs').upsert([row], {
+        onConflict: 'guild_id,occurrence_key',
+        ignoreDuplicates: true,
+      });
+      return;
+    }
+    await admin.from('audit_logs').insert(row);
   } catch {
     // Audit logging must never break the commerce flow.
   }
