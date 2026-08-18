@@ -310,6 +310,8 @@ describe('POST /api/portal/cancel', () => {
 
     expect(res.status).toBe(502);
     expect(entitlement.cancelled_at).toBeNull();
+    expect(entitlement.portal_cancellation_timing).toBeNull();
+    expect(entitlement.portal_cancellation_access_until).toBeNull();
   });
 
   it('resumes a locally reserved cancellation after an ambiguous provider failure', async () => {

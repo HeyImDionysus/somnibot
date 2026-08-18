@@ -298,6 +298,40 @@ export async function POST(request: NextRequest) {
         }
       }
       if (!reconciled) {
+        const providerFailureIsRetryable = res.status === 408
+          || res.status === 429
+          || res.status >= 500;
+        if (!providerFailureIsRetryable) {
+          const releasedAt = new Date().toISOString();
+          const { data: releasedIntent, error: releaseError } = await admin
+            .from('entitlements')
+            .update({
+              portal_cancellation_timing: null,
+              portal_cancellation_access_until: null,
+              updated_at: releasedAt,
+            })
+            .eq('id', entitlement.id)
+            .eq('customer_id', session.customer_id)
+            .eq('guild_id', session.guild_id)
+            .eq('status', cancellationSnapshot.status)
+            .is('cancelled_at', null)
+            .eq('portal_cancellation_timing', appliedTiming)
+            .eq('portal_cancellation_access_until', appliedAccessUntil)
+            .select('id, portal_cancellation_timing, portal_cancellation_access_until, cancelled_at')
+            .maybeSingle();
+          if (
+            releaseError
+            || !releasedIntent
+            || releasedIntent.cancelled_at !== null
+            || releasedIntent.portal_cancellation_timing !== null
+            || releasedIntent.portal_cancellation_access_until !== null
+          ) {
+            return NextResponse.json(
+              { error: 'The payment provider rejected cancellation, but the local request could not be released. Please retry.' },
+              { status: 503 },
+            );
+          }
+        }
         return NextResponse.json(
           { error: 'Could not schedule cancellation with the payment provider. Please try again.' },
           { status: 502 },
