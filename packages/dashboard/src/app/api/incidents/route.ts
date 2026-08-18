@@ -137,7 +137,9 @@ export async function GET(request: NextRequest) {
 
     if (status) {
       if (status === 'active') {
-        query = query.not('status', 'eq', 'resolved');
+        query = query.not('status', 'in', '(resolved,closed)');
+      } else if (status === 'resolved') {
+        query = query.in('status', ['resolved', 'closed']);
       } else {
         query = query.eq('status', status);
       }
@@ -160,9 +162,9 @@ export async function GET(request: NextRequest) {
       investigating: (allIncidents || []).filter(i => i.status === 'investigating').length,
       identified: (allIncidents || []).filter(i => i.status === 'identified').length,
       monitoring: (allIncidents || []).filter(i => i.status === 'monitoring').length,
-      resolved: (allIncidents || []).filter(i => i.status === 'resolved').length,
-      critical: (allIncidents || []).filter(i => i.severity === 'critical' && i.status !== 'resolved').length,
-      outage: (allIncidents || []).filter(i => i.severity === 'outage' && i.status !== 'resolved').length,
+      resolved: (allIncidents || []).filter(i => ['resolved', 'closed'].includes(i.status)).length,
+      critical: (allIncidents || []).filter(i => i.severity === 'critical' && !['resolved', 'closed'].includes(i.status)).length,
+      outage: (allIncidents || []).filter(i => i.severity === 'outage' && !['resolved', 'closed'].includes(i.status)).length,
     };
 
     return NextResponse.json({

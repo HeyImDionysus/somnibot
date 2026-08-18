@@ -43,8 +43,10 @@ describe('release runtime readback migration', () => {
     expect(lifecycleMigration).toMatch(/status = 'open',[\s\S]+resolved_at = NULL,[\s\S]+resolved_by = NULL,[\s\S]+duration_seconds = NULL/i);
     expect(lifecycleMigration).not.toMatch(/status = 'open',[\s\S]+resolution = NULL,[\s\S]+duration_seconds = NULL/i);
     expect(lifecycleMigration).toMatch(
-      /CREATE TRIGGER incidents_guard_linked_health_alert\s+BEFORE UPDATE OF status ON public\.incidents/i,
+      /CREATE TRIGGER incidents_guard_linked_health_alert\s+BEFORE INSERT OR UPDATE OF status ON public\.incidents/i,
     );
+    expect(lifecycleMigration).toMatch(/IF TG_OP = 'INSERT'[\s\S]+FOR UPDATE/i);
+    expect(lifecycleMigration).toContain("NEW.status := 'resolved'");
     expect(lifecycleMigration).toContain("v_terminal_status := NEW.status IN ('resolved', 'closed')");
     expect(lifecycleMigration).toContain('v_alert_resolved IS DISTINCT FROM v_terminal_status');
     expect(lifecycleMigration).toContain('DROP FUNCTION IF EXISTS public.sync_health_incident_alert()');

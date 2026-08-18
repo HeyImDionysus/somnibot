@@ -66,6 +66,7 @@ const STATUS_STYLES: Record<string, string> = {
   identified: 'bg-orange-500/20 text-orange-400',
   monitoring: 'bg-blue-500/20 text-blue-400',
   resolved: 'bg-discord-success/20 text-discord-success',
+  closed: 'bg-discord-success/20 text-discord-success',
 };
 
 const STATUS_FLOW = ['open', 'investigating', 'identified', 'monitoring', 'resolved'];
@@ -324,7 +325,7 @@ export default function IncidentsPage() {
             </div>
 
             {/* Status Flow */}
-            {selectedIncident.status !== 'resolved' && !(selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id) && (
+            {!['resolved', 'closed'].includes(selectedIncident.status) && !(selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id) && (
               <div className="flex gap-2 flex-wrap">
                 {STATUS_FLOW.filter(s => {
                   const currentIdx = STATUS_FLOW.indexOf(selectedIncident.status);
@@ -345,7 +346,7 @@ export default function IncidentsPage() {
                 ))}
               </div>
             )}
-            {selectedIncident.status !== 'resolved' && selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id && (
+            {!['resolved', 'closed'].includes(selectedIncident.status) && selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id && (
               <p className="rounded-input border border-discord-border-subtle bg-discord-bg-tertiary p-3 text-xs text-discord-text-muted">
                 Status follows the linked diagnostics alert and updates automatically when that alert clears.
               </p>

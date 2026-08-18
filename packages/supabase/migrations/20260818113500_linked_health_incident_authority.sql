@@ -100,29 +100,62 @@ SET search_path = ''
 AS $$
 DECLARE
   v_alert_resolved BOOLEAN;
+  v_alert_resolved_at TIMESTAMPTZ;
   v_terminal_status BOOLEAN;
 BEGIN
-  IF NEW.source = 'health_alert'
-     AND NEW.source_ref_id IS NOT NULL
-     AND NEW.status IS DISTINCT FROM OLD.status THEN
-    SELECT alert.resolved
-    INTO v_alert_resolved
+  IF NEW.source <> 'health_alert' OR NEW.source_ref_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' AND NEW.status IS NOT DISTINCT FROM OLD.status THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    SELECT alert.resolved, alert.resolved_at
+    INTO v_alert_resolved, v_alert_resolved_at
+    FROM public.alerts AS alert
+    WHERE alert.guild_id = NEW.guild_id
+      AND alert.id::TEXT = NEW.source_ref_id
+    FOR UPDATE;
+  ELSE
+    SELECT alert.resolved, alert.resolved_at
+    INTO v_alert_resolved, v_alert_resolved_at
     FROM public.alerts AS alert
     WHERE alert.guild_id = NEW.guild_id
       AND alert.id::TEXT = NEW.source_ref_id;
+  END IF;
 
-    IF NOT FOUND THEN
-      RAISE EXCEPTION USING
-        ERRCODE = '23514',
-        MESSAGE = 'health-alert incident status requires its linked alert';
-    END IF;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'health-alert incident status requires its linked alert';
+  END IF;
 
-    v_terminal_status := NEW.status IN ('resolved', 'closed');
-    IF v_alert_resolved IS DISTINCT FROM v_terminal_status THEN
-      RAISE EXCEPTION USING
-        ERRCODE = '23514',
-        MESSAGE = 'health-alert incident status must follow its linked alert';
-    END IF;
+  IF TG_OP = 'INSERT' AND v_alert_resolved IS TRUE THEN
+    NEW.status := 'resolved';
+    NEW.resolved_at := COALESCE(v_alert_resolved_at, pg_catalog.now());
+    NEW.resolved_by := 'system:diagnostics';
+    NEW.resolution := COALESCE(
+      NULLIF(NEW.resolution, ''),
+      'Automatically resolved from the linked cleared diagnostics alert.'
+    );
+    NEW.duration_seconds := GREATEST(
+      0,
+      EXTRACT(
+        EPOCH FROM (
+          NEW.resolved_at - COALESCE(NEW.started_at, NEW.created_at, NEW.resolved_at)
+        )
+      )::INTEGER
+    );
+    RETURN NEW;
+  END IF;
+
+  v_terminal_status := NEW.status IN ('resolved', 'closed');
+  IF v_alert_resolved IS DISTINCT FROM v_terminal_status THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'health-alert incident status must follow its linked alert';
   END IF;
 
   RETURN NEW;
@@ -134,7 +167,7 @@ REVOKE ALL ON FUNCTION public.guard_health_alert_incident_status()
 
 DROP TRIGGER IF EXISTS incidents_guard_linked_health_alert ON public.incidents;
 CREATE TRIGGER incidents_guard_linked_health_alert
-BEFORE UPDATE OF status ON public.incidents
+BEFORE INSERT OR UPDATE OF status ON public.incidents
 FOR EACH ROW
 EXECUTE FUNCTION public.guard_health_alert_incident_status();
 

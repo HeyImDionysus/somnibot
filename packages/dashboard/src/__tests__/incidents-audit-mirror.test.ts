@@ -13,7 +13,7 @@ vi.mock('@/lib/rbac', () => ({ requirePermission: vi.fn(), authErrorResponse: vi
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn().mockResolvedValue(null) }));
 
-import { POST, PATCH } from '@/app/api/incidents/route';
+import { GET, POST, PATCH } from '@/app/api/incidents/route';
 import { requirePermission } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
@@ -36,9 +36,18 @@ function makeAdmin(incidentResults: Array<{
     payload: Record<string, unknown>;
     options: Record<string, unknown>;
   }> = [];
+  const filters: Array<{ method: string; column: string; operator?: string; value: unknown }> = [];
   const from = vi.fn((table: string) => {
     const chain: any = {};
     for (const m of ['select', 'eq', 'order', 'range', 'limit']) chain[m] = vi.fn(() => chain);
+    chain.not = vi.fn((column: string, operator: string, value: unknown) => {
+      filters.push({ method: 'not', column, operator, value });
+      return chain;
+    });
+    chain.in = vi.fn((column: string, value: unknown) => {
+      filters.push({ method: 'in', column, value });
+      return chain;
+    });
     chain.insert = vi.fn((p: any) => { inserts.push({ table, payload: p }); return chain; });
     chain.upsert = vi.fn((p: Record<string, unknown>, options: Record<string, unknown>) => {
       upserts.push({ table, payload: p, options });
@@ -64,7 +73,7 @@ function makeAdmin(incidentResults: Array<{
     return chain;
   });
   const rpc = vi.fn().mockResolvedValue({ data: 7, error: null });
-  return { admin: { from, rpc }, inserts, updates, upserts };
+  return { admin: { from, rpc }, inserts, updates, upserts, filters };
 }
 
 beforeEach(() => {
@@ -73,6 +82,37 @@ beforeEach(() => {
     guildId: 'guild-1',
     discordId: 'discord-1',
     permissions: ['dashboard.full_access'],
+  });
+});
+
+describe('GET /api/incidents terminal filtering', () => {
+  it('excludes resolved and closed incidents from the active view', async () => {
+    const { admin, filters } = makeAdmin();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await GET(new NextRequest('http://localhost/api/incidents?status=active'));
+
+    expect(res.status).toBe(200);
+    expect(filters).toContainEqual({
+      method: 'not',
+      column: 'status',
+      operator: 'in',
+      value: '(resolved,closed)',
+    });
+  });
+
+  it('includes resolved and closed incidents in the terminal view', async () => {
+    const { admin, filters } = makeAdmin();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await GET(new NextRequest('http://localhost/api/incidents?status=resolved'));
+
+    expect(res.status).toBe(200);
+    expect(filters).toContainEqual({
+      method: 'in',
+      column: 'status',
+      value: ['resolved', 'closed'],
+    });
   });
 });
 
