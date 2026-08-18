@@ -13,7 +13,7 @@ vi.mock('@/lib/rbac', () => ({ requirePermission: vi.fn(), authErrorResponse: vi
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn().mockResolvedValue(null) }));
 
-import { POST, PATCH } from '@/app/api/incidents/route';
+import { GET, POST, PATCH } from '@/app/api/incidents/route';
 import { requirePermission } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
@@ -28,7 +28,7 @@ function makeRequest(method: string, body: Record<string, unknown>) {
 function makeAdmin(incidentResults: Array<{
   data: Record<string, unknown> | null;
   error: { message: string } | null;
-}> = []) {
+}> = [], beforeRow: Record<string, unknown> = {}) {
   const inserts: Array<{ table: string; payload: any }> = [];
   const updates: Array<{ table: string; payload: any }> = [];
   const upserts: Array<{
@@ -36,9 +36,18 @@ function makeAdmin(incidentResults: Array<{
     payload: Record<string, unknown>;
     options: Record<string, unknown>;
   }> = [];
+  const filters: Array<{ method: string; column: string; operator?: string; value: unknown }> = [];
   const from = vi.fn((table: string) => {
     const chain: any = {};
     for (const m of ['select', 'eq', 'order', 'range', 'limit']) chain[m] = vi.fn(() => chain);
+    chain.not = vi.fn((column: string, operator: string, value: unknown) => {
+      filters.push({ method: 'not', column, operator, value });
+      return chain;
+    });
+    chain.in = vi.fn((column: string, value: unknown) => {
+      filters.push({ method: 'in', column, value });
+      return chain;
+    });
     chain.insert = vi.fn((p: any) => { inserts.push({ table, payload: p }); return chain; });
     chain.upsert = vi.fn((p: Record<string, unknown>, options: Record<string, unknown>) => {
       upserts.push({ table, payload: p, options });
@@ -50,12 +59,21 @@ function makeAdmin(incidentResults: Array<{
         ? incidentResults.shift()
         : { data: { id: 'inc-1', started_at: new Date().toISOString() }, error: null },
     ));
-    chain.maybeSingle = vi.fn(() => Promise.resolve({ data: { started_at: new Date().toISOString() }, error: null }));
+    chain.maybeSingle = vi.fn(() => Promise.resolve({
+      data: {
+        started_at: new Date().toISOString(),
+        status: 'open',
+        source: 'manual',
+        source_ref_id: null,
+        ...beforeRow,
+      },
+      error: null,
+    }));
     chain.then = (r: (v: any) => unknown) => r({ data: null, error: null });
     return chain;
   });
   const rpc = vi.fn().mockResolvedValue({ data: 7, error: null });
-  return { admin: { from, rpc }, inserts, updates, upserts };
+  return { admin: { from, rpc }, inserts, updates, upserts, filters };
 }
 
 beforeEach(() => {
@@ -67,7 +85,52 @@ beforeEach(() => {
   });
 });
 
+describe('GET /api/incidents terminal filtering', () => {
+  it('excludes resolved and closed incidents from the active view', async () => {
+    const { admin, filters } = makeAdmin();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await GET(new NextRequest('http://localhost/api/incidents?status=active'));
+
+    expect(res.status).toBe(200);
+    expect(filters).toContainEqual({
+      method: 'not',
+      column: 'status',
+      operator: 'in',
+      value: '(resolved,closed)',
+    });
+  });
+
+  it('includes resolved and closed incidents in the terminal view', async () => {
+    const { admin, filters } = makeAdmin();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await GET(new NextRequest('http://localhost/api/incidents?status=resolved'));
+
+    expect(res.status).toBe(200);
+    expect(filters).toContainEqual({
+      method: 'in',
+      column: 'status',
+      value: ['resolved', 'closed'],
+    });
+  });
+});
+
 describe('POST /api/incidents owner mirror', () => {
+  it('rejects dashboard creation of diagnostics-owned linked incidents', async () => {
+    const { admin, inserts } = makeAdmin();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await POST(makeRequest('POST', {
+      title: 'Linked diagnostics incident',
+      source: 'health_alert',
+      source_ref_id: 'alert-1',
+    }));
+
+    expect(res.status).toBe(400);
+    expect(inserts).toHaveLength(0);
+  });
+
   it('writes an incident.created audit row and opens an owner alert', async () => {
     const { admin, inserts, upserts } = makeAdmin();
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
@@ -183,6 +246,58 @@ describe('POST /api/incidents owner mirror', () => {
 });
 
 describe('PATCH /api/incidents owner mirror', () => {
+  it('keeps linked health incident status authoritative to its diagnostics alert', async () => {
+    const { admin, updates } = makeAdmin([], {
+      status: 'open',
+      source: 'health_alert',
+      source_ref_id: 'alert-1',
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PATCH(makeRequest('PATCH', {
+      id: '00000000-0000-0000-0000-000000000001',
+      status: 'resolved',
+    }));
+
+    expect(res.status).toBe(409);
+    expect(updates.some((entry) => entry.table === 'incidents')).toBe(false);
+  });
+
+  it('allows an idempotent linked status retry', async () => {
+    const { admin, updates } = makeAdmin([], {
+      status: 'resolved',
+      source: 'health_alert',
+      source_ref_id: 'alert-1',
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PATCH(makeRequest('PATCH', {
+      id: '00000000-0000-0000-0000-000000000001',
+      status: 'resolved',
+      impact_summary: 'Readback retry',
+    }));
+
+    expect(res.status).toBe(200);
+    expect(updates.some((entry) => entry.table === 'incidents')).toBe(true);
+  });
+
+  it('allows legacy unlinked health incidents to follow the manual lifecycle', async () => {
+    const { admin, updates } = makeAdmin([], {
+      status: 'open',
+      source: 'health_alert',
+      source_ref_id: null,
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PATCH(makeRequest('PATCH', {
+      id: '00000000-0000-0000-0000-000000000001',
+      status: 'resolved',
+    }));
+
+    expect(res.status).toBe(200);
+    expect(updates.some((entry) => entry.table === 'incidents')).toBe(true);
+  });
+
   it('writes an incident.resolved audit row and resolves the owner alert', async () => {
     const { admin, inserts, updates } = makeAdmin();
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);

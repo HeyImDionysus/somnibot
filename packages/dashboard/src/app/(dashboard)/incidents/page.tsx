@@ -19,6 +19,7 @@ interface Incident {
   severity: string;
   status: string;
   source: string;
+  source_ref_id: string | null;
   assigned_to: string | null;
   started_at: string | null;
   identified_at: string | null;
@@ -65,6 +66,7 @@ const STATUS_STYLES: Record<string, string> = {
   identified: 'bg-orange-500/20 text-orange-400',
   monitoring: 'bg-blue-500/20 text-blue-400',
   resolved: 'bg-discord-success/20 text-discord-success',
+  closed: 'bg-discord-success/20 text-discord-success',
 };
 
 const STATUS_FLOW = ['open', 'investigating', 'identified', 'monitoring', 'resolved'];
@@ -323,7 +325,7 @@ export default function IncidentsPage() {
             </div>
 
             {/* Status Flow */}
-            {selectedIncident.status !== 'resolved' && (
+            {!['resolved', 'closed'].includes(selectedIncident.status) && !(selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id) && (
               <div className="flex gap-2 flex-wrap">
                 {STATUS_FLOW.filter(s => {
                   const currentIdx = STATUS_FLOW.indexOf(selectedIncident.status);
@@ -343,6 +345,19 @@ export default function IncidentsPage() {
                   </button>
                 ))}
               </div>
+            )}
+            {!['resolved', 'closed'].includes(selectedIncident.status) && selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id && (
+              <p className="rounded-input border border-discord-border-subtle bg-discord-bg-tertiary p-3 text-xs text-discord-text-muted">
+                Status follows the linked diagnostics alert and updates automatically when that alert clears.
+              </p>
+            )}
+            {selectedIncident.status === 'resolved' && (
+              <button
+                onClick={() => updateStatus(selectedIncident.id, 'closed')}
+                className="rounded-md bg-discord-bg-tertiary px-3 py-1.5 text-xs font-medium text-discord-text-secondary transition-colors hover:text-discord-text-primary"
+              >
+                Close incident
+              </button>
             )}
 
             {/* Post-mortem fields */}

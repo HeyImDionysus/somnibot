@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
  * than inherit.
  */
 const INCIDENT_RECORD_COLUMNS =
-  'id, incident_number, title, status, severity, assigned_to, started_at';
+  'id, incident_number, title, status, severity, assigned_to, started_at, source, source_ref_id';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -137,7 +137,9 @@ export async function GET(request: NextRequest) {
 
     if (status) {
       if (status === 'active') {
-        query = query.not('status', 'eq', 'resolved');
+        query = query.not('status', 'in', '(resolved,closed)');
+      } else if (status === 'resolved') {
+        query = query.in('status', ['resolved', 'closed']);
       } else {
         query = query.eq('status', status);
       }
@@ -160,9 +162,9 @@ export async function GET(request: NextRequest) {
       investigating: (allIncidents || []).filter(i => i.status === 'investigating').length,
       identified: (allIncidents || []).filter(i => i.status === 'identified').length,
       monitoring: (allIncidents || []).filter(i => i.status === 'monitoring').length,
-      resolved: (allIncidents || []).filter(i => i.status === 'resolved').length,
-      critical: (allIncidents || []).filter(i => i.severity === 'critical' && i.status !== 'resolved').length,
-      outage: (allIncidents || []).filter(i => i.severity === 'outage' && i.status !== 'resolved').length,
+      resolved: (allIncidents || []).filter(i => ['resolved', 'closed'].includes(i.status)).length,
+      critical: (allIncidents || []).filter(i => i.severity === 'critical' && !['resolved', 'closed'].includes(i.status)).length,
+      outage: (allIncidents || []).filter(i => i.severity === 'outage' && !['resolved', 'closed'].includes(i.status)).length,
     };
 
     return NextResponse.json({
@@ -186,6 +188,12 @@ export async function POST(request: NextRequest) {
     const parsed = await parseBody(request, incidentCreate);
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
+    if (body.source === 'health_alert') {
+      return NextResponse.json(
+        { error: 'Linked health incidents are created by diagnostics.' },
+        { status: 400 },
+      );
+    }
     const requestOccurrenceId = body.request_id ?? randomUUID();
     const admin = createAdminSupabase();
     const { data: config } = await admin
@@ -326,6 +334,19 @@ export async function PATCH(request: NextRequest) {
       { id: body.id, guild_id: ctx.guildId },
       INCIDENT_RECORD_COLUMNS,
     );
+
+    if (
+      body.status
+      && before?.source === 'health_alert'
+      && before.source_ref_id
+      && body.status !== before.status
+      && !(body.status === 'closed' && before.status === 'resolved')
+    ) {
+      return NextResponse.json(
+        { error: 'Linked health incident status follows its diagnostics alert.' },
+        { status: 409 },
+      );
+    }
 
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     const eventMeta: Record<string, unknown> = {};

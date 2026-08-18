@@ -31,6 +31,18 @@ async function insertIncident(sourceRefId: string | null): Promise<void> {
   `;
 }
 
+async function insertAlert(id: string, resolved = false): Promise<void> {
+  await sql`
+    INSERT INTO public.alerts
+      (id, guild_id, alert_type, severity, title, message, resolved, resolved_at)
+    VALUES (
+      ${id}, ${GUILD_ID}, ${'incident_source_ref_' + id}, 'critical',
+      'Incident source reference fixture', 'Integration fixture', ${resolved},
+      ${resolved ? new Date() : null}
+    )
+  `;
+}
+
 beforeAll(async () => {
   supa = await requireSupabase();
   sql = postgres(getTestDbUrl(), { max: 1 });
@@ -44,6 +56,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await sql`DELETE FROM public.incidents WHERE guild_id = ${GUILD_ID}`;
+  await sql`DELETE FROM public.alerts WHERE guild_id = ${GUILD_ID}`;
   await supa.from('guild').delete().eq('id', GUILD_ID);
   await sql.end({ timeout: 5 });
 });
@@ -62,10 +75,34 @@ describe('incidents source_ref_id dedup', () => {
 
   it('rejects a second incident with the same (guild, source_ref_id)', async () => {
     const alertId = randomUUID();
+    await insertAlert(alertId);
     await insertIncident(alertId);
     // A concurrent evaluation trying to open a second incident for the SAME
     // alert reference must be fenced by the unique index (23505).
     await expect(insertIncident(alertId)).rejects.toMatchObject({ code: '23505' });
+  });
+
+  it('initializes a late linked incident from an already-resolved alert', async () => {
+    const alertId = randomUUID();
+    await insertAlert(alertId, true);
+    await insertIncident(alertId);
+
+    const [incident] = await sql<{
+      status: string;
+      resolved_by: string | null;
+      resolved_at: Date | null;
+    }[]>`
+      SELECT status, resolved_by, resolved_at
+      FROM public.incidents
+      WHERE guild_id = ${GUILD_ID}
+        AND source_ref_id = ${alertId}
+    `;
+
+    expect(incident).toMatchObject({
+      status: 'resolved',
+      resolved_by: 'system:diagnostics',
+    });
+    expect(incident?.resolved_at).toBeInstanceOf(Date);
   });
 
   it('permits many manual incidents with a NULL source_ref_id', async () => {
