@@ -90,15 +90,6 @@ export function ConfirmDialog({
   }, [onCancel]);
 
   useEffect(() => {
-    loadingRef.current = loading;
-    if (open && loading) {
-      dialogRef.current?.focus();
-    } else if (open) {
-      cancelRef.current?.focus();
-    }
-  }, [loading, open]);
-
-  useEffect(() => {
     if (!open) return;
     previousFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -140,6 +131,15 @@ export function ConfirmDialog({
       previousFocusRef.current?.focus();
     };
   }, [open]);
+
+  useEffect(() => {
+    loadingRef.current = loading;
+    if (open && loading) {
+      dialogRef.current?.focus();
+    } else if (open) {
+      cancelRef.current?.focus();
+    }
+  }, [loading, open]);
 
   if (!open) return null;
 
