@@ -2617,6 +2617,18 @@ export interface DbPredictions {
   resolved_at: string | null;
 }
 
+export interface DbProfileWriteOccurrences {
+  id: string;
+  guild_id: string;
+  interaction_id: string;
+  actor_id: string;
+  target_id: string;
+  field: 'title' | 'bio';
+  outcome: 'claimed' | 'applied' | 'denied';
+  created_at: string;
+  settled_at: string | null;
+}
+
 export interface DbRuntimeLeases {
   lease_name: string;
   holder_id: string;

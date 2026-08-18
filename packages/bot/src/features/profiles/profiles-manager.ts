@@ -14,6 +14,7 @@ import {
 } from '../branding/brand-kit.js';
 import { applyBrand } from '../branding/branded-embed.js';
 import { createLogger } from '@somnibot/shared';
+import { ProfileWrites } from './profile-writes.js';
 
 const log = createLogger('Profiles');
 
@@ -48,6 +49,18 @@ interface ProfileConfig {
   brandKit: BrandKit;
 }
 
+type ProfileMutationInteraction = {
+  readonly id: string;
+  readonly guildId: string | null;
+  readonly guild: { readonly name: string } | null;
+  readonly user: { readonly id: string };
+  readonly options: { getString(name: string): string | null };
+  readonly deferred: boolean;
+  readonly replied: boolean;
+  reply(options: { readonly content: string; readonly ephemeral?: boolean }): Promise<unknown>;
+  editReply(options: { readonly content: string }): Promise<unknown>;
+};
+
 const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
   profilesEnabled: true,
   titleMaxLength: 64,
@@ -74,38 +87,20 @@ export class ProfilesManager {
   private supabase: SupabaseClient;
   private cache = new Map<string, any>();
   private configCache = new Map<string, { data: ProfileConfig; time: number }>();
-  // Lightweight replay fence for /title and /bio, keyed by interaction id. A
-  // re-delivered interaction (gateway RESUME/redelivery) must not re-run the
-  // write or re-confirm — the writes are value-idempotent, so skipping is safe.
-  private processedWrites = new Map<string, number>();
-  private static readonly WRITE_DEDUP_TTL_MS = 10 * 60_000;
-
+  private readonly profileWrites: ProfileWrites;
   private eventBus: PlatformEventBus;
 
-  constructor(supabase: SupabaseClient, eventBus: PlatformEventBus = defaultEventBus) {
+  constructor(
+    supabase: SupabaseClient,
+    eventBus: PlatformEventBus = defaultEventBus,
+    profileWrites: ProfileWrites = new ProfileWrites(supabase),
+  ) {
     this.supabase = supabase;
     this.eventBus = eventBus;
+    this.profileWrites = profileWrites;
   }
 
-  clearCache(): void { this.cache.clear(); this.configCache.clear(); this.processedWrites.clear(); }
-
-  /**
-   * Returns true when this interaction id was already handled (a replay), else
-   * records it and returns false. Prunes expired entries as it goes so the map
-   * stays bounded.
-   */
-  private isReplayedWrite(interactionId: string): boolean {
-    const now = Date.now();
-    if (this.processedWrites.size > 500) {
-      for (const [id, t] of this.processedWrites) {
-        if (now - t > ProfilesManager.WRITE_DEDUP_TTL_MS) this.processedWrites.delete(id);
-      }
-    }
-    const seen = this.processedWrites.get(interactionId);
-    if (seen !== undefined && now - seen < ProfilesManager.WRITE_DEDUP_TTL_MS) return true;
-    this.processedWrites.set(interactionId, now);
-    return false;
-  }
+  clearCache(): void { this.cache.clear(); this.configCache.clear(); }
 
   private async getConfig(guildId: string): Promise<ProfileConfig> {
     const now = Date.now();
@@ -169,7 +164,9 @@ export class ProfilesManager {
    * resolveBrandKit never throws and the guild name is the fallback, so this
    * reply always lands even while the database is unreachable.
    */
-  private async replyProfilesUnavailable(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async replyProfilesUnavailable(
+    interaction: ChatInputCommandInteraction | ProfileMutationInteraction,
+  ): Promise<void> {
     const guildId = interaction.guildId!;
     const brandKit = await resolveBrandKit(this.supabase, guildId, { fallbackName: interaction.guild?.name })
       .catch(() => null);
@@ -298,17 +295,7 @@ export class ProfilesManager {
     await interaction.editReply({ embeds: [embed] });
   }
 
-  async setTitle(interaction: ChatInputCommandInteraction): Promise<void> {
-    // Replay fence: a re-delivered interaction skips the write + confirmation.
-    if (this.isReplayedWrite(interaction.id)) {
-      await writeAuditLog(this.supabase, {
-        guildId: interaction.guildId!, actorType: 'discord', actorId: interaction.user.id,
-        action: 'profiles.write_replay', category: 'profiles', targetType: 'member', targetId: interaction.user.id,
-        details: { field: 'title', interactionId: interaction.id }, success: false,
-        occurrenceKey: `profiles.write_replay:${interaction.id}`, correlationId: `profile:${interaction.guildId}:${interaction.user.id}`,
-      });
-      return;
-    }
+  async setTitle(interaction: ProfileMutationInteraction): Promise<void> {
     const title = interaction.options.getString('title')!;
     const guildId = interaction.guildId!;
     const cfg = await this.getConfig(guildId);
@@ -344,37 +331,20 @@ export class ProfilesManager {
       return;
     }
 
-    // DEPFAIL fail-soft: never confirm a save that did not land. A failed
-    // profile ensure or a failed UPDATE (database outage) degrades to the
-    // branded unavailable notice; the prior value stays untouched.
-    const titleProfileRow = await this.getOrCreateProfile(guildId, interaction.user.id);
-    if (titleProfileRow == null) {
-      await this.replyProfilesUnavailable(interaction);
-      return;
-    }
-    const { error: titleWriteErr } = await this.supabase.from('economy_profiles')
-      .update({ title: finalTitle, updated_at: new Date().toISOString() })
-      .eq('guild_id', guildId).eq('user_id', interaction.user.id);
-    if (titleWriteErr) {
-      await this.replyProfilesUnavailable(interaction);
-      return;
-    }
-
-    // [community-profiles] Append-only audit row on the title save (the catalog
-    // contracts one audit row per member-profile state change). Written directly
-    // so it lands synchronously with the save, not on the batched event pipeline.
-    await writeAuditLog(this.supabase, {
+    const outcome = await this.profileWrites.apply({
       guildId,
-      actorType: 'discord',
+      interactionId: interaction.id,
       actorId: interaction.user.id,
-      action: 'profiles.title_updated',
-      category: 'profiles',
-      targetType: 'member',
       targetId: interaction.user.id,
-      details: { value: finalTitle, truncated, interactionId: interaction.id },
-      occurrenceKey: `profiles.title_updated:${interaction.id}`,
-      correlationId: `profile:${guildId}:${interaction.user.id}`,
+      field: 'title',
+      value: finalTitle,
+      truncated,
     });
+    if (outcome.kind === 'unavailable') {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
+    if (outcome.kind !== 'applied') return;
 
     this.eventBus.emit('profile.updated', guildId, {
       userId: interaction.user.id,
@@ -390,18 +360,7 @@ export class ProfilesManager {
     });
   }
 
-  async setBio(interaction: ChatInputCommandInteraction): Promise<void> {
-    // Replay fence: a re-delivered interaction skips the write + confirmation.
-    if (this.isReplayedWrite(interaction.id)) {
-      await writeAuditLog(this.supabase, {
-        guildId: interaction.guildId!, actorType: 'discord', actorId: interaction.user.id,
-        action: 'profiles.write_replay', category: 'profiles', targetType: 'member', targetId: interaction.user.id,
-        details: { field: 'bio', interactionId: interaction.id }, success: false,
-        occurrenceKey: `profiles.write_replay:${interaction.id}`,
-        correlationId: `profile:${interaction.guildId}:${interaction.user.id}`,
-      });
-      return;
-    }
+  async setBio(interaction: ProfileMutationInteraction): Promise<void> {
     const bio = interaction.options.getString('bio')!;
     const guildId = interaction.guildId!;
     const cfg = await this.getConfig(guildId);
@@ -435,35 +394,20 @@ export class ProfilesManager {
       return;
     }
 
-    // DEPFAIL fail-soft: never confirm a save that did not land (see setTitle).
-    const bioProfileRow = await this.getOrCreateProfile(guildId, interaction.user.id);
-    if (bioProfileRow == null) {
-      await this.replyProfilesUnavailable(interaction);
-      return;
-    }
-    const { error: bioWriteErr } = await this.supabase.from('economy_profiles')
-      .update({ bio: finalBio, updated_at: new Date().toISOString() })
-      .eq('guild_id', guildId).eq('user_id', interaction.user.id);
-    if (bioWriteErr) {
-      await this.replyProfilesUnavailable(interaction);
-      return;
-    }
-
-    // [community-profiles] Append-only audit row on the bio save (the catalog
-    // contracts one audit row per member-profile state change). Written directly
-    // so it lands synchronously with the save, not on the batched event pipeline.
-    await writeAuditLog(this.supabase, {
+    const outcome = await this.profileWrites.apply({
       guildId,
-      actorType: 'discord',
+      interactionId: interaction.id,
       actorId: interaction.user.id,
-      action: 'profiles.bio_updated',
-      category: 'profiles',
-      targetType: 'member',
       targetId: interaction.user.id,
-      details: { value: finalBio, truncated, interactionId: interaction.id },
-      occurrenceKey: `profiles.bio_updated:${interaction.id}`,
-      correlationId: `profile:${guildId}:${interaction.user.id}`,
+      field: 'bio',
+      value: finalBio,
+      truncated,
     });
+    if (outcome.kind === 'unavailable') {
+      await this.replyProfilesUnavailable(interaction);
+      return;
+    }
+    if (outcome.kind !== 'applied') return;
 
     this.eventBus.emit('profile.updated', guildId, {
       userId: interaction.user.id,
