@@ -209,6 +209,23 @@ describe('PATCH /api/incidents owner mirror', () => {
     expect(updates.some((entry) => entry.table === 'incidents')).toBe(false);
   });
 
+  it('allows legacy unlinked health incidents to follow the manual lifecycle', async () => {
+    const { admin, updates } = makeAdmin([], {
+      status: 'open',
+      source: 'health_alert',
+      source_ref_id: null,
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PATCH(makeRequest('PATCH', {
+      id: '00000000-0000-0000-0000-000000000001',
+      status: 'resolved',
+    }));
+
+    expect(res.status).toBe(200);
+    expect(updates.some((entry) => entry.table === 'incidents')).toBe(true);
+  });
+
   it('writes an incident.resolved audit row and resolves the owner alert', async () => {
     const { admin, inserts, updates } = makeAdmin();
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);

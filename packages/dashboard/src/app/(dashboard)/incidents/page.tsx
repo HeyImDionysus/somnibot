@@ -19,6 +19,7 @@ interface Incident {
   severity: string;
   status: string;
   source: string;
+  source_ref_id: string | null;
   assigned_to: string | null;
   started_at: string | null;
   identified_at: string | null;
@@ -323,7 +324,7 @@ export default function IncidentsPage() {
             </div>
 
             {/* Status Flow */}
-            {selectedIncident.status !== 'resolved' && selectedIncident.source !== 'health_alert' && (
+            {selectedIncident.status !== 'resolved' && !(selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id) && (
               <div className="flex gap-2 flex-wrap">
                 {STATUS_FLOW.filter(s => {
                   const currentIdx = STATUS_FLOW.indexOf(selectedIncident.status);
@@ -344,7 +345,7 @@ export default function IncidentsPage() {
                 ))}
               </div>
             )}
-            {selectedIncident.status !== 'resolved' && selectedIncident.source === 'health_alert' && (
+            {selectedIncident.status !== 'resolved' && selectedIncident.source === 'health_alert' && selectedIncident.source_ref_id && (
               <p className="rounded-input border border-discord-border-subtle bg-discord-bg-tertiary p-3 text-xs text-discord-text-muted">
                 Status follows the linked diagnostics alert and updates automatically when that alert clears.
               </p>

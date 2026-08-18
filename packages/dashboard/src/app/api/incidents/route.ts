@@ -330,6 +330,7 @@ export async function PATCH(request: NextRequest) {
     if (
       body.status
       && before?.source === 'health_alert'
+      && before.source_ref_id
       && !(body.status === 'closed' && before.status === 'resolved')
     ) {
       return NextResponse.json(
