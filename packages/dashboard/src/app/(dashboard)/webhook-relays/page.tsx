@@ -9,6 +9,7 @@ import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Input } from '@/components/shared/input';
 import { useToast } from '@/components/shared/toast';
 import { useDiscordNames } from '@/hooks/use-discord-names';
+import { clearResolvedDestinationError } from '@/lib/webhook-relay-form-validation';
 
 const DEFAULT_TEMPLATE = '**{source} — {event}**\n{content}';
 
@@ -189,6 +190,10 @@ function RelayForm({
     .replaceAll('{source}', draft.sourceLabel || 'Rust server')
     .replaceAll('{event}', 'server.started')
     .replaceAll('{content}', 'Map wipe completed'), [draft]);
+
+  useEffect(() => {
+    setError((current) => clearResolvedDestinationError(current, draft.channelId, authoritative));
+  }, [draft.channelId, authoritative]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
