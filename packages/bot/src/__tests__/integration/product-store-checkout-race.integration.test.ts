@@ -78,7 +78,7 @@ describe('commerce checkout intent claim', () => {
       ) VALUES (
         ${guildId}, 'user', ${actorId}, 'commerce.checkout.race_refused', 'commerce',
         'checkout_intent', ${blocked.checkout_token},
-        ${{ stage: 'checkout_intent_claim', product_id: productId }}::JSONB,
+        ${sql.json({ stage: 'checkout_intent_claim', product_id: productId })}::JSONB,
         ${occurrenceKey}, false
       )
       ON CONFLICT (guild_id, occurrence_key) DO NOTHING
