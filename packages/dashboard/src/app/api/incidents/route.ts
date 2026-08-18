@@ -12,6 +12,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { recordAdminChange, readRowBefore } from '@/lib/admin-changes';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { randomUUID } from 'node:crypto';
 
 /**
  * Columns of an incident copied into an admin-changes before/after payload.
@@ -44,13 +45,16 @@ async function mirrorIncidentToOwner(
   args: {
     guildId: string;
     actorId: string;
-    action: 'incident.created' | 'incident.updated' | 'incident.resolved';
+    action: 'incident.created' | 'incident.create_failed' | 'incident.updated' | 'incident.resolved';
     incidentId: string;
     details: Record<string, unknown>;
+    occurrenceKey?: string;
+    success?: boolean;
+    errorMessage?: string;
   },
 ): Promise<void> {
   try {
-    await admin.from('audit_logs').insert({
+    const row = {
       guild_id: args.guildId,
       actor_type: 'dashboard',
       actor_id: args.actorId,
@@ -59,8 +63,18 @@ async function mirrorIncidentToOwner(
       target_type: 'incident',
       target_id: args.incidentId,
       details: args.details,
-      success: true,
-    });
+      occurrence_key: args.occurrenceKey ?? null,
+      success: args.success ?? true,
+      error_message: args.errorMessage ?? null,
+    };
+    if (args.occurrenceKey) {
+      await admin.from('audit_logs').upsert(row, {
+        onConflict: 'guild_id,occurrence_key',
+        ignoreDuplicates: true,
+      });
+    } else {
+      await admin.from('audit_logs').insert(row);
+    }
   } catch {
     // audit write is best-effort
   }
@@ -73,6 +87,7 @@ const incidentCreate = z.object({
   source: z.string().max(64).default('manual'),
   source_ref_id: z.string().max(256).optional().nullable(),
   assigned_to: snowflake.optional().nullable(),
+  request_id: z.string().uuid().optional(),
 });
 
 const incidentUpdate = z.object({
@@ -171,6 +186,7 @@ export async function POST(request: NextRequest) {
     const parsed = await parseBody(request, incidentCreate);
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
+    const requestOccurrenceId = body.request_id ?? randomUUID();
     const admin = createAdminSupabase();
     const { data: config } = await admin
       .from('guild_config')
@@ -201,7 +217,24 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
 
-    if (error) return dbError(error, 'incidents');
+    if (error) {
+      await mirrorIncidentToOwner(admin, {
+        guildId: ctx.guildId,
+        actorId: ctx.discordId,
+        action: 'incident.create_failed',
+        incidentId: requestOccurrenceId,
+        details: {
+          request_id: requestOccurrenceId,
+          title: body.title,
+          severity: effectiveSeverity,
+          source: body.source || 'manual',
+        },
+        occurrenceKey: `incident.create_failed:${requestOccurrenceId}`,
+        success: false,
+        errorMessage: error.message,
+      });
+      return dbError(error, 'incidents');
+    }
 
     // Create initial event
     await admin.from('incident_events').insert({
@@ -226,6 +259,7 @@ export async function POST(request: NextRequest) {
         severity: effectiveSeverity,
         source: body.source || 'manual',
       },
+      occurrenceKey: `incident.created:${requestOccurrenceId}`,
     });
     try {
       await admin.from('alerts').insert({

@@ -7,6 +7,7 @@ import type { Message, Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import { calculateLevel, randomXp, LEVEL_CONFIG, DEFAULT_LEVEL_CURVE, createLogger, type LevelCurve } from '@somnibot/shared';
+import { writeAuditLog } from '../../services/audit.js';
 
 const log = createLogger('XPTracker');
 
@@ -285,6 +286,24 @@ export async function processMessageXp(
 
   if (rpcError) {
     log.error('increment_member_xp RPC failed:', rpcError.message);
+    await writeAuditLog(supabase, {
+      guildId,
+      actorType: 'system',
+      actorId: 'levels-xp-tracker',
+      action: 'levels.xp_write_retried',
+      category: 'levels',
+      targetType: 'member',
+      targetId: userId,
+      details: {
+        message_id: message.id,
+        channel_id: channelId,
+        xp_amount: xpAmount,
+      },
+      correlationId: `levels:message:${message.id}`,
+      occurrenceKey: `levels.xp_write_retried:${message.id}`,
+      success: false,
+      errorMessage: rpcError.message,
+    });
     return { granted: false, newXp: 0, oldLevel: 0, newLevel: 0, leveledUp: false };
   }
 

@@ -26,6 +26,7 @@ import {
   type MassActionHoldRow,
 } from './mass-action-hold.js';
 import { AutomationActionResumeRunner } from './action-resume-runner.js';
+import { writeAuditLog } from '../../services/audit.js';
 
 /**
  * A stable, uuid-shaped id derived from a durable seed. Same seed → same id, so
@@ -456,22 +457,46 @@ export class AutomationEngine {
       return;
     }
     if (ctx.member) {
-      const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
-      if (!allowed) {
-        log.info(`Rate limited: ${automation.name} for user ${ctx.member.id}`);
-        return;
-      }
+      try {
+        const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
+        if (!allowed) {
+          log.info(`Rate limited: ${automation.name} for user ${ctx.member.id}`);
+          return;
+        }
 
-      // Custom per-automation rate limit
-      if (automation.rateLimitPerUser && automation.rateLimitWindowSeconds) {
-        const customAllowed = await this.rateLimiter.allowCustom(
-          this.guild.id,
-          automation.id,
-          ctx.member.id,
-          automation.rateLimitPerUser,
-          automation.rateLimitWindowSeconds,
-        );
-        if (!customAllowed) return;
+        // Custom per-automation rate limit
+        if (automation.rateLimitPerUser && automation.rateLimitWindowSeconds) {
+          const customAllowed = await this.rateLimiter.allowCustom(
+            this.guild.id,
+            automation.id,
+            ctx.member.id,
+            automation.rateLimitPerUser,
+            automation.rateLimitWindowSeconds,
+          );
+          if (!customAllowed) return;
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Rate limiter unavailable';
+        await writeAuditLog(this.supabase, {
+          guildId: this.guild.id,
+          actorType: 'automation',
+          actorId: automation.id,
+          action: 'automation.rate_limiter_down',
+          category: 'automations',
+          targetType: 'member',
+          targetId: ctx.member.id,
+          details: {
+            automation_id: automation.id,
+            automation_name: automation.name,
+            trigger: event.type,
+            occurrence_id: ctx.occurrenceId,
+          },
+          correlationId: `automation:${automation.id}:${ctx.occurrenceId}`,
+          occurrenceKey: `automation.rate_limiter_down:${automation.id}:${ctx.occurrenceId}`,
+          success: false,
+          errorMessage,
+        });
+        return;
       }
     }
 
