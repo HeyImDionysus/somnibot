@@ -14,6 +14,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert, resolveOwnerAlertWithStatus } from '../../services/alert-service.js';
+import { writeAuditLog } from '../../services/audit.js';
 
 const log = createLogger('StatsManager');
 
@@ -32,6 +33,11 @@ export interface StatsChannelConfig {
    * instead of orphaned behind a log line.
    */
   pending_cleanup_channel_ids: string[] | null;
+}
+
+interface GatheredStats {
+  readonly values: Record<string, string>;
+  readonly unavailableStatTypes: ReadonlySet<string>;
 }
 
 export class StatsChannelManager {
@@ -116,7 +122,12 @@ export class StatsChannelManager {
 
     for (const config of this.channels) {
       try {
-        const value = this.resolveStatValue(config, stats);
+        if (stats.unavailableStatTypes.has(config.stat_type)) {
+          await this.recordQueryRetry(config);
+          continue;
+        }
+
+        const value = this.resolveStatValue(config, stats.values);
         const newName = config.name_format.replace('{value}', value).replace('{count}', value);
 
         // Only update if value changed
@@ -689,7 +700,28 @@ export class StatsChannelManager {
     this.alertedDegradedChannels.delete(config.id);
   }
 
-  private async gatherStats(): Promise<Record<string, string>> {
+  private async recordQueryRetry(config: StatsChannelConfig): Promise<void> {
+    const heldValue = config.last_value ?? 'initial';
+    await writeAuditLog(this.supabase, {
+      guildId: config.guild_id,
+      actorType: 'system',
+      actorId: 'stats-channel-manager',
+      action: 'stats_channels.query_retried',
+      category: 'statistics',
+      targetType: 'stats_channel',
+      targetId: config.id,
+      details: {
+        stat_type: config.stat_type,
+        held_last_value: config.last_value,
+      },
+      correlationId: `stats:${config.id}`,
+      occurrenceKey: `stats_channels.query_retried:${config.id}:${config.stat_type}:${heldValue}`,
+      success: false,
+      errorMessage: `Unable to refresh ${config.stat_type}; retained the last accurate value`,
+    });
+  }
+
+  private async gatherStats(): Promise<GatheredStats> {
     const guild = this.guild;
     await guild.members.fetch().catch((e: unknown) => { log.warn('Failed to fetch members:', (e as Error)?.message ?? e); }); // ensure cache is populated
 
@@ -706,45 +738,67 @@ export class StatsChannelManager {
     let activeTickets = 0;
     let totalXp = 0;
     let highestLevel = 0;
+    const unavailableStatTypes = new Set<string>();
 
     try {
-      const { count } = await this.supabase
+      const { count, error } = await this.supabase
         .from('tickets')
         .select('id', { count: 'exact', head: true })
         .eq('guild_id', guild.id)
         .in('status', ['open', 'claimed']);
+      if (error) {
+        throw new Error(error.message);
+      }
       activeTickets = count ?? 0;
-    } catch { /* ignore */ }
+    } catch (error) {
+      unavailableStatTypes.add('active_tickets');
+      log.warn('Failed to fetch active ticket count:', { error: String(error) });
+    }
 
     try {
-      const { data } = await this.supabase
+      const { data, error } = await this.supabase
         .from('member_levels')
         .select('xp, level')
         .eq('guild_id', guild.id)
         .order('level', { ascending: false })
         .limit(1)
         .maybeSingle();
+      if (error) {
+        throw new Error(error.message);
+      }
       if (data) {
         highestLevel = data.level ?? 0;
       }
-      // Total XP — rpc may return a single number or object
-      try {
-        const { data: xpData } = await this.supabase
-          .rpc('sum_guild_xp', { g_id: guild.id });
-        totalXp = typeof xpData === 'number' ? xpData : 0;
-      } catch { /* rpc may not exist */ }
-    } catch { /* ignore */ }
+    } catch (error) {
+      unavailableStatTypes.add('highest_level');
+      log.warn('Failed to fetch highest member level:', { error: String(error) });
+    }
+
+    try {
+      const { data: xpData, error } = await this.supabase
+        .rpc('sum_guild_xp', { g_id: guild.id });
+      if (error) {
+        throw new Error(error.message);
+      }
+      totalXp = typeof xpData === 'number' ? xpData : 0;
+    } catch (error) {
+      unavailableStatTypes.add('total_xp_earned');
+      log.warn('Failed to fetch total guild XP:', { error: String(error) });
+    }
 
     return {
-      total_members: String(totalMembers),
-      online_members: String(onlineMembers),
-      bot_count: String(botCount),
-      role_count: String(roleCount),
-      channel_count: String(channelCount),
-      premium_members: String(premiumMembers),
-      active_tickets: String(activeTickets),
-      total_xp_earned: String(totalXp),
-      highest_level: String(highestLevel),
+      values: {
+        total_members: String(totalMembers),
+        online_members: String(onlineMembers),
+        bot_count: String(botCount),
+        role_count: String(roleCount),
+        channel_count: String(channelCount),
+        premium_members: String(premiumMembers),
+        active_tickets: String(activeTickets),
+        total_xp_earned: String(totalXp),
+        highest_level: String(highestLevel),
+      },
+      unavailableStatTypes,
     };
   }
 

@@ -28,10 +28,14 @@ describe('statsChannel.create name_format placeholder', () => {
     const result = schemas.statsChannel.create.safeParse({
       stat_type: 'total_members',
       name_format: '📊 Members',
+      stat_config: { category_id: '123456789012345678' },
     });
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues.some((i) => /placeholder/i.test(i.message))).toBe(true);
+      expect(result.error.issues).toHaveLength(1);
+      expect(result.error.issues[0]?.message).toBe(
+        'name_format must contain {value} or {count}',
+      );
     }
   });
 

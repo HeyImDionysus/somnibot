@@ -608,7 +608,7 @@ const levelRewardCreate = z.object({
 // ── Stats channel schemas ───────────────────────────
 
 const namePlaceholder = (s: string) => s.includes('{value}') || s.includes('{count}');
-const namePlaceholderMsg = 'name_format must contain the {value} placeholder';
+const namePlaceholderMsg = 'name_format must contain {value} or {count}';
 
 const statsChannelConfig = z.object({
   category_id: snowflake,

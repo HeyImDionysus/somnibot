@@ -24,7 +24,7 @@ const statsChannelUpdate = z.object({
     .string()
     .max(128)
     .refine((s) => s.includes('{value}') || s.includes('{count}'), {
-      message: 'name_format must contain the {value} placeholder',
+      message: 'name_format must contain {value} or {count}',
     })
     .optional(),
   stat_config: z.object({
