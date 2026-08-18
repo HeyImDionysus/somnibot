@@ -49,6 +49,7 @@ import {
   type CommercePlanRecovery,
 } from '@/lib/store/commerce-plan-recovery';
 import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
+import { writeCommerceAudit } from '@/lib/commerce-audit';
 
 // ── PayPal Helpers ─────────────────────────────────────
 
@@ -328,7 +329,7 @@ async function createPayPalBillingPlan(
 
 // ── Route Handlers ──────────────────────────────────────
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
@@ -343,6 +344,17 @@ export async function GET() {
     .limit(500);
 
   if (error) {
+    const occurrenceId = req.headers.get('x-request-id')?.trim() || crypto.randomUUID();
+    await writeCommerceAudit(supabase, {
+      guildId,
+      actorId: auth.ctx.discordId,
+      action: 'commerce.store.load_failed',
+      targetType: 'store',
+      targetId: guildId,
+      details: { stage: 'products_query', error_code: error.code ?? null },
+      occurrenceKey: `commerce.store.load_failed:${guildId}:${occurrenceId}`,
+      success: false,
+    });
     return dbError(error, 'store/products');
   }
 
@@ -361,6 +373,7 @@ export async function POST(req: NextRequest) {
   const parsed = await parseBody(req, schemas.product.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
+  const operationId = req.headers.get('x-request-id')?.trim() || crypto.randomUUID();
 
   const {
     name,
@@ -492,6 +505,16 @@ export async function POST(req: NextRequest) {
       tenantPayPalConfig,
     );
     if (!paypalProduct.ok) {
+      await writeCommerceAudit(supabase, {
+        guildId,
+        actorId: auth.ctx.discordId,
+        action: 'commerce.store.provider_failed',
+        targetType: 'product_create',
+        targetId: operationId,
+        details: { stage: 'paypal_catalog_create', product_type: type },
+        occurrenceKey: `commerce.store.provider_failed:${guildId}:${operationId}:catalog`,
+        success: false,
+      });
       return paypalNotReadyResponse(paypalProduct.error);
     }
     paypalProductId = paypalProduct.id;
@@ -510,6 +533,16 @@ export async function POST(req: NextRequest) {
         active: plan.active,
       }, tenantPayPalConfig);
       if (!paypalPlan.ok) {
+        await writeCommerceAudit(supabase, {
+          guildId,
+          actorId: auth.ctx.discordId,
+          action: 'commerce.store.provider_failed',
+          targetType: 'plan_create',
+          targetId: plan.id,
+          details: { stage: 'paypal_plan_create', operation_id: operationId },
+          occurrenceKey: `commerce.store.provider_failed:${guildId}:${operationId}:plan:${plan.id}`,
+          success: false,
+        });
         return paypalNotReadyResponse(paypalPlan.error);
       }
       plan.paypalPlanId = paypalPlan.id;

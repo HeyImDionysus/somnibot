@@ -15,8 +15,9 @@ vi.mock('@/lib/store/paypal-plan-state', () => ({ ensurePayPalPlanState: vi.fn()
 vi.mock('@/lib/api/live-discord-facts', () => ({
   validateAssignableDiscordTargets: vi.fn(),
 }));
+vi.mock('@/lib/commerce-audit', () => ({ writeCommerceAudit: vi.fn().mockResolvedValue(undefined) }));
 
-import { POST, PUT } from '@/app/api/store/products/route';
+import { GET, POST, PUT } from '@/app/api/store/products/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { notifyBot } from '@/lib/notify-bot';
@@ -24,6 +25,7 @@ import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
 import { validateAssignableDiscordTargets } from '@/lib/api/live-discord-facts';
+import { writeCommerceAudit } from '@/lib/commerce-audit';
 
 import {
   buildRequest,
@@ -116,6 +118,39 @@ describe('POST /api/store/products PayPal readiness', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it('writes one occurrence-keyed load failure audit for a real products query error', async () => {
+    productsTable.limit.mockResolvedValueOnce({
+      data: null,
+      error: { code: '08006', message: 'connection failure' },
+    });
+
+    const res = await GET(buildRequest('/api/store/products', {
+      headers: { 'x-request-id': 'store-load-attempt-1' },
+    }));
+
+    expect(res.status).toBe(500);
+    expect(writeCommerceAudit).toHaveBeenCalledWith(mock, {
+      guildId: 'guild-1',
+      actorId: '123456789',
+      action: 'commerce.store.load_failed',
+      targetType: 'store',
+      targetId: 'guild-1',
+      details: { stage: 'products_query', error_code: '08006' },
+      occurrenceKey: 'commerce.store.load_failed:guild-1:store-load-attempt-1',
+      success: false,
+    });
+  });
+
+  it('returns an ordinary empty store without a load failure audit', async () => {
+    productsTable.limit.mockResolvedValueOnce({ data: [], error: null });
+
+    const res = await GET(buildRequest('/api/store/products'));
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ success: true, data: [] });
+    expect(writeCommerceAudit).not.toHaveBeenCalled();
   });
 
   it('blocks paid product creation before database writes when PayPal is not ready', async () => {
@@ -294,6 +329,11 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(productsTable.insert).not.toHaveBeenCalled();
     expect(plansTable.insert).not.toHaveBeenCalled();
     expect(notifyBot).not.toHaveBeenCalled();
+    expect(writeCommerceAudit).toHaveBeenCalledWith(mock, expect.objectContaining({
+      action: 'commerce.store.provider_failed',
+      targetType: 'product_create',
+      success: false,
+    }));
   });
 
   it('blocks subscription creation before database writes when PayPal plan sync fails', async () => {

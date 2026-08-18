@@ -48,14 +48,24 @@ const sampleProduct = {
   sort_order: 0,
 };
 
-function makeSupabase(products: any[], guildConfig: any) {
+function makeSupabase(products: any[], guildConfig: any, productError: { code: string; message: string } | null = null) {
+  const auditRows: Record<string, unknown>[] = [];
   return {
+    auditRows,
     from: vi.fn((table: string) => {
       if (table === 'products') {
         const chain: any = {};
         for (const m of ['select', 'eq', 'order', 'limit']) chain[m] = vi.fn(() => chain);
-        chain.then = (resolve: any) => resolve({ data: products, error: null });
+        chain.then = (resolve: any) => resolve({ data: productError ? null : products, error: productError });
         return chain;
+      }
+      if (table === 'audit_logs') {
+        return {
+          upsert: vi.fn(async (rows: Record<string, unknown>[]) => {
+            auditRows.push(...rows);
+            return { error: null };
+          }),
+        };
       }
       // guild_config
       const chain: any = {};
@@ -68,6 +78,8 @@ function makeSupabase(products: any[], guildConfig: any) {
 
 function makeInteraction(guildName?: string) {
   return {
+    id: 'interaction-1',
+    user: { id: 'member-1' },
     guild: guildName ? { name: guildName } : null,
     deferReply: vi.fn().mockResolvedValue({}),
     editReply: vi.fn().mockResolvedValue({}),
@@ -120,5 +132,27 @@ describe('handleStoreCommand — white-label branding', () => {
     const header = embedInstances[0];
     expect(header.data.title).toBe('Acme Emporium');
     expect(header.data.footer).toBeUndefined();
+  });
+
+  it('audits an actual products-query failure once without calling an empty store a failure', async () => {
+    const failedInteraction = makeInteraction('Cool Server');
+    const failed = makeSupabase([], null, { code: '08006', message: 'connection failure' });
+
+    await handleStoreCommand(failedInteraction, failed, 'g1', 'https://api.paypal.example');
+
+    expect(failed.auditRows).toEqual([expect.objectContaining({
+      action: 'commerce.store.load_failed',
+      actor_id: 'member-1',
+      occurrence_key: 'commerce.store.load_failed:interaction-1',
+      success: false,
+    })]);
+
+    const emptyInteraction = makeInteraction('Cool Server');
+    const empty = makeSupabase([], null);
+    await handleStoreCommand(emptyInteraction, empty, 'g1', 'https://api.paypal.example');
+    expect(empty.auditRows).toEqual([]);
+    expect(emptyInteraction.editReply).toHaveBeenCalledWith({
+      content: '🏪 The store is empty right now. Check back later!',
+    });
   });
 });

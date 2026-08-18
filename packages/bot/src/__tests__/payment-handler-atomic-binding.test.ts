@@ -14,10 +14,13 @@ const migration = normalizedSource('../../../supabase/migrations/20260804142000_
 const recoveryMigration = normalizedSource('../../../supabase/migrations/20260804143000_paid_checkout_exposure_recovery.sql');
 const noOrderRecoveryMigration = normalizedSource('../../../supabase/migrations/20260804144000_checkout_recovery_no_order_cleanup.sql');
 const providerBindingMigration = normalizedSource('../../../supabase/migrations/20260817180000_paypal_checkout_provider_binding.sql');
+const intentClaimMigration = normalizedSource('../../../supabase/migrations/20260818111500_checkout_intent_claim.sql');
 const handlerSource = readFileSync(new URL('../features/commerce/payment-handler.ts', import.meta.url), 'utf8');
+const observedAuditRows: Record<string, unknown>[] = [];
 
 function interaction(customId = 'store:buy:prod-1') {
   return {
+    id: 'interaction-1',
     customId,
     user: { id: '12345678901234567', username: 'Tester' },
     deferReply: vi.fn().mockResolvedValue({}),
@@ -25,7 +28,12 @@ function interaction(customId = 'store:buy:prod-1') {
   } as any;
 }
 
-function makeSupabase(productType: 'one_time' | 'subscription', bothAtomicResponsesLost = false) {
+function makeSupabase(
+  productType: 'one_time' | 'subscription',
+  bothAtomicResponsesLost = false,
+  reservationBlocked = false,
+  intentBlocked = false,
+) {
   const product = {
     id: '00000000-0000-4000-8000-000000000001', guild_id: 'guild-1', active: true,
     type: productType, price_cents: 500, name: 'VIP', delivery_type: 'access_pass',
@@ -40,10 +48,40 @@ function makeSupabase(productType: 'one_time' | 'subscription', bothAtomicRespon
   let atomicCalls = 0;
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
     rpcCalls.push([name, args]);
+    if (name === 'commerce_claim_checkout_intent') {
+      return intentBlocked
+        ? {
+            data: {
+              disposition: 'blocked',
+              checkout_token: '00000000-0000-4000-8000-000000000088',
+              provider_id: null,
+              order_id: null,
+            },
+            error: null,
+          }
+        : {
+            data: {
+              disposition: 'claimed',
+              checkout_token: args?.p_checkout_token,
+              provider_id: null,
+              order_id: null,
+            },
+            error: null,
+          };
+    }
     if (name === 'commerce_select_checkout_plan') return { data: [plan], error: null };
     if (name === 'generate_order_number') return { data: 'ORD-1', error: null };
     if (name === 'commerce_create_and_bind_active_paid_checkout') {
       atomicCalls += 1;
+      if (reservationBlocked) {
+        return {
+          data: null,
+          error: {
+            code: '23505',
+            message: 'commerce_checkout_blocked: provider_checkout order 00000000-0000-4000-8000-000000000099',
+          },
+        };
+      }
       if (bothAtomicResponsesLost || atomicCalls === 1) return { data: null, error: { code: '08006', message: 'connection closed after commit' } };
       const subscription = productType === 'subscription';
       return {
@@ -71,6 +109,10 @@ function makeSupabase(productType: 'one_time' | 'subscription', bothAtomicRespon
       order: vi.fn(() => chain), limit: vi.fn(() => chain),
       insert: vi.fn(() => { operation = 'insert'; return chain; }),
       update: vi.fn(() => { operation = 'update'; return chain; }),
+      upsert: vi.fn(async (rows: Record<string, unknown>[]) => {
+        if (table === 'audit_logs') observedAuditRows.push(...rows);
+        return { error: null };
+      }),
       maybeSingle: vi.fn(async () => {
         if (table === 'products') return { data: product, error: null };
         if (table === 'customers') return { data: customerReads++ === 0 ? null : null, error: null };
@@ -96,7 +138,10 @@ function paypalFetch() {
   });
 }
 
-beforeEach(() => { process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret'; });
+beforeEach(() => {
+  process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret';
+  observedAuditRows.length = 0;
+});
 afterEach(() => { delete process.env.PAYPAL_CLIENT_SECRET; vi.restoreAllMocks(); });
 
 describe('atomic paid checkout intent binding', () => {
@@ -122,6 +167,49 @@ describe('atomic paid checkout intent binding', () => {
     expect(rpcCalls.filter(([name]) => name === 'commerce_create_and_bind_active_paid_checkout')).toHaveLength(2);
     expect(rpcCalls.some(([name]) => name === 'commerce_reap_unexposed_paid_checkout')).toBe(true);
     expect(rpcCalls.some(([name]) => name === 'commerce_mark_paid_checkout_exposed')).toBe(false);
+    expect(observedAuditRows).toEqual([expect.objectContaining({
+      action: 'commerce.checkout.record_failed',
+      occurrence_key: expect.stringMatching(/^commerce\.checkout\.record_failed:/),
+      success: false,
+    })]);
+  });
+
+  it('audits provider dependency failure against the persisted checkout intent', async () => {
+    const { supabase } = makeSupabase('one_time');
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
+      if (String(url).includes('/v1/oauth2/token')) {
+        return new Response(JSON.stringify({ access_token: 'tok' }), { status: 200 });
+      }
+      throw new Error('provider unavailable');
+    }));
+
+    await handleBuyButton(interaction(), supabase, 'guild-1', 'https://api.paypal.example', 'id', 'secret', 'https://dashboard.example');
+
+    expect(observedAuditRows).toEqual([expect.objectContaining({
+      action: 'commerce.checkout.dependency_failed',
+      target_type: 'capture',
+      occurrence_key: expect.stringMatching(/^commerce\.checkout\.dependency_failed:/),
+      success: false,
+    })]);
+  });
+
+  it('audits the concurrent intent loser once before creating a second provider checkout', async () => {
+    const { supabase, rpcCalls } = makeSupabase('one_time', false, false, true);
+    const fetch = paypalFetch();
+    vi.stubGlobal('fetch', fetch);
+
+    await handleBuyButton(interaction(), supabase, 'guild-1', 'https://api.paypal.example', 'id', 'secret', 'https://dashboard.example');
+
+    expect(rpcCalls.filter(([name]) => name === 'commerce_create_and_bind_active_paid_checkout')).toHaveLength(0);
+    expect(rpcCalls.some(([name]) => name === 'commerce_mark_paid_checkout_exposed')).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(observedAuditRows).toEqual([expect.objectContaining({
+      action: 'commerce.checkout.race_refused',
+      target_type: 'checkout_intent',
+      target_id: '00000000-0000-4000-8000-000000000088',
+      occurrence_key: 'commerce.checkout.race_refused:00000000-0000-4000-8000-000000000088',
+      success: false,
+    })]);
   });
 
   it('ships service-role-only locking, exact identity checks, and a rollback-on-zero-row contract', () => {
@@ -155,6 +243,12 @@ describe('atomic paid checkout intent binding', () => {
     expect(providerBindingMigration).toContain("SET search_path = ''");
     expect(providerBindingMigration).toContain('REVOKE ALL ON FUNCTION');
     expect(providerBindingMigration).toContain('TO service_role');
+    expect(intentClaimMigration).toContain('commerce_claim_checkout_intent');
+    expect(intentClaimMigration).toContain('pg_advisory_xact_lock');
+    expect(intentClaimMigration).toContain("status IN ('pending', 'bound')");
+    expect(intentClaimMigration).toContain("'disposition', 'blocked'");
+    expect(intentClaimMigration).toContain("'disposition', 'claimed'");
+    expect(handlerSource).toContain("'commerce_claim_checkout_intent'");
     expect(handlerSource).toContain("'commerce_reap_unexposed_paid_checkouts_for_product'");
     expect(handlerSource).not.toContain("update({ provider_id:");
     expect(handlerSource).not.toContain("update({ plan_id:");
