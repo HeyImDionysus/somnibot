@@ -21,7 +21,6 @@ describe('webhook relay destination validation', () => {
 
     expect(clearResolvedDestinationError(error, channelId, authoritative)).toBe(error);
   });
-
   it.each([
     ['no selected channel', null, true],
     ['no authoritative snapshot', 'channel-1', false],
