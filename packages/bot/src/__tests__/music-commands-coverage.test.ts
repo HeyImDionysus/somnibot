@@ -43,9 +43,21 @@ vi.mock('../features/music/music-embeds.js', () => {
 });
 
 import { buildMusicCommands, handleMusicCommand } from '../features/music/commands.js';
+import { buildMusicErrorEmbed } from '../features/music/music-embeds.js';
+
+const TEST_BRAND_KIT = {
+  brandName: 'Guild Brand',
+  primaryColor: 0x112233,
+  accentColor: 0x445566,
+  voicePreset: 'default',
+  poweredByAttribution: null,
+  currencyName: 'coins',
+  currencyEmoji: 'coin',
+} as const;
 
 function mp(overrides: any = {}) {
   return {
+    getBrandKit: vi.fn().mockResolvedValue(TEST_BRAND_KIT),
     play: vi.fn().mockResolvedValue({ success: true, entry: { title: 'S', author: 'A', duration: 180000 }, count: 1 }),
     skip: vi.fn().mockResolvedValue({ success: true, message: 'Skipped' }),
     voteSkip: vi.fn().mockResolvedValue({ success: true, message: 'Vote skip' }),
@@ -117,6 +129,10 @@ describe('handleMusicCommand', () => {
     const i = mi('play', { str: 'song', inVoice: false });
     await handleMusicCommand(i as any, mp() as any);
     expect(i.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    expect(buildMusicErrorEmbed).toHaveBeenCalledWith(
+      'You must be in a voice channel to use this command',
+      TEST_BRAND_KIT,
+    );
   });
 
   it('play — no text channel', async () => {

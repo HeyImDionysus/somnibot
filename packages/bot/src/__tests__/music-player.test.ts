@@ -34,6 +34,7 @@ vi.mock('discord.js', () => ({
 
 vi.mock('../features/music/music-queue.js', () => ({
   MusicQueueManager: class {
+    setLimits = vi.fn();
     getQueue = vi.fn(async () => ({ tracks: [], currentIndex: 0, loopMode: 'off' }));
     addTrack = vi.fn(async () => 0);
     removeTrack = vi.fn(async () => true);
@@ -123,9 +124,10 @@ function makeChain(data: any = null) {
   return chain;
 }
 
-function makeSupa() {
+function makeSupa(rows: unknown[] = []) {
+  const pendingRows = [...rows];
   return {
-    from: vi.fn(() => makeChain()),
+    from: vi.fn(() => makeChain(pendingRows.shift() ?? null)),
     rpc: vi.fn(async () => ({ data: null, error: null })),
   } as any;
 }
@@ -151,6 +153,58 @@ describe('MusicPlayerManager', () => {
     await manager.init();
   });
 
+  it('reloadConfig applies changed music policy without recreating the manager', async () => {
+    const rows = [
+      { music_default_volume: 25, dj_role_id: null },
+      { music_default_volume: 80, dj_role_id: 'dj-role' },
+    ];
+    const localManager = new MusicPlayerManager(
+      makeGuild(),
+      makeShoukaku(),
+      makeSupa(rows),
+      makeValkey(),
+      makeEventBus(),
+    );
+    await localManager.init();
+
+    await localManager.reloadConfig();
+
+    expect(localManager.getConfig()).toEqual(expect.objectContaining({
+      defaultVolume: 80,
+      djRoleId: 'dj-role',
+    }));
+  });
+
+  it('resolves configured guild branding for music surfaces', async () => {
+    const guild = makeGuild();
+    guild.id = 'brand-guild';
+    guild.name = 'Fallback Guild';
+    const localManager = new MusicPlayerManager(
+      guild,
+      makeShoukaku(),
+      makeSupa([{
+        store_brand_name: 'Night Radio',
+        store_brand_source: 'custom',
+        brand_primary_color: 0x123456,
+        brand_accent_color: 0x654321,
+        brand_voice_preset: 'friendly',
+        store_show_powered_by: false,
+        currency_name: 'notes',
+        currency_emoji: '🎵',
+      }]),
+      makeValkey(),
+      makeEventBus(),
+    );
+
+    await expect(localManager.getBrandKit()).resolves.toEqual(expect.objectContaining({
+      brandName: 'Night Radio',
+      primaryColor: 0x123456,
+      accentColor: 0x654321,
+      voicePreset: 'friendly',
+      poweredByAttribution: null,
+    }));
+  });
+
   it('has required playback methods', () => {
     expect(typeof manager.play).toBe('function');
     expect(typeof manager.skip).toBe('function');
@@ -162,5 +216,98 @@ describe('MusicPlayerManager', () => {
 
   it('shutdown clears timers', () => {
     manager.shutdown();
+  });
+
+  it('suspends voice while preserving the durable queue for later recovery', async () => {
+    const shoukaku = makeShoukaku();
+    const localManager = new MusicPlayerManager(
+      makeGuild(),
+      shoukaku,
+      makeSupa(),
+      makeValkey(),
+      makeEventBus(),
+    );
+
+    await localManager.suspend();
+
+    expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledWith('guild-1');
+    expect(localManager.queueManager.clearQueue).not.toHaveBeenCalled();
+  });
+
+  it('keeps Shoukaku listener counts stable across repeated runtime enable and disable', async () => {
+    const shoukaku = makeShoukaku();
+    const firstManager = new MusicPlayerManager(
+      makeGuild(),
+      shoukaku,
+      makeSupa(),
+      makeValkey(),
+      makeEventBus(),
+    );
+
+    await firstManager.init();
+    await firstManager.init();
+    expect(shoukaku.on).toHaveBeenCalledTimes(3);
+
+    await firstManager.suspend();
+    expect(shoukaku.off).toHaveBeenCalledTimes(3);
+    for (const [eventName, listener] of shoukaku.on.mock.calls) {
+      expect(shoukaku.off).toHaveBeenCalledWith(eventName, listener);
+    }
+
+    const secondManager = new MusicPlayerManager(
+      makeGuild(),
+      shoukaku,
+      makeSupa(),
+      makeValkey(),
+      makeEventBus(),
+    );
+    await secondManager.init();
+    expect(shoukaku.on).toHaveBeenCalledTimes(6);
+    expect(shoukaku.off).toHaveBeenCalledTimes(3);
+
+    await secondManager.suspend();
+    expect(shoukaku.off).toHaveBeenCalledTimes(6);
+  });
+
+  it('denies DJ privileges by default when multiple listeners share voice', async () => {
+    const member = {
+      id: 'member-1',
+      roles: { cache: { has: vi.fn().mockReturnValue(false) } },
+      permissions: { has: vi.fn().mockReturnValue(false) },
+    };
+    const guild = makeGuild();
+    guild.ownerId = 'owner-1';
+    guild.members.fetch = vi.fn().mockResolvedValue(member);
+    guild.channels.cache.set('voice-1', {
+      isVoiceBased: () => true,
+      members: { filter: () => ({ size: 2 }) },
+    });
+    const localManager = new MusicPlayerManager(guild, makeShoukaku(), makeSupa(), makeValkey(), makeEventBus());
+    localManager.queueManager.getQueue = vi.fn().mockResolvedValue({ voiceChannelId: 'voice-1' });
+
+    await expect(localManager.isDJ('member-1')).resolves.toBe(false);
+  });
+
+  it.each([
+    ['server owner', 'owner-1', false, 2],
+    ['administrator', 'member-1', true, 2],
+    ['only human listener', 'member-1', false, 1],
+  ])('grants DJ privileges to the %s without a configured role', async (_label, memberId, isAdmin, listenerCount) => {
+    const member = {
+      id: memberId,
+      roles: { cache: { has: vi.fn().mockReturnValue(false) } },
+      permissions: { has: vi.fn().mockReturnValue(isAdmin) },
+    };
+    const guild = makeGuild();
+    guild.ownerId = 'owner-1';
+    guild.members.fetch = vi.fn().mockResolvedValue(member);
+    guild.channels.cache.set('voice-1', {
+      isVoiceBased: () => true,
+      members: { filter: () => ({ size: listenerCount }) },
+    });
+    const localManager = new MusicPlayerManager(guild, makeShoukaku(), makeSupa(), makeValkey(), makeEventBus());
+    localManager.queueManager.getQueue = vi.fn().mockResolvedValue({ voiceChannelId: 'voice-1' });
+
+    await expect(localManager.isDJ(memberId)).resolves.toBe(true);
   });
 });

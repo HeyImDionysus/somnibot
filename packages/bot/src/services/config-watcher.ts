@@ -85,6 +85,7 @@ export class ConfigWatcher {
     private onAutomationConfigChange?: () => void,
     private onDiagnosticsConfigChange?: (snapshotIntervalMs?: number) => void,
     private onOnboardingConfigChange?: () => void | Promise<void>,
+    private onMusicConfigChange?: (enabled?: boolean) => void | Promise<void>,
   ) {}
 
   /**
@@ -100,6 +101,7 @@ export class ConfigWatcher {
       const changedInterval = event.data.changes?.sync_interval_minutes;
       const changedEnabled = event.data.changes?.sync_enabled;
       const changedSnapshotInterval = event.data.changes?.diagnostics_snapshot_interval_ms;
+      const changedMusicEnabled = event.data.changes?.music_enabled;
       if (section === 'settings' || section === 'all') {
         // Audit cadence is a runtime timer, not merely cached config. Refresh
         // it on the same config event so the new value takes effect without a
@@ -155,7 +157,10 @@ export class ConfigWatcher {
             await this.reloadCommerce();
             break;
           case 'music':
-            await this.reloadMusic();
+            await this.reloadMusic(
+              false,
+              typeof changedMusicEnabled === 'boolean' ? changedMusicEnabled : undefined,
+            );
             break;
           case 'tickets':
             await this.reloadTickets();
@@ -300,9 +305,13 @@ export class ConfigWatcher {
     log.info('Commerce config reloaded');
   }
 
-  private async reloadMusic(skipGuildConfig = false): Promise<void> {
+  private async reloadMusic(skipGuildConfig = false, enabled?: boolean): Promise<void> {
     if (!skipGuildConfig) await this.reloadGuildConfig();
     await this.valkey.del(`music:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    const cachedEnabled = this.cache.guildConfig?.music_enabled;
+    await this.onMusicConfigChange?.(
+      enabled ?? (typeof cachedEnabled === 'boolean' ? cachedEnabled : undefined),
+    );
     log.info('Music config reloaded');
   }
 

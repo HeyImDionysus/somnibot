@@ -114,6 +114,7 @@ vi.mock('../services/alert-service.js', () => ({
 
 import {
   destroyGuildServices,
+  createMusicRuntimeLifecycle,
   getCommunityChannelMappings,
   initializeLotteryFeature,
   initializeMarketFeature,
@@ -143,6 +144,54 @@ describe('guild-init', () => {
     expect(marketRegistration.register).toHaveBeenCalledOnce();
     expect(ctx.setManager).toHaveBeenCalledWith('market', expect.anything());
     expect(commands).toContainEqual(expect.objectContaining({ name: 'market' }));
+  });
+
+  it('keeps one music manager and reporter active across repeated enable and disable', async () => {
+    const firstPlayer = { reloadConfig: vi.fn().mockResolvedValue(undefined), suspend: vi.fn().mockResolvedValue(undefined) };
+    const secondPlayer = { reloadConfig: vi.fn().mockResolvedValue(undefined), suspend: vi.fn().mockResolvedValue(undefined) };
+    const state: {
+      musicPlayer?: typeof firstPlayer;
+      musicStatusReporter?: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
+    } = {};
+    const reporters: Array<{ start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }> = [];
+    const createPlayer = vi.fn()
+      .mockResolvedValueOnce(firstPlayer)
+      .mockResolvedValueOnce(secondPlayer);
+    const createReporter = vi.fn(() => {
+      const reporter = { start: vi.fn(), stop: vi.fn() };
+      reporters.push(reporter);
+      return reporter;
+    });
+    const publishPlayer = vi.fn();
+    const lifecycle = createMusicRuntimeLifecycle(state, {
+      createPlayer,
+      createReporter,
+      publishPlayer,
+      onStarted: vi.fn(),
+      onStopped: vi.fn(),
+    });
+
+    await Promise.all([lifecycle.start(), lifecycle.start()]);
+
+    expect(createPlayer).toHaveBeenCalledOnce();
+    expect(createReporter).toHaveBeenCalledOnce();
+    expect(firstPlayer.reloadConfig).toHaveBeenCalledOnce();
+    expect(reporters[0]?.start).toHaveBeenCalledOnce();
+    expect(reporters[0]?.stop).not.toHaveBeenCalled();
+
+    await lifecycle.stop();
+    await lifecycle.start();
+
+    expect(firstPlayer.suspend).toHaveBeenCalledOnce();
+    expect(reporters[0]?.stop).toHaveBeenCalledOnce();
+    expect(createPlayer).toHaveBeenCalledTimes(2);
+    expect(createReporter).toHaveBeenCalledTimes(2);
+    expect(reporters[1]?.start).toHaveBeenCalledOnce();
+    expect(reporters[1]?.stop).not.toHaveBeenCalled();
+    expect(state.musicPlayer).toBe(secondPlayer);
+    expect(publishPlayer).toHaveBeenNthCalledWith(1, firstPlayer);
+    expect(publishPlayer).toHaveBeenNthCalledWith(2, undefined);
+    expect(publishPlayer).toHaveBeenNthCalledWith(3, secondPlayer);
   });
 
   it('registers /lottery while disabled without starting its draw producer', () => {

@@ -29,6 +29,7 @@ import { applyFilterPreset, applyCustomTimescale, describeActiveFilters, type Fi
 import type { Band, TimescaleSettings } from 'shoukaku';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { resolveBrandKit, type BrandKit } from '../branding/index.js';
 
 const log = createLogger('MusicPlayer');
 
@@ -157,6 +158,16 @@ export class MusicPlayerManager {
   private appliedPaused: boolean | null = null;
   private volumeRevision = 0;
   private appliedVolume: number | null = null;
+  private shoukakuEventsRegistered = false;
+  private readonly shoukakuReadyHandler = (name: string): void => {
+    log.info(`Lavalink node "${name}" ready`);
+  };
+  private readonly shoukakuErrorHandler = (name: string, error: Error): void => {
+    log.error(`Lavalink node "${name}" error:`, error);
+  };
+  private readonly shoukakuCloseHandler = (name: string, code: number, reason: string): void => {
+    log.warn(`Lavalink node "${name}" closed: ${code} — ${reason}`);
+  };
 
   constructor(
     private readonly guild: Guild,
@@ -201,6 +212,7 @@ export class MusicPlayerManager {
   /** Clean up timers on shutdown. */
   shutdown(): void {
     this.disposed = true;
+    this.teardownShoukakuEvents();
     this.voiceOperationRevision += 1;
     this.playbackSessionRevision += 1;
     this.playbackMutationRevision += 1;
@@ -209,6 +221,11 @@ export class MusicPlayerManager {
     for (const timer of this.inactivityTimers.values()) clearTimeout(timer);
     this.autoLeaveTimers.clear();
     this.inactivityTimers.clear();
+  }
+
+  async suspend(): Promise<void> {
+    this.shutdown();
+    await this.shoukaku.leaveVoiceChannel(this.guild.id);
   }
 
   // ── Config ──────────────────────────────────────────────
@@ -247,6 +264,10 @@ export class MusicPlayerManager {
   /** Reload config (called when settings change via dashboard). */
   async reloadConfig(): Promise<void> {
     await this.loadConfig();
+  }
+
+  async getBrandKit(): Promise<BrandKit> {
+    return resolveBrandKit(this.supabase, this.guild.id, { fallbackName: this.guild.name });
   }
 
   getConfig(): MusicConfig {
@@ -305,8 +326,6 @@ export class MusicPlayerManager {
 
   /** Check if a user has DJ privileges. */
   async isDJ(userId: string): Promise<boolean> {
-    if (!this.config.djRoleId) return true; // No DJ role = everyone is DJ
-
     const member = await this.guild.members.fetch(userId).catch(() => null);
     if (!member) return false;
 
@@ -314,7 +333,7 @@ export class MusicPlayerManager {
     if (member.id === this.guild.ownerId) return true;
 
     // Has DJ role
-    if (member.roles.cache.has(this.config.djRoleId)) return true;
+    if (this.config.djRoleId && member.roles.cache.has(this.config.djRoleId)) return true;
 
     // Admin permission
     if (member.permissions.has('Administrator')) return true;
@@ -1270,7 +1289,8 @@ export class MusicPlayerManager {
 
       const position = this.getPlayerPosition(guildId);
       const activeFilters = this.getActiveFilters(guildId);
-      const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
+      const brandKit = await this.getBrandKit();
+      const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters, brandKit);
 
       // Try to edit existing now-playing message
       const existingMsgId = await this.queueManager.getNowPlayingMessage(guildId);
@@ -1476,17 +1496,19 @@ export class MusicPlayerManager {
   // ── Shoukaku Events ─────────────────────────────────────
 
   private setupShoukakuEvents(): void {
-    this.shoukaku.on('ready', (name) => {
-      log.info(`Lavalink node "${name}" ready`);
-    });
+    if (this.shoukakuEventsRegistered) return;
+    this.shoukaku.on('ready', this.shoukakuReadyHandler);
+    this.shoukaku.on('error', this.shoukakuErrorHandler);
+    this.shoukaku.on('close', this.shoukakuCloseHandler);
+    this.shoukakuEventsRegistered = true;
+  }
 
-    this.shoukaku.on('error', (name, error) => {
-      log.error(`Lavalink node "${name}" error:`, error);
-    });
-
-    this.shoukaku.on('close', (name, code, reason) => {
-      log.warn(`Lavalink node "${name}" closed: ${code} — ${reason}`);
-    });
+  private teardownShoukakuEvents(): void {
+    if (!this.shoukakuEventsRegistered) return;
+    this.shoukaku.off('ready', this.shoukakuReadyHandler);
+    this.shoukaku.off('error', this.shoukakuErrorHandler);
+    this.shoukaku.off('close', this.shoukakuCloseHandler);
+    this.shoukakuEventsRegistered = false;
   }
 
   private setupPlayerEvents(player: Player): void {
@@ -1667,8 +1689,9 @@ export class MusicPlayerManager {
       if (queue) {
         const textChannel = this.guild.channels.cache.get(queue.textChannelId);
         if (textChannel && textChannel.type === ChannelType.GuildText) {
+          const brandKit = await this.getBrandKit();
           await textChannel.send({
-            embeds: [buildMusicErrorEmbed('Failed to play track — skipping to next')],
+            embeds: [buildMusicErrorEmbed('Failed to play track — skipping to next', brandKit)],
           }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
         }
       }
@@ -2102,8 +2125,9 @@ export class MusicPlayerManager {
     if (!textChannelId || expectedSessionRevision !== this.playbackSessionRevision) return;
     const textChannel = this.guild.channels.cache.get(textChannelId);
     if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
+    const brandKit = await this.getBrandKit();
     const notice = await textChannel.send({
-      embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
+      embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`', brandKit)],
     }).catch((error: unknown) => {
       log.warn('Failed to send the queue-ended notice:', (error as Error)?.message ?? error);
     });
