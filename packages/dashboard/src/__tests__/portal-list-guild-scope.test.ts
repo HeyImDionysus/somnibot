@@ -15,6 +15,7 @@ const SESSION = { customer_id: 'customer-1', guild_id: 'guild-1' };
 const eqCalls: Array<[table: string, column: string, value: unknown]> = [];
 const selectCalls: Array<[table: string, columns: string | undefined]> = [];
 let orderRows: Record<string, unknown>[] = [];
+let licenseRows: Record<string, unknown>[] = [];
 
 type QueryChain = {
   select: (columns?: string) => QueryChain;
@@ -50,7 +51,10 @@ function makeChain(table: string): QueryChain {
         : null,
       error: null,
     }),
-    limit: async () => ({ data: table === 'orders' ? orderRows : [], error: null }),
+    limit: async () => ({
+      data: table === 'orders' ? orderRows : table === 'license_keys' ? licenseRows : [],
+      error: null,
+    }),
   };
   return chain;
 }
@@ -65,6 +69,7 @@ beforeEach(() => {
   eqCalls.length = 0;
   selectCalls.length = 0;
   orderRows = [];
+  licenseRows = [];
   vi.clearAllMocks();
   vi.mocked(rateLimits.portalData).mockResolvedValue({ limited: false } as never);
   vi.mocked(createAdminSupabase).mockReturnValue({
@@ -85,9 +90,16 @@ describe('portal list tenant scope', () => {
       refund_requests_enabled: true,
       service_requests_enabled: true,
     });
+    expect(selectCalls.find(([table]) => table === 'orders')?.[1]).toContain(
+      'entitlements!entitlements_order_id_fkey(',
+    );
   });
 
   it('scopes licenses to both the portal customer and guild', async () => {
+    licenseRows = [{
+      id: 'license-1',
+      products: { product_license_config: { max_devices: 3 } },
+    }];
     const response = await getLicenses(request('/api/portal/licenses'));
 
     expect(response.status).toBe(200);
@@ -96,6 +108,10 @@ describe('portal list tenant scope', () => {
     expect(selectCalls.find(([table]) => table === 'license_keys')?.[1]).toContain(
       'entitlements!entitlements_license_key_id_fkey(status, type, expires_at, grace_period_ends_at)',
     );
+    expect(selectCalls.find(([table]) => table === 'license_keys')?.[1]).not.toContain(
+      'status, max_devices, expires_at',
+    );
+    expect((await response.json()).data[0]).toMatchObject({ id: 'license-1', max_devices: 3 });
   });
 
   it('exposes cancellation only for provider-backed purchase subscriptions', async () => {

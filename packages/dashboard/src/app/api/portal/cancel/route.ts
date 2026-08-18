@@ -39,8 +39,8 @@ function scheduledResponse(entitlement: {
   grace_period_ends_at: string | null;
   cancelled_at: string | null;
   portal_cancellation_timing: string | null;
+  portal_cancellation_access_until: string | null;
 }, deduped: boolean, cancellationTiming: 'immediate' | 'end-of-term') {
-  const immediate = cancellationTiming === 'immediate';
   return NextResponse.json({
     success: true,
     deduped,
@@ -49,11 +49,7 @@ function scheduledResponse(entitlement: {
       entitlement_id: entitlement.id,
       status: entitlement.status,
       cancellation_timing: cancellationTiming,
-      access_until: immediate
-        ? entitlement.expires_at
-        : entitlement.status === 'grace_period'
-          ? entitlement.grace_period_ends_at
-          : entitlement.expires_at,
+      access_until: entitlement.portal_cancellation_access_until,
       cancellation_scheduled_at: entitlement.cancelled_at,
     },
   });
@@ -122,7 +118,7 @@ export async function POST(request: NextRequest) {
     // The entitlement MUST be a subscription owned by this customer in this guild.
     const { data: entitlement, error: entitlementError } = await admin
       .from('entitlements')
-      .select('id, status, type, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, order_id')
+      .select('id, status, type, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, portal_cancellation_access_until, order_id')
       .eq('id', entitlement_id)
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
@@ -139,7 +135,11 @@ export async function POST(request: NextRequest) {
     }
     if (entitlement.cancelled_at) {
       const appliedTiming = persistedCancellationTiming(entitlement);
-      if (!appliedTiming) {
+      if (
+        !appliedTiming
+        || typeof entitlement.portal_cancellation_access_until !== 'string'
+        || !Number.isFinite(Date.parse(entitlement.portal_cancellation_access_until))
+      ) {
         return NextResponse.json(
           { error: 'This subscription was cancelled outside the customer portal.' },
           { status: 409 },
@@ -251,15 +251,22 @@ export async function POST(request: NextRequest) {
     // single-winner under a race. Immediate policy revokes access now; the
     // default end-of-term policy keeps the entitlement active through expiry.
     const now = new Date().toISOString();
+    const appliedAccessUntil = cancellationTiming === 'immediate' ? now : accessUntil;
     const cancellationUpdate = cancellationTiming === 'immediate'
       ? {
           cancelled_at: now,
           portal_cancellation_timing: cancellationTiming,
+          portal_cancellation_access_until: appliedAccessUntil,
           status: 'cancelled',
           expires_at: now,
           updated_at: now,
         }
-      : { cancelled_at: now, portal_cancellation_timing: cancellationTiming, updated_at: now };
+      : {
+          cancelled_at: now,
+          portal_cancellation_timing: cancellationTiming,
+          portal_cancellation_access_until: appliedAccessUntil,
+          updated_at: now,
+        };
     const guardedUpdate = admin
       .from('entitlements')
       .update(cancellationUpdate)
@@ -268,7 +275,8 @@ export async function POST(request: NextRequest) {
       .eq('guild_id', session.guild_id)
       .eq('status', entitlement.status)
       .is('cancelled_at', null)
-      .is('portal_cancellation_timing', null);
+      .is('portal_cancellation_timing', null)
+      .is('portal_cancellation_access_until', null);
     if (entitlement.expires_at === null) {
       guardedUpdate.is('expires_at', null);
     } else {
@@ -280,7 +288,7 @@ export async function POST(request: NextRequest) {
       guardedUpdate.eq('grace_period_ends_at', entitlement.grace_period_ends_at);
     }
     const { data: updated, error: updateError } = await guardedUpdate
-      .select('id, status, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing')
+      .select('id, status, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, portal_cancellation_access_until')
       .maybeSingle();
 
     if (updateError) {
@@ -297,6 +305,7 @@ export async function POST(request: NextRequest) {
         || (cancellationTiming === 'end-of-term' && updated.expires_at !== entitlement.expires_at)
         || (cancellationTiming === 'end-of-term' && updated.grace_period_ends_at !== entitlement.grace_period_ends_at)
         || updated.portal_cancellation_timing !== cancellationTiming
+        || updated.portal_cancellation_access_until !== appliedAccessUntil
         || typeof updated.cancelled_at !== 'string'
         || !Number.isFinite(Date.parse(updated.cancelled_at))
       ) {
@@ -311,7 +320,7 @@ export async function POST(request: NextRequest) {
     // A concurrent confirm already scheduled it — resolve to that single entry.
     const { data: current, error: currentError } = await admin
       .from('entitlements')
-      .select('id, status, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing')
+      .select('id, status, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, portal_cancellation_access_until')
       .eq('id', entitlement.id)
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
@@ -329,7 +338,11 @@ export async function POST(request: NextRequest) {
       );
     }
     const appliedTiming = persistedCancellationTiming(current);
-    if (!appliedTiming) {
+    if (
+      !appliedTiming
+      || typeof current.portal_cancellation_access_until !== 'string'
+      || !Number.isFinite(Date.parse(current.portal_cancellation_access_until))
+    ) {
       return NextResponse.json(
         { error: 'The provider cancelled renewal, but the local schedule is unconfirmed. Please retry.' },
         { status: 503 },

@@ -101,6 +101,7 @@ function makeAdmin() {
                 grace_period_ends_at: entitlement.grace_period_ends_at,
                 cancelled_at: entitlement.cancelled_at,
                 portal_cancellation_timing: entitlement.portal_cancellation_timing,
+                portal_cancellation_access_until: entitlement.portal_cancellation_access_until,
               },
               error: null,
             };
@@ -158,6 +159,7 @@ beforeEach(() => {
     grace_period_ends_at: null,
     cancelled_at: null,
     portal_cancellation_timing: null,
+    portal_cancellation_access_until: null,
     order_id: 'order-1',
   };
   (createAdminSupabase as any).mockReturnValue(makeAdmin());
@@ -180,6 +182,7 @@ describe('POST /api/portal/cancel', () => {
     expect(entitlement.status).toBe('active'); // not revoked immediately
     expect(entitlement.cancelled_at).toBeTruthy();
     expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
+    expect(entitlement.portal_cancellation_access_until).toBe('2026-08-23T00:00:00.000Z');
     expect(paypalCancelCalls).toBe(1);
   });
 
@@ -372,6 +375,7 @@ describe('POST /api/portal/cancel', () => {
     expect(entitlement.status).toBe('expired');
     expect(entitlement.cancelled_at).toBeNull();
     expect(entitlement.portal_cancellation_timing).toBeNull();
+    expect(entitlement.portal_cancellation_access_until).toBeNull();
     expect(paypalCancelCalls).toBe(1);
   });
 
@@ -386,6 +390,23 @@ describe('POST /api/portal/cancel', () => {
     expect(res.status).toBe(200);
     expect(json.data.status).toBe('grace_period');
     expect(json.data.access_until).toBe('2026-08-26T00:00:00.000Z');
+  });
+
+  it('keeps the grace access boundary after scheduled fulfillment makes status terminal', async () => {
+    entitlement.status = 'grace_period';
+    entitlement.expires_at = '2026-08-01T00:00:00.000Z';
+    entitlement.grace_period_ends_at = '2026-08-26T00:00:00.000Z';
+    await POST(makeRequest({ entitlement_id: ENT_ID }));
+    entitlement.status = 'cancelled';
+
+    const replay = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const body = await replay.json();
+
+    expect(replay.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.data.cancellation_timing).toBe('end-of-term');
+    expect(body.data.access_until).toBe('2026-08-26T00:00:00.000Z');
+    expect(paypalCancelCalls).toBe(1);
   });
 
   it('rejects cancellation when the confirmed timing no longer matches the store policy', async () => {

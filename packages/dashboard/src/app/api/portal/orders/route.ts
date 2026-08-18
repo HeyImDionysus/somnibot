@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
 
     const { data: orders, error: ordersError } = await admin
       .from('orders')
-      .select('id, order_number, amount_cents, discount_cents, currency, status, source, paypal_subscription_id, created_at, products(name, type), payments(id, amount_cents, currency, status, provider, created_at), entitlements(id, status, type, expires_at, grace_period_ends_at, cancelled_at)')
+      .select('id, order_number, amount_cents, discount_cents, currency, status, source, paypal_subscription_id, created_at, products(name, type), payments(id, amount_cents, currency, status, provider, created_at), entitlements!entitlements_order_id_fkey(id, status, type, expires_at, grace_period_ends_at, cancelled_at)')
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
       .order('created_at', { ascending: false })

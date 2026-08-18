@@ -78,6 +78,7 @@ export function ConfirmDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const onCancelRef = useRef(onCancel);
+  const loadingRef = useRef(loading);
   const generatedId = useId();
   const titleId = `${generatedId}-title`;
   const descriptionId = `${generatedId}-description`;
@@ -87,6 +88,11 @@ export function ConfirmDialog({
   useEffect(() => {
     onCancelRef.current = onCancel;
   }, [onCancel]);
+
+  useEffect(() => {
+    loadingRef.current = loading;
+    if (open && loading) dialogRef.current?.focus();
+  }, [loading, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -99,7 +105,7 @@ export function ConfirmDialog({
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        if (!loading) onCancelRef.current();
+        if (!loadingRef.current) onCancelRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -129,7 +135,7 @@ export function ConfirmDialog({
       document.body.style.overflow = previousOverflow;
       previousFocusRef.current?.focus();
     };
-  }, [loading, open]);
+  }, [open]);
 
   if (!open) return null;
 

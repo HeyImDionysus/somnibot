@@ -926,6 +926,7 @@ test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async
   const dialog = page.getByRole('alertdialog');
   await dialog.getByRole('button', { name: 'Rotate key' }).click();
   await expect(dialog).toHaveAttribute('aria-busy', 'true');
+  await expect(dialog).toBeFocused();
 
   await page.keyboard.press('Escape');
   await expect(dialog).toBeVisible();

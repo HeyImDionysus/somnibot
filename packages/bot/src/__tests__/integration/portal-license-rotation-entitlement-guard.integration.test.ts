@@ -408,7 +408,8 @@ describe('portal license rotation entitlement guard', () => {
       UPDATE public.entitlements
       SET
         cancelled_at = ${portalCancelledAt}::TIMESTAMPTZ,
-        portal_cancellation_timing = 'end-of-term'
+        portal_cancellation_timing = 'end-of-term',
+        portal_cancellation_access_until = ${graceUntil}::TIMESTAMPTZ
       WHERE id = ${entitlement.id}::UUID
       RETURNING id
     `;
