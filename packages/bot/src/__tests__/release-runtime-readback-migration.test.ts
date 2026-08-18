@@ -35,16 +35,13 @@ describe('release runtime readback migration', () => {
     expect(migration).toMatch(/status = 'open',[\s\S]+resolved_at = NULL,[\s\S]+duration_seconds = NULL/i);
     expect(migration).not.toMatch(/status = 'open',[\s\S]+resolution = NULL,[\s\S]+duration_seconds = NULL/i);
     expect(migration).toMatch(
-      /CREATE TRIGGER incidents_sync_linked_health_alert\s+AFTER UPDATE OF status ON public\.incidents/i,
+      /CREATE TRIGGER incidents_guard_linked_health_alert\s+BEFORE UPDATE OF status ON public\.incidents/i,
     );
+    expect(migration).toContain("v_terminal_status := NEW.status IN ('resolved', 'closed')");
+    expect(migration).toContain('v_alert_resolved IS DISTINCT FROM v_terminal_status');
+    expect(migration).not.toContain('sync_health_incident_alert');
     expect(migration).toMatch(
-      /NEW\.status = 'resolved'[\s\S]+UPDATE public\.alerts AS alert[\s\S]+resolved = TRUE/i,
-    );
-    expect(migration).toMatch(
-      /OLD\.status = 'resolved'[\s\S]+UPDATE public\.alerts AS alert[\s\S]+resolved = FALSE/i,
-    );
-    expect(migration).toMatch(
-      /FROM public\.alerts AS alert[\s\S]+incident\.source_ref_id = alert\.id::TEXT[\s\S]+alert\.resolved IS TRUE/i,
+      /FROM public\.alerts AS alert[\s\S]+incident\.source_ref_id = alert\.id::TEXT[\s\S]+incident\.status NOT IN \('resolved', 'closed'\)[\s\S]+alert\.resolved IS TRUE/i,
     );
     expect(migration).not.toMatch(/DELETE FROM public\.(?:alerts|incidents|incident_events)/i);
   });

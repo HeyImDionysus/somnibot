@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
  * than inherit.
  */
 const INCIDENT_RECORD_COLUMNS =
-  'id, incident_number, title, status, severity, assigned_to, started_at';
+  'id, incident_number, title, status, severity, assigned_to, started_at, source, source_ref_id';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -326,6 +326,17 @@ export async function PATCH(request: NextRequest) {
       { id: body.id, guild_id: ctx.guildId },
       INCIDENT_RECORD_COLUMNS,
     );
+
+    if (
+      body.status
+      && before?.source === 'health_alert'
+      && !(body.status === 'closed' && before.status === 'resolved')
+    ) {
+      return NextResponse.json(
+        { error: 'Linked health incident status follows its diagnostics alert.' },
+        { status: 409 },
+      );
+    }
 
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     const eventMeta: Record<string, unknown> = {};

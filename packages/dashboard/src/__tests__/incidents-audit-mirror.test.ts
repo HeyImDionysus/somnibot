@@ -28,7 +28,7 @@ function makeRequest(method: string, body: Record<string, unknown>) {
 function makeAdmin(incidentResults: Array<{
   data: Record<string, unknown> | null;
   error: { message: string } | null;
-}> = []) {
+}> = [], beforeRow: Record<string, unknown> = {}) {
   const inserts: Array<{ table: string; payload: any }> = [];
   const updates: Array<{ table: string; payload: any }> = [];
   const upserts: Array<{
@@ -50,7 +50,16 @@ function makeAdmin(incidentResults: Array<{
         ? incidentResults.shift()
         : { data: { id: 'inc-1', started_at: new Date().toISOString() }, error: null },
     ));
-    chain.maybeSingle = vi.fn(() => Promise.resolve({ data: { started_at: new Date().toISOString() }, error: null }));
+    chain.maybeSingle = vi.fn(() => Promise.resolve({
+      data: {
+        started_at: new Date().toISOString(),
+        status: 'open',
+        source: 'manual',
+        source_ref_id: null,
+        ...beforeRow,
+      },
+      error: null,
+    }));
     chain.then = (r: (v: any) => unknown) => r({ data: null, error: null });
     return chain;
   });
@@ -183,6 +192,23 @@ describe('POST /api/incidents owner mirror', () => {
 });
 
 describe('PATCH /api/incidents owner mirror', () => {
+  it('keeps linked health incident status authoritative to its diagnostics alert', async () => {
+    const { admin, updates } = makeAdmin([], {
+      status: 'open',
+      source: 'health_alert',
+      source_ref_id: 'alert-1',
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PATCH(makeRequest('PATCH', {
+      id: '00000000-0000-0000-0000-000000000001',
+      status: 'resolved',
+    }));
+
+    expect(res.status).toBe(409);
+    expect(updates.some((entry) => entry.table === 'incidents')).toBe(false);
+  });
+
   it('writes an incident.resolved audit row and resolves the owner alert', async () => {
     const { admin, inserts, updates } = makeAdmin();
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);

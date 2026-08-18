@@ -100,36 +100,36 @@ AFTER UPDATE OF resolved ON public.alerts
 FOR EACH ROW
 EXECUTE FUNCTION public.sync_health_alert_incident();
 
-CREATE OR REPLACE FUNCTION public.sync_health_incident_alert()
+CREATE OR REPLACE FUNCTION public.guard_health_alert_incident_status()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_changed_at TIMESTAMPTZ := pg_catalog.now();
+  v_alert_resolved BOOLEAN;
+  v_terminal_status BOOLEAN;
 BEGIN
   IF NEW.source = 'health_alert'
      AND NEW.source_ref_id IS NOT NULL
      AND NEW.status IS DISTINCT FROM OLD.status THEN
-    IF NEW.status = 'resolved' THEN
-      UPDATE public.alerts AS alert
-      SET
-        resolved = TRUE,
-        resolved_at = COALESCE(NEW.resolved_at, v_changed_at),
-        updated_at = v_changed_at
-      WHERE alert.guild_id = NEW.guild_id
-        AND alert.id::TEXT = NEW.source_ref_id
-        AND alert.resolved IS FALSE;
-    ELSIF OLD.status = 'resolved' THEN
-      UPDATE public.alerts AS alert
-      SET
-        resolved = FALSE,
-        resolved_at = NULL,
-        updated_at = v_changed_at
-      WHERE alert.guild_id = NEW.guild_id
-        AND alert.id::TEXT = NEW.source_ref_id
-        AND alert.resolved IS TRUE;
+    SELECT alert.resolved
+    INTO v_alert_resolved
+    FROM public.alerts AS alert
+    WHERE alert.guild_id = NEW.guild_id
+      AND alert.id::TEXT = NEW.source_ref_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        MESSAGE = 'health-alert incident status requires its linked alert';
+    END IF;
+
+    v_terminal_status := NEW.status IN ('resolved', 'closed');
+    IF v_alert_resolved IS DISTINCT FROM v_terminal_status THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        MESSAGE = 'health-alert incident status must follow its linked alert';
     END IF;
   END IF;
 
@@ -137,14 +137,14 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.sync_health_incident_alert()
+REVOKE ALL ON FUNCTION public.guard_health_alert_incident_status()
   FROM PUBLIC, anon, authenticated, service_role;
 
-DROP TRIGGER IF EXISTS incidents_sync_linked_health_alert ON public.incidents;
-CREATE TRIGGER incidents_sync_linked_health_alert
-AFTER UPDATE OF status ON public.incidents
+DROP TRIGGER IF EXISTS incidents_guard_linked_health_alert ON public.incidents;
+CREATE TRIGGER incidents_guard_linked_health_alert
+BEFORE UPDATE OF status ON public.incidents
 FOR EACH ROW
-EXECUTE FUNCTION public.sync_health_incident_alert();
+EXECUTE FUNCTION public.guard_health_alert_incident_status();
 
 -- Repair already-cleared diagnostic episodes from earlier deployments. Only
 -- unresolved health-alert incidents are changed; manual incidents and active
@@ -173,7 +173,7 @@ WITH repaired AS (
   WHERE incident.guild_id = alert.guild_id
     AND incident.source = 'health_alert'
     AND incident.source_ref_id = alert.id::TEXT
-    AND incident.status <> 'resolved'
+    AND incident.status NOT IN ('resolved', 'closed')
     AND alert.resolved IS TRUE
   RETURNING incident.id
 )
