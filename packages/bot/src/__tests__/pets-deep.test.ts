@@ -2,7 +2,7 @@
  * Deep tests for features/pets/pets-manager.ts — viewPet, buyPet, feedPet, playWithPet, trainPet, renamePet.
  * 208 uncovered statements at 49.4%.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -27,6 +27,7 @@ vi.mock('../features/economy/economy-utils.js', () => ({
 }));
 
 import { PetsManager } from '../features/pets/pets-manager.js';
+import * as auditService from '../services/audit.js';
 
 function makeChain(data: any = null) {
   const chain: any = {};
@@ -133,15 +134,106 @@ describe('PetsManager deep', () => {
     expect(responded).toBe(true);
   });
 
-  it('renamePet renames a pet', async () => {
+  it('renames once and writes one occurrence-keyed audit across a duplicate interaction', async () => {
+    vi.mocked(auditService.writeAuditLog).mockClear();
     const supa = makeSupa({
-      guild_config: { guild_id: 'guild-1', pets_enabled: true },
-      pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat' },
+      guild_config: { guild_id: 'guild-1', economy_pets_enabled: true },
+      economy_pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat' },
     });
+    supa.rpc
+      .mockResolvedValueOnce({
+        data: { status: 'renamed', replayed: false, old_name: 'Fluffy', new_name: 'Comet' },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: { status: 'renamed', replayed: true, old_name: 'Fluffy', new_name: 'Comet' },
+        error: null,
+      });
     const mgr = new PetsManager(supa);
     const interaction = makeInteraction();
+    interaction.id = 'rename-interaction-1';
+    interaction.options.getString.mockReturnValue('Comet');
+
     await mgr.renamePet(interaction);
-    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
-    expect(responded).toBe(true);
+    await mgr.renamePet(interaction);
+
+    expect(supa.rpc).toHaveBeenNthCalledWith(1, 'economy_pet_rename_atomic', {
+      p_guild_id: 'guild-1',
+      p_user_id: 'user-1',
+      p_new_name: 'Comet',
+      p_request_id: 'rename-interaction-1',
+    });
+    expect(auditService.writeAuditLog).toHaveBeenCalledTimes(2);
+    expect(auditService.writeAuditLog).toHaveBeenLastCalledWith(supa, expect.objectContaining({
+      action: 'pets.renamed',
+      occurrenceKey: 'pets.renamed:rename-interaction-1',
+      success: true,
+      details: { beforeName: 'Fluffy', afterName: 'Comet' },
+    }));
+    expect(interaction.reply).toHaveBeenLastCalledWith(expect.objectContaining({
+      content: expect.stringContaining('already processed'),
+      ephemeral: true,
+    }));
+  });
+
+  it('reports an unavailable rename and writes a stable failure audit when the authoritative mutation fails', async () => {
+    vi.mocked(auditService.writeAuditLog).mockClear();
+    const supa = makeSupa({
+      guild_config: { guild_id: 'guild-1', economy_pets_enabled: true },
+      economy_pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat' },
+    });
+    supa.rpc.mockResolvedValue({ data: null, error: { message: 'database unavailable' } });
+    const mgr = new PetsManager(supa);
+    const interaction = makeInteraction();
+    interaction.id = 'rename-interaction-failed';
+    interaction.options.getString.mockReturnValue('Comet');
+
+    await mgr.renamePet(interaction);
+
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('temporarily unavailable'),
+    }));
+    expect(auditService.writeAuditLog).toHaveBeenCalledWith(supa, expect.objectContaining({
+      action: 'pets.rename_failed',
+      occurrenceKey: 'pets.rename_failed:rename-interaction-failed',
+      success: false,
+      errorMessage: 'rename_not_confirmed',
+      details: { beforeName: 'Fluffy', afterName: 'Comet', reason: 'rename_not_confirmed' },
+    }));
+  });
+
+  it('retries the same success-audit occurrence on a replay after the first audit write fails', async () => {
+    vi.mocked(auditService.writeAuditLog).mockClear();
+    const supa = makeSupa({
+      guild_config: { guild_id: 'guild-1', economy_pets_enabled: true },
+      economy_pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat' },
+    });
+    supa.rpc
+      .mockResolvedValueOnce({
+        data: { status: 'renamed', replayed: false, old_name: 'Fluffy', new_name: 'Comet' },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: { status: 'renamed', replayed: true, old_name: 'Fluffy', new_name: 'Comet' },
+        error: null,
+      });
+    vi.mocked(auditService.writeAuditLog).mockRejectedValueOnce(new Error('audit unavailable'));
+    const mgr = new PetsManager(supa);
+    const interaction = makeInteraction();
+    interaction.id = 'rename-interaction-audit-retry';
+    interaction.options.getString.mockReturnValue('Comet');
+
+    await mgr.renamePet(interaction);
+    await mgr.renamePet(interaction);
+
+    expect(auditService.writeAuditLog).toHaveBeenCalledTimes(2);
+    expect(auditService.writeAuditLog).toHaveBeenLastCalledWith(supa, expect.objectContaining({
+      action: 'pets.renamed',
+      occurrenceKey: 'pets.renamed:rename-interaction-audit-retry',
+    }));
+    expect(interaction.reply).toHaveBeenLastCalledWith(expect.objectContaining({
+      content: expect.stringContaining('already processed'),
+      ephemeral: true,
+    }));
   });
 });
