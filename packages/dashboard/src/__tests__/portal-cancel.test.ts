@@ -332,6 +332,15 @@ describe('POST /api/portal/cancel', () => {
     expect(entitlement.cancelled_at).toBeNull();
     expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
 
+    portalConfig.cancellation_timing = 'immediate';
+    const mismatchedRetry = await POST(makeRequest({
+      entitlement_id: ENT_ID,
+      cancellation_timing: 'immediate',
+    }));
+    expect(mismatchedRetry.status).toBe(409);
+    expect(entitlement.cancelled_at).toBeNull();
+    expect(paypalCancelCalls).toBe(1);
+
     const retry = await POST(makeRequest({ entitlement_id: ENT_ID }));
     expect(retry.status).toBe(200);
     expect(entitlement.cancelled_at).not.toBeNull();

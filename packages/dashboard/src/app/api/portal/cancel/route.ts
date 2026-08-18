@@ -171,6 +171,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
     }
     const appliedTiming = pendingTiming ?? cancellationTiming;
+    if (hasPendingIntent && confirmedTiming !== appliedTiming) {
+      return NextResponse.json(
+        { error: 'A previous cancellation attempt is still pending with different access terms. Reload and review those terms before confirming again.' },
+        { status: 409 },
+      );
+    }
     const accessUntil = hasPendingIntent
       ? pendingAccessUntil
       : entitlement.status === 'grace_period'

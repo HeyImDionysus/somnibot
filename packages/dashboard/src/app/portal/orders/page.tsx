@@ -21,6 +21,7 @@ interface Entitlement {
   expires_at: string | null;
   grace_period_ends_at: string | null;
   cancelled_at: string | null;
+  portal_cancellation_timing: 'end-of-term' | 'immediate' | null;
   portal_cancellation_access_until: string | null;
 }
 
@@ -152,10 +153,12 @@ export default function PortalOrders() {
     () => cancelTarget ? activeSubscription(cancelTarget) : null,
     [cancelTarget],
   );
+  const cancelTiming = cancelEntitlement?.portal_cancellation_timing
+    ?? controls?.cancellation_timing;
 
   const scheduleCancellation = async () => {
     const token = localStorage.getItem('portal_token');
-    if (!token || !cancelTarget || !cancelEntitlement) return;
+    if (!token || !cancelTarget || !cancelEntitlement || !cancelTiming) return;
     setCancelling(true);
     setNotice(null);
     try {
@@ -164,7 +167,7 @@ export default function PortalOrders() {
         headers: { 'Content-Type': 'application/json', 'x-portal-token': token },
         body: JSON.stringify({
           entitlement_id: cancelEntitlement.id,
-          cancellation_timing: controls?.cancellation_timing,
+          cancellation_timing: cancelTiming,
         }),
       });
       const body = await response.json().catch(() => ({}));
@@ -181,6 +184,7 @@ export default function PortalOrders() {
                     status: body.data.status,
                     expires_at: body.data.access_until,
                     cancelled_at: body.data.cancellation_scheduled_at,
+                    portal_cancellation_timing: body.data.cancellation_timing,
                     portal_cancellation_access_until: body.data.access_until,
                   }
                 : entitlement),
@@ -410,7 +414,7 @@ export default function PortalOrders() {
       <ConfirmDialog
         open={Boolean(cancelTarget && cancelEntitlement)}
         title={`Cancel renewal for ${cancelTarget?.products?.name || 'this subscription'}?`}
-        description={controls?.cancellation_timing === 'immediate'
+        description={cancelTiming === 'immediate'
           ? 'PayPal renewal will stop and your access ends immediately.'
           : `PayPal renewal will stop. Your current access remains available through ${cancelEntitlement && accessBoundary(cancelEntitlement) ? formatDate(accessBoundary(cancelEntitlement)!) : 'the current access deadline'}.`}
         confirmLabel="Cancel renewal"

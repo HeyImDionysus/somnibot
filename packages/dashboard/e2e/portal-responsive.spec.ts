@@ -250,6 +250,68 @@ test('immediate cancellation warns that access ends now', async ({ page }, testI
   });
 });
 
+test('a retained cancellation request reconfirms its original timing after policy changes', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-retained-cancellation-session'));
+  let confirmedTiming: unknown;
+  await page.route('**/api/portal/orders', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      controls: {
+        self_service_cancellation: true,
+        cancellation_timing: 'immediate',
+        refund_requests_enabled: false,
+        service_requests_enabled: false,
+      },
+      data: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        order_number: 'ORD-RETAINED',
+        amount_cents: 100,
+        discount_cents: 0,
+        currency: 'USD',
+        status: 'completed',
+        source: 'paypal',
+        can_self_service_cancel: true,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: { name: 'Retained Cancellation Subscription', type: 'subscription' },
+        payments: [],
+        entitlements: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          status: 'active',
+          type: 'subscription',
+          expires_at: '2026-09-17T12:00:00.000Z',
+          grace_period_ends_at: null,
+          cancelled_at: null,
+          portal_cancellation_timing: 'end-of-term',
+          portal_cancellation_access_until: '2026-09-17T12:00:00.000Z',
+        }],
+      }],
+    }),
+  }));
+  await page.route('**/api/portal/cancel', async (route) => {
+    confirmedTiming = (await route.request().postDataJSON()).cancellation_timing;
+    return route.fulfill({
+      status: 502,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'The provider response is still uncertain.' }),
+    });
+  });
+
+  await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Cancel renewal' }).click();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toContainText('access remains available through Sep 17, 2026');
+  await expect(dialog).not.toContainText('access ends immediately');
+  await testInfo.attach('orders-retained-cancellation-confirmation', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+  await dialog.getByRole('button', { name: 'Cancel renewal' }).click();
+  expect(confirmedTiming).toBe('end-of-term');
+  await expect(page.getByRole('alert').filter({ hasText: 'still uncertain' })).toBeVisible();
+});
+
 test('grace-period cancellation uses the grace deadline', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-grace-session'));
   await page.route('**/api/portal/orders', (route) => route.fulfill({
