@@ -771,6 +771,8 @@ export interface DbAutomationExecution {
   created_at: string;
   occurrence_id: string | null;
   actions_started: boolean;
+  recovery_context: Json | null;
+  recovery_state: 'legacy' | 'running' | 'completed' | 'manual_reconcile';
 }
 
 export interface DbCustomCommand {
@@ -1550,6 +1552,25 @@ export interface DbAppeals {
   decided_at: string | null;
   created_at: string;
   expires_at: string | null;
+}
+
+export interface DbAutomationActionProgress {
+  execution_id: string;
+  action_index: number;
+  target_id: string;
+  action_type: string;
+  action_payload: Json;
+  retry_safe: boolean;
+  status: 'pending' | 'executing' | 'completed' | 'failed' | 'manual_reconcile';
+  side_effect_key: string;
+  owner_token: string | null;
+  lease_expires_at: string | null;
+  attempt_count: number;
+  result: Json | null;
+  started_at: string | null;
+  settled_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DbAutomationMassActionHolds {

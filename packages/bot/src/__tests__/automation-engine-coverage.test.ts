@@ -55,6 +55,39 @@ vi.mock('../features/automations/action-executor.js', () => ({
   executeActions: (...args: unknown[]) => mockExecuteActions(...args),
 }));
 
+vi.mock('../features/automations/action-resume-runner.js', () => ({
+  AutomationActionResumeRunner: class {
+    recover = vi.fn().mockResolvedValue(undefined);
+    complete = vi.fn().mockResolvedValue(undefined);
+    execute = vi.fn(async (run: {
+      actions: Array<{ type: string; config: Record<string, unknown> }>;
+      context: { member: { id: string } | null; variables: Record<string, string> };
+      affectedMemberIds: string[];
+    }) => {
+      const total = { executed: 0, failed: 0, errors: [] as string[] };
+      const memberActions = new Set([
+        'send_dm', 'give_role', 'remove_role', 'grant_entitlement',
+        'create_ticket', 'ban_member', 'kick_member', 'mute_member',
+      ]);
+      for (const [actionIndex, action] of run.actions.entries()) {
+        const targets = memberActions.has(action.type) && run.affectedMemberIds.length > 0
+          ? run.affectedMemberIds
+          : [run.context.member?.id ?? ''];
+        for (const targetId of targets) {
+          const result = await mockExecuteActions([action], {
+            ...run.context,
+            member: targetId ? { id: targetId, displayName: targetId } : run.context.member,
+          }, actionIndex);
+          total.executed += result.executed;
+          total.failed += result.failed;
+          total.errors.push(...result.errors);
+        }
+      }
+      return total;
+    });
+  },
+}));
+
 const mockAllowFire = vi.fn().mockResolvedValue(true);
 const mockAllowCustom = vi.fn().mockResolvedValue(true);
 vi.mock('../features/automations/rate-limiter.js', () => ({
