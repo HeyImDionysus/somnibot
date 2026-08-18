@@ -34,9 +34,29 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
   }),
 }));
 
-import { ProfilesManager, registerProfilesManager, invalidateProfilesCache } from '../features/profiles/profiles-manager.js';
+import {
+  ProfilesManager,
+  registerProfilesManager,
+  invalidateProfilesCache,
+} from '../features/profiles/profiles-manager.js';
 
 // ── Helpers ───────────────────────────────────────────────
+
+type ProfileMutationInteraction = Parameters<ProfilesManager['setBio']>[0];
+type TestProfileInteraction = ProfileMutationInteraction & {
+  readonly user: ProfileMutationInteraction['user'] & {
+    readonly displayName: string;
+    readonly username: string;
+    readonly displayAvatarURL: ReturnType<typeof vi.fn>;
+  };
+  readonly options: ProfileMutationInteraction['options'] & {
+    readonly getUser: ReturnType<typeof vi.fn>;
+    readonly getInteger: ReturnType<typeof vi.fn>;
+  };
+  readonly reply: ReturnType<typeof vi.fn>;
+  readonly deferReply: ReturnType<typeof vi.fn>;
+  readonly editReply: ReturnType<typeof vi.fn>;
+};
 
 function makeSupabase(overrides: Record<string, any> = {}) {
   const fromMock = vi.fn();
@@ -57,14 +77,20 @@ function makeSupabase(overrides: Record<string, any> = {}) {
 
   return {
     from: fromMock,
-    rpc: vi.fn().mockResolvedValue({ error: null }),
+    rpc: vi.fn().mockImplementation(async (name: string) => name === 'apply_profile_write_atomic'
+      ? { data: { outcome: 'applied' }, error: null }
+      : { data: null, error: null }),
   };
 }
 
-function makeInteraction(overrides: Record<string, any> = {}) {
+function makeInteraction(overrides: Record<string, any> = {}): TestProfileInteraction {
   const targetUser = overrides.targetUser ?? null;
   return {
+    id: overrides.id ?? 'profile-interaction-1',
     guildId: overrides.guildId ?? 'g1',
+    guild: null,
+    deferred: false,
+    replied: false,
     user: {
       id: overrides.userId ?? 'u1',
       displayName: 'TestUser',
@@ -282,19 +308,50 @@ describe('ProfilesManager', () => {
 
     it('ignores a re-delivered write (same interaction id) — no second confirmation', async () => {
       supabase = makeSupabase({ economy_profiles: { bio: null } });
+      supabase.rpc
+        .mockResolvedValueOnce({ data: { outcome: 'applied' }, error: null })
+        .mockResolvedValueOnce({
+          data: { outcome: 'replayed', originalOutcome: 'applied' },
+          error: null,
+        });
       mgr = new ProfilesManager(supabase as any);
 
-      const first = makeInteraction({ bio: 'hello' });
-      (first as any).id = 'int-replay-1';
+      const first = makeInteraction({ bio: 'hello', id: 'int-replay-1' });
       await mgr.setBio(first as any);
       expect(first.reply).toHaveBeenCalledTimes(1);
 
       // Gateway redelivery: a fresh interaction object carrying the same id.
-      const replay = makeInteraction({ bio: 'hello' });
-      (replay as any).id = 'int-replay-1';
+      const replay = makeInteraction({ bio: 'hello', id: 'int-replay-1' });
       await mgr.setBio(replay as any);
       // The replay is fenced: no second confirmation is issued.
       expect(replay.reply).not.toHaveBeenCalled();
+    });
+
+    it('does not confirm a refused profile write', async () => {
+      supabase.rpc.mockResolvedValueOnce({
+        data: { outcome: 'denied', reason: 'actor_target_mismatch' },
+        error: null,
+      });
+      const interaction = makeInteraction({ bio: 'refused', id: 'int-refused-1' });
+
+      await mgr.setBio(interaction);
+
+      expect(interaction.reply).not.toHaveBeenCalled();
+    });
+
+    it('degrades honestly when the durable profile write is unavailable', async () => {
+      supabase.rpc.mockResolvedValueOnce({
+        data: null,
+        error: { message: 'profile write unavailable' },
+      });
+      const interaction = makeInteraction({ bio: 'not persisted', id: 'int-unavailable-1' });
+
+      await mgr.setBio(interaction);
+
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('profiles are snoozing'),
+        ephemeral: true,
+      }));
     });
   });
 });

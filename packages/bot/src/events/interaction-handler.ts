@@ -285,7 +285,11 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
             }
             return;
           }
-          const result = await musicMgr.handleButton(interaction.customId, interaction.user.id);
+          const result = await musicMgr.handleButton(
+            interaction.customId,
+            interaction.user.id,
+            interaction.id,
+          );
           await interaction.reply({ content: result.message, ephemeral: true });
           return;
         }

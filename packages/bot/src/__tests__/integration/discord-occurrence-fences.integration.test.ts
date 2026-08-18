@@ -220,19 +220,23 @@ describe('durable Discord occurrence fences', () => {
       current_sends: 0,
       active: true,
       status: 'active',
-    }).select('id').single();
+    }).select('id,next_occurrence_at').single();
     expect(schedule.error).toBeNull();
+    const firstDueAt = schedule.data?.next_occurrence_at;
+    expect(typeof firstDueAt).toBe('string');
+    if (typeof firstDueAt !== 'string' || typeof schedule.data?.id !== 'string') return;
+    const secondDueAt = new Date(Date.parse(firstDueAt) + 60_000).toISOString();
 
     const claims = await Promise.all([
       supa.rpc('claim_scheduled_message_send', {
-        p_schedule_id: schedule.data!.id,
+        p_schedule_id: schedule.data.id,
         p_guild_id: guildId,
-        p_occurrence_at: '2026-07-30T12:00:00.000Z',
+        p_occurrence_at: firstDueAt,
       }),
       supa.rpc('claim_scheduled_message_send', {
-        p_schedule_id: schedule.data!.id,
+        p_schedule_id: schedule.data.id,
         p_guild_id: guildId,
-        p_occurrence_at: '2026-07-30T12:01:00.000Z',
+        p_occurrence_at: secondDueAt,
       }),
     ]);
     expect(claims.every((claim) => claim.error === null)).toBe(true);
@@ -242,13 +246,10 @@ describe('durable Discord occurrence fences', () => {
     const persisted = await supa
       .from('scheduled_messages')
       .select('current_sends,last_sent_at')
-      .eq('id', schedule.data!.id)
+      .eq('id', schedule.data.id)
       .single();
     expect(persisted.data?.current_sends).toBe(1);
-    expect([
-      '2026-07-30T12:00:00+00:00',
-      '2026-07-30T12:01:00+00:00',
-    ]).toContain(persisted.data?.last_sent_at);
+    expect(Date.parse(String(persisted.data?.last_sent_at))).toBe(Date.parse(firstDueAt));
   });
 
   it('prunes only unreferenced terminal fences outside the retention window', async () => {

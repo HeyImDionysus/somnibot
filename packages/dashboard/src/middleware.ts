@@ -43,18 +43,25 @@ function buildCspHeader(nonce: string): string {
   ].join('; ');
 }
 
-function requestWithNonce(request: NextRequest, nonce: string): { headers: Headers } {
+function requestWithNonce(
+  request: NextRequest,
+  nonce: string,
+  occurrenceId: string,
+): { headers: Headers } {
   const headers = new Headers(request.headers);
   headers.set('x-nonce', nonce);
+  headers.set('x-somnibot-request-route', request.nextUrl.pathname);
+  headers.set('x-somnibot-request-method', request.method);
+  headers.set('x-somnibot-request-occurrence-id', occurrenceId);
   // Next.js reads the request CSP header during render to nonce framework
   // scripts. The response CSP is still set separately by applyCspHeaders.
   headers.set('Content-Security-Policy', buildCspHeader(nonce));
   return { headers };
 }
 
-function nextWithNonce(request: NextRequest, nonce: string): NextResponse {
+function nextWithNonce(request: NextRequest, nonce: string, occurrenceId: string): NextResponse {
   return NextResponse.next({
-    request: requestWithNonce(request, nonce),
+    request: requestWithNonce(request, nonce, occurrenceId),
   });
 }
 
@@ -100,7 +107,11 @@ function isLocalMode(): boolean {
  * Handle auth for local-mode (Electron launcher).
  * Returns a response if handled, or null to fall through to remote auth.
  */
-function handleLocalAuth(request: NextRequest, nonce: string): NextResponse | null {
+function handleLocalAuth(
+  request: NextRequest,
+  nonce: string,
+  occurrenceId: string,
+): NextResponse | null {
   if (!isLocalMode()) return null;
 
   // I-2: Only allow local-mode auth for actual localhost requests.
@@ -142,7 +153,7 @@ function handleLocalAuth(request: NextRequest, nonce: string): NextResponse | nu
 
   // Already authenticated — pass through
   if (sessionCookie === LOCAL_SESSION_TOKEN) {
-    return nextWithNonce(request, nonce);
+    return nextWithNonce(request, nonce, occurrenceId);
   }
 
   // First visit or mismatched token — bind the browser, then repeat the same
@@ -226,6 +237,7 @@ function hasValidReconcileSchedulerSecret(request: NextRequest): boolean {
 export async function middleware(request: NextRequest) {
   // Generate per-request CSP nonce
   const nonce = generateNonce();
+  const occurrenceId = crypto.randomUUID();
 
   // Health probes are machine-to-machine requests and do not retain the
   // launcher-local session cookie. They must bypass local auth before it can
@@ -236,20 +248,20 @@ export async function middleware(request: NextRequest) {
     ['/api/health', '/api/health/live'].includes(request.nextUrl.pathname) &&
     (request.method === 'GET' || request.method === 'HEAD')
   ) {
-    const healthResponse = nextWithNonce(request, nonce);
+    const healthResponse = nextWithNonce(request, nonce, occurrenceId);
     applyCspHeaders(healthResponse, nonce);
     return healthResponse;
   }
 
   // ── Local mode: bypass Supabase entirely ──
-  const localResponse = handleLocalAuth(request, nonce);
+  const localResponse = handleLocalAuth(request, nonce, occurrenceId);
   if (localResponse) {
     applyCspHeaders(localResponse, nonce);
     return localResponse;
   }
 
   if (hasValidReconcileSchedulerSecret(request)) {
-    const schedulerResponse = nextWithNonce(request, nonce);
+    const schedulerResponse = nextWithNonce(request, nonce, occurrenceId);
     applyCspHeaders(schedulerResponse, nonce);
     return schedulerResponse;
   }
@@ -261,13 +273,13 @@ export async function middleware(request: NextRequest) {
       return csrfError;
     }
 
-    const publicResponse = nextWithNonce(request, nonce);
+    const publicResponse = nextWithNonce(request, nonce, occurrenceId);
     applyCspHeaders(publicResponse, nonce);
     return publicResponse;
   }
 
   // ── Remote mode: Supabase session refresh + Discord OAuth ──
-  let supabaseResponse = nextWithNonce(request, nonce);
+  let supabaseResponse = nextWithNonce(request, nonce, occurrenceId);
 
   const { url, publishableKey } = requireBrowserSupabaseConfig();
   const supabase = createServerClient(
@@ -282,7 +294,7 @@ export async function middleware(request: NextRequest) {
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value),
           );
-          supabaseResponse = nextWithNonce(request, nonce);
+          supabaseResponse = nextWithNonce(request, nonce, occurrenceId);
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, options as Parameters<typeof supabaseResponse.cookies.set>[2]),
           );

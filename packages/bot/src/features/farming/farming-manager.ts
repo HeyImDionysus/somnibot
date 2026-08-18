@@ -10,7 +10,7 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
-import { walletBalance, joinProp } from '../../utils/db-helpers.js';
+import { walletBalance } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -27,6 +27,7 @@ import {
 } from '../branding/brand-kit.js';
 import { applyBrand, brandedEmbed } from '../branding/branded-embed.js';
 import { voice } from '../branding/voice.js';
+import { z } from 'zod';
 
 const log = createLogger('Farming');
 
@@ -76,6 +77,43 @@ interface Plot {
 }
 
 type PlotStatus = 'empty' | 'planted' | 'growing' | 'ready' | 'wilted';
+
+const farmingOperationResultSchema = z.object({
+  status: z.enum([
+    'planted',
+    'watered',
+    'fertilized',
+    'crop_unavailable',
+    'farm_full',
+    'missing_inventory',
+    'already_watered',
+    'no_crops',
+    'invalid_plot',
+    'empty_plot',
+    'already_fertilized',
+  ]),
+  applied: z.boolean(),
+  replayed: z.boolean(),
+  plot_index: z.number().int().optional(),
+  affected_count: z.number().int().optional(),
+  affected_plot_indexes: z.array(z.number().int()).optional(),
+});
+
+type FarmingOperationResult = z.infer<typeof farmingOperationResultSchema>;
+
+interface FarmingOperationInput {
+  readonly userId: string;
+  readonly operationId: string;
+  readonly operationType: 'plant' | 'water' | 'fertilize';
+  readonly cropId?: string;
+  readonly itemId?: string | null;
+  readonly plotIndex?: number;
+  readonly gridSize: number;
+  readonly wiltEnabled: boolean;
+  readonly fertilizerReductionPct: number;
+}
+
+type FarmingOperationFailureReason = 'rpc_error' | 'invalid_result';
 
 const PLOT_ICONS: Record<PlotStatus, string> = {
   empty: '⬛',
@@ -212,7 +250,7 @@ export class FarmingManager {
 
   // ── Plant ───────────────────────────────────────────────
 
-  async plant(userId: string, cropName: string): Promise<{ embed: EmbedBuilder }> {
+  async plant(userId: string, cropName: string, operationId?: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
       return {
@@ -251,54 +289,39 @@ export class FarmingManager {
       };
     }
 
-    // Find empty plot
-    const plots = await this.getPlots(userId);
-    if (plots === null) {
+    const result = await this.runFarmingOperation({
+      userId,
+      operationId: operationId?.trim() || randomUUID(),
+      operationType: 'plant',
+      cropId: crop.id,
+      itemId: crop.seed_item_id,
+      gridSize: config.economy_farm_grid_size,
+      wiltEnabled: config.economy_farming_wilt_enabled,
+      fertilizerReductionPct: config.economy_fertilizer_time_reduction_pct,
+    });
+    if (!result) return { embed: await this.unavailableEmbed() };
+    if (result.status === 'farm_full') {
+      return { embed: brandedEmbed(config.brandKit, {
+        intent: 'danger',
+        description: '❌ All your farm plots are occupied! Harvest or wait for crops to wilt.',
+      }) };
+    }
+    if (result.status === 'missing_inventory') {
+      return { embed: brandedEmbed(config.brandKit, {
+        intent: 'danger',
+        description: `❌ You don't have any **${crop.name} Seeds**! Buy them from the shop.`,
+      }) };
+    }
+    if (result.status !== 'planted' || result.plot_index === undefined) {
       return { embed: await this.unavailableEmbed() };
     }
-    const cropMap = new Map(crops.map((c) => [c.id, c]));
-    const emptyIndex = this.findEmptyPlot(plots, config, cropMap);
-
-    if (emptyIndex === -1) {
-      return {
-        embed: brandedEmbed(config.brandKit, {
-          intent: 'danger',
-          description: '❌ All your farm plots are occupied! Harvest or wait for crops to wilt.',
-        }),
-      };
-    }
-
-    // Check if user has seeds (check inventory for seed item, or allow free planting if no seed_item_id)
-    if (crop.seed_item_id) {
-      const hasSeed = await this.checkAndConsumeSeed(userId, crop.seed_item_id);
-      if (!hasSeed) {
-        return {
-          embed: brandedEmbed(config.brandKit, {
-            intent: 'danger',
-            description: `❌ You don't have any **${crop.name} Seeds**! Buy them from the shop.`,
-          }),
-        };
-      }
-    }
-
-    // Plant
-    await this.supabase.from('economy_farm_plots').upsert({
-      guild_id: this.guild.id,
-      user_id: userId,
-      plot_index: emptyIndex,
-      crop_id: crop.id,
-      planted_at: new Date().toISOString(),
-      watered_at: null,
-      fertilized: false,
-      harvested: false,
-    }, { onConflict: 'guild_id,user_id,plot_index' });
 
     return {
       embed: applyBrand(
         new EmbedBuilder()
           .setTitle(`${crop.emoji} Planted!`)
           .setDescription(
-            `You planted **${crop.name}** in plot ${emptyIndex + 1}.\n\n` +
+            `You planted **${crop.name}** in plot ${result.plot_index + 1}.\n\n` +
             `⏱️ Growth time: **${this.formatTime(crop.grow_seconds)}**\n` +
             `💧 Water with \`/farm water\` to keep it healthy!\n` +
             `🌿 Use fertilizer to cut grow time by ${config.economy_fertilizer_time_reduction_pct}%`,
@@ -312,7 +335,7 @@ export class FarmingManager {
 
   // ── Water ───────────────────────────────────────────────
 
-  async water(userId: string): Promise<{ embed: EmbedBuilder }> {
+  async water(userId: string, operationId?: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
       return {
@@ -323,44 +346,36 @@ export class FarmingManager {
       };
     }
 
-    const plots = await this.getPlots(userId);
-    // [game-economy-farming DEPFAIL] A failed read is not "no crops planted".
-    if (plots === null) {
+    const result = await this.runFarmingOperation({
+      userId,
+      operationId: operationId?.trim() || randomUUID(),
+      operationType: 'water',
+      gridSize: config.economy_farm_grid_size,
+      wiltEnabled: config.economy_farming_wilt_enabled,
+      fertilizerReductionPct: config.economy_fertilizer_time_reduction_pct,
+    });
+    if (!result) return { embed: await this.unavailableEmbed() };
+    if (result.status === 'no_crops') {
+      return { embed: brandedEmbed(config.brandKit, {
+        intent: 'danger',
+        description: '❌ You have no crops planted!',
+      }) };
+    }
+    if (result.status === 'already_watered') {
+      return { embed: brandedEmbed(config.brandKit, {
+        intent: 'info',
+        description: '💧 All your crops are already watered!',
+      }) };
+    }
+    if (result.status !== 'watered' || result.affected_count === undefined) {
       return { embed: await this.unavailableEmbed() };
-    }
-    const needsWater = plots.filter((p) => p.crop_id && !p.harvested && !p.watered_at);
-
-    if (needsWater.length === 0) {
-      const growing = plots.filter((p) => p.crop_id && !p.harvested);
-      if (growing.length === 0) {
-        return {
-          embed: brandedEmbed(config.brandKit, {
-            intent: 'danger',
-            description: '❌ You have no crops planted!',
-          }),
-        };
-      }
-      return {
-        embed: brandedEmbed(config.brandKit, {
-          intent: 'info',
-          description: '💧 All your crops are already watered!',
-        }),
-      };
-    }
-
-    // Water all unwatered plots
-    const now = new Date().toISOString();
-    for (const plot of needsWater) {
-      await this.supabase.from('economy_farm_plots')
-        .update({ watered_at: now })
-        .eq('id', plot.id);
     }
 
     return {
       embed: applyBrand(
         new EmbedBuilder()
           .setTitle('💧 Watered!')
-          .setDescription(`You watered **${needsWater.length}** plot${needsWater.length > 1 ? 's' : ''}. Your crops are growing!`)
+          .setDescription(`You watered **${result.affected_count}** plot${result.affected_count > 1 ? 's' : ''}. Your crops are growing!`)
           .setTimestamp(),
         config.brandKit,
         { intent: 'info' },
@@ -568,7 +583,7 @@ export class FarmingManager {
 
   // ── Fertilize ───────────────────────────────────────────
 
-  async fertilize(userId: string, plotNum: number): Promise<{ embed: EmbedBuilder }> {
+  async fertilize(userId: string, plotNum: number, operationId?: string): Promise<{ embed: EmbedBuilder }> {
     const config = await this.getConfig();
     if (!config.economy_farming_enabled) {
       return {
@@ -589,45 +604,33 @@ export class FarmingManager {
       };
     }
 
-    const plots = await this.getPlots(userId);
-    // [game-economy-farming DEPFAIL] A failed read is not an empty plot.
-    if (plots === null) {
-      return { embed: await this.unavailableEmbed() };
+    const result = await this.runFarmingOperation({
+      userId,
+      operationId: operationId?.trim() || randomUUID(),
+      operationType: 'fertilize',
+      plotIndex,
+      gridSize: config.economy_farm_grid_size,
+      wiltEnabled: config.economy_farming_wilt_enabled,
+      fertilizerReductionPct: config.economy_fertilizer_time_reduction_pct,
+    });
+    if (!result) return { embed: await this.unavailableEmbed() };
+    if (result.status === 'empty_plot') {
+      return { embed: brandedEmbed(config.brandKit, {
+        intent: 'danger', description: '❌ That plot is empty!',
+      }) };
     }
-    const plot = plots.find((p) => p.plot_index === plotIndex);
-
-    if (!plot || !plot.crop_id || plot.harvested) {
-      return {
-        embed: brandedEmbed(config.brandKit, {
-          intent: 'danger',
-          description: '❌ That plot is empty!',
-        }),
-      };
+    if (result.status === 'already_fertilized') {
+      return { embed: brandedEmbed(config.brandKit, {
+        intent: 'warning', description: '❌ That plot is already fertilized!',
+      }) };
     }
-
-    if (plot.fertilized) {
-      return {
-        embed: brandedEmbed(config.brandKit, {
-          intent: 'warning',
-          description: '❌ That plot is already fertilized!',
-        }),
-      };
+    if (result.status === 'missing_inventory') {
+      return { embed: brandedEmbed(config.brandKit, {
+        intent: 'danger',
+        description: '❌ You don\'t have any **Fertilizer**! Craft it or buy from the shop.',
+      }) };
     }
-
-    // Check for fertilizer in inventory
-    const hasFertilizer = await this.checkAndConsumeFertilizer(userId);
-    if (!hasFertilizer) {
-      return {
-        embed: brandedEmbed(config.brandKit, {
-          intent: 'danger',
-          description: '❌ You don\'t have any **Fertilizer**! Craft it or buy from the shop.',
-        }),
-      };
-    }
-
-    await this.supabase.from('economy_farm_plots')
-      .update({ fertilized: true })
-      .eq('id', plot.id);
+    if (result.status !== 'fertilized') return { embed: await this.unavailableEmbed() };
 
     return {
       embed: applyBrand(
@@ -770,42 +773,48 @@ export class FarmingManager {
     return -1;
   }
 
-  private async checkAndConsumeSeed(userId: string, seedItemId: string): Promise<boolean> {
-    // Atomic decrement — prevents TOCTOU race on inventory quantity
-    const { data: success } = await this.supabase.rpc('economy_decrement_inventory', {
+  private async runFarmingOperation(input: FarmingOperationInput): Promise<FarmingOperationResult | null> {
+    const { data, error } = await this.supabase.rpc('economy_farming_operation_atomic', {
       p_guild_id: this.guild.id,
-      p_user_id: userId,
-      p_item_id: seedItemId,
-      p_quantity: 1,
+      p_user_id: input.userId,
+      p_operation_id: input.operationId,
+      p_operation_type: input.operationType,
+      p_crop_id: input.cropId ?? null,
+      p_item_id: input.itemId ?? null,
+      p_plot_index: input.plotIndex ?? null,
+      p_grid_size: input.gridSize,
+      p_wilt_enabled: input.wiltEnabled,
+      p_fertilizer_reduction_pct: input.fertilizerReductionPct,
+      p_fail_before_plot: false,
     });
-    return success === true;
+    if (error) {
+      log.error('Atomic farming operation failed:', error.message);
+      await this.writeFarmingOperationFailure(input, 'rpc_error', error.message);
+      return null;
+    }
+    const parsed = farmingOperationResultSchema.safeParse(data);
+    if (!parsed.success) {
+      log.error('Atomic farming operation returned an invalid result:', parsed.error.message);
+      await this.writeFarmingOperationFailure(input, 'invalid_result', parsed.error.message);
+      return null;
+    }
+    return parsed.data;
   }
 
-  private async checkAndConsumeFertilizer(userId: string): Promise<boolean> {
-    // Resolve fertilizer item_id by name, then use atomic RPC
-    const { data: items } = await this.supabase
-      .from('economy_inventory')
-      .select('item_id, economy_items!inner(name)')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .gt('quantity', 0)
-      .limit(1000);
-
-    if (!items) return false;
-
-    const fert = (items as Record<string, unknown>[]).find((i) =>
-      ((joinProp(i, 'economy_items', 'name') as string) ?? '').toLowerCase() === 'fertilizer'
-    );
-    if (!fert) return false;
-
-    // Atomic decrement — prevents TOCTOU race on inventory quantity
-    const { data: success } = await this.supabase.rpc('economy_decrement_inventory', {
-      p_guild_id: this.guild.id,
-      p_user_id: userId,
-      p_item_id: fert.item_id,
-      p_quantity: 1,
+  private async writeFarmingOperationFailure(
+    input: FarmingOperationInput,
+    reason: FarmingOperationFailureReason,
+    errorMessage: string,
+  ): Promise<void> {
+    await writeEconomyAudit(this.supabase, {
+      guildId: this.guild.id,
+      actorId: input.userId,
+      operationId: input.operationId,
+      action: `farming.${input.operationType}`,
+      details: { operation: input.operationType, reason },
+      success: false,
+      errorMessage,
     });
-    return success === true;
   }
 
   private async addToInventory(userId: string, itemId: string, quantity: number): Promise<boolean> {

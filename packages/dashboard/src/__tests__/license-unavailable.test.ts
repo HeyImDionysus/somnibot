@@ -99,8 +99,14 @@ describe('POST /api/license/validate — a failed lookup is not a revocation', (
       rpc: vi.fn().mockResolvedValue(rpcResult),
     });
     const validations = registerTable(mock, 'license_validations');
+    const products = registerTable(mock, 'products');
+    products.maybeSingle.mockResolvedValue({
+      data: { guild_id: 'guild-1' },
+      error: null,
+    });
+    const auditLogs = registerTable(mock, 'audit_logs');
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
-    return { mock, validations };
+    return { mock, validations, auditLogs };
   }
 
   function req() {
@@ -146,10 +152,30 @@ describe('POST /api/license/validate — a failed lookup is not a revocation', (
     );
   });
 
+  it('writes one sanitized license.validate_unavailable commerce audit', async () => {
+    const { auditLogs } = setup({ data: null, error: DB_DOWN });
+
+    await validatePost(req() as never);
+
+    expect(auditLogs.upsert).toHaveBeenCalledTimes(1);
+    expect(auditLogs.upsert).toHaveBeenCalledWith([expect.objectContaining({
+      guild_id: 'guild-1',
+      actor_type: 'system',
+      actor_id: 'license-validator',
+      action: 'license.validate_unavailable',
+      target_type: 'product',
+      target_id: PRODUCT_ID,
+      details: { cause: 'authoritative_lookup_failed' },
+      success: false,
+      occurrence_key: expect.stringMatching(/^license\.validate_unavailable:/),
+    })], { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true });
+    expect(JSON.stringify(auditLogs.upsert.mock.calls)).not.toMatch(/Connection refused|SOMNI-TEST/i);
+  });
+
   it('still reports a genuine "key not found" as invalid', async () => {
     // The other side of the split: a lookup that SUCCEEDS and finds nothing is
     // a real verdict and must keep its teeth.
-    setup({ data: { found: false }, error: null });
+    const { auditLogs } = setup({ data: { found: false }, error: null });
 
     const res = await validatePost(req() as never);
     const body = await res.json();
@@ -157,6 +183,7 @@ describe('POST /api/license/validate — a failed lookup is not a revocation', (
     expect(res.status).toBe(200);
     expect(body.valid).toBe(false);
     expect(body.status).toBe('revoked');
+    expect(auditLogs.upsert).not.toHaveBeenCalled();
   });
 });
 

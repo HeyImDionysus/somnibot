@@ -5,6 +5,14 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const { mockWriteAuditLog } = vi.hoisted(() => ({
+  mockWriteAuditLog: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../services/audit.js', () => ({
+  writeAuditLog: mockWriteAuditLog,
+}));
+
 vi.mock('discord.js', () => ({
   EmbedBuilder: class {
     data: Record<string, unknown> = {};
@@ -91,7 +99,19 @@ function makeSupabase(tableHandlers: Record<string, () => ReturnType<typeof chai
       const h = merged[table];
       return h ? h() : chainBuilder();
     }),
-    rpc: vi.fn().mockResolvedValue({ data: true, error: null }),
+    rpc: vi.fn().mockImplementation((_name: string, args: Record<string, unknown>) => {
+      const operation = args.p_operation_type;
+      if (operation === 'plant') {
+        return Promise.resolve({ data: { status: 'planted', applied: true, replayed: false, plot_index: 0 }, error: null });
+      }
+      if (operation === 'water') {
+        return Promise.resolve({ data: { status: 'watered', applied: true, replayed: false, affected_count: 1, affected_plot_indexes: [0] }, error: null });
+      }
+      if (operation === 'fertilize') {
+        return Promise.resolve({ data: { status: 'fertilized', applied: true, replayed: false, plot_index: 0 }, error: null });
+      }
+      return Promise.resolve({ data: true, error: null });
+    }),
   };
 }
 
@@ -254,21 +274,60 @@ describe('FarmingManager', () => {
         economy_farm_plots: () => chainBuilder({ data: plots }),
       });
       fm = new FarmingManager(makeGuild() as any, supabase as any, makeValkey() as any);
+      supabase.rpc.mockResolvedValue({ data: { status: 'farm_full', applied: false, replayed: false }, error: null });
       const r = await fm.plant('u1', 'Corn');
       expect(r.embed.data.description).toContain('occupied');
     });
 
     it('fails when no seeds', async () => {
-      // Wheat needs seed1, rpc returns false (no seed)
-      supabase.rpc.mockResolvedValue({ data: false, error: null });
+      supabase.rpc.mockResolvedValue({ data: { status: 'missing_inventory', applied: false, replayed: false }, error: null });
       const r = await fm.plant('u1', 'Wheat');
       expect(r.embed.data.description).toContain("don't have any");
     });
 
     it('plants with seeds consumed', async () => {
-      supabase.rpc.mockResolvedValue({ data: true, error: null });
+      supabase.rpc.mockResolvedValue({ data: { status: 'planted', applied: true, replayed: false, plot_index: 0 }, error: null });
       const r = await fm.plant('u1', 'Wheat');
       expect(r.embed.data.title).toContain('Planted');
+    });
+
+    it('records one stable failure occurrence when the atomic RPC rolls back', async () => {
+      supabase.rpc.mockResolvedValue({
+        data: null,
+        error: { message: 'farming operation fault before plot mutation' },
+      });
+
+      await fm.plant('u1', 'Wheat', 'plant-fault-stable');
+      await fm.plant('u1', 'Wheat', 'plant-fault-stable');
+
+      expect(mockWriteAuditLog).toHaveBeenCalledTimes(2);
+      for (const [, entry] of mockWriteAuditLog.mock.calls) {
+        expect(entry).toMatchObject({
+          action: 'farming.plant',
+          correlationId: 'plant-fault-stable',
+          occurrenceKey: 'farming.plant:plant-fault-stable',
+          success: false,
+          errorMessage: 'farming operation fault before plot mutation',
+        });
+      }
+    });
+
+    it('records one stable failure occurrence when the atomic RPC result is invalid', async () => {
+      supabase.rpc.mockResolvedValue({ data: { applied: true }, error: null });
+
+      await fm.plant('u1', 'Wheat', 'plant-invalid-stable');
+      await fm.plant('u1', 'Wheat', 'plant-invalid-stable');
+
+      expect(mockWriteAuditLog).toHaveBeenCalledTimes(2);
+      for (const [, entry] of mockWriteAuditLog.mock.calls) {
+        expect(entry).toMatchObject({
+          action: 'farming.plant',
+          correlationId: 'plant-invalid-stable',
+          occurrenceKey: 'farming.plant:plant-invalid-stable',
+          details: { operation: 'plant', reason: 'invalid_result' },
+          success: false,
+        });
+      }
     });
 
     it('seeds default crops when none exist', async () => {
@@ -316,11 +375,13 @@ describe('FarmingManager', () => {
         }),
       });
       fm = new FarmingManager(makeGuild() as any, supabase as any, makeValkey() as any);
+      supabase.rpc.mockResolvedValue({ data: { status: 'already_watered', applied: false, replayed: false }, error: null });
       const r = await fm.water('u1');
       expect(r.embed.data.description).toContain('already watered');
     });
 
     it('says no crops planted', async () => {
+      supabase.rpc.mockResolvedValue({ data: { status: 'no_crops', applied: false, replayed: false }, error: null });
       const r = await fm.water('u1');
       expect(r.embed.data.description).toContain('no crops planted');
     });
@@ -443,6 +504,7 @@ describe('FarmingManager', () => {
     });
 
     it('fails when plot empty', async () => {
+      supabase.rpc.mockResolvedValue({ data: { status: 'empty_plot', applied: false, replayed: false, plot_index: 0 }, error: null });
       const r = await fm.fertilize('u1', 1);
       expect(r.embed.data.description).toContain('empty');
     });
@@ -454,6 +516,7 @@ describe('FarmingManager', () => {
         }),
       });
       fm = new FarmingManager(makeGuild() as any, supabase as any, makeValkey() as any);
+      supabase.rpc.mockResolvedValue({ data: { status: 'already_fertilized', applied: false, replayed: false, plot_index: 0 }, error: null });
       const r = await fm.fertilize('u1', 1);
       expect(r.embed.data.description).toContain('already fertilized');
     });
@@ -467,6 +530,7 @@ describe('FarmingManager', () => {
         economy_inventory: () => chainBuilder({ data: [] }),
       });
       fm = new FarmingManager(makeGuild() as any, supabase as any, makeValkey() as any);
+      supabase.rpc.mockResolvedValue({ data: { status: 'missing_inventory', applied: false, replayed: false, plot_index: 0 }, error: null });
       const r = await fm.fertilize('u1', 1);
       expect(r.embed.data.description).toContain("don't have any");
     });
@@ -479,6 +543,7 @@ describe('FarmingManager', () => {
         economy_inventory: () => chainBuilder({ data: null }),
       });
       fm = new FarmingManager(makeGuild() as any, supabase as any, makeValkey() as any);
+      supabase.rpc.mockResolvedValue({ data: { status: 'missing_inventory', applied: false, replayed: false, plot_index: 0 }, error: null });
       const r = await fm.fertilize('u1', 1);
       expect(r.embed.data.description).toContain("don't have any");
     });
@@ -492,7 +557,7 @@ describe('FarmingManager', () => {
           data: [{ item_id: 'fert1', economy_items: { name: 'Fertilizer' } }],
         }),
       });
-      supabase.rpc.mockResolvedValue({ data: true, error: null });
+      supabase.rpc.mockResolvedValue({ data: { status: 'fertilized', applied: true, replayed: false, plot_index: 0 }, error: null });
       fm = new FarmingManager(makeGuild() as any, supabase as any, makeValkey() as any);
       const r = await fm.fertilize('u1', 1);
       expect(r.embed.data.title).toContain('Fertilized');

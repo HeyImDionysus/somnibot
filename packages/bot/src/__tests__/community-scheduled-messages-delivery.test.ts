@@ -28,6 +28,7 @@ const BASE_SCHEDULE = {
   timezone: 'UTC', start_date: null, end_date: null,
   max_sends: null, current_sends: 0, active: true,
   last_sent_at: null, status: 'active', last_error: null,
+  next_occurrence_at: null, updated_at: '2026-07-27T12:00:00.000Z',
   failed_at: null, missed_run_policy: 'skip-missed',
 };
 
@@ -141,6 +142,17 @@ function schedSupa(
     return c;
   }
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+    if (name === 'complete_scheduled_message_send') {
+      updates.push({
+        payload: {
+          status: 'completed',
+          resource_id: args?.p_resource_id ?? null,
+          result: { dueAt: args?.p_occurrence_at },
+          last_error: null,
+        },
+      });
+      return { data: true, error: null };
+    }
     if (name === 'settle_discord_occurrence') {
       // Settlement moved to a merge RPC (round 28): record it like the old
       // occurrence table update so completion/failure assertions stay
@@ -205,6 +217,50 @@ describe('ScheduledMessageRunner — missing channel', () => {
 });
 
 describe('ScheduledMessageRunner — transient send retry', () => {
+  it('uses the persisted due minute instead of recomputing cron in process', async () => {
+    const Runner = await loadRunner();
+    const dueAt = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
+    const { supabase } = schedSupa([{
+      ...BASE_SCHEDULE,
+      cron_expression: '0 0 1 1 *',
+      next_occurrence_at: dueAt,
+    }]);
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+    const tick = Reflect.get(runner, 'tick');
+    expect(typeof tick).toBe('function');
+    if (typeof tick !== 'function') return;
+
+    await Reflect.apply(tick, runner, []);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'claim_scheduled_message_send',
+      expect.objectContaining({ p_occurrence_at: dueAt }),
+    );
+  });
+
+  it('does not deliver before the persisted next occurrence', async () => {
+    const Runner = await loadRunner();
+    const { supabase } = schedSupa([{
+      ...BASE_SCHEDULE,
+      next_occurrence_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+    }]);
+    const { guild: g, send } = guild();
+    const runner = new Runner(g, supabase);
+    const tick = Reflect.get(runner, 'tick');
+    expect(typeof tick).toBe('function');
+    if (typeof tick !== 'function') return;
+
+    await Reflect.apply(tick, runner, []);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalledWith(
+      'claim_scheduled_message_send',
+      expect.anything(),
+    );
+  });
+
   it('retries a transient send failure and delivers exactly once', async () => {
     const Runner = await loadRunner();
     let attempts = 0;

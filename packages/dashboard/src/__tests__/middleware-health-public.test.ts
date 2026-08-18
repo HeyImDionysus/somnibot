@@ -53,6 +53,25 @@ describe('middleware health access', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
+  it('overwrites caller metadata with trusted route, method, and one request occurrence', async () => {
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health', {
+      headers: {
+        'x-somnibot-request-route': '/forged',
+        'x-somnibot-request-method': 'FORGED',
+        'x-somnibot-request-occurrence-id': 'forged',
+      },
+    }));
+
+    const overrides = res.headers.get('x-middleware-override-headers');
+    expect(overrides).toContain('x-somnibot-request-route');
+    expect(overrides).toContain('x-somnibot-request-method');
+    expect(overrides).toContain('x-somnibot-request-occurrence-id');
+    expect(res.headers.get('x-middleware-request-x-somnibot-request-route')).toBe('/api/health');
+    expect(res.headers.get('x-middleware-request-x-somnibot-request-method')).toBe('GET');
+    expect(res.headers.get('x-middleware-request-x-somnibot-request-occurrence-id')).not.toBe('forged');
+  });
+
   it('allows launcher health probes in local mode without a session cookie', async () => {
     process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
     process.env.SESSION_TOKEN = 'launcher-session-token';

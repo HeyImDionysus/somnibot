@@ -1,8 +1,32 @@
 /**
  * Farming slash commands — /farm (plant, water, harvest, view, fertilize).
  */
-import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import {
+  SlashCommandBuilder,
+  type InteractionEditReplyOptions,
+  type MessagePayload,
+} from 'discord.js';
 import type { FarmingManager } from './farming-manager.js';
+
+interface FarmingCommandOptions {
+  getSubcommand(): string;
+  getString(name: 'crop', required: true): string;
+  getInteger(name: 'plot', required: true): number;
+}
+
+export interface FarmingCommandInteraction {
+  readonly commandName: string;
+  readonly id: string;
+  readonly user: { readonly id: string };
+  readonly options: FarmingCommandOptions;
+  deferReply(): Promise<unknown>;
+  editReply(response: string | MessagePayload | InteractionEditReplyOptions): Promise<unknown>;
+}
+
+type FarmingCommandManager = Pick<
+  FarmingManager,
+  'viewFarm' | 'plant' | 'water' | 'harvest' | 'fertilize'
+>;
 
 export function buildFarmingCommands(): Record<string, SlashCommandBuilder> {
   return {
@@ -38,8 +62,8 @@ export function buildFarmingCommands(): Record<string, SlashCommandBuilder> {
 }
 
 export async function handleFarmingCommand(
-  interaction: ChatInputCommandInteraction,
-  manager: FarmingManager,
+  interaction: FarmingCommandInteraction,
+  manager: FarmingCommandManager,
 ): Promise<void> {
   if (interaction.commandName !== 'farm') return;
 
@@ -55,12 +79,12 @@ export async function handleFarmingCommand(
     }
     case 'plant': {
       const cropName = interaction.options.getString('crop', true);
-      const { embed } = await manager.plant(interaction.user.id, cropName);
+      const { embed } = await manager.plant(interaction.user.id, cropName, interaction.id);
       await interaction.editReply({ embeds: [embed] });
       break;
     }
     case 'water': {
-      const { embed } = await manager.water(interaction.user.id);
+      const { embed } = await manager.water(interaction.user.id, interaction.id);
       await interaction.editReply({ embeds: [embed] });
       break;
     }
@@ -71,7 +95,7 @@ export async function handleFarmingCommand(
     }
     case 'fertilize': {
       const plotNum = interaction.options.getInteger('plot', true);
-      const { embed } = await manager.fertilize(interaction.user.id, plotNum);
+      const { embed } = await manager.fertilize(interaction.user.id, plotNum, interaction.id);
       await interaction.editReply({ embeds: [embed] });
       break;
     }

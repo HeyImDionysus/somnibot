@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -36,6 +37,9 @@ function writeFleet(directory, gateMode = 'none', sha = candidateSha) {
 }
 
 function writeReceipt(directory, sha = candidateSha) {
+  const artifactPath = 'fleet-artifact-dashboard-live-route.json';
+  const artifactBody = '{"surface":"dashboard","observed":true}\n';
+  writeFileSync(path.join(directory, artifactPath), artifactBody);
   writeFileSync(path.join(directory, 'fleet-proof-dashboard.json'), JSON.stringify({
     schemaVersion: 1,
     candidateSha: sha,
@@ -45,6 +49,11 @@ function writeReceipt(directory, sha = candidateSha) {
       assertionClass: 'Discord',
       sensor: 'dashboard-live-route',
       observation: 'The exact candidate produced and read back the contracted dashboard effect.',
+      observedAt: '2026-08-18T12:00:00.000Z',
+      artifact: {
+        path: artifactPath,
+        sha256: createHash('sha256').update(artifactBody).digest('hex'),
+      },
     }],
   }));
 }
@@ -133,6 +142,37 @@ test('rejects a proof receipt from a different candidate', () => {
     const run = runAggregate(directory, directory);
     assert.notEqual(run.status, 0);
     assert.match(run.stderr, /proof receipt candidate mismatch/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a direct synthetic receipt that bypassed the proof producer', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-synthetic-'));
+  try {
+    writeFleet(directory, 'declared');
+    writeReceipt(directory);
+    const file = path.join(directory, 'fleet-proof-dashboard.json');
+    const receipt = JSON.parse(readFileSync(file, 'utf8'));
+    receipt.proofs[0].observation = 'mock fixture result';
+    writeFileSync(file, JSON.stringify(receipt));
+    const run = runAggregate(directory, directory);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /synthetic\/mock\/fake\/fixture evidence/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects a receipt whose artifact content does not match its SHA-256', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'somnibot-fleet-aggregate-artifact-'));
+  try {
+    writeFleet(directory, 'declared');
+    writeReceipt(directory);
+    writeFileSync(path.join(directory, 'fleet-artifact-dashboard-live-route.json'), 'tampered\n');
+    const run = runAggregate(directory, directory);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /artifact SHA-256 mismatch/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

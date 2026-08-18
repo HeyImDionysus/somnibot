@@ -64,6 +64,10 @@ describe('createQueue + getQueue + saveQueue', () => {
       volume: 50,
       shuffled: false,
       paused: false,
+      runtimeState: 'ready',
+      runtimeRevision: 0,
+      recoveryEpisodeId: null,
+      runtimeError: null,
     });
   });
 

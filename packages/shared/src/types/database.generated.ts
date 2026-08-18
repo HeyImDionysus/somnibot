@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 272 migration files in packages/supabase/migrations/
+ * Source: 282 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -771,6 +771,8 @@ export interface DbAutomationExecution {
   created_at: string;
   occurrence_id: string | null;
   actions_started: boolean;
+  recovery_context: Json | null;
+  recovery_state: 'legacy' | 'running' | 'completed' | 'manual_reconcile';
 }
 
 export interface DbCustomCommand {
@@ -931,6 +933,7 @@ export interface DbScheduledMessage {
   last_error: string | null;
   failed_at: string | null;
   missed_run_policy: 'skip-missed' | 'send-latest';
+  next_occurrence_at: string | null;
 }
 
 // — Commerce — Products —
@@ -1215,6 +1218,7 @@ export interface DbAuditLog {
   category: string;
   correlation_id: string | null;
   occurrence_key: string | null;
+  unscoped_occurrence_key: string | null;
 }
 
 export interface DbWebhookEvent {
@@ -1549,6 +1553,25 @@ export interface DbAppeals {
   decided_at: string | null;
   created_at: string;
   expires_at: string | null;
+}
+
+export interface DbAutomationActionProgress {
+  execution_id: string;
+  action_index: number;
+  target_id: string;
+  action_type: string;
+  action_payload: Json;
+  retry_safe: boolean;
+  status: 'pending' | 'executing' | 'completed' | 'failed' | 'manual_reconcile';
+  side_effect_key: string;
+  owner_token: string | null;
+  lease_expires_at: string | null;
+  attempt_count: number;
+  result: Json | null;
+  started_at: string | null;
+  settled_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DbAutomationMassActionHolds {
@@ -2073,6 +2096,15 @@ export interface DbEconomyFarmPlots {
   created_at: string;
 }
 
+export interface DbEconomyFarmingOperations {
+  guild_id: string;
+  user_id: string;
+  operation_id: string;
+  operation_type: 'plant' | 'water' | 'fertilize';
+  result: Json;
+  created_at: string;
+}
+
 export interface DbEconomyFishCatches {
   id: string;
   guild_id: string;
@@ -2582,6 +2614,28 @@ export interface DbPolls {
   closed_at: string | null;
 }
 
+export interface DbPortalCancellationOperations {
+  id: string;
+  request_id: string;
+  entitlement_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  paypal_subscription_id: string;
+  cancellation_timing: 'immediate' | 'end-of-term';
+  access_until: string;
+  status: 'pending' | 'uncertain' | 'provider_confirmed' | 'completed' | 'failed';
+  provider_http_status: number | null;
+  provider_debug_id: string | null;
+  provider_status: 'ACTIVE' | 'SUSPENDED' | 'CANCELLED' | 'EXPIRED' | null;
+  reconciliation_state: 'not_required' | 'pending' | 'confirmed_cancelled' | 'confirmed_active' | 'unavailable';
+  failure_code: 'provider_rejected' | 'provider_uncertain' | 'local_commit_failed' | null;
+  created_at: string;
+  updated_at: string;
+  provider_confirmed_at: string | null;
+  completed_at: string | null;
+}
+
 export interface DbPredictionBets {
   id: string;
   prediction_id: string;
@@ -2614,6 +2668,18 @@ export interface DbPredictions {
   created_at: string;
   locked_at: string | null;
   resolved_at: string | null;
+}
+
+export interface DbProfileWriteOccurrences {
+  id: string;
+  guild_id: string;
+  interaction_id: string;
+  actor_id: string;
+  target_id: string;
+  field: 'title' | 'bio';
+  outcome: 'claimed' | 'applied' | 'denied';
+  created_at: string;
+  settled_at: string | null;
 }
 
 export interface DbRuntimeLeases {

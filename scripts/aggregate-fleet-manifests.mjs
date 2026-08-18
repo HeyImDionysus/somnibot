@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateObservationEntry } from './fleet-proof-contract.mjs';
 
 const args = process.argv.slice(2);
 const allowUnresolved = args.includes('--allow-unresolved');
@@ -48,10 +49,10 @@ for (const receipt of receipts) {
   for (const proof of receipt.proofs) {
     assert.equal(typeof proof.scenario, 'string', `proof receipt for ${receipt.domainId} has no scenario`);
     assert.equal(typeof proof.assertionClass, 'string', `proof receipt for ${receipt.domainId} has no assertionClass`);
-    assert.equal(typeof proof.sensor, 'string', `proof receipt for ${receipt.domainId} has no sensor`);
-    assert.equal(typeof proof.observation, 'string', `proof receipt for ${receipt.domainId} has no observation`);
-    assert.ok(proof.sensor.trim().length > 0, `proof receipt for ${receipt.domainId} has an empty sensor`);
-    assert.ok(proof.observation.trim().length > 0, `proof receipt for ${receipt.domainId} has an empty observation`);
+    validateObservationEntry(proof, {
+      label: `proof receipt ${receipt.domainId}/${proof.scenario}/${proof.assertionClass}`,
+      artifactRoot: proofDirectory,
+    });
     const key = `${receipt.domainId}\0${proof.scenario}\0${proof.assertionClass}`;
     assert.ok(!provenGateKeys.has(key), `duplicate fleet proof for ${receipt.domainId}/${proof.scenario}/${proof.assertionClass}`);
     provenGateKeys.add(key);

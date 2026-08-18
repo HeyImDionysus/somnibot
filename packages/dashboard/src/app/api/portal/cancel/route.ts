@@ -22,6 +22,11 @@ import { parseBody } from '@/lib/api/validation';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { applyPayPalPolicyEnvironment, loadPayPalPolicy } from '@/lib/paypal-policy';
+import {
+  completePortalCancellationOperation,
+  ensurePortalCancellationProvider,
+  type PortalCancellationClaim,
+} from '@/lib/portal-cancellation-operation';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -280,70 +285,66 @@ export async function POST(request: NextRequest) {
       }
       cancellationSnapshot = intent;
     }
-    const providerUrl = `${config.apiBase}/v1/billing/subscriptions/${subscriptionId}`;
-    const res = await fetch(`${providerUrl}/cancel`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${paypalToken}` },
-      body: JSON.stringify({ reason: 'Customer requested cancellation via self-service portal' }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) {
-      let reconciled = false;
-      if (res.status === 422) {
-        const providerState = await fetch(providerUrl, {
-          headers: { Authorization: `Bearer ${paypalToken}` },
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (providerState.ok) {
-          const providerBody = await providerState.json().catch(() => null) as
-            | { id?: unknown; status?: unknown }
-            | null;
-          reconciled =
-            providerBody?.id === subscriptionId
-            && ['CANCELLED', 'EXPIRED'].includes(String(providerBody?.status));
-        }
-      }
-      if (!reconciled) {
-        const providerFailureIsRetryable = res.status === 408
-          || res.status === 429
-          || res.status >= 500;
-        if (!providerFailureIsRetryable) {
-          const releasedAt = new Date().toISOString();
-          const { data: releasedIntent, error: releaseError } = await admin
-            .from('entitlements')
-            .update({
-              portal_cancellation_timing: null,
-              portal_cancellation_access_until: null,
-              updated_at: releasedAt,
-            })
-            .eq('id', entitlement.id)
-            .eq('customer_id', session.customer_id)
-            .eq('guild_id', session.guild_id)
-            .eq('status', cancellationSnapshot.status)
-            .is('cancelled_at', null)
-            .eq('portal_cancellation_timing', appliedTiming)
-            .eq('portal_cancellation_access_until', appliedAccessUntil)
-            .select('id, portal_cancellation_timing, portal_cancellation_access_until, cancelled_at')
-            .maybeSingle();
-          if (
-            releaseError
-            || !releasedIntent
-            || releasedIntent.cancelled_at !== null
-            || releasedIntent.portal_cancellation_timing !== null
-            || releasedIntent.portal_cancellation_access_until !== null
-          ) {
-            return NextResponse.json(
-              { error: 'The payment provider rejected cancellation, but the local request could not be released. Please retry.' },
-              { status: 503 },
-            );
-          }
-        }
+    const providerClaim: PortalCancellationClaim = {
+      entitlementId: entitlement.id,
+      orderId: order.id,
+      guildId: session.guild_id,
+      customerId: session.customer_id,
+      subscriptionId,
+      timing: appliedTiming,
+      accessUntil: appliedAccessUntil,
+      providerApiBase: config.apiBase,
+      providerToken: paypalToken,
+    };
+    const providerResult = await ensurePortalCancellationProvider(admin, providerClaim);
+    if (providerResult.kind === 'instrumentation_error') {
+      return NextResponse.json(
+        { error: 'Cancellation could not be instrumented safely. Please retry.' },
+        { status: 503 },
+      );
+    }
+    if (providerResult.kind === 'retryable_failure') {
+      return NextResponse.json(
+        { error: 'Could not schedule cancellation with the payment provider. Please try again.' },
+        { status: 502 },
+      );
+    }
+    if (providerResult.kind === 'rejected') {
+      const releasedAt = new Date().toISOString();
+      const { data: releasedIntent, error: releaseError } = await admin
+        .from('entitlements')
+        .update({
+          portal_cancellation_timing: null,
+          portal_cancellation_access_until: null,
+          updated_at: releasedAt,
+        })
+        .eq('id', entitlement.id)
+        .eq('customer_id', session.customer_id)
+        .eq('guild_id', session.guild_id)
+        .eq('status', cancellationSnapshot.status)
+        .is('cancelled_at', null)
+        .eq('portal_cancellation_timing', appliedTiming)
+        .eq('portal_cancellation_access_until', appliedAccessUntil)
+        .select('id, portal_cancellation_timing, portal_cancellation_access_until, cancelled_at')
+        .maybeSingle();
+      if (
+        releaseError
+        || !releasedIntent
+        || releasedIntent.cancelled_at !== null
+        || releasedIntent.portal_cancellation_timing !== null
+        || releasedIntent.portal_cancellation_access_until !== null
+      ) {
         return NextResponse.json(
-          { error: 'Could not schedule cancellation with the payment provider. Please try again.' },
-          { status: 502 },
+          { error: 'The payment provider rejected cancellation, but the local request could not be released. Please retry.' },
+          { status: 503 },
         );
       }
+      return NextResponse.json(
+        { error: 'Could not schedule cancellation with the payment provider. Please try again.' },
+        { status: 502 },
+      );
     }
+    const operation = providerResult.operation;
 
     // Mark cancellation. The `.is('cancelled_at', null)` guard makes the write
     // single-winner under a race. Immediate policy revokes access now; the
@@ -409,6 +410,17 @@ export async function POST(request: NextRequest) {
           { status: 503 },
         );
       }
+      const operationCompleted = await completePortalCancellationOperation(
+        admin,
+        operation,
+        providerClaim,
+      );
+      if (!operationCompleted) {
+        return NextResponse.json(
+          { error: 'The cancellation succeeded, but its operation record is incomplete. Please retry.' },
+          { status: 503 },
+        );
+      }
       return scheduledResponse(updated, false, appliedTiming);
     }
 
@@ -443,9 +455,20 @@ export async function POST(request: NextRequest) {
         { status: 503 },
       );
     }
+    const operationCompleted = await completePortalCancellationOperation(
+      admin,
+      operation,
+      providerClaim,
+    );
+    if (!operationCompleted) {
+      return NextResponse.json(
+        { error: 'The cancellation succeeded, but its operation record is incomplete. Please retry.' },
+        { status: 503 },
+      );
+    }
     return scheduledResponse(current, true, currentTiming);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Unknown error';
-    return NextResponse.json({ error: msg }, { status: 500 });
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    return NextResponse.json({ error: 'Unexpected cancellation error. Please retry.' }, { status: 500 });
   }
 }

@@ -63,6 +63,37 @@ const PET_PRICES: Record<string, number> = {
 const XP_PER_LEVEL = 100;
 const MAX_LEVEL = 50;
 
+type PetRenameResult =
+  | {
+      readonly status: 'renamed';
+      readonly replayed: boolean;
+      readonly oldName: string;
+      readonly newName: string;
+    }
+  | {
+      readonly status: 'no_pet' | 'mutation_not_applied';
+      readonly replayed: boolean;
+    };
+
+function parsePetRenameResult(value: unknown): PetRenameResult | null {
+  if (value === null || typeof value !== 'object') return null;
+
+  const status = Reflect.get(value, 'status');
+  const replayed = Reflect.get(value, 'replayed');
+  if (
+    typeof replayed !== 'boolean'
+    || (status !== 'renamed' && status !== 'no_pet' && status !== 'mutation_not_applied')
+  ) {
+    return null;
+  }
+  if (status !== 'renamed') return { status, replayed };
+
+  const oldName = Reflect.get(value, 'old_name');
+  const newName = Reflect.get(value, 'new_name');
+  if (typeof oldName !== 'string' || typeof newName !== 'string') return null;
+  return { status, replayed, oldName, newName };
+}
+
 export class PetsManager {
   private supabase: SupabaseClient;
   private client: Client | null = null;
@@ -637,14 +668,80 @@ export class PetsManager {
   async renamePet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
     const name = interaction.options.getString('name')!;
-    const { pet, degraded } = await this.getPet(interaction.guildId!, interaction.user.id);
+    const guildId = interaction.guildId!;
+    const operationId = interaction.id || randomUUID();
+    const { pet, degraded } = await this.getPet(guildId, interaction.user.id);
     if (degraded) { await this.replyPetsUnavailable(interaction); return; }
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
 
-    await this.supabase.from('economy_pets')
-      .update({ name, updated_at: new Date().toISOString() }).eq('id', pet.id);
+    const recordRenameAudit = async (audit: {
+      readonly action: 'pets.renamed' | 'pets.rename_failed';
+      readonly beforeName: string;
+      readonly afterName: string;
+      readonly success: boolean;
+      readonly errorMessage?: string;
+    }): Promise<void> => {
+      try {
+        await this.auditPet(
+          guildId,
+          interaction.user.id,
+          audit.action,
+          operationId,
+          {
+            beforeName: audit.beforeName,
+            afterName: audit.afterName,
+            ...(audit.errorMessage ? { reason: audit.errorMessage } : {}),
+          },
+          audit.success,
+          audit.errorMessage,
+        );
+      } catch (error) {
+        log.warn('Pet rename audit write failed', {
+          action: audit.action,
+          operationId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
 
-    await interaction.reply({ content: `✅ Your pet is now named **${name}**!` });
+    const { data: renameData, error: renameError } = await this.supabase.rpc(
+      'economy_pet_rename_atomic',
+      {
+        p_guild_id: guildId,
+        p_user_id: interaction.user.id,
+        p_new_name: name,
+        p_request_id: operationId,
+      },
+    );
+    const renameResult = parsePetRenameResult(renameData);
+    if (renameError || !renameResult || renameResult.status !== 'renamed') {
+      await recordRenameAudit({
+        action: 'pets.rename_failed',
+        beforeName: pet.name,
+        afterName: name,
+        success: false,
+        errorMessage: 'rename_not_confirmed',
+      });
+      await this.replyPetsUnavailable(interaction);
+      return;
+    }
+
+    await recordRenameAudit({
+      action: 'pets.renamed',
+      beforeName: renameResult.oldName,
+      afterName: renameResult.newName,
+      success: true,
+    });
+
+    if (renameResult.replayed) {
+      await interaction.reply({
+        content: `⏳ That pet rename was already processed. Your pet is named **${renameResult.newName}**.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await interaction.reply({ content: `✅ Your pet is now named **${renameResult.newName}**!` });
   }
 
   async battlePet(interaction: ChatInputCommandInteraction): Promise<void> {

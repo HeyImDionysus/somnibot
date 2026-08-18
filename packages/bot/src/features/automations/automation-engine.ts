@@ -25,6 +25,8 @@ import {
   MassActionHoldService,
   type MassActionHoldRow,
 } from './mass-action-hold.js';
+import { AutomationActionResumeRunner } from './action-resume-runner.js';
+import { writeAuditLog } from '../../services/audit.js';
 
 /**
  * A stable, uuid-shaped id derived from a durable seed. Same seed → same id, so
@@ -101,6 +103,7 @@ export class AutomationEngine {
   private loader: AutomationLoader;
   private rateLimiter: AutomationRateLimiter;
   private executionLogger: ExecutionLogger;
+  private actionResumeRunner: AutomationActionResumeRunner;
   private massActionHolds: MassActionHoldService;
   private alertService: AlertService | null;
   private eventHandler: ((event: PlatformEvent) => Promise<void>) | null = null;
@@ -163,6 +166,12 @@ export class AutomationEngine {
     this.loader = new AutomationLoader(supabase, guild.id);
     this.rateLimiter = new AutomationRateLimiter(valkey);
     this.executionLogger = new ExecutionLogger(supabase);
+    this.actionResumeRunner = new AutomationActionResumeRunner({
+      guild,
+      supabase,
+      rateLimiter: () => this.rateLimiter,
+      executionLogger: this.executionLogger,
+    });
     this.massActionHolds = new MassActionHoldService(supabase, guild);
     this.alertService = alertService ?? null;
   }
@@ -210,8 +219,7 @@ export class AutomationEngine {
       log.error('Failed to reconcile interrupted mass actions:', err);
     }
     try {
-      // Immediate-path twin of the hold recovery above: rows stranded
-      // between the actions marker and finalize turn truthful at boot.
+      await this.actionResumeRunner.recover();
       await this.executionLogger.finalizeStaleStartedSweep(this.guild.id);
     } catch (err) {
       log.error('Failed to sweep interrupted immediate executions:', err);
@@ -449,22 +457,46 @@ export class AutomationEngine {
       return;
     }
     if (ctx.member) {
-      const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
-      if (!allowed) {
-        log.info(`Rate limited: ${automation.name} for user ${ctx.member.id}`);
-        return;
-      }
+      try {
+        const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
+        if (!allowed) {
+          log.info(`Rate limited: ${automation.name} for user ${ctx.member.id}`);
+          return;
+        }
 
-      // Custom per-automation rate limit
-      if (automation.rateLimitPerUser && automation.rateLimitWindowSeconds) {
-        const customAllowed = await this.rateLimiter.allowCustom(
-          this.guild.id,
-          automation.id,
-          ctx.member.id,
-          automation.rateLimitPerUser,
-          automation.rateLimitWindowSeconds,
-        );
-        if (!customAllowed) return;
+        // Custom per-automation rate limit
+        if (automation.rateLimitPerUser && automation.rateLimitWindowSeconds) {
+          const customAllowed = await this.rateLimiter.allowCustom(
+            this.guild.id,
+            automation.id,
+            ctx.member.id,
+            automation.rateLimitPerUser,
+            automation.rateLimitWindowSeconds,
+          );
+          if (!customAllowed) return;
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Rate limiter unavailable';
+        await writeAuditLog(this.supabase, {
+          guildId: this.guild.id,
+          actorType: 'automation',
+          actorId: automation.id,
+          action: 'automation.rate_limiter_down',
+          category: 'automations',
+          targetType: 'member',
+          targetId: ctx.member.id,
+          details: {
+            automation_id: automation.id,
+            automation_name: automation.name,
+            trigger: event.type,
+            occurrence_id: ctx.occurrenceId,
+          },
+          correlationId: `automation:${automation.id}:${ctx.occurrenceId}`,
+          occurrenceKey: `automation.rate_limiter_down:${automation.id}:${ctx.occurrenceId}`,
+          success: false,
+          errorMessage,
+        });
+        return;
       }
     }
 
@@ -666,6 +698,7 @@ export class AutomationEngine {
     };
 
     let actionResult: { executed: number; failed: number; errors: string[] };
+    let actionPlanStarted = false;
     try {
       // Durable point of no return FIRST: rate-limit counters are consumed by
       // filterBulkRateLimits, so a marker failure after them would release
@@ -737,7 +770,15 @@ export class AutomationEngine {
         // one-shot actions (channel message, …) still run once for the
         // occurrence — the approved-hold path behaves the same way when
         // release-time limits empty its target set.
-        const oneShotResult = await this.executeResolvedActions(oneShotActions, actionCtx, []);
+        const oneShotResult = claimRowId
+          ? await this.actionResumeRunner.execute({
+              executionId: claimRowId,
+              actions: oneShotActions,
+              context: actionCtx,
+              affectedMemberIds: [],
+            })
+          : await this.executeResolvedActions(oneShotActions, actionCtx, []);
+        actionPlanStarted = claimRowId !== null;
         actionResult = {
           ...oneShotResult,
           errors: [
@@ -746,11 +787,15 @@ export class AutomationEngine {
           ],
         };
       } else {
-        actionResult = await this.executeResolvedActions(
-          actions,
-          actionCtx,
-          rateLimitedMemberIds,
-        );
+        actionResult = claimRowId
+          ? await this.actionResumeRunner.execute({
+              executionId: claimRowId,
+              actions,
+              context: actionCtx,
+              affectedMemberIds: rateLimitedMemberIds,
+            })
+          : await this.executeResolvedActions(actions, actionCtx, rateLimitedMemberIds);
+        actionPlanStarted = claimRowId !== null;
       }
     } finally {
       this._activeDepths.delete(execId);
@@ -771,6 +816,9 @@ export class AutomationEngine {
     };
 
     await this.executionLogger.finalize(claimRowId, result);
+    if (claimRowId && actionPlanStarted) {
+      await this.actionResumeRunner.complete(claimRowId);
+    }
 
     // V53 Phase 2: Track success/failure for alert service
     if (this.alertService) {
@@ -1096,6 +1144,7 @@ export class AutomationEngine {
         log.error('Failed to reconcile expired mass-action leases:', err);
       }
       try {
+        await this.actionResumeRunner.recover();
         await this.executionLogger.finalizeStaleStartedSweep(this.guild.id);
       } catch (err) {
         log.error('Failed to sweep interrupted immediate executions:', err);

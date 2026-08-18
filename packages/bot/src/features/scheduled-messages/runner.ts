@@ -52,6 +52,8 @@ interface ScheduledMessage {
   current_sends: number;
   active: boolean;
   last_sent_at: string | null;
+  next_occurrence_at: string | null;
+  updated_at: string;
   status: string | null;
   last_error: string | null;
   failed_at: string | null;
@@ -147,6 +149,12 @@ function dateInTimezone(date: Date, timezone: string): Date {
   } catch {
     return date; // Fallback to UTC
   }
+}
+
+function readObjectString(value: unknown, field: string): string | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const fieldValue = Reflect.get(value, field);
+  return typeof fieldValue === 'string' ? fieldValue : null;
 }
 
 /**
@@ -275,20 +283,19 @@ export class ScheduledMessageRunner {
         // Check max sends
         if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) continue;
 
-        // Convert now to schedule's timezone
-        const localNow = dateInTimezone(now, schedule.timezone || 'UTC');
-
-        // Check if cron matches
-        if (!matchesCron(schedule.cron_expression, localNow)) continue;
-
-        // Prevent double-send: check if we already sent this minute
-        if (schedule.last_sent_at) {
-          const lastSent = new Date(schedule.last_sent_at);
-          const diffMs = now.getTime() - lastSent.getTime();
-          if (diffMs < 55_000) continue; // Skip if sent less than 55s ago
+        const nextOccurrenceMs = Date.parse(schedule.next_occurrence_at ?? '');
+        let occurrenceAt: Date;
+        if (Number.isFinite(nextOccurrenceMs)) {
+          if (nextOccurrenceMs > now.getTime()) continue;
+          occurrenceAt = new Date(nextOccurrenceMs);
+        } else {
+          const localNow = dateInTimezone(now, schedule.timezone || 'UTC');
+          if (!matchesCron(schedule.cron_expression, localNow)) continue;
+          occurrenceAt = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
+          if (schedule.last_sent_at && now.getTime() - Date.parse(schedule.last_sent_at) < 55_000) {
+            continue;
+          }
         }
-
-        const occurrenceAt = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
         await this.sendMessage(schedule, occurrenceAt);
       } catch (err) {
         log.error(`Error for schedule ${schedule.id}:`, err);
@@ -600,10 +607,11 @@ export class ScheduledMessageRunner {
     // The reservation stamp bumped the occurrence generation; refresh the
     // baseline so the send-boundary recheck below compares against OUR
     // current claim, not the pre-reserve snapshot.
+    let scheduleReservationUpdatedAt: string | null = null;
     {
       const { data: baseline, error: baselineError } = await this.supabase
         .from('discord_operation_occurrences')
-        .select('status, updated_at')
+        .select('status, updated_at, result')
         .eq('id', occurrenceId)
         .maybeSingle();
       if (
@@ -618,6 +626,7 @@ export class ScheduledMessageRunner {
         return;
       }
       occurrenceClaimUpdatedAt = baseline.updated_at;
+      scheduleReservationUpdatedAt = readObjectString(baseline.result, 'scheduleUpdatedAt');
     }
 
     let embed: EmbedBuilder | null = null;
@@ -666,21 +675,39 @@ export class ScheduledMessageRunner {
     // this check and channel.send remains the documented at-least-once
     // corner, now nanoscopic instead of minutes wide.)
     {
-      const { data: sendGate, error: sendGateError } = await this.supabase
-        .from('discord_operation_occurrences')
-        .select('status, updated_at')
-        .eq('id', occurrenceId)
-        .maybeSingle();
+      const [occurrenceGate, scheduleGate] = await Promise.all([
+        this.supabase
+          .from('discord_operation_occurrences')
+          .select('status, updated_at')
+          .eq('id', occurrenceId)
+          .maybeSingle(),
+        this.supabase
+          .from('scheduled_messages')
+          .select('active,status,next_occurrence_at,updated_at')
+          .eq('id', schedule.id)
+          .eq('guild_id', this.guild.id)
+          .maybeSingle(),
+      ]);
+      const verifiesScheduleGeneration = !reclaimedStaleClaim
+        && scheduleReservationUpdatedAt !== null;
       if (
-        sendGateError
-        || !sendGate
-        || sendGate.status !== 'claimed'
-        || sendGate.updated_at !== occurrenceClaimUpdatedAt
+        occurrenceGate.error
+        || !occurrenceGate.data
+        || occurrenceGate.data.status !== 'claimed'
+        || occurrenceGate.data.updated_at !== occurrenceClaimUpdatedAt
+        || (verifiesScheduleGeneration && (
+          scheduleGate.error
+          || !scheduleGate.data
+          || scheduleGate.data.active !== true
+          || scheduleGate.data.status !== 'active'
+          || Date.parse(String(scheduleGate.data.next_occurrence_at)) !== occurrenceAt.getTime()
+          || scheduleGate.data.updated_at !== scheduleReservationUpdatedAt
+        ))
       ) {
         log.warn(
           `Occurrence ownership moved before the send for schedule ${schedule.id} `
           + `(${occurrenceAt.toISOString()}); the current holder owns the delivery.`,
-          { error: sendGateError?.message ?? null },
+          { error: occurrenceGate.error?.message ?? scheduleGate.error?.message ?? null },
         );
         return;
       }
@@ -711,12 +738,19 @@ export class ScheduledMessageRunner {
       await this.markFailed(schedule, `send_failed:${sent.error}`, occurrenceId);
       return;
     }
-    await completeDiscordOccurrence(
-      this.supabase,
-      occurrenceId,
-      sent.messageId,
-      { channelId: schedule.channel_id, dueAt: occurrenceAt.toISOString() },
-    ).catch((err) => log.error('Failed to complete scheduled occurrence:', { error: String(err) }));
+    const completion = await this.supabase.rpc('complete_scheduled_message_send', {
+      p_schedule_id: schedule.id,
+      p_guild_id: this.guild.id,
+      p_occurrence_id: occurrenceId,
+      p_occurrence_at: occurrenceAt.toISOString(),
+      p_resource_id: sent.messageId,
+    });
+    if (completion.error || completion.data !== true) {
+      log.error('Failed to complete scheduled occurrence:', {
+        error: completion.error?.message ?? 'occurrence no longer claimable',
+      });
+      return;
+    }
 
     this.eventBus.emit('scheduled_message.sent', this.guild.id, {
       scheduleId: schedule.id,
@@ -820,7 +854,13 @@ export class ScheduledMessageRunner {
     const now = new Date();
     for (const schedule of this.schedules) {
       try {
-        const baselineStr = schedule.last_sent_at ?? schedule.start_date;
+        const persistedNextMs = Date.parse(schedule.next_occurrence_at ?? '');
+        if (Number.isFinite(persistedNextMs) && persistedNextMs >= now.getTime()) continue;
+        const baselineStr = schedule.last_sent_at
+          ?? schedule.start_date
+          ?? (Number.isFinite(persistedNextMs)
+            ? new Date(persistedNextMs - 60_000).toISOString()
+            : null);
         if (!baselineStr) continue;
         const baseline = new Date(baselineStr);
         if (Number.isNaN(baseline.getTime())) continue;
@@ -829,7 +869,12 @@ export class ScheduledMessageRunner {
         if (schedule.max_sends != null && schedule.current_sends >= schedule.max_sends) continue;
 
         const lastOcc = this.lastOccurrenceBefore(schedule, now);
-        if (!lastOcc || lastOcc.getTime() <= baseline.getTime()) continue;
+        if (!lastOcc) continue;
+        if (Number.isFinite(persistedNextMs)) {
+          if (lastOcc.getTime() < persistedNextMs) continue;
+        } else if (lastOcc.getTime() <= baseline.getTime()) {
+          continue;
+        }
 
         if ((schedule.missed_run_policy ?? this.defaultMissedPolicy) === 'send-latest') {
           // Fire exactly one catch-up now; sendMessage's atomic claim prevents a
@@ -860,13 +905,24 @@ export class ScheduledMessageRunner {
     // "now" made the next legitimate tick look like a duplicate to the
     // ordinary send guard (a minutely schedule recovered at :30 lost its :00
     // of the following minute). lastOcc still prevents repeat notices.
-    const { data: won, error } = await this.supabase
-      .from('scheduled_messages')
-      .update({ last_sent_at: lastOcc.toISOString() })
-      .eq('id', schedule.id)
-      .or(`last_sent_at.is.null,last_sent_at.lt.${lastOcc.toISOString()}`)
-      .select('id');
-    if (error || !won || won.length === 0) return;
+    const persistedNextMs = Date.parse(schedule.next_occurrence_at ?? '');
+    if (Number.isFinite(persistedNextMs)) {
+      const skipped = await this.supabase.rpc('skip_scheduled_message_occurrences', {
+        p_schedule_id: schedule.id,
+        p_guild_id: this.guild.id,
+        p_expected_next_occurrence_at: new Date(persistedNextMs).toISOString(),
+        p_last_occurrence_at: lastOcc.toISOString(),
+      });
+      if (skipped.error || skipped.data !== true) return;
+    } else {
+      const { data: won, error } = await this.supabase
+        .from('scheduled_messages')
+        .update({ last_sent_at: lastOcc.toISOString() })
+        .eq('id', schedule.id)
+        .or(`last_sent_at.is.null,last_sent_at.lt.${lastOcc.toISOString()}`)
+        .select('id');
+      if (error || !won || won.length === 0) return;
+    }
 
     const missedCount = this.countOccurrences(schedule, baseline, now);
     // Persisted cursor advancement is the occurrence transition.  Audit it
@@ -905,7 +961,12 @@ export class ScheduledMessageRunner {
         for (let attempt = 1; attempt <= 3; attempt++) {
           const { error: rollbackError } = await this.supabase
             .from('scheduled_messages')
-            .update({ last_sent_at: baseline.toISOString() })
+            .update({
+              last_sent_at: baseline.toISOString(),
+              ...(Number.isFinite(persistedNextMs)
+                ? { next_occurrence_at: new Date(persistedNextMs).toISOString() }
+                : {}),
+            })
             .eq('id', schedule.id)
             .eq('last_sent_at', lastOcc.toISOString());
           if (!rollbackError) break;

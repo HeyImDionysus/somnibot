@@ -14,7 +14,55 @@ if (!manifestDirectory || !outputPath) {
   throw new Error('Usage: node scripts/classify-fleet-gates.mjs <manifest-directory> <output-json>');
 }
 
-function routeGate({ channel, reason = '', promise = '' }, domainId) {
+const databaseProofAuditCases = new Set([
+  ...['DEF', 'SET-A', 'SET-B', 'DEPFAIL', 'RETRY', 'RESTART', 'XGUILD'].map(
+    (scenario) => `game-economy-gathering:${scenario}:audit`,
+  ),
+  'game-economy-crafting:RETRY:audit',
+  'game-economy-shop-market:RETRY:audit',
+  'game-economy-wallet-rewards:RETRY:audit',
+  'game-economy-wallet-rewards:XGUILD:audit',
+  'commerce-paypal:RETRY:audit',
+  'moderation-automod:RETRY:audit',
+  'moderation-infractions-appeals:RETRY:audit',
+  'moderation-infractions-appeals:RACE:audit',
+  'community-profiles:RETRY:audit',
+].map((key) => key.toLowerCase()));
+const statisticsDiscordScenarios = new Set([
+  'DEF', 'SET-A', 'SET-B', 'UNAUTH', 'DEPFAIL', 'RETRY', 'REPLAY', 'RESTART', 'RACE', 'XGUILD', 'CLEANUP',
+]);
+
+function routeGate({ channel, reason = '', promise = '', class: assertionClass, scenario }, domainId) {
+  const exactCase = `${domainId}:${scenario}:${assertionClass}`.toLowerCase();
+  if (databaseProofAuditCases.has(exactCase)) {
+    return 'database-proof-adapter';
+  }
+
+  // Statistics and temporary-channel records sometimes mention a voice
+  // channel, but their required proof is Discord channel readback, not
+  // Lavalink playback. The launcher has two distinct proof surfaces.
+  if (
+    domainId === 'community-statistics-channels'
+    && assertionClass === 'Discord'
+    && statisticsDiscordScenarios.has(scenario)
+  ) {
+    return 'live-discord-readback';
+  }
+  if (
+    domainId === 'community-temporary-channels'
+    && scenario === 'CLEANUP'
+    && assertionClass === 'Discord'
+  ) {
+    return 'live-discord-readback';
+  }
+  if (
+    domainId === 'infrastructure-launcher'
+    && scenario === 'SET-A'
+    && (assertionClass === 'database-RLS' || assertionClass === 'Discord')
+  ) {
+    return assertionClass === 'database-RLS' ? 'database-proof-adapter' : 'live-discord-readback';
+  }
+
   const detail = `${domainId} ${reason} ${promise}`.toLowerCase();
 
   // Route by the surface that must actually be exercised before falling back

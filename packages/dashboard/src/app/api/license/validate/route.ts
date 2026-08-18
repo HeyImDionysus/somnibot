@@ -15,9 +15,60 @@ import { rateLimits } from '@/lib/api/rate-limit';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { licenseUnavailable } from '@/lib/api/license-status';
 import { getClientIp } from '@/lib/api/client-ip';
+import { writeCommerceAudit } from '@/lib/commerce-audit';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
+}
+
+type LicenseUnavailableAudit = {
+  readonly productId: string;
+  readonly keyHash: string;
+  readonly cause:
+    | 'authoritative_lookup_failed'
+    | 'membership_lookup_failed'
+    | 'device_session_failed';
+  readonly guildId?: string;
+};
+
+async function auditLicenseUnavailable(
+  supabase: SupabaseClient,
+  outage: LicenseUnavailableAudit,
+): Promise<void> {
+  let guildId = outage.guildId;
+  if (!guildId) {
+    try {
+      const { data, error } = await supabase
+        .from('products')
+        .select('guild_id')
+        .eq('id', outage.productId)
+        .maybeSingle();
+      if (error || !data?.guild_id) return;
+      guildId = data.guild_id;
+    } catch (error) {
+      console.error(
+        '[License] Failed to resolve guild for unavailable validation audit:',
+        error instanceof Error ? error.message : String(error),
+      );
+      return;
+    }
+  }
+  if (!guildId) return;
+
+  const outageWindow = Math.floor(Date.now() / 60_000);
+  const occurrence = sha256(`${outage.cause}:${outage.keyHash}:${outageWindow}`).slice(0, 24);
+  await writeCommerceAudit(supabase, {
+    guildId,
+    actorType: 'system',
+    actorId: 'license-validator',
+    action: 'license.validate_unavailable',
+    targetType: 'product',
+    targetId: outage.productId,
+    details: { cause: outage.cause },
+    occurrenceKey: `license.validate_unavailable:${outage.cause}:${occurrence}`,
+    success: false,
+  });
 }
 
 // ── Composite lookup result shape ────────────────────────────
@@ -101,6 +152,11 @@ export async function POST(req: NextRequest) {
     // terminal. Report it as undetermined instead: HTTP 503 +
     // status 'service_unavailable', which the SDK handles non-terminally.
     await logValidation(supabase, null, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+    await auditLicenseUnavailable(supabase, {
+      productId: product_id,
+      keyHash,
+      cause: 'authoritative_lookup_failed',
+    });
     return licenseUnavailable('License/validate license_validate_lookup', lookupError);
   }
 
@@ -168,6 +224,12 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
     if (memberError) {
       await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      await auditLicenseUnavailable(supabase, {
+        productId: product_id,
+        keyHash,
+        cause: 'membership_lookup_failed',
+        guildId: result.product_guild_id,
+      });
       return licenseUnavailable('License/validate guild membership', memberError);
     }
     if (!member) {
@@ -314,6 +376,12 @@ export async function POST(req: NextRequest) {
     // cached validation keeps working on offline grace while we recover.
     if (deviceError) {
       await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      await auditLicenseUnavailable(supabase, {
+        productId: product_id,
+        keyHash,
+        cause: 'device_session_failed',
+        guildId: result.product_guild_id,
+      });
       return licenseUnavailable('License/validate license_validate_device', deviceError);
     }
 
@@ -343,6 +411,12 @@ export async function POST(req: NextRequest) {
     // a failure to validate rather than silently issuing a seatless success.
     if (!deviceResult?.session_id && deviceResult?.status !== 'over_device_limit') {
       await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      await auditLicenseUnavailable(supabase, {
+        productId: product_id,
+        keyHash,
+        cause: 'device_session_failed',
+        guildId: result.product_guild_id,
+      });
       return licenseUnavailable(
         'License/validate license_validate_device',
         { message: `RPC returned no session (status=${String(deviceResult?.status ?? 'null')})` },

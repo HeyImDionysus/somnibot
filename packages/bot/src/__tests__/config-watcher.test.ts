@@ -5,10 +5,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const loggerMocks = vi.hoisted(() => ({ error: vi.fn() }));
+
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({
-    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+    info: vi.fn(), warn: vi.fn(), error: loggerMocks.error, debug: vi.fn(),
   }),
 }));
 
@@ -195,6 +197,81 @@ describe('ConfigWatcher', () => {
     expect(mocks.invalidateBrandKitCache).toHaveBeenCalledWith('guild-1');
     // branding is a targeted invalidation — not an economy-wide sweep
     expect(mocks.invalidateEconomyCache).not.toHaveBeenCalled();
+  });
+
+  it('reloads the active music manager when music config changes', async () => {
+    const reloadMusic = vi.fn().mockResolvedValue(undefined);
+    const localWatcher = new ConfigWatcher(
+      makeGuild(),
+      makeSupa() as never,
+      eventBus,
+      makeValkey(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onboardingReload,
+      reloadMusic,
+    );
+    localWatcher.start();
+
+    await configHandler({
+      guildId: 'guild-1',
+      data: { section: 'music', changedBy: 'owner', changes: { music_enabled: true } },
+    });
+
+    expect(reloadMusic).toHaveBeenCalledOnce();
+    expect(reloadMusic).toHaveBeenCalledWith(true);
+  });
+
+  it('passes a disabled music flag to the runtime lifecycle callback', async () => {
+    const reloadMusic = vi.fn().mockResolvedValue(undefined);
+    const localWatcher = new ConfigWatcher(
+      makeGuild(),
+      makeSupa() as never,
+      eventBus,
+      makeValkey(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onboardingReload,
+      reloadMusic,
+    );
+    localWatcher.start();
+
+    await configHandler({
+      guildId: 'guild-1',
+      data: { section: 'music', changedBy: 'owner', changes: { music_enabled: false } },
+    });
+
+    expect(reloadMusic).toHaveBeenCalledOnce();
+    expect(reloadMusic).toHaveBeenCalledWith(false);
+  });
+
+  it('reports a rejected music reload without retrying or duplicating the lifecycle callback', async () => {
+    const reloadMusic = vi.fn().mockRejectedValue(new Error('music reload failed'));
+    const localWatcher = new ConfigWatcher(
+      makeGuild(),
+      makeSupa() as never,
+      eventBus,
+      makeValkey(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onboardingReload,
+      reloadMusic,
+    );
+    localWatcher.start();
+
+    await configHandler({
+      guildId: 'guild-1',
+      data: { section: 'music', changedBy: 'owner', changes: { music_enabled: true } },
+    });
+
+    expect(reloadMusic).toHaveBeenCalledOnce();
+    expect(loggerMocks.error).toHaveBeenCalledWith('Failed to reload music:', expect.any(Error));
   });
 
   it('invalidates the brand kit cache as part of the full reload (settings/all)', async () => {

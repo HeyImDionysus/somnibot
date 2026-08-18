@@ -6,21 +6,25 @@
 import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
-  ChannelType,
-  type GuildMember,
 } from 'discord.js';
 import type { MusicPlayerManager } from './music-player.js';
 import {
   buildNowPlayingEmbed,
   buildQueueEmbed,
-  buildAddedEmbed,
-  buildPlaylistAddedEmbed,
   buildMusicErrorEmbed,
   buildMusicInfoEmbed,
   buildFilterEmbed,
   formatDuration,
 } from './music-embeds.js';
 import type { FilterPreset } from './music-filters.js';
+import type { BrandKit } from '../branding/index.js';
+import { handlePlayCommand } from './play-command.js';
+
+type MusicCommandContext = {
+  readonly musicPlayer: MusicPlayerManager;
+  readonly guildId: string;
+  readonly brandKit: BrandKit;
+};
 
 // ── Command Builders ──────────────────────────────────────
 
@@ -185,46 +189,48 @@ export async function handleMusicCommand(
 ): Promise<void> {
   const name = interaction.commandName;
   const guildId = interaction.guildId!;
+  const brandKit = await musicPlayer.getBrandKit();
+  const context: MusicCommandContext = { musicPlayer, guildId, brandKit };
 
   switch (name) {
     case 'play':
-      await handlePlay(interaction, musicPlayer);
+      await handlePlayCommand(interaction, musicPlayer, brandKit);
       break;
     case 'skip':
-      await handleSkip(interaction, musicPlayer, guildId);
+      await handleSkip(interaction, context);
       break;
     case 'stop':
-      await handleStop(interaction, musicPlayer, guildId);
+      await handleStop(interaction, context);
       break;
     case 'queue':
-      await handleQueue(interaction, musicPlayer, guildId);
+      await handleQueue(interaction, context);
       break;
     case 'np':
-      await handleNowPlaying(interaction, musicPlayer, guildId);
+      await handleNowPlaying(interaction, context);
       break;
     case 'volume':
-      await handleVolume(interaction, musicPlayer, guildId);
+      await handleVolume(interaction, context);
       break;
     case 'loop':
-      await handleLoop(interaction, musicPlayer, guildId);
+      await handleLoop(interaction, context);
       break;
     case 'shuffle':
-      await handleShuffle(interaction, musicPlayer, guildId);
+      await handleShuffle(interaction, context);
       break;
     case 'seek':
-      await handleSeek(interaction, musicPlayer, guildId);
+      await handleSeek(interaction, context);
       break;
     case 'remove':
-      await handleRemove(interaction, musicPlayer, guildId);
+      await handleRemove(interaction, context);
       break;
     case 'move':
-      await handleMove(interaction, musicPlayer, guildId);
+      await handleMove(interaction, context);
       break;
     case 'pause':
-      await handlePause(interaction, musicPlayer, guildId);
+      await handlePause(interaction, context);
       break;
     case 'filter':
-      await handleFilter(interaction, musicPlayer, guildId);
+      await handleFilter(interaction, context);
       break;
     default:
       await interaction.reply({ content: '❌ Unknown music command', ephemeral: true });
@@ -233,92 +239,36 @@ export async function handleMusicCommand(
 
 // ── Individual Handlers ───────────────────────────────────
 
-async function handlePlay(
-  interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-): Promise<void> {
-  const member = interaction.member as GuildMember;
-  const voiceChannel = member.voice.channel;
-
-  if (!voiceChannel) {
-    await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You must be in a voice channel to use this command')],
-      ephemeral: true,
-    });
-    return;
-  }
-
-  const textChannel = interaction.channel;
-  if (!textChannel || textChannel.type !== ChannelType.GuildText) {
-    await interaction.reply({
-      embeds: [buildMusicErrorEmbed('This command can only be used in a text channel')],
-      ephemeral: true,
-    });
-    return;
-  }
-
-  const query = interaction.options.getString('query', true);
-
-  await interaction.deferReply();
-
-  const result = await musicPlayer.play(query, member.id, voiceChannel, textChannel);
-
-  if (!result.success) {
-    await interaction.editReply({
-      embeds: [buildMusicErrorEmbed(result.message ?? 'Failed to play track')],
-    });
-    return;
-  }
-
-  if (result.count && result.count > 1 && result.playlistName) {
-    await interaction.editReply({
-      embeds: [buildPlaylistAddedEmbed(result.count, result.playlistName)],
-    });
-  } else if (result.entry) {
-    const queue = await musicPlayer.queueManager.getQueue(interaction.guildId!);
-    const position = queue ? queue.entries.length - queue.currentIndex : 1;
-    await interaction.editReply({
-      embeds: [buildAddedEmbed(result.entry, position)],
-    });
-  } else {
-    await interaction.editReply({
-      embeds: [buildMusicInfoEmbed(`✅ Added **${result.count ?? 1}** track(s) to the queue`)],
-    });
-  }
-}
-
 async function handleSkip(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
 
   if (isDj) {
     const result = await musicPlayer.skip(guildId, { userId: interaction.user.id, method: 'dj_force' });
     await interaction.reply({
-      embeds: [buildMusicInfoEmbed(result.message)],
+      embeds: [buildMusicInfoEmbed(result.message, brandKit)],
     });
   } else {
     const result = await musicPlayer.voteSkip(guildId, interaction.user.id);
     await interaction.reply({
       embeds: [result.success
-        ? buildMusicInfoEmbed(result.message)
-        : buildMusicErrorEmbed(result.message)],
+        ? buildMusicInfoEmbed(result.message, brandKit)
+        : buildMusicErrorEmbed(result.message, brandKit)],
     });
   }
 }
 
 async function handleStop(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'stop');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to stop playback')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to stop playback', brandKit)],
       ephemeral: true,
     });
     return;
@@ -326,38 +276,36 @@ async function handleStop(
 
   const result = await musicPlayer.stop(guildId, { userId: interaction.user.id, reason: 'command' });
   await interaction.reply({
-    embeds: [buildMusicInfoEmbed(result.message)],
+    embeds: [buildMusicInfoEmbed(result.message, brandKit)],
   });
 }
 
 async function handleQueue(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const queue = await musicPlayer.queueManager.getQueue(guildId);
   if (!queue) {
     await interaction.reply({
-      embeds: [buildMusicInfoEmbed('📭 No active queue. Use `/play` to start one.')],
+      embeds: [buildMusicInfoEmbed('📭 No active queue. Use `/play` to start one.', brandKit)],
       ephemeral: true,
     });
     return;
   }
 
   const page = interaction.options.getInteger('page') ?? 1;
-  const { embeds, components } = buildQueueEmbed(queue, page);
+  const { embeds, components } = buildQueueEmbed(queue, page, brandKit);
   await interaction.reply({ embeds, components });
 }
 
 async function handleNowPlaying(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const queue = await musicPlayer.queueManager.getQueue(guildId);
   if (!queue) {
     await interaction.reply({
-      embeds: [buildMusicInfoEmbed('📭 Nothing is playing right now.')],
+      embeds: [buildMusicInfoEmbed('📭 Nothing is playing right now.', brandKit)],
       ephemeral: true,
     });
     return;
@@ -366,7 +314,7 @@ async function handleNowPlaying(
   const current = queue.entries[queue.currentIndex];
   if (!current) {
     await interaction.reply({
-      embeds: [buildMusicInfoEmbed('📭 Nothing is playing right now.')],
+      embeds: [buildMusicInfoEmbed('📭 Nothing is playing right now.', brandKit)],
       ephemeral: true,
     });
     return;
@@ -374,20 +322,19 @@ async function handleNowPlaying(
 
   const position = musicPlayer.getPlayerPosition(guildId);
   const activeFilters = musicPlayer.getActiveFilters(guildId);
-  const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
+  const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters, brandKit);
   await interaction.reply({ embeds, components: components });
 }
 
 async function handleVolume(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'volume');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to change the volume')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to change the volume', brandKit)],
       ephemeral: true,
     });
     return;
@@ -397,21 +344,20 @@ async function handleVolume(
   const result = await musicPlayer.setVolume(guildId, level, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
-      ? buildMusicInfoEmbed(result.message)
-      : buildMusicErrorEmbed(result.message)],
+      ? buildMusicInfoEmbed(result.message, brandKit)
+      : buildMusicErrorEmbed(result.message, brandKit)],
   });
 }
 
 async function handleLoop(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'loop');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to change the loop mode')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to change the loop mode', brandKit)],
       ephemeral: true,
     });
     return;
@@ -420,20 +366,19 @@ async function handleLoop(
   const mode = interaction.options.getString('mode', true) as 'off' | 'track' | 'queue';
   const result = await musicPlayer.setLoopMode(guildId, mode, { userId: interaction.user.id });
   await interaction.reply({
-    embeds: [buildMusicInfoEmbed(result.message)],
+    embeds: [buildMusicInfoEmbed(result.message, brandKit)],
   });
 }
 
 async function handleShuffle(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'shuffle');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to shuffle the queue')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to shuffle the queue', brandKit)],
       ephemeral: true,
     });
     return;
@@ -442,21 +387,20 @@ async function handleShuffle(
   const result = await musicPlayer.shuffle(guildId, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
-      ? buildMusicInfoEmbed(result.message)
-      : buildMusicErrorEmbed(result.message)],
+      ? buildMusicInfoEmbed(result.message, brandKit)
+      : buildMusicErrorEmbed(result.message, brandKit)],
   });
 }
 
 async function handleSeek(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'seek');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to seek')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to seek', brandKit)],
       ephemeral: true,
     });
     return;
@@ -467,7 +411,7 @@ async function handleSeek(
 
   if (positionMs === null) {
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('Invalid position format. Use `1:30` or `90` (seconds)')],
+      embeds: [buildMusicErrorEmbed('Invalid position format. Use `1:30` or `90` (seconds)', brandKit)],
       ephemeral: true,
     });
     return;
@@ -476,21 +420,20 @@ async function handleSeek(
   const result = await musicPlayer.seek(guildId, positionMs, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
-      ? buildMusicInfoEmbed(result.message)
-      : buildMusicErrorEmbed(result.message)],
+      ? buildMusicInfoEmbed(result.message, brandKit)
+      : buildMusicErrorEmbed(result.message, brandKit)],
   });
 }
 
 async function handleRemove(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'remove');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to remove tracks')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to remove tracks', brandKit)],
       ephemeral: true,
     });
     return;
@@ -500,8 +443,8 @@ async function handleRemove(
   const result = await musicPlayer.remove(guildId, position, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
-      ? buildMusicInfoEmbed(result.message)
-      : buildMusicErrorEmbed(result.message)],
+      ? buildMusicInfoEmbed(result.message, brandKit)
+      : buildMusicErrorEmbed(result.message, brandKit)],
   });
 }
 
@@ -512,30 +455,28 @@ async function handleRemove(
  */
 async function handleMove(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const from = interaction.options.getInteger('from', true);
   const to = interaction.options.getInteger('to', true);
   const result = await musicPlayer.move(guildId, interaction.user.id, from, to);
   await interaction.reply({
     embeds: [result.success
-      ? buildMusicInfoEmbed(result.message)
-      : buildMusicErrorEmbed(result.message)],
+      ? buildMusicInfoEmbed(result.message, brandKit)
+      : buildMusicErrorEmbed(result.message, brandKit)],
     ephemeral: !result.success,
   });
 }
 
 async function handlePause(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'pause');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to pause/resume')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to pause/resume', brandKit)],
       ephemeral: true,
     });
     return;
@@ -544,21 +485,20 @@ async function handlePause(
   const result = await musicPlayer.togglePause(guildId, { userId: interaction.user.id });
   await interaction.reply({
     embeds: [result.success
-      ? buildMusicInfoEmbed(result.message)
-      : buildMusicErrorEmbed(result.message)],
+      ? buildMusicInfoEmbed(result.message, brandKit)
+      : buildMusicErrorEmbed(result.message, brandKit)],
   });
 }
 
 async function handleFilter(
   interaction: ChatInputCommandInteraction,
-  musicPlayer: MusicPlayerManager,
-  guildId: string,
+  { musicPlayer, guildId, brandKit }: MusicCommandContext,
 ): Promise<void> {
   const isDj = await musicPlayer.isDJ(interaction.user.id);
   if (!isDj) {
     musicPlayer.auditPermissionDenied(interaction.user.id, 'filter');
     await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You need the DJ role to change filters')],
+      embeds: [buildMusicErrorEmbed('You need the DJ role to change filters', brandKit)],
       ephemeral: true,
     });
     return;
@@ -575,7 +515,7 @@ async function handleFilter(
   if (!preset && !hasCustomTimescale) {
     const active = musicPlayer.getActiveFilters(guildId);
     await interaction.reply({
-      embeds: [buildFilterEmbed('🎛️ Current audio filters', active)],
+      embeds: [buildFilterEmbed('🎛️ Current audio filters', active, brandKit)],
     });
     return;
   }
@@ -589,7 +529,7 @@ async function handleFilter(
     );
     if (!result.success) {
       await interaction.reply({
-        embeds: [buildMusicErrorEmbed(result.message)],
+        embeds: [buildMusicErrorEmbed(result.message, brandKit)],
         ephemeral: true,
       });
       return;
@@ -599,7 +539,7 @@ async function handleFilter(
     if (!hasCustomTimescale) {
       const active = musicPlayer.getActiveFilters(guildId);
       await interaction.reply({
-        embeds: [buildFilterEmbed(result.message, active)],
+        embeds: [buildFilterEmbed(result.message, active, brandKit)],
       });
       return;
     }
@@ -626,7 +566,7 @@ async function handleFilter(
       // The preset already landed even though the custom half could not.
       if (preset) musicPlayer.auditFilterActionApplied(interaction.user.id, preset);
       await interaction.reply({
-        embeds: [buildMusicErrorEmbed(result.message)],
+        embeds: [buildMusicErrorEmbed(result.message, brandKit)],
         ephemeral: true,
       });
       return;
@@ -644,7 +584,7 @@ async function handleFilter(
 
     const active = musicPlayer.getActiveFilters(guildId);
     await interaction.reply({
-      embeds: [buildFilterEmbed(result.message, active)],
+      embeds: [buildFilterEmbed(result.message, active, brandKit)],
     });
     return;
   }

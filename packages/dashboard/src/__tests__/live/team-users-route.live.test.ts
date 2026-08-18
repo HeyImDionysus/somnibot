@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -42,18 +43,44 @@ function writeFleetProofReceipt(): void {
   if (!candidateSha || !/^[0-9a-f]{40}$/i.test(candidateSha)) {
     throw new Error('Fleet proof receipt requires an exact 40-character candidate SHA.');
   }
+  const exactCandidateSha = candidateSha.toLowerCase();
+  const observedAt = new Date().toISOString();
+  const artifactName = 'fleet-artifact-administration-team-management-def-audit.json';
+  const sensor = 'dashboard-live-route:team-users-route.live.test.ts';
+  const observation = 'POST /api/rbac/users created one pending team invitation and one team.invite_sent audit row through the real owner session and real local Supabase route.';
+  const witness = `${JSON.stringify({
+    schemaVersion: 1,
+    candidateSha: exactCandidateSha,
+    domainId: 'administration-team-management',
+    scenario: 'DEF',
+    assertionClass: 'audit',
+    sensor,
+    observedAt,
+    result: {
+      responseStatus: 200,
+      pendingInvitationCount: 1,
+      directRoleGrantCount: 0,
+      inviteAuditCountMinimum: 1,
+    },
+  }, null, 2)}\n`;
   mkdirSync(directory, { recursive: true });
+  writeFileSync(path.join(directory, artifactName), witness, 'utf8');
   writeFileSync(
     path.join(directory, 'fleet-proof-administration-team-management-def-audit.json'),
     `${JSON.stringify({
       schemaVersion: 1,
-      candidateSha: candidateSha.toLowerCase(),
+      candidateSha: exactCandidateSha,
       domainId: 'administration-team-management',
       proofs: [{
         scenario: 'DEF',
         assertionClass: 'audit',
-        sensor: 'dashboard-live-route:team-users-route.live.test.ts',
-        observation: 'POST /api/rbac/users created one pending team invitation and one team.invite_sent audit row through the real owner session and real local Supabase route.',
+        sensor,
+        observation,
+        observedAt,
+        artifact: {
+          path: artifactName,
+          sha256: createHash('sha256').update(witness).digest('hex'),
+        },
       }],
     }, null, 2)}\n`,
     'utf8',

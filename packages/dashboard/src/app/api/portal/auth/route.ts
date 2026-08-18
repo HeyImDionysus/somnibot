@@ -18,8 +18,12 @@ import { rateLimits } from '@/lib/api/rate-limit';
 import { getClientIp } from '@/lib/api/client-ip';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
-import { dbError, apiServerError } from '@/lib/api/response';
+import { apiServerError } from '@/lib/api/response';
 import { writeCommerceAudit } from '@/lib/commerce-audit';
+import {
+  exchangeCodeForUser,
+  loginDependencyFailure,
+} from '@/lib/api/portal-login-dependency';
 
 const portalAuthSchema = z.object({
   action: z.literal('login'),
@@ -31,67 +35,8 @@ const portalAuthSchema = z.object({
   guild_id: z.string().min(1).max(64),
   redirect_uri: z.string().url().max(2048).optional(),
 });
-
-
-const DiscordTokenSchema = z.object({
-  access_token: z.string().min(1),
-  token_type: z.string(),
-}).passthrough();
-
-const DiscordUserSchema = z.object({
-  id: z.string().min(1),
-  username: z.string(),
-}).passthrough();
-
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
-}
-
-const DISCORD_API = 'https://discord.com/api/v10';
-
-/**
- * Exchange a Discord OAuth2 authorization code for user identity.
- * Returns the Discord user object ({ id, username, ... }) or null on failure.
- */
-async function exchangeCodeForUser(
-  code: string,
-  redirectUri: string,
-): Promise<{ id: string; username: string } | null> {
-  const clientId = process.env.DISCORD_APPLICATION_ID;
-  const clientSecret = process.env.DISCORD_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
-
-  // Step 1: Exchange code for access token
-  const tokenRes = await fetch(`${DISCORD_API}/oauth2/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  if (!tokenRes.ok) return null;
-
-  const tokenRaw = await tokenRes.json();
-  const tokenParsed = DiscordTokenSchema.safeParse(tokenRaw);
-  if (!tokenParsed.success) return null;
-
-  // Step 2: Fetch the authenticated user's identity
-  const userRes = await fetch(`${DISCORD_API}/users/@me`, {
-    headers: { Authorization: `Bearer ${tokenParsed.data.access_token}` },
-  });
-
-  if (!userRes.ok) return null;
-
-  const userRaw = await userRes.json();
-  const userParsed = DiscordUserSchema.safeParse(userRaw);
-  if (!userParsed.success) return null;
-
-  return { id: userParsed.data.id, username: userParsed.data.username };
 }
 
 export async function POST(request: NextRequest) {
@@ -126,8 +71,14 @@ export async function POST(request: NextRequest) {
       const redirectUri = body.redirect_uri || `${origin}/portal`;
 
       // Exchange code for verified Discord identity
-      const discordUser = await exchangeCodeForUser(code, redirectUri);
-      if (!discordUser) {
+      const identity = await exchangeCodeForUser(code, redirectUri);
+      if (identity.kind === 'unavailable') {
+        return loginDependencyFailure(
+          admin,
+          { guildId: body.guild_id, code, cause: 'provider_unavailable' },
+        );
+      }
+      if (identity.kind === 'denied') {
         // Auditable refusal: OAuth exchange / identity lookup failed.
         await writeCommerceAudit(admin, {
           guildId: body.guild_id,
@@ -143,16 +94,29 @@ export async function POST(request: NextRequest) {
           { status: 401 },
         );
       }
+      const discordUser = identity.user;
 
       // Find the customer by verified Discord ID SCOPED TO THE TARGET GUILD.
       // (customers is UNIQUE(discord_id, guild_id) — an unscoped lookup bound the
       // session to an arbitrary guild for a buyer who is a customer in more than one.)
-      const { data: customer } = await admin
+      const { data: customer, error: customerError } = await admin
         .from('customers')
         .select('id, guild_id, discord_id')
         .eq('guild_id', body.guild_id)
         .eq('discord_id', discordUser.id)
         .maybeSingle();
+
+      if (customerError) {
+        return loginDependencyFailure(
+          admin,
+          {
+            guildId: body.guild_id,
+            code,
+            cause: 'account_dependency',
+            actorId: discordUser.id,
+          },
+        );
+      }
 
       if (!customer) {
         // Auditable refusal: verified identity is not a customer in this guild.
@@ -174,11 +138,22 @@ export async function POST(request: NextRequest) {
       // Guild-scoped portal policy. The migration constrains this value; keep
       // the runtime fallback bounded so a stale/malformed row can never create
       // an effectively permanent session.
-      const { data: portalConfig } = await admin
+      const { data: portalConfig, error: portalConfigError } = await admin
         .from('guild_config')
         .select('portal_session_ttl_ms')
         .eq('guild_id', customer.guild_id)
         .maybeSingle();
+      if (portalConfigError) {
+        return loginDependencyFailure(
+          admin,
+          {
+            guildId: body.guild_id,
+            code,
+            cause: 'account_dependency',
+            actorId: discordUser.id,
+          },
+        );
+      }
       const configuredTtl = Number(portalConfig?.portal_session_ttl_ms);
       const sessionTtlMs = Number.isSafeInteger(configuredTtl)
         && configuredTtl >= 3_600_000
@@ -194,7 +169,7 @@ export async function POST(request: NextRequest) {
       // V53 Phase 3 (1.9): Enforce max 3 concurrent sessions.
       // If limit reached, auto-revoke the oldest session(s).
       const MAX_CONCURRENT_SESSIONS = 3;
-      const { data: activeSessions } = await admin
+      const { data: activeSessions, error: activeSessionsError } = await admin
         .from('portal_sessions')
         .select('id, created_at')
         .eq('guild_id', customer.guild_id)
@@ -204,13 +179,36 @@ export async function POST(request: NextRequest) {
         .order('created_at', { ascending: true })
         .limit(500);
 
+      if (activeSessionsError) {
+        return loginDependencyFailure(
+          admin,
+          {
+            guildId: body.guild_id,
+            code,
+            cause: 'session_dependency',
+            actorId: discordUser.id,
+          },
+        );
+      }
+
       if (activeSessions && activeSessions.length >= MAX_CONCURRENT_SESSIONS) {
         // Revoke oldest sessions to make room
         const toRevoke = activeSessions.slice(0, activeSessions.length - MAX_CONCURRENT_SESSIONS + 1);
-        await admin
+        const { error: revokeError } = await admin
           .from('portal_sessions')
           .update({ revoked: true })
           .in('id', toRevoke.map((s) => s.id));
+        if (revokeError) {
+          return loginDependencyFailure(
+            admin,
+            {
+              guildId: body.guild_id,
+              code,
+              cause: 'session_dependency',
+              actorId: discordUser.id,
+            },
+          );
+        }
       }
 
       const { error } = await admin
@@ -225,7 +223,17 @@ export async function POST(request: NextRequest) {
           user_agent: request.headers.get('user-agent') || null,
         });
 
-      if (error) return dbError(error, 'portal/auth');
+      if (error) {
+        return loginDependencyFailure(
+          admin,
+          {
+            guildId: body.guild_id,
+            code,
+            cause: 'session_dependency',
+            actorId: discordUser.id,
+          },
+        );
+      }
 
       // Auditable state change: a portal session was issued for this buyer.
       await writeCommerceAudit(admin, {

@@ -30,6 +30,9 @@ let auditRows: Record<string, unknown>[] = [];
 
 interface AdminOpts {
   customer?: { id: string; guild_id: string; discord_id: string } | null;
+  customerError?: { message: string } | null;
+  portalConfigError?: { message: string } | null;
+  sessionInsertError?: { message: string } | null;
   session?: { customer_id: string; guild_id: string } | null;
   entitlements?: Array<{ id: string; status: string; grace_period_ends_at: string | null }>;
   file?: { id: string } | null;
@@ -39,10 +42,18 @@ function makeAdmin(opts: AdminOpts = {}) {
   return {
     from: (table: string) => {
       if (table === 'audit_logs') {
-        return { insert: (row: Record<string, unknown>) => { auditRows.push(row); return { error: null }; } };
+        const persist = (rows: Record<string, unknown> | readonly Record<string, unknown>[]) => {
+          auditRows.push(...(Array.isArray(rows) ? rows : [rows]));
+          return { error: null };
+        };
+        return { insert: persist, upsert: persist };
       }
       if (table === 'customers') {
-        const chain: any = { select: () => chain, eq: () => chain, maybeSingle: async () => ({ data: opts.customer ?? null, error: null }) };
+        const chain: any = { select: () => chain, eq: () => chain, maybeSingle: async () => ({ data: opts.customer ?? null, error: opts.customerError ?? null }) };
+        return chain;
+      }
+      if (table === 'guild_config') {
+        const chain: any = { select: () => chain, eq: () => chain, maybeSingle: async () => ({ data: null, error: opts.portalConfigError ?? null }) };
         return chain;
       }
       if (table === 'portal_sessions') {
@@ -55,7 +66,7 @@ function makeAdmin(opts: AdminOpts = {}) {
           update: () => chain,
           limit: async () => ({ data: [], error: null }),
           single: async () => ({ data: opts.session ?? null, error: null }),
-          insert: () => ({ error: null }),
+          insert: () => ({ error: opts.sessionInsertError ?? null }),
         };
         return chain;
       }
@@ -107,6 +118,65 @@ beforeEach(() => {
 });
 
 describe('POST /api/portal/auth — login audit', () => {
+  it('writes one sanitized portal.login_failed row on login dependency failure', async () => {
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeAdmin());
+    global.fetch = vi.fn(async () => {
+      throw new TypeError('provider socket exposed oauth-secret-value');
+    });
+
+    const res = await authPost(authRequest({
+      action: 'login',
+      code: 'oauth-secret-value',
+      guild_id: 'guild-1',
+    }));
+
+    expect(res.status).toBe(503);
+    expect(auditRows.filter((row) => row.action === 'portal.login_failed')).toHaveLength(1);
+    const row = auditRows.find((entry) => entry.action === 'portal.login_failed');
+    expect(row).toMatchObject({
+      guild_id: 'guild-1',
+      actor_id: 'unknown',
+      success: false,
+      occurrence_key: expect.stringMatching(/^portal\.login_failed:/),
+      details: { cause: 'provider_unavailable' },
+    });
+    expect(JSON.stringify(row)).not.toMatch(/oauth-secret-value|provider socket/i);
+  });
+
+  it('audits an account dependency failure without minting a session', async () => {
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeAdmin({
+      customerError: { message: 'customer query leaked-account@example.test' },
+    }));
+    mockDiscord(true);
+
+    const accountResponse = await authPost(authRequest({ action: 'login', code: 'oauth', guild_id: 'guild-1' }));
+    expect(accountResponse.status).toBe(503);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]).toMatchObject({
+      action: 'portal.login_failed',
+      details: { cause: 'account_dependency' },
+      success: false,
+    });
+    expect(JSON.stringify(auditRows[0])).not.toContain('leaked-account@example.test');
+  });
+
+  it('audits a session dependency failure without returning a token', async () => {
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeAdmin({
+      customer: { id: 'cust-1', guild_id: 'guild-1', discord_id: 'discord-1' },
+      sessionInsertError: { message: 'session insert leaked-token-value' },
+    }));
+    mockDiscord(true);
+    const sessionResponse = await authPost(authRequest({ action: 'login', code: 'oauth', guild_id: 'guild-1' }));
+    expect(sessionResponse.status).toBe(503);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]).toMatchObject({
+      action: 'portal.login_failed',
+      details: { cause: 'session_dependency' },
+      success: false,
+    });
+    expect(JSON.stringify(auditRows[0])).not.toContain('leaked-token-value');
+  });
+
   it('writes portal.login_succeeded when a session is issued', async () => {
     (createAdminSupabase as any).mockReturnValue(
       makeAdmin({ customer: { id: 'cust-1', guild_id: 'guild-1', discord_id: 'discord-1' } }),
@@ -142,6 +212,7 @@ describe('POST /api/portal/auth — login audit', () => {
       success: false,
     });
     expect((row?.details as Record<string, unknown>).reason).toBe('discord_auth_failed');
+    expect(auditRows.filter((entry) => entry.action === 'portal.login_failed')).toHaveLength(0);
   });
 
   it('writes a failed portal.login_denied row when identity is not a customer', async () => {

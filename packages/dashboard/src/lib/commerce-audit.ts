@@ -23,6 +23,7 @@ export interface CommerceAuditEntry {
   targetType: string;
   targetId?: string | null;
   details?: Record<string, unknown>;
+  occurrenceKey?: string;
   /** false for denied/refused attempts so they are queryable. */
   success?: boolean;
 }
@@ -36,7 +37,7 @@ export async function writeCommerceAudit(
   entry: CommerceAuditEntry,
 ): Promise<void> {
   try {
-    await admin.from('audit_logs').insert({
+    const row = {
       guild_id: entry.guildId,
       actor_type: entry.actorType ?? 'dashboard',
       actor_id: entry.actorId,
@@ -45,8 +46,17 @@ export async function writeCommerceAudit(
       target_type: entry.targetType,
       target_id: entry.targetId ?? null,
       details: entry.details ?? {},
+      occurrence_key: entry.occurrenceKey ?? null,
       success: entry.success ?? true,
-    });
+    };
+    if (entry.occurrenceKey) {
+      await admin.from('audit_logs').upsert([row], {
+        onConflict: 'guild_id,occurrence_key',
+        ignoreDuplicates: true,
+      });
+      return;
+    }
+    await admin.from('audit_logs').insert(row);
   } catch {
     // Audit logging must never break the commerce flow.
   }

@@ -91,7 +91,7 @@ describe.skipIf(!reachable)('LIVE: /api/store/products (real-session harness)', 
 
   it('GET lists the created product for the guild', async () => {
     const { GET } = await import('../../app/api/store/products/route');
-    const res = await GET();
+    const res = await GET(jsonReq('GET'));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { success: boolean; data: Array<{ id: string; name: string }> };
     expect(body.data.some((p) => p.id === productId && p.name === 'E2E Supporter Badge')).toBe(true);

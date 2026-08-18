@@ -139,10 +139,12 @@ describe('community-profiles audit', () => {
   it('emits profile.updated on /title save', async () => {
     const { ProfilesManager } = await import('../features/profiles/profiles-manager.js');
     const eventBus = bus();
-    const supa = makeSupa({
-      guild_config: { data: { profiles_enabled: true, title_max_length: 64, content_filter_mode: 'lenient' }, error: null },
-      economy_profiles: { data: { user_id: 'u1' }, error: null },
-    });
+    const supa = makeSupa(
+      {
+        guild_config: { data: { profiles_enabled: true, title_max_length: 64, content_filter_mode: 'lenient' }, error: null },
+      },
+      vi.fn(async () => ({ data: { outcome: 'applied' }, error: null })),
+    );
     const mgr = new ProfilesManager(supa, eventBus);
     const interaction: any = {
       id: 'int1',
@@ -461,7 +463,10 @@ describe('community-scheduled-messages audit', () => {
         },
         error: null,
       },
-    }, vi.fn(async () => ({ data: 1, error: null })));
+    }, vi.fn(async (name: string) => ({
+      data: name === 'complete_scheduled_message_send' ? true : 1,
+      error: null,
+    })));
     const runner = new ScheduledMessageRunner(guild, supa, eventBus);
 
     await (runner as any).sendMessage({

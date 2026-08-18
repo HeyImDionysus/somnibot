@@ -20,8 +20,17 @@
  *   updater:install         — quit and install the downloaded update
  */
 
+import { randomUUID } from 'node:crypto';
 import { BrowserWindow, ipcMain } from 'electron';
-import { type LauncherAuditEntry } from './audit-log.js';
+import {
+  buildLauncherAttemptAuditEntry,
+  LauncherAttemptTracker,
+  type LauncherAttemptCode,
+  type LauncherAttemptIdentity,
+  type LauncherAttemptPhase,
+  type LauncherAttemptResult,
+  type LauncherAuditEntry,
+} from './audit-log.js';
 
 /** Whether a downloaded update is staged and ready to install. */
 let updateReady = false;
@@ -35,6 +44,85 @@ export interface UpdaterOptions {
 }
 
 let auditSink: ((entry: LauncherAuditEntry) => void) | undefined;
+
+export interface UpdaterAttemptRuntime {
+  readonly tracker: LauncherAttemptTracker;
+  readonly now: () => string;
+  readonly recordAudit: (entry: LauncherAuditEntry) => void;
+}
+
+const defaultUpdaterAttemptRuntime: UpdaterAttemptRuntime = {
+  tracker: new LauncherAttemptTracker(randomUUID),
+  now: () => new Date().toISOString(),
+  recordAudit: (entry) => auditSink?.(entry),
+};
+
+interface UpdaterAttemptOutcome {
+  readonly identity: LauncherAttemptIdentity;
+  readonly phase: LauncherAttemptPhase;
+  readonly result: LauncherAttemptResult;
+  readonly code: LauncherAttemptCode;
+}
+
+function recordUpdaterAttempt(outcome: UpdaterAttemptOutcome, runtime: UpdaterAttemptRuntime): void {
+  runtime.recordAudit(buildLauncherAttemptAuditEntry({
+    operationId: outcome.identity.operationId,
+    attempt: outcome.identity.attempt,
+    phase: outcome.phase,
+    result: outcome.result,
+    code: outcome.code,
+    message: '',
+    timestamp: runtime.now(),
+  }));
+  runtime.tracker.finish(outcome.phase, outcome.result);
+}
+
+export interface UpdaterOperation {
+  readonly phase: 'updater-check' | 'updater-download';
+  readonly execute: () => Promise<unknown>;
+  readonly successCode: LauncherAttemptCode;
+  readonly retryCode: LauncherAttemptCode;
+}
+
+export async function runUpdaterOperation(
+  operation: UpdaterOperation,
+  runtime: UpdaterAttemptRuntime = defaultUpdaterAttemptRuntime,
+): Promise<{ ok: boolean; error?: string }> {
+  const identity = runtime.tracker.next(operation.phase);
+
+  try {
+    await operation.execute();
+    recordUpdaterAttempt({
+      identity,
+      phase: operation.phase,
+      result: 'success',
+      code: operation.successCode,
+    }, runtime);
+    return { ok: true };
+  } catch (error) {
+    recordUpdaterAttempt({
+      identity,
+      phase: operation.phase,
+      result: 'retry',
+      code: operation.retryCode,
+    }, runtime);
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function recordUnavailableUpdaterAttempt(
+  phase: UpdaterOperation['phase'],
+  runtime: UpdaterAttemptRuntime = defaultUpdaterAttemptRuntime,
+): { ok: false; error: string } {
+  const identity = runtime.tracker.next(phase);
+  recordUpdaterAttempt({
+    identity,
+    phase,
+    result: 'failure',
+    code: 'updater_unavailable',
+  }, runtime);
+  return { ok: false, error: 'Updater not available in dev mode.' };
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -139,21 +227,21 @@ async function initUpdaterWithModule(mod: typeof import('electron-updater'), opt
   /* ── IPC Handlers ──────────────────────────────────────────────── */
 
   ipcMain.handle('updater:check', async () => {
-    try {
-      await autoUpdater.checkForUpdates();
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
+    return runUpdaterOperation({
+      phase: 'updater-check',
+      execute: () => autoUpdater.checkForUpdates(),
+      successCode: 'updater_check_completed',
+      retryCode: 'updater_check_failed',
+    });
   });
 
   ipcMain.handle('updater:download', async () => {
-    try {
-      await autoUpdater.downloadUpdate();
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
+    return runUpdaterOperation({
+      phase: 'updater-download',
+      execute: () => autoUpdater.downloadUpdate(),
+      successCode: 'updater_download_completed',
+      retryCode: 'updater_download_failed',
+    });
   });
 
   ipcMain.handle('updater:install', () => {
@@ -175,8 +263,11 @@ async function initUpdaterWithModule(mod: typeof import('electron-updater'), opt
 
   /* ── Auto-check on launch ──────────────────────────────────────── */
 
-  autoUpdater.checkForUpdates().catch(() => {
-    // Silent — don't block app startup if the update server is unreachable
+  void runUpdaterOperation({
+    phase: 'updater-check',
+    execute: () => autoUpdater.checkForUpdates(),
+    successCode: 'updater_check_completed',
+    retryCode: 'updater_check_failed',
   });
 }
 
@@ -186,13 +277,11 @@ async function initUpdaterWithModule(mod: typeof import('electron-updater'), opt
 
 /** Register harmless stubs so renderer calls never throw. */
 function registerNoopHandlers(): void {
-  ipcMain.handle('updater:check', () => ({
-    ok: false,
-    error: 'Updater not available in dev mode.',
-  }));
-  ipcMain.handle('updater:download', () => ({
-    ok: false,
-    error: 'Updater not available in dev mode.',
-  }));
+  ipcMain.handle('updater:check', () => {
+    return recordUnavailableUpdaterAttempt('updater-check');
+  });
+  ipcMain.handle('updater:download', () => {
+    return recordUnavailableUpdaterAttempt('updater-download');
+  });
   ipcMain.handle('updater:install', () => undefined);
 }

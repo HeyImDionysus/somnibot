@@ -150,6 +150,74 @@ interface GuildServices {
   forumTicketService?: ForumTicketService;
 }
 
+interface MusicRuntimePlayer {
+  reloadConfig(): Promise<void>;
+  suspend(): Promise<void>;
+}
+
+interface MusicRuntimeReporter {
+  start(): void;
+  stop(): void;
+}
+
+type MusicRuntimeState<TPlayer, TReporter> = {
+  musicPlayer?: TPlayer;
+  musicStatusReporter?: TReporter;
+};
+
+type MusicRuntimeLifecycleOptions<TPlayer, TReporter> = {
+  readonly createPlayer: () => Promise<TPlayer>;
+  readonly createReporter: (player: TPlayer) => TReporter;
+  readonly publishPlayer: (player: TPlayer | undefined) => void;
+  readonly onStarted: () => void;
+  readonly onStopped: () => void;
+};
+
+export function createMusicRuntimeLifecycle<
+  TPlayer extends MusicRuntimePlayer,
+  TReporter extends MusicRuntimeReporter,
+>(
+  state: MusicRuntimeState<TPlayer, TReporter>,
+  options: MusicRuntimeLifecycleOptions<TPlayer, TReporter>,
+): { readonly start: () => Promise<void>; readonly stop: () => Promise<void> } {
+  let transitionTail: Promise<void> = Promise.resolve();
+  const runExclusive = (operation: () => Promise<void>): Promise<void> => {
+    const result = transitionTail.then(operation, operation);
+    transitionTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
+  return {
+    start: () => runExclusive(async () => {
+      if (state.musicPlayer) {
+        await state.musicPlayer.reloadConfig();
+        return;
+      }
+      const musicPlayer = await options.createPlayer();
+      state.musicPlayer = musicPlayer;
+      options.publishPlayer(musicPlayer);
+      state.musicStatusReporter = options.createReporter(musicPlayer);
+      state.musicStatusReporter.start();
+      options.onStarted();
+    }),
+    stop: () => runExclusive(async () => {
+      state.musicStatusReporter?.stop();
+      delete state.musicStatusReporter;
+      const musicPlayer = state.musicPlayer;
+      try {
+        await musicPlayer?.suspend();
+      } finally {
+        delete state.musicPlayer;
+        options.publishPlayer(undefined);
+      }
+      options.onStopped();
+    }),
+  };
+}
+
 /**
  * Market is configurable at runtime, so its manager and command must exist even
  * while the feature is disabled. MarketManager enforces the flag at execution.
@@ -456,17 +524,27 @@ export async function initGuildFeatures(
 
 
   // ── Music system ──
-  try {
-    if (guildCfg?.music_enabled !== false) {
+  let musicCommandCount = 0;
+  const musicRuntime = createMusicRuntimeLifecycle(services, {
+    createPlayer: async () => {
       const musicPlayer = new MusicPlayerManager(guild, client.shoukaku, supabase, valkey, eventBus);
       await musicPlayer.init();
-      services.musicPlayer = musicPlayer;
-      ctx.setManager('musicPlayer', musicPlayer);
-      const musicCmds = buildMusicCommands();
-      for (const cmd of musicCmds) allCommands.push(cmd.toJSON());
-      services.musicStatusReporter = new MusicStatusReporter(musicPlayer, supabase, guildId);
-      services.musicStatusReporter.start();
-      guildLog.info('Music system started', { commands: musicCmds.length });
+      return musicPlayer;
+    },
+    createReporter: (musicPlayer) => new MusicStatusReporter(musicPlayer, supabase, guildId),
+    publishPlayer: (musicPlayer) => {
+      ctx.setManager<MusicPlayerManager | undefined>('musicPlayer', musicPlayer);
+    },
+    onStarted: () => guildLog.info('Music system started', { commands: musicCommandCount }),
+    onStopped: () => guildLog.info('Music system stopped'),
+  });
+
+  try {
+    const musicCmds = buildMusicCommands();
+    musicCommandCount = musicCmds.length;
+    for (const cmd of musicCmds) allCommands.push(cmd.toJSON());
+    if (guildCfg?.music_enabled !== false) {
+      await musicRuntime.start();
       startedRuntimeFeatures.push('music');
     }
   } catch (err) {
@@ -768,6 +846,17 @@ export async function initGuildFeatures(
       },
       async () => {
         await reconcilePendingOnboardingMembers(client, guild);
+      },
+      async (enabled) => {
+        if (enabled === false) {
+          await musicRuntime.stop();
+          return;
+        }
+        if (enabled === true) {
+          await musicRuntime.start();
+          return;
+        }
+        await services.musicPlayer?.reloadConfig();
       },
     );
     services.configWatcher.start();

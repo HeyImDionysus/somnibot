@@ -3,6 +3,7 @@
  * TempChannelManager, AlertService, CustomCommands, deeper GamesManager
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createClient } from '@supabase/supabase-js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -235,6 +236,111 @@ describe('StatsChannelManager', () => {
     const s: any = { from: vi.fn(() => chainAsync([])) };
     const mgr = new StatsChannelManager(guild(), s, 60);
     await mgr.start();
+  });
+
+  it('keeps the last accurate counter name when the backing query is retried once', async () => {
+    const { writeAuditLog } = await import('../services/audit.js');
+    const transientConfig = [{
+      id: 'sc-retry',
+      guild_id: 'g1',
+      channel_id: 'vc1',
+      stat_type: 'total_xp_earned',
+      stat_config: {},
+      name_format: 'Tickets: {value}',
+      active: true,
+      last_value: '4',
+      pending_cleanup_channel_ids: null,
+    }];
+    let xpQueryCount = 0;
+    let currentTime = 1_700_000_000_000;
+    const firstCycle = new Date(Math.floor(currentTime / 60_000) * 60_000).toISOString();
+    vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+    const supabase = createClient('https://test.supabase.co', 'test-anon-key', {
+      global: {
+        fetch: async (input, init) => {
+          const url = typeof input === 'string'
+            ? new URL(input)
+            : input instanceof URL
+              ? input
+              : new URL(input.url);
+          const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+
+          if (url.pathname.endsWith('/stats_channels')) {
+            return new Response(JSON.stringify(method === 'GET' ? transientConfig : []), {
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (url.pathname.endsWith('/tickets') || url.pathname.endsWith('/member_levels')) {
+            return new Response(JSON.stringify([]), {
+              headers: { 'content-type': 'application/json', 'content-range': '0-0/0' },
+            });
+          }
+          if (url.pathname.endsWith('/rpc/sum_guild_xp')) {
+            xpQueryCount += 1;
+            if (xpQueryCount <= 3) {
+              return new Response(JSON.stringify({ message: 'temporary XP query failure' }), {
+                status: 503,
+                headers: { 'content-type': 'application/json' },
+              });
+            }
+            return new Response(JSON.stringify(7), {
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return new Response(JSON.stringify([]), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      },
+    });
+    const statsGuild = guild();
+    const counter = statsGuild.channels.cache.get('vc1');
+    const manager = new (await import('../features/stats-channels/stats-manager.js')).StatsChannelManager(
+      statsGuild,
+      supabase,
+      1,
+    );
+
+    await manager.reload();
+
+    expect(counter.setName).not.toHaveBeenCalled();
+    expect(writeAuditLog).toHaveBeenCalledWith(
+      supabase,
+      expect.objectContaining({
+        action: 'stats_channels.query_retried',
+        occurrenceKey: `stats_channels.query_retried:sc-retry:total_xp_earned:4:${firstCycle}`,
+      }),
+    );
+
+    await manager.reload();
+
+    expect(counter.setName).not.toHaveBeenCalled();
+    expect(writeAuditLog).toHaveBeenNthCalledWith(
+      2,
+      supabase,
+      expect.objectContaining({
+        occurrenceKey: `stats_channels.query_retried:sc-retry:total_xp_earned:4:${firstCycle}`,
+      }),
+    );
+
+    currentTime += 60_000;
+    const laterCycle = new Date(Math.floor(currentTime / 60_000) * 60_000).toISOString();
+    await manager.reload();
+
+    expect(counter.setName).not.toHaveBeenCalled();
+    expect(writeAuditLog).toHaveBeenNthCalledWith(
+      3,
+      supabase,
+      expect.objectContaining({
+        occurrenceKey: `stats_channels.query_retried:sc-retry:total_xp_earned:4:${laterCycle}`,
+      }),
+    );
+
+    await manager.reload();
+
+    expect(counter.setName).toHaveBeenCalledTimes(1);
+    expect(counter.setName).toHaveBeenCalledWith('Tickets: 7');
+    expect(writeAuditLog).toHaveBeenCalledTimes(3);
   });
 });
 

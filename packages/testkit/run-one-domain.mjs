@@ -117,6 +117,11 @@ try {
       activeScenario = 'report-assembly';
     },
   });
+  const configuredCandidateSha = process.env.SOMNIBOT_CANDIDATE_SHA?.trim()
+    || process.env.GITHUB_SHA?.trim();
+  const assertionEvidence = configuredCandidateSha
+    ? (await import('./raw-assertions.mjs')).captureFleetAssertionRecords(report, configuredCandidateSha)
+    : undefined;
   const s = mod.summarize(report);
   // The fleet aggregate closes functional assertion cells, not every internal
   // facet record. A class is GATED when any of its records is gated; emit one
@@ -142,6 +147,7 @@ try {
     gated: s.gated,
     fail: s.fail,
     capabilities: report.capabilities,
+    assertionEvidence,
     completedScenarios,
     findings: report.findings.map((f) => ({
       scenario: f.scenarioClass,

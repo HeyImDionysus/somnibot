@@ -13,6 +13,7 @@ import { NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { resolveLauncherLocalAuth } from '@/lib/api/launcher-local-auth';
+import { auditDashboardAuthorizationDenial } from '@/lib/rbac-audit';
 
 export interface OwnerContext {
   userId: string;       // Supabase auth user ID
@@ -23,6 +24,23 @@ export interface OwnerContext {
 type OwnerResult =
   | { ok: true; ctx: OwnerContext }
   | { ok: false; response: NextResponse };
+
+type OwnerDenial = {
+  readonly guildId: string | null;
+  readonly actorId: string;
+  readonly reason: string;
+  readonly status: 401 | 403;
+};
+
+async function auditOwnerDenial(denial: OwnerDenial): Promise<void> {
+  await auditDashboardAuthorizationDenial({
+    guildId: denial.guildId,
+    actorId: denial.actorId,
+    permission: 'guild.owner',
+    reason: denial.reason,
+    status: denial.status,
+  });
+}
 
 /**
  * Verify the caller is the authenticated guild owner.
@@ -47,6 +65,7 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
     };
   }
   if (localAuth.kind === 'denied') {
+    await auditOwnerDenial({ guildId: null, actorId: 'anonymous', reason: 'local_auth_denied', status: localAuth.status === 403 ? 403 : 401 });
     return {
       ok: false,
       response: NextResponse.json({ error: localAuth.message }, { status: localAuth.status }),
@@ -58,6 +77,7 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
   const { data: { user }, error: authError } = await supabase.auth.getUser();
 
   if (authError || !user) {
+    await auditOwnerDenial({ guildId: null, actorId: 'anonymous', reason: 'missing_session', status: 401 });
     return {
       ok: false,
       response: NextResponse.json(
@@ -75,6 +95,7 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
     null;
 
   if (!discordId) {
+    await auditOwnerDenial({ guildId: null, actorId: user.id, reason: 'missing_discord_identity', status: 401 });
     return {
       ok: false,
       response: NextResponse.json(
@@ -94,6 +115,7 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
     .limit(1000);
 
   if (!guilds || guilds.length === 0) {
+    await auditOwnerDenial({ guildId: null, actorId: discordId, reason: 'not_guild_owner', status: 403 });
     return {
       ok: false,
       response: NextResponse.json(
@@ -122,6 +144,7 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
       `[requireGuildOwner] Guild probe: user ${discordId} requested guild ${requestedGuildId} ` +
       `but only owns [${guilds.map(g => g.id).join(', ')}].`,
     );
+    await auditOwnerDenial({ guildId: requestedGuildId, actorId: discordId, reason: 'requested_guild_not_owned', status: 403 });
     return {
       ok: false,
       response: NextResponse.json(

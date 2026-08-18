@@ -38,10 +38,98 @@ let portalConfig: {
   cancellation_timing: 'end-of-term' | 'immediate';
 };
 let portalConfigError: unknown;
+type CancellationOperation = {
+  id: string;
+  request_id: string;
+  status: 'pending' | 'uncertain' | 'provider_confirmed' | 'completed' | 'failed';
+  [key: string]: unknown;
+};
+
+let cancellationOperation: CancellationOperation | null;
+let cancellationOperations: CancellationOperation[];
+let auditRows: Array<Record<string, unknown>>;
+
+type OperationUpdateChain = {
+  readonly update: (values: Record<string, unknown>) => OperationUpdateChain;
+  readonly eq: (column: string, value: unknown) => OperationUpdateChain;
+  readonly in: (column: string, values: readonly unknown[]) => OperationUpdateChain;
+  readonly select: () => OperationUpdateChain;
+  readonly maybeSingle: () => Promise<{
+    readonly data: { readonly id: string } | null;
+    readonly error: null;
+  }>;
+};
 
 function makeAdmin() {
   return {
+    rpc: async (name: string, args?: Record<string, unknown>) => {
+      if (name !== 'claim_portal_cancellation_operation') {
+        return { data: null, error: { message: 'unexpected rpc' } };
+      }
+      cancellationOperation = cancellationOperations.find((operation) => operation.status !== 'failed') ?? null;
+      if (!cancellationOperation) {
+        const secondOperation = cancellationOperations.length > 0;
+        cancellationOperation = {
+          id: secondOperation
+            ? '44444444-4444-4444-8444-444444444444'
+            : '22222222-2222-4222-8222-222222222222',
+          request_id: secondOperation
+            ? '55555555-5555-4555-8555-555555555555'
+            : '33333333-3333-4333-8333-333333333333',
+          status: 'pending',
+          access_until: args?.p_access_until,
+          cancellation_timing: args?.p_cancellation_timing,
+        };
+        cancellationOperations.push(cancellationOperation);
+      }
+      return { data: [{ ...cancellationOperation }], error: null };
+    },
     from: (table: string) => {
+      if (table === 'audit_logs') {
+        const recordAudit = async (rowOrRows: Record<string, unknown> | Array<Record<string, unknown>>) => {
+          const rows = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows];
+          for (const row of rows) {
+            if (!auditRows.some((entry) => entry.occurrence_key === row.occurrence_key)) {
+              auditRows.push(row);
+            }
+          }
+          return { data: null, error: null };
+        };
+        return {
+          insert: recordAudit,
+          upsert: recordAudit,
+        };
+      }
+      if (table === 'portal_cancellation_operations') {
+        let updateValues: Record<string, unknown> = {};
+        let operationId: unknown;
+        let expectedStatuses: readonly unknown[] = [];
+        const chain: OperationUpdateChain = {
+          update: (values: Record<string, unknown>) => { updateValues = values; return chain; },
+          eq: (column: string, value: unknown) => {
+            if (column === 'id') operationId = value;
+            return chain;
+          },
+          in: (_column: string, values: readonly unknown[]) => {
+            expectedStatuses = values;
+            return chain;
+          },
+          select: () => chain,
+          maybeSingle: async () => {
+            const operationIndex = cancellationOperations.findIndex(
+              (operation) => operation.id === operationId
+                && expectedStatuses.includes(operation.status),
+            );
+            if (operationIndex < 0) return { data: null, error: null };
+            const currentOperation = cancellationOperations[operationIndex];
+            if (!currentOperation) return { data: null, error: null };
+            cancellationOperation = { ...currentOperation, ...updateValues };
+            cancellationOperations[operationIndex] = cancellationOperation;
+            return { data: { id: cancellationOperation.id }, error: null };
+          },
+        };
+        return chain;
+      }
       if (table === 'portal_sessions') {
         const chain: any = { select: () => chain, eq: () => chain, gt: () => chain, single: async () => ({ data: SESSION, error: null }) };
         return chain;
@@ -149,6 +237,9 @@ beforeEach(() => {
     cancellation_timing: 'end-of-term',
   };
   portalConfigError = null;
+  cancellationOperation = null;
+  cancellationOperations = [];
+  auditRows = [];
   entitlement = {
     id: ENT_ID,
     customer_id: SESSION.customer_id,
@@ -195,6 +286,11 @@ describe('POST /api/portal/cancel', () => {
     expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
     expect(entitlement.portal_cancellation_access_until).toBe('2026-08-23T00:00:00.000Z');
     expect(paypalCancelCalls).toBe(1);
+    expect(cancellationOperation?.status).toBe('completed');
+    expect(auditRows.map((row) => row.action)).toEqual([
+      'portal.cancellation_requested',
+      'portal.cancellation_succeeded',
+    ]);
   });
 
   it('is idempotent: a second confirm stays one scheduled cancellation with one provider call', async () => {
@@ -291,6 +387,8 @@ describe('POST /api/portal/cancel', () => {
 
     expect(res.status).toBe(200);
     expect(entitlement.cancelled_at).toBeTruthy();
+    expect(cancellationOperation?.status).toBe('completed');
+    expect(auditRows.map((row) => row.action)).toContain('portal.cancellation_reconciled');
   });
 
   it('rejects generic PayPal 422 when reconciliation does not prove cancellation', async () => {
@@ -312,6 +410,53 @@ describe('POST /api/portal/cancel', () => {
     expect(entitlement.cancelled_at).toBeNull();
     expect(entitlement.portal_cancellation_timing).toBeNull();
     expect(entitlement.portal_cancellation_access_until).toBeNull();
+  });
+
+  it('creates a fresh operation after a terminal provider rejection releases the intent', async () => {
+    portalConfig.cancellation_timing = 'immediate';
+    const requestIds: Array<string | null> = [];
+    let providerAttempts = 0;
+    global.fetch = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      if (String(url).endsWith('/cancel')) {
+        providerAttempts += 1;
+        requestIds.push(new Headers(init?.headers).get('PayPal-Request-Id'));
+        return providerAttempts === 1
+          ? new Response(null, { status: 400 })
+          : new Response(null, { status: 204 });
+      }
+      return new Response(JSON.stringify({ id: 'SUB-123', status: 'ACTIVE' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const rejected = await POST(makeRequest({
+      entitlement_id: ENT_ID,
+      cancellation_timing: 'immediate',
+    }));
+
+    expect(rejected.status).toBe(502);
+    expect(entitlement.portal_cancellation_timing).toBeNull();
+    expect(entitlement.portal_cancellation_access_until).toBeNull();
+    expect(cancellationOperations).toHaveLength(1);
+    expect(cancellationOperations[0]?.status).toBe('failed');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const freshConfirmation = await POST(makeRequest({
+      entitlement_id: ENT_ID,
+      cancellation_timing: 'immediate',
+    }));
+
+    expect(freshConfirmation.status).toBe(200);
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[1]).not.toBe(requestIds[0]);
+    expect(cancellationOperations).toHaveLength(2);
+    expect(cancellationOperations[0]?.status).toBe('failed');
+    expect(cancellationOperations[1]?.status).toBe('completed');
+    expect(cancellationOperations[1]?.access_until).not.toBe(cancellationOperations[0]?.access_until);
+    expect(auditRows.filter((row) => row.action === 'portal.cancellation_requested')).toHaveLength(2);
+    expect(auditRows.filter((row) => row.action === 'portal.cancellation_failed')).toHaveLength(1);
+    expect(auditRows.filter((row) => row.action === 'portal.cancellation_succeeded')).toHaveLength(1);
   });
 
   it('resumes a locally reserved cancellation after an ambiguous provider failure', async () => {
@@ -345,6 +490,97 @@ describe('POST /api/portal/cancel', () => {
     expect(retry.status).toBe(200);
     expect(entitlement.cancelled_at).not.toBeNull();
     expect(paypalCancelCalls).toBe(2);
+  });
+
+  it('reuses one PayPal request id after an uncertain provider failure', async () => {
+    const requestIds: Array<string | null> = [];
+    let providerAttempts = 0;
+    global.fetch = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      if (String(url).endsWith('/cancel')) {
+        providerAttempts += 1;
+        requestIds.push(new Headers(init?.headers).get('PayPal-Request-Id'));
+        return providerAttempts === 1
+          ? new Response('{"private_field":"must-not-persist"}', {
+              status: 500,
+              headers: { 'paypal-debug-id': 'DEBUG_SAFE-1' },
+            })
+          : new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const first = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const retry = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(first.status).toBe(502);
+    expect(retry.status).toBe(200);
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requestIds[1]).toBe(requestIds[0]);
+    expect(cancellationOperation?.status).toBe('completed');
+    const failedAudit = auditRows.find((row) => row.action === 'portal.cancellation_failed');
+    expect(failedAudit?.success).toBe(false);
+    expect(failedAudit?.details).toEqual(expect.objectContaining({
+      provider_debug_id: 'DEBUG_SAFE-1',
+      provider_http_status: 500,
+    }));
+    expect(JSON.stringify(failedAudit)).not.toContain('tok');
+    expect(JSON.stringify(failedAudit)).not.toContain('Authorization');
+    expect(JSON.stringify(failedAudit)).not.toContain('must-not-persist');
+  });
+
+  it('reuses one PayPal request id after a timeout with unavailable readback', async () => {
+    const requestIds: Array<string | null> = [];
+    let providerAttempts = 0;
+    global.fetch = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      if (String(url).endsWith('/cancel')) {
+        providerAttempts += 1;
+        requestIds.push(new Headers(init?.headers).get('PayPal-Request-Id'));
+        if (providerAttempts === 1) throw new DOMException('timed out', 'AbortError');
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 503 });
+    });
+
+    const first = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    const retry = await POST(makeRequest({ entitlement_id: ENT_ID }));
+
+    expect(first.status).toBe(502);
+    expect(retry.status).toBe(200);
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requestIds[1]).toBe(requestIds[0]);
+    expect(cancellationOperation?.status).toBe('completed');
+  });
+
+  it('shares one operation identity across concurrent confirmations', async () => {
+    entitlement.portal_cancellation_timing = 'end-of-term';
+    entitlement.portal_cancellation_access_until = entitlement.expires_at;
+    const requestIds: Array<string | null> = [];
+    let releaseProviderCalls: (() => void) | null = null;
+    const providerBarrier = new Promise<void>((resolve) => { releaseProviderCalls = resolve; });
+    global.fetch = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      if (String(url).endsWith('/cancel')) {
+        requestIds.push(new Headers(init?.headers).get('PayPal-Request-Id'));
+        if (requestIds.length === 2) releaseProviderCalls?.();
+        await providerBarrier;
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const [first, second] = await Promise.all([
+      POST(makeRequest({ entitlement_id: ENT_ID })),
+      POST(makeRequest({ entitlement_id: ENT_ID })),
+    ]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(requestIds).toHaveLength(2);
+    expect(new Set(requestIds).size).toBe(1);
+    expect(cancellationOperations).toHaveLength(1);
+    expect(cancellationOperation?.status).toBe('completed');
+    expect(auditRows.filter((row) => row.action === 'portal.cancellation_succeeded')).toHaveLength(1);
   });
 
   it('does not fabricate success when the local schedule update fails', async () => {

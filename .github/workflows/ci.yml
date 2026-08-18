@@ -41,9 +41,9 @@ env:
   # GITHUB_SHA is a temporary merge ref on pull_request events. Release proof
   # must name the actual PR head so receipts cannot be carried across heads.
   SOMNIBOT_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  # 2.110+ executes CREATE INDEX CONCURRENTLY outside the per-migration
-  # transaction, which the online fraud-observation index migration requires.
-  SUPABASE_CLI_VERSION: "2.110.0"
+  # 2.114+ executes CREATE INDEX CONCURRENTLY outside the migration pipeline
+  # during local resets, which the online fraud-observation index requires.
+  SUPABASE_CLI_VERSION: "2.114.0"
   SUPABASE_CLI_PATH: /usr/local/bin/supabase
 
 # =============================================================================
@@ -799,9 +799,7 @@ jobs:
             mkdir -p /tmp/somnibot-fleet-evidence
             git archive FETCH_HEAD fleet-proofs \
               | tar -xf - -C /tmp/somnibot-fleet-evidence
-            find /tmp/somnibot-fleet-evidence/fleet-proofs \
-              -maxdepth 1 -type f -name 'fleet-proof-*.json' \
-              -exec cp '{}' artifacts/proofs/ ';'
+            cp -R /tmp/somnibot-fleet-evidence/fleet-proofs/. artifacts/proofs/
             echo "Loaded candidate-bound operator receipts from ${evidence_branch}."
           else
             echo "No operator receipt branch exists for this candidate yet."

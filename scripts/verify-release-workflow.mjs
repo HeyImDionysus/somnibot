@@ -17,6 +17,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFileSync(path.join(root, relativePath), 'utf8');
 
 const releaseWorkflow = read('.github/workflows/release.yml');
+const ciWorkflow = read('.github/workflows/ci.yml');
 const builderConfig = read('packages/launcher/electron-builder.yml');
 const buildScript = read('scripts/build-launcher.mjs');
 const fleetChild = read('packages/testkit/run-one-domain.mjs');
@@ -44,6 +45,11 @@ assert.doesNotMatch(releaseWorkflow, /WINDOWS_CODESIGN_PFX_BASE64|signtool sign/
 assert.match(releaseWorkflow, /SHA256SUMS-\$\{\{ matrix\.artifact \}\}/);
 assert.match(releaseWorkflow, /provenance-\$\{\{ matrix\.artifact \}\}\.json/);
 assert.doesNotMatch(releaseWorkflow, /macos-latest|\.dmg|--mac/, 'release workflow must not publish macOS');
+assert.match(
+  ciWorkflow,
+  /cp -R \/tmp\/somnibot-fleet-evidence\/fleet-proofs\/\. artifacts\/proofs\//,
+  'candidate evidence loading must retain receipt witness artifacts for aggregate hash verification',
+);
 assert.match(builderConfig, /target: nsis/);
 assert.match(builderConfig, /target: AppImage/);
 assert.match(

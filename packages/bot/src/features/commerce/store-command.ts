@@ -14,6 +14,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { applyBrand, resolveBrandKit } from '../branding/index.js';
+import { writeAuditLog } from '../../services/audit.js';
 
 export function buildStoreCommand() {
   return new SlashCommandBuilder()
@@ -53,6 +54,19 @@ export async function handleStoreCommand(
     .limit(1000);
 
   if (error) {
+    await writeAuditLog(supabase, {
+      guildId,
+      actorType: 'user',
+      actorId: interaction.user.id,
+      action: 'commerce.store.load_failed',
+      category: 'commerce',
+      targetType: 'store',
+      targetId: guildId,
+      details: { stage: 'products_query', error_code: error.code ?? null },
+      occurrenceKey: `commerce.store.load_failed:${interaction.id}`,
+      success: false,
+      errorMessage: error.message,
+    });
     // A failed READ is not an empty store — and not a raw vendor error either:
     // during a database outage the catalog may be full, so degrade honestly
     // with the branded store-unavailable notice. The brand read is itself

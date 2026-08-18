@@ -19,7 +19,14 @@ import {
   setKeychainFallbackListener,
   type LauncherConfig,
 } from './config-store.js';
-import { writeLauncherAuditLog, resolveLauncherGuildId, type LauncherAuditEntry } from './audit-log.js';
+import {
+  resolveLauncherGuildId,
+  writeLauncherAuditLog,
+  type LauncherAttemptCode,
+  type LauncherAttemptResult,
+  type LauncherAuditEntry,
+} from './audit-log.js';
+import { createPreflightAttemptAudit } from './preflight-attempt-audit.js';
 import {
   REGULAR_LOCAL_OPERATOR_DASHBOARD_URL,
   getLauncherLocalStartBlocker,
@@ -232,6 +239,12 @@ function recordLauncherAudit(entry: LauncherAuditEntry): void {
     entry,
   );
 }
+
+const preflightAttemptAudit = createPreflightAttemptAudit({
+  createOperationId: crypto.randomUUID,
+  now: () => new Date().toISOString(),
+  recordAudit: recordLauncherAudit,
+});
 
 async function syncLauncherCredentials(config: LauncherConfig): Promise<void> {
   const result = await pushToSupabaseWithRetry(config.supabaseUrl, config.supabaseSecretKey, {
@@ -2285,6 +2298,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('vps:run-preflight', async () => {
     const cfg = getConfig();
     if (cfg.runtimeMode !== 'vps') {
+      preflightAttemptAudit.record('failure', 'vps_preflight_blocked');
       return {
         state: 'blocked',
         canRetry: false,
@@ -2307,6 +2321,7 @@ function registerIpcHandlers(): void {
       explicitUserAction: true,
     });
     if (!plan.command) {
+      preflightAttemptAudit.record('failure', 'vps_preflight_blocked');
       return {
         state: 'blocked',
         canRetry: false,
@@ -2344,6 +2359,17 @@ function registerIpcHandlers(): void {
     }
     const publicAccessReady = !tailscaleFunnel || tailscaleFunnel.state === 'verified';
     const state = result.ok && publicAccessReady ? 'success' : result.retriable ? 'retry' : 'failure';
+    const attemptResult: LauncherAttemptResult = state === 'success'
+      ? 'success'
+      : state === 'retry'
+        ? 'retry'
+        : 'failure';
+    const attemptCode: LauncherAttemptCode = attemptResult === 'success'
+      ? 'vps_preflight_succeeded'
+      : attemptResult === 'retry'
+        ? 'vps_preflight_retryable_failure'
+        : 'vps_preflight_terminal_failure';
+    preflightAttemptAudit.record(attemptResult, attemptCode);
     const redactedError = result.error ? redactVpsDeploymentText(result.error) : undefined;
 
     return {

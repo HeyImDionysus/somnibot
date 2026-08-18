@@ -112,6 +112,56 @@ describe('rail A rows — music', () => {
     expect(applied!.details).toMatchObject({ userId: 'u1', action: 'volume', value: 80 });
   });
 
+  it('music occurrence replay records the original interaction without a second mutation row', async () => {
+    const rows = await rowsFor('music.replay_ignored', {
+      userId: 'u1',
+      action: 'play',
+      occurrenceId: 'interaction-1',
+      originalStatus: 'completed',
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      guild_id: 'g1',
+      action: 'music.replay_ignored',
+      category: 'music',
+      actor_type: 'user',
+      actor_id: 'u1',
+      target_type: 'music_control',
+      target_id: 'play',
+      occurrence_key: 'music.replay_ignored:interaction-1',
+      correlation_id: 'music-interaction:interaction-1',
+      success: true,
+      details: {
+        occurrenceId: 'interaction-1',
+        originalStatus: 'completed',
+      },
+    });
+  });
+
+  it('maps a runtime outage episode to distinct correlated audit rows', async () => {
+    const episodeId = 'episode-1';
+    const rows = await rowsForAll([
+      ['music.runtime_outage', { episodeId, revision: 1, source: 'node_close', nodeName: 'main', reason: 'connection reset' }],
+      ['music.queue_preserved', { episodeId, revision: 1, trackCount: 2, reason: 'connection reset' }],
+      ['music.recovery_attempted', { episodeId, revision: 2, attempt: 1, trigger: 'node_ready' }],
+      ['music.recovery_failed', { episodeId, revision: 2, attempt: 1, trigger: 'node_ready', error: 'voice unavailable', terminal: false }],
+      ['music.recovery_succeeded', { episodeId, revision: 3, attempt: 2, trigger: 'node_ready' }],
+      ['music.manual_reconcile_required', { episodeId, revision: 3, reason: 'retry budget exhausted', trackCount: 2 }],
+    ]);
+
+    expect(rows.map((row) => row.action)).toEqual([
+      'music.runtime_outage',
+      'music.queue_preserved',
+      'music.recovery_attempted',
+      'music.recovery_failed',
+      'music.recovery_succeeded',
+      'music.manual_reconcile_required',
+    ]);
+    expect(new Set(rows.map((row) => row.occurrence_key)).size).toBe(6);
+    expect(rows.every((row) => row.correlation_id === `music-runtime:${episodeId}`)).toBe(true);
+  });
+
   it('attributes skip and capacity rejection to the member who caused them', async () => {
     const [skipped, rejected] = await rowsForAll([
       ['music.skipped', {
