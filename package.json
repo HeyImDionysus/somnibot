@@ -27,7 +27,7 @@
     "launcher:build:dir": "node scripts/build-launcher.mjs --dir"
   },
   "devDependencies": {
-    "supabase": "2.110.0",
+    "supabase": "2.114.0",
     "tsx": "^4.22.4",
     "turbo": "^2.9.14",
     "zod": "^3.24.0"
