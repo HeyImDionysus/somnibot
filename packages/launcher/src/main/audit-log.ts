@@ -27,6 +27,107 @@ export interface LauncherAuditEntry {
   /** false for denied/failed operations. */
   success?: boolean;
   errorMessage?: string;
+  correlationId?: string;
+  occurrenceKey?: string;
+}
+
+export const LauncherAttemptPhases = [
+  'updater-check',
+  'updater-download',
+  'vps-preflight',
+] as const;
+
+export type LauncherAttemptPhase = typeof LauncherAttemptPhases[number];
+
+export const LauncherAttemptResults = ['success', 'retry', 'failure'] as const;
+
+export type LauncherAttemptResult = typeof LauncherAttemptResults[number];
+
+export interface LauncherAttemptIdentity {
+  readonly operationId: string;
+  readonly attempt: number;
+}
+
+export type LauncherAttemptCode =
+  | 'updater_check_completed'
+  | 'updater_check_failed'
+  | 'updater_download_completed'
+  | 'updater_download_failed'
+  | 'updater_unavailable'
+  | 'vps_preflight_succeeded'
+  | 'vps_preflight_retryable_failure'
+  | 'vps_preflight_terminal_failure'
+  | 'vps_preflight_blocked';
+
+export interface LauncherAttemptAuditInput {
+  readonly operationId: string;
+  readonly attempt: number;
+  readonly phase: LauncherAttemptPhase;
+  readonly result: LauncherAttemptResult;
+  readonly code: LauncherAttemptCode;
+  readonly message: string;
+  readonly timestamp: string;
+}
+
+export class LauncherAttemptTracker {
+  private readonly active = new Map<LauncherAttemptPhase, LauncherAttemptIdentity>();
+
+  public constructor(private readonly createOperationId: () => string) {}
+
+  public next(phase: LauncherAttemptPhase): LauncherAttemptIdentity {
+    const previous = this.active.get(phase);
+    const identity: LauncherAttemptIdentity = previous
+      ? { operationId: previous.operationId, attempt: previous.attempt + 1 }
+      : { operationId: this.createOperationId(), attempt: 1 };
+    this.active.set(phase, identity);
+    return identity;
+  }
+
+  public finish(phase: LauncherAttemptPhase, result: LauncherAttemptResult): void {
+    switch (result) {
+      case 'retry':
+        return;
+      case 'success':
+      case 'failure':
+        this.active.delete(phase);
+    }
+  }
+}
+
+function attemptAction(phase: LauncherAttemptPhase): string {
+  switch (phase) {
+    case 'updater-check':
+      return 'launcher.updater.check_attempt';
+    case 'updater-download':
+      return 'launcher.updater.download_attempt';
+    case 'vps-preflight':
+      return 'launcher.vps_preflight.attempt';
+  }
+}
+
+export function buildLauncherAttemptAuditEntry(input: LauncherAttemptAuditInput): LauncherAuditEntry {
+  const sanitizedMessage = input.result === 'success'
+    ? undefined
+    : input.message.trim() ? '[redacted]' : 'Attempt failed.';
+
+  return {
+    action: attemptAction(input.phase),
+    category: 'infrastructure',
+    targetType: 'launcher_operation',
+    targetId: input.operationId,
+    details: {
+      operationId: input.operationId,
+      attempt: input.attempt,
+      phase: input.phase,
+      result: input.result,
+      code: input.code,
+      timestamp: input.timestamp,
+    },
+    correlationId: input.operationId,
+    occurrenceKey: `launcher.attempt:${input.operationId}:${input.phase}:${input.attempt}`,
+    success: input.result === 'success',
+    ...(sanitizedMessage ? { errorMessage: sanitizedMessage } : {}),
+  };
 }
 
 /** Supabase connection + guild scope needed to write a launcher audit row. */
@@ -66,6 +167,8 @@ export function buildLauncherAuditRow(
     target_type: entry.targetType ?? null,
     target_id: entry.targetId ?? null,
     details: entry.details ?? {},
+    correlation_id: entry.correlationId ?? null,
+    occurrence_key: entry.occurrenceKey ?? null,
     success: entry.success ?? true,
     error_message: entry.errorMessage ?? null,
   };
@@ -94,15 +197,17 @@ export async function writeLauncherAuditLog(
 
   const fetchImpl = deps.fetchImpl ?? fetch;
   const row = buildLauncherAuditRow(ctx.guildId, entry);
+  const endpoint = `${ctx.supabaseUrl.replace(/\/+$/, '')}/rest/v1/audit_logs${entry.occurrenceKey ? '?on_conflict=guild_id,occurrence_key' : ''}`;
+  const prefer = entry.occurrenceKey ? 'return=minimal,resolution=ignore-duplicates' : 'return=minimal';
 
   try {
-    const res = await fetchImpl(`${ctx.supabaseUrl.replace(/\/+$/, '')}/rest/v1/audit_logs`, {
+    const res = await fetchImpl(endpoint, {
       method: 'POST',
       headers: {
         apikey: ctx.supabaseSecretKey,
         Authorization: `Bearer ${ctx.supabaseSecretKey}`,
         'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
+        Prefer: prefer,
       },
       body: JSON.stringify(row),
       signal: AbortSignal.timeout(deps.timeoutMs ?? 10_000),
