@@ -91,7 +91,11 @@ export function ConfirmDialog({
 
   useEffect(() => {
     loadingRef.current = loading;
-    if (open && loading) dialogRef.current?.focus();
+    if (open && loading) {
+      dialogRef.current?.focus();
+    } else if (open) {
+      cancelRef.current?.focus();
+    }
   }, [loading, open]);
 
   useEffect(() => {

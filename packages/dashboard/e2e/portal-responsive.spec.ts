@@ -919,9 +919,9 @@ test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async
   await page.route('**/api/portal/licenses/*/rotate', async (route) => {
     await heldRotation;
     await route.fulfill({
-      status: 200,
+      status: 503,
       contentType: 'application/json',
-      body: JSON.stringify({ success: true, alreadyRotated: false, newKeySuffix: 'WXYZ' }),
+      body: JSON.stringify({ error: 'Rotation could not be completed.' }),
     });
   });
 
@@ -943,6 +943,10 @@ test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async
   });
 
   releaseRotation?.();
-  await expect(page.getByRole('status')).toContainText('replacement ending in WXYZ');
-  await expect(dialog).toHaveCount(0);
+  const cancel = dialog.getByRole('button', { name: 'Cancel' });
+  await expect(dialog).not.toHaveAttribute('aria-busy', 'true');
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(dialog.getByRole('button', { name: 'Close confirmation dialog' })).toBeFocused();
+  await expect(page.getByRole('alert').filter({ hasText: 'Rotation could not be completed.' })).toBeVisible();
 });
