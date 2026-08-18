@@ -187,7 +187,7 @@ test.describe('Community self-service browser flow', () => {
 
     await page.goto('/reaction-roles');
     await page.getByRole('button', { name: /Add Mapping/ }).click();
-    await page.getByRole('button', { name: 'Channel *' }).click();
+    await page.getByRole('combobox', { name: 'Channel *' }).click();
     await page.getByRole('button', { name: /role-picks/ }).click();
     await page.getByLabel('Discord message link *').fill(
       `https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`,
@@ -263,7 +263,7 @@ test.describe('Community self-service browser flow', () => {
 
     await page.goto('/reaction-roles');
     await page.getByRole('button', { name: /Add Mapping/ }).click();
-    await page.getByRole('button', { name: 'Channel *' }).click();
+    await page.getByRole('combobox', { name: 'Channel *' }).click();
     await page.getByRole('button', { name: /role-picks/ }).click();
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
@@ -292,7 +292,7 @@ test.describe('Community self-service browser flow', () => {
 
     await page.goto('/reaction-roles');
     await page.getByRole('button', { name: /Add Mapping/ }).click();
-    await page.getByRole('button', { name: 'Channel *' }).click();
+    await page.getByRole('combobox', { name: 'Channel *' }).click();
     await page.getByRole('button', { name: /role-picks/ }).click();
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
@@ -350,7 +350,7 @@ test.describe('Community self-service browser flow', () => {
 
     await page.goto('/reaction-roles');
     await page.getByRole('button', { name: /Add Mapping/ }).click();
-    await page.getByRole('button', { name: 'Channel *' }).click();
+    await page.getByRole('combobox', { name: 'Channel *' }).click();
     await page.getByRole('button', { name: /role-picks/ }).click();
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
