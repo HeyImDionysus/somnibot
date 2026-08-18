@@ -2095,6 +2095,15 @@ export interface DbEconomyFarmPlots {
   created_at: string;
 }
 
+export interface DbEconomyFarmingOperations {
+  guild_id: string;
+  user_id: string;
+  operation_id: string;
+  operation_type: 'plant' | 'water' | 'fertilize';
+  result: Json;
+  created_at: string;
+}
+
 export interface DbEconomyFishCatches {
   id: string;
   guild_id: string;
