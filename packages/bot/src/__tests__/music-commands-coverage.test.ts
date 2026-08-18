@@ -58,6 +58,10 @@ const TEST_BRAND_KIT = {
 function mp(overrides: any = {}) {
   return {
     getBrandKit: vi.fn().mockResolvedValue(TEST_BRAND_KIT),
+    executeInteractionOccurrence: vi.fn(async (execution: { mutate: () => Promise<unknown> }) => ({
+      kind: 'applied',
+      value: await execution.mutate(),
+    })),
     play: vi.fn().mockResolvedValue({ success: true, entry: { title: 'S', author: 'A', duration: 180000 }, count: 1 }),
     skip: vi.fn().mockResolvedValue({ success: true, message: 'Skipped' }),
     voteSkip: vi.fn().mockResolvedValue({ success: true, message: 'Vote skip' }),
@@ -89,6 +93,7 @@ function mp(overrides: any = {}) {
 
 function mi(name: string, opts: any = {}) {
   return {
+    id: `interaction-${name}`,
     commandName: name,
     options: {
       getString: vi.fn().mockImplementation((_n: string, _req?: boolean) => opts.str ?? null),
@@ -122,6 +127,11 @@ describe('handleMusicCommand', () => {
     const i = mi('play', { str: 'song' });
     await handleMusicCommand(i as any, p as any);
     expect(p.play).toHaveBeenCalled();
+    expect(p.executeInteractionOccurrence).toHaveBeenCalledWith(expect.objectContaining({
+      interactionId: 'interaction-play',
+      userId: 'u1',
+      action: 'play',
+    }));
     expect(i.editReply).toHaveBeenCalled();
   });
 

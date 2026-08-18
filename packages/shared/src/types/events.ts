@@ -540,6 +540,7 @@ export interface PlatformEventMap {
   'music.denied': { userId: string; action: string };
   'music.capacity_rejected': { userId: string; reason: 'queue_full' | 'user_limit'; limit: number };
   'music.store_outage': { userId: string; operation: string; error: string };
+  'music.replay_ignored': { userId: string; action: string; occurrenceId: string; originalStatus: 'claimed' | 'completed' | 'failed' };
   'giveaway.started': { giveawayId: string; prize: string; winnerCount: number; channelId: string; creatorId: string; endsAt: string; requiredRoleId: string | null; requiredLevel: number | null; occurrenceId?: string; correlationId?: string };
   'giveaway.entered': { giveawayId: string; userId: string; withdrawn: boolean; entryCount: number; occurrenceId?: string; correlationId?: string };
   'giveaway.paused': { giveawayId: string; prize: string; actorId: string | null; occurrenceId?: string; correlationId?: string };

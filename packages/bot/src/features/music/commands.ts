@@ -6,15 +6,11 @@
 import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
-  ChannelType,
-  type GuildMember,
 } from 'discord.js';
 import type { MusicPlayerManager } from './music-player.js';
 import {
   buildNowPlayingEmbed,
   buildQueueEmbed,
-  buildAddedEmbed,
-  buildPlaylistAddedEmbed,
   buildMusicErrorEmbed,
   buildMusicInfoEmbed,
   buildFilterEmbed,
@@ -22,6 +18,7 @@ import {
 } from './music-embeds.js';
 import type { FilterPreset } from './music-filters.js';
 import type { BrandKit } from '../branding/index.js';
+import { handlePlayCommand } from './play-command.js';
 
 type MusicCommandContext = {
   readonly musicPlayer: MusicPlayerManager;
@@ -197,7 +194,7 @@ export async function handleMusicCommand(
 
   switch (name) {
     case 'play':
-      await handlePlay(interaction, context);
+      await handlePlayCommand(interaction, musicPlayer, brandKit);
       break;
     case 'skip':
       await handleSkip(interaction, context);
@@ -241,60 +238,6 @@ export async function handleMusicCommand(
 }
 
 // ── Individual Handlers ───────────────────────────────────
-
-async function handlePlay(
-  interaction: ChatInputCommandInteraction,
-  { musicPlayer, brandKit }: MusicCommandContext,
-): Promise<void> {
-  const member = interaction.member as GuildMember;
-  const voiceChannel = member.voice.channel;
-
-  if (!voiceChannel) {
-    await interaction.reply({
-      embeds: [buildMusicErrorEmbed('You must be in a voice channel to use this command', brandKit)],
-      ephemeral: true,
-    });
-    return;
-  }
-
-  const textChannel = interaction.channel;
-  if (!textChannel || textChannel.type !== ChannelType.GuildText) {
-    await interaction.reply({
-      embeds: [buildMusicErrorEmbed('This command can only be used in a text channel', brandKit)],
-      ephemeral: true,
-    });
-    return;
-  }
-
-  const query = interaction.options.getString('query', true);
-
-  await interaction.deferReply();
-
-  const result = await musicPlayer.play(query, member.id, voiceChannel, textChannel);
-
-  if (!result.success) {
-    await interaction.editReply({
-      embeds: [buildMusicErrorEmbed(result.message ?? 'Failed to play track', brandKit)],
-    });
-    return;
-  }
-
-  if (result.count && result.count > 1 && result.playlistName) {
-    await interaction.editReply({
-      embeds: [buildPlaylistAddedEmbed(result.count, result.playlistName, brandKit)],
-    });
-  } else if (result.entry) {
-    const queue = await musicPlayer.queueManager.getQueue(interaction.guildId!);
-    const position = queue ? queue.entries.length - queue.currentIndex : 1;
-    await interaction.editReply({
-      embeds: [buildAddedEmbed(result.entry, position, brandKit)],
-    });
-  } else {
-    await interaction.editReply({
-      embeds: [buildMusicInfoEmbed(`✅ Added **${result.count ?? 1}** track(s) to the queue`, brandKit)],
-    });
-  }
-}
 
 async function handleSkip(
   interaction: ChatInputCommandInteraction,

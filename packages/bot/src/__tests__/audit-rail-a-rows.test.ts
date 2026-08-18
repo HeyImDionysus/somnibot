@@ -112,6 +112,33 @@ describe('rail A rows — music', () => {
     expect(applied!.details).toMatchObject({ userId: 'u1', action: 'volume', value: 80 });
   });
 
+  it('music occurrence replay records the original interaction without a second mutation row', async () => {
+    const rows = await rowsFor('music.replay_ignored', {
+      userId: 'u1',
+      action: 'play',
+      occurrenceId: 'interaction-1',
+      originalStatus: 'completed',
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      guild_id: 'g1',
+      action: 'music.replay_ignored',
+      category: 'music',
+      actor_type: 'user',
+      actor_id: 'u1',
+      target_type: 'music_control',
+      target_id: 'play',
+      occurrence_key: 'music.replay_ignored:interaction-1',
+      correlation_id: 'music-interaction:interaction-1',
+      success: true,
+      details: {
+        occurrenceId: 'interaction-1',
+        originalStatus: 'completed',
+      },
+    });
+  });
+
   it('attributes skip and capacity rejection to the member who caused them', async () => {
     const [skipped, rejected] = await rowsForAll([
       ['music.skipped', {

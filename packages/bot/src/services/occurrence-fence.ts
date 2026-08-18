@@ -1,6 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-export type DiscordOperationKind = 'scheduled_message' | 'temp_channel' | 'ticket';
+export type DiscordOperationKind =
+  | 'scheduled_message'
+  | 'temp_channel'
+  | 'ticket'
+  | 'music_interaction';
 
 export interface DiscordOperationOccurrence {
   id: string;

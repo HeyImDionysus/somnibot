@@ -77,7 +77,18 @@ function makeSupabase(insert = vi.fn().mockResolvedValue({ error: null })) {
 }
 
 function makeGuild() {
-  return { id: 'g1', channels: { cache: new Map() }, members: { cache: new Map(), fetch: vi.fn() } };
+  return {
+    id: 'g1',
+    channels: { cache: new Map() },
+    members: {
+      cache: new Map(),
+      fetch: vi.fn().mockResolvedValue({
+        id: 'u9',
+        roles: { cache: { has: vi.fn().mockReturnValue(false) } },
+        permissions: { has: vi.fn().mockReturnValue(false) },
+      }),
+    },
+  };
 }
 
 function makeEventBus() {
@@ -150,6 +161,10 @@ describe('music audit events', () => {
 
   it('uses the same canonical control vocabulary for denied music buttons', async () => {
     vi.spyOn(manager, 'isDJ').mockResolvedValue(false);
+    vi.spyOn(manager, 'executeInteractionOccurrence').mockImplementation(async (execution) => ({
+      kind: 'applied',
+      value: await execution.mutate(),
+    }));
 
     for (const buttonId of [
       'music:pause_resume',
@@ -159,7 +174,7 @@ describe('music audit events', () => {
       'music:vol_down',
       'music:vol_up',
     ]) {
-      await manager.handleButton(buttonId, 'u1');
+      await manager.handleButton(buttonId, 'u1', `interaction-${buttonId}`);
     }
 
     const actions = eventBus.emit.mock.calls

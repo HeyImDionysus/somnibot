@@ -30,6 +30,12 @@ import type { Band, TimescaleSettings } from 'shoukaku';
 import { createLogger } from '@somnibot/shared';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { resolveBrandKit, type BrandKit } from '../branding/index.js';
+import {
+  MusicInteractionOccurrenceFence,
+  type MusicOccurrenceExecution,
+  type MusicOccurrenceOutcome,
+} from './music-occurrence-fence.js';
+import { applyMusicButtonMutation, resolveMusicButtonAction } from './music-buttons.js';
 
 const log = createLogger('MusicPlayer');
 
@@ -127,6 +133,7 @@ const DEFAULT_CONFIG: MusicConfig = {
 
 export class MusicPlayerManager {
   public readonly queueManager: MusicQueueManager;
+  private readonly interactionFence: MusicInteractionOccurrenceFence;
   private readonly selfHealer = new MusicSelfHealer();
   private config: MusicConfig = { ...DEFAULT_CONFIG };
   private autoLeaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -177,6 +184,11 @@ export class MusicPlayerManager {
     private readonly eventBus: PlatformEventBus,
   ) {
     this.queueManager = new MusicQueueManager(valkey);
+    this.interactionFence = new MusicInteractionOccurrenceFence(supabase, eventBus, guild.id);
+  }
+
+  get guildId(): string {
+    return this.guild.id;
   }
 
   /** Initialize — load config from database, set up Shoukaku event handlers. */
@@ -268,6 +280,12 @@ export class MusicPlayerManager {
 
   async getBrandKit(): Promise<BrandKit> {
     return resolveBrandKit(this.supabase, this.guild.id, { fallbackName: this.guild.name });
+  }
+
+  executeInteractionOccurrence<T>(
+    execution: MusicOccurrenceExecution<T>,
+  ): Promise<MusicOccurrenceOutcome<T>> {
+    return this.interactionFence.execute(execution);
   }
 
   getConfig(): MusicConfig {
@@ -1406,58 +1424,25 @@ export class MusicPlayerManager {
   // ── Button Interactions ─────────────────────────────────
 
   /** Handle music button interactions from now-playing embeds. */
-  async handleButton(buttonId: string, userId: string): Promise<{ message: string }> {
-    const guildId = this.guild.id;
-
-    switch (buttonId) {
-      case 'music:pause_resume': {
-        const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'pause'); return { message: '❌ You need the DJ role to do that' }; }
-        const result = await this.togglePause(guildId, { userId });
-        return { message: result.message };
-      }
-      case 'music:skip': {
-        const isDj = await this.isDJ(userId);
-        if (isDj) {
-          const result = await this.skip(guildId, { userId, method: 'dj_force' });
-          return { message: result.message };
-        }
-        const result = await this.voteSkip(guildId, userId);
-        return { message: result.message };
-      }
-      case 'music:stop': {
-        const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'stop'); return { message: '❌ You need the DJ role to stop playback' }; }
-        const result = await this.stop(guildId, { userId, reason: 'command' });
-        return { message: result.message };
-      }
-      case 'music:shuffle': {
-        const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'shuffle'); return { message: '❌ You need the DJ role to shuffle' }; }
-        const result = await this.shuffle(guildId, { userId });
-        return { message: result.message };
-      }
-      case 'music:loop': {
-        const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'loop'); return { message: '❌ You need the DJ role to change loop mode' }; }
-        const result = await this.cycleLoopMode(guildId, { userId });
-        return { message: result.message };
-      }
-      // V53 Phase 3 (3.6): Volume buttons
-      case 'music:vol_down': {
-        const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'volume'); return { message: '❌ You need the DJ role to change volume' }; }
-        const result = await this.setVolume(guildId, Math.max(0, (await this.queueManager.getQueue(guildId))?.volume ?? 50) - 10, { userId });
-        return { message: result.message };
-      }
-      case 'music:vol_up': {
-        const hasPerm = await this.isDJ(userId);
-        if (!hasPerm) { this.auditPermissionDenied(userId, 'volume'); return { message: '❌ You need the DJ role to change volume' }; }
-        const result = await this.setVolume(guildId, Math.min(100, ((await this.queueManager.getQueue(guildId))?.volume ?? 50) + 10), { userId });
-        return { message: result.message };
-      }
-      default:
-        return { message: '❌ Unknown action' };
+  async handleButton(
+    buttonId: string,
+    userId: string,
+    interactionId: string,
+  ): Promise<{ message: string }> {
+    const action = resolveMusicButtonAction(buttonId);
+    if (!action) return { message: '❌ Unknown action' };
+    const outcome = await this.executeInteractionOccurrence({
+      interactionId,
+      userId,
+      action,
+      mutate: () => applyMusicButtonMutation(this, buttonId, userId),
+    });
+    switch (outcome.kind) {
+      case 'applied': return outcome.value;
+      case 'replayed':
+      case 'indeterminate':
+      case 'unavailable': return { message: outcome.message };
+      default: return assertNeverMusicOutcome(outcome);
     }
   }
 
@@ -2427,6 +2412,10 @@ export class MusicPlayerManager {
 
     return stats;
   }
+}
+
+function assertNeverMusicOutcome(outcome: never): never {
+  throw new TypeError(`Unexpected music occurrence outcome: ${String(outcome)}`);
 }
 
 /**

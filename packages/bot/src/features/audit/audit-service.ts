@@ -1237,6 +1237,22 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ userId: d.userId, operation: d.operation, error: d.error }),
     success: false,
   },
+  'music.replay_ignored': {
+    action: 'music.replay_ignored',
+    category: 'music',
+    targetType: 'music_control',
+    actorType: 'user',
+    targetId: (d) => d.action as string,
+    actorId: (d) => d.userId as string,
+    details: (d) => ({
+      userId: d.userId,
+      action: d.action,
+      occurrenceId: d.occurrenceId,
+      originalStatus: d.originalStatus,
+    }),
+    occurrenceId: (d) => d.occurrenceId as string,
+    correlationId: (d) => `music-interaction:${d.occurrenceId as string}`,
+  },
   'giveaway.started': {
     action: 'giveaway.started',
     category: 'giveaways',
