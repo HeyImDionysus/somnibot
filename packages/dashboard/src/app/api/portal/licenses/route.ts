@@ -13,12 +13,12 @@ function hashToken(token: string): string {
 
 function configuredMaxDevices(products: unknown): number {
   const product = Array.isArray(products) ? products[0] : products;
-  if (!product || typeof product !== 'object') return 0;
+  if (!product || typeof product !== 'object') return 3;
   const rawConfig = Reflect.get(product, 'product_license_config');
   const config = Array.isArray(rawConfig) ? rawConfig[0] : rawConfig;
-  if (!config || typeof config !== 'object') return 0;
+  if (!config || typeof config !== 'object') return 3;
   const value = Reflect.get(config, 'max_devices');
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : 3;
 }
 
 async function getPortalCustomer(request: NextRequest) {

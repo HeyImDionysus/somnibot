@@ -71,6 +71,8 @@ function hasUsableEntitlement(key: LicenseKey): boolean {
     ));
 }
 
+const ROTATABLE_KEY_STATUSES = new Set(['active', 'pending_activation', 'suspended']);
+
 export default function PortalLicenses() {
   const [keys, setKeys] = useState<LicenseKey[]>([]);
   const [loading, setLoading] = useState(true);
@@ -258,7 +260,7 @@ export default function PortalLicenses() {
                     <div>Max Devices: {key.max_devices}</div>
                   </div>
 
-                  {key.status === 'active' && rotationAllowed && hasUsableEntitlement(key) && (
+                  {ROTATABLE_KEY_STATUSES.has(key.status) && rotationAllowed && hasUsableEntitlement(key) && (
                     <div className="rounded-input border border-discord-warning/30 bg-discord-warning/10 p-3">
                       <p className="text-xs text-discord-text-secondary">
                         Replace this key if it was shared or exposed. The current key stops working immediately, and the replacement is delivered only through Discord DM.

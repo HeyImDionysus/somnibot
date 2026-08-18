@@ -280,7 +280,7 @@ test('a retained cancellation request reconfirms its original timing after polic
           id: '22222222-2222-4222-8222-222222222222',
           status: 'active',
           type: 'subscription',
-          expires_at: '2026-09-17T12:00:00.000Z',
+          expires_at: '2026-10-17T12:00:00.000Z',
           grace_period_ends_at: null,
           cancelled_at: null,
           portal_cancellation_timing: 'end-of-term',
@@ -592,6 +592,46 @@ test('license load failure does not claim that the account has no licenses', asy
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 }));
+
+test('server-supported non-active license key states expose rotation', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-rotatable-key-states'));
+  await page.route('**/api/portal/licenses', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      data: ['pending_activation', 'suspended'].map((status, index) => ({
+        id: `${index + 3}3333333-3333-4333-8333-333333333333`,
+        key_prefix: 'SMNI',
+        key_suffix: index === 0 ? 'PEND' : 'SUSP',
+        status,
+        max_devices: 3,
+        expires_at: null,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: {
+          name: index === 0 ? 'Pending Activation License' : 'Suspended License',
+          type: 'one_time',
+          product_license_config: {
+            rotation_policy: 'rotate-and-invalidate',
+            self_service_device_removal: true,
+          },
+        },
+        entitlements: [{ status: 'active', type: 'one_time', expires_at: null }],
+        license_sessions: [],
+      })),
+    }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Pending Activation License/ }).click();
+  await expect(page.getByRole('button', { name: 'Rotate key' })).toBeVisible();
+  await page.getByRole('button', { name: /Suspended License/ }).click();
+  await expect(page.getByRole('button', { name: 'Rotate key' })).toBeVisible();
+  await testInfo.attach('licenses-desktop-suspended-rotation', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
 
 test('disabled license policies hide rotation and device removal', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-policy-session'));

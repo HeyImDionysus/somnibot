@@ -99,6 +99,9 @@ describe('portal list tenant scope', () => {
     licenseRows = [{
       id: 'license-1',
       products: { product_license_config: { max_devices: 3 } },
+    }, {
+      id: 'license-with-null-limit',
+      products: { product_license_config: { max_devices: null } },
     }];
     const response = await getLicenses(request('/api/portal/licenses'));
 
@@ -111,7 +114,10 @@ describe('portal list tenant scope', () => {
     expect(selectCalls.find(([table]) => table === 'license_keys')?.[1]).not.toContain(
       'status, max_devices, expires_at',
     );
-    expect((await response.json()).data[0]).toMatchObject({ id: 'license-1', max_devices: 3 });
+    expect((await response.json()).data).toMatchObject([
+      { id: 'license-1', max_devices: 3 },
+      { id: 'license-with-null-limit', max_devices: 3 },
+    ]);
   });
 
   it('exposes cancellation only for provider-backed purchase subscriptions', async () => {

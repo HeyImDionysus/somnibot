@@ -82,7 +82,7 @@ function displayedSubscription(order: Order): Entitlement | null {
 }
 
 function accessBoundary(entitlement: Entitlement): string | null {
-  return entitlement.cancelled_at && entitlement.portal_cancellation_access_until
+  return entitlement.portal_cancellation_access_until
     ? entitlement.portal_cancellation_access_until
     : entitlement.status === 'grace_period'
     ? entitlement.grace_period_ends_at
