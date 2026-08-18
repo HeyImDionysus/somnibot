@@ -204,6 +204,7 @@ describe('MusicPlayerManager', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(resolveOwnerAlert).mockReset().mockResolvedValue(1);
     vi.useFakeTimers();
     player = makePlayer();
     shoukaku = makeShoukaku(player);

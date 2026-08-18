@@ -266,6 +266,15 @@ function makeQueryEngine(
   let deactivationAttempts = 0;
   let activeCheckoutAttempts = 0;
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+    if (name === 'commerce_claim_checkout_intent') {
+      return {
+        data: {
+          disposition: 'claimed',
+          checkout_token: args?.p_checkout_token,
+        },
+        error: null,
+      };
+    }
     // The production handler now uses the atomic RPC that creates the order
     // and binds the checkout intent in one transaction.  Keep the in-memory
     // engine's row shape identical to the SQL function so these tests exercise
@@ -794,7 +803,7 @@ describe('handleBuyButton — cross-guild plan injection (subscription checkout)
       plans: [legitPlan],
       orders: [],
     });
-    (rpc as any).mockImplementation(async (name: string) => {
+    (rpc as any).mockImplementation(async (name: string, args?: Record<string, unknown>) => {
       if (name === 'commerce_inspect_checkout_blocker') {
         return {
           data: {
@@ -803,6 +812,15 @@ describe('handleBuyButton — cross-guild plan injection (subscription checkout)
             order_id: null,
             order_number: null,
             approval_url: null,
+          },
+          error: null,
+        };
+      }
+      if (name === 'commerce_claim_checkout_intent') {
+        return {
+          data: {
+            disposition: 'claimed',
+            checkout_token: args?.p_checkout_token,
           },
           error: null,
         };

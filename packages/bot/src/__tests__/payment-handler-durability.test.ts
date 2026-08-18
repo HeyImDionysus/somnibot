@@ -36,6 +36,15 @@ function makeSupabase(opts: {
     : product;
   const updates: Array<{ table: string; values: Record<string, unknown> }> = [];
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+    if (name === 'commerce_claim_checkout_intent') {
+      return {
+        data: {
+          disposition: 'claimed',
+          checkout_token: args?.p_checkout_token,
+        },
+        error: null,
+      };
+    }
     if (name === 'commerce_select_checkout_plan') return { data: [plan], error: null };
     if (name === 'generate_order_number') return { data: 'ORD-1', error: null };
     if (name === 'commerce_create_and_bind_active_paid_checkout') {

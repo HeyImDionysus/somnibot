@@ -86,13 +86,18 @@ function makeAdmin() {
     },
     from: (table: string) => {
       if (table === 'audit_logs') {
-        return {
-          insert: async (row: Record<string, unknown>) => {
+        const recordAudit = async (rowOrRows: Record<string, unknown> | Array<Record<string, unknown>>) => {
+          const rows = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows];
+          for (const row of rows) {
             if (!auditRows.some((entry) => entry.occurrence_key === row.occurrence_key)) {
               auditRows.push(row);
             }
-            return { data: null, error: null };
-          },
+          }
+          return { data: null, error: null };
+        };
+        return {
+          insert: recordAudit,
+          upsert: recordAudit,
         };
       }
       if (table === 'portal_cancellation_operations') {

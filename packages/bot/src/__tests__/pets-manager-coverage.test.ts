@@ -72,7 +72,24 @@ function makeSupabase(overrides: Record<string, any> = {}) {
 
   return {
     from: fromMock,
-    rpc: vi.fn().mockResolvedValue({ error: overrides.rpcError ?? null }),
+    rpc: vi.fn(async (
+      name: string,
+      args?: Record<string, unknown>,
+    ): Promise<{ data: unknown; error: unknown }> => {
+      if (name === 'economy_pet_rename_atomic' && !overrides.rpcError) {
+        return {
+          data: {
+            status: 'renamed',
+            applied: true,
+            replayed: false,
+            old_name: overrides.economy_pets?.name ?? 'Old Name',
+            new_name: args?.p_new_name,
+          },
+          error: null,
+        };
+      }
+      return { data: null, error: overrides.rpcError ?? null };
+    }),
   };
 }
 

@@ -149,6 +149,9 @@ describe('MusicPlayerManager', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    occurrenceFenceMocks.claimDiscordOccurrence.mockReset();
+    occurrenceFenceMocks.completeDiscordOccurrence.mockReset();
+    occurrenceFenceMocks.failDiscordOccurrence.mockReset();
     manager = new MusicPlayerManager(makeGuild(), makeShoukaku(), makeSupa(), makeValkey(), makeEventBus());
   });
 

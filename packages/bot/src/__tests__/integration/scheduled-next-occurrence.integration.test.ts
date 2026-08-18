@@ -81,7 +81,9 @@ describe('scheduled message next occurrence persistence', () => {
     // Given an every-minute schedule whose persisted pointer is behind recovery time.
     const schedule = await insertScheduledNextFixture();
     const dueAt = schedule?.next_occurrence_at;
-    if (typeof dueAt !== 'string' || typeof schedule?.id !== 'string') return;
+    if (typeof dueAt !== 'string' || typeof schedule?.id !== 'string') {
+      throw new Error('scheduled next-occurrence fixture did not return an id and due time');
+    }
     const lastMissedAt = new Date(Date.parse(dueAt) + 2 * 60_000).toISOString();
 
     // When skip-missed settles the backlog, then the pointer and baseline move
@@ -187,7 +189,9 @@ describe('scheduled message next occurrence persistence', () => {
     // Given the only allowed send slot was reserved before the worker crashed.
     const schedule = await insertScheduledNextFixture({ max_sends: 1 });
     const dueAt = schedule?.next_occurrence_at;
-    if (typeof dueAt !== 'string' || typeof schedule?.id !== 'string') return;
+    if (typeof dueAt !== 'string' || typeof schedule?.id !== 'string') {
+      throw new Error('scheduled next-occurrence fixture did not return an id and due time');
+    }
     const claim = await claimDiscordOccurrence(
       requireScheduledNextClient(),
       scheduledNextGuildId,
