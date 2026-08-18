@@ -318,14 +318,15 @@ export default function MusicSettingsPage() {
             <h2 className="text-lg font-semibold text-discord-text-primary">DJ Role</h2>
             <p className="mt-1 text-sm text-discord-text-muted">
               Members with this role can force-skip, clear queue, adjust volume, and disconnect the bot.
-              Without a DJ role, everyone has DJ privileges. Members alone in voice always have DJ privileges.
+              Without a DJ role, owners and administrators keep DJ privileges. Members alone in voice can
+              manage playback; other members use listener controls.
             </p>
             <select
               value={config.dj_role_id ?? ''}
               onChange={(e) => updateField('dj_role_id', e.target.value || null)}
               className="mt-3 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
             >
-              <option value="">No DJ role (everyone is DJ)</option>
+              <option value="">No DJ role (owner/admin/solo only)</option>
               {roles.map((role) => (
                 <option key={role.id} value={role.id}>
                   {role.name}
