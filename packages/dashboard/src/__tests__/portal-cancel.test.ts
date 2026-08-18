@@ -183,7 +183,6 @@ describe('POST /api/portal/cancel', () => {
 
     const replay = await POST(makeRequest({
       entitlement_id: ENT_ID,
-      cancellation_timing: 'immediate',
     }));
     const body = await replay.json();
 

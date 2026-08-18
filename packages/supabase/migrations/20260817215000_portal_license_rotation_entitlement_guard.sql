@@ -50,7 +50,13 @@ BEGIN
       AND entitlement.product_id = v_old.product_id
       AND entitlement.guild_id = v_old.guild_id
       AND (
-        entitlement.status = 'active'
+        (
+          entitlement.status = 'active'
+          AND (
+            entitlement.expires_at IS NULL
+            OR entitlement.expires_at > v_now
+          )
+        )
         OR (
           entitlement.status = 'grace_period'
           AND entitlement.grace_period_ends_at > v_now

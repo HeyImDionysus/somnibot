@@ -40,8 +40,8 @@ interface LicenseKey {
         }>;
   } | null;
   entitlements?:
-    | { status: string; type: string; grace_period_ends_at: string | null }
-    | Array<{ status: string; type: string; grace_period_ends_at: string | null }>;
+    | { status: string; type: string; expires_at: string | null; grace_period_ends_at: string | null }
+    | Array<{ status: string; type: string; expires_at: string | null; grace_period_ends_at: string | null }>;
   license_sessions: LicenseSession[];
 }
 
@@ -57,7 +57,13 @@ function productLicenseConfig(product: LicenseKey['products']) {
 function hasUsableEntitlement(key: LicenseKey): boolean {
   const embedded = key.entitlements;
   const entitlements = Array.isArray(embedded) ? embedded : embedded ? [embedded] : [];
-  return entitlements.some((entitlement) => entitlement.status === 'active'
+  return entitlements.some((entitlement) => (
+    entitlement.status === 'active'
+    && (
+      entitlement.expires_at === null
+      || Date.parse(entitlement.expires_at) > Date.now()
+    )
+  )
     || (
       entitlement.status === 'grace_period'
       && typeof entitlement.grace_period_ends_at === 'string'

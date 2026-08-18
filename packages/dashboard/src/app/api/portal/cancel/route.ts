@@ -112,12 +112,6 @@ export async function POST(request: NextRequest) {
     const parsed = await parseBody(request, portalCancelSchema);
     if (!parsed.ok) return parsed.response;
     const { entitlement_id, cancellation_timing: confirmedTiming } = parsed.data;
-    if (confirmedTiming !== cancellationTiming) {
-      return NextResponse.json(
-        { error: 'The store cancellation policy changed. Reload this page and review the current terms before confirming again.' },
-        { status: 409 },
-      );
-    }
 
     // The entitlement MUST be a subscription owned by this customer in this guild.
     const { data: entitlement, error: entitlementError } = await admin
@@ -139,6 +133,12 @@ export async function POST(request: NextRequest) {
     }
     if (entitlement.cancelled_at) {
       return scheduledResponse(entitlement, true, persistedCancellationTiming(entitlement));
+    }
+    if (confirmedTiming !== cancellationTiming) {
+      return NextResponse.json(
+        { error: 'The store cancellation policy changed. Reload this page and review the current terms before confirming again.' },
+        { status: 409 },
+      );
     }
     if (!['active', 'grace_period'].includes(entitlement.status)) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });

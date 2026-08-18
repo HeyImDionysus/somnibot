@@ -448,7 +448,7 @@ test('license load failure does not claim that the account has no licenses', asy
               self_service_device_removal: true,
             }],
           },
-          entitlements: [{ status: 'active', type: 'one_time' }],
+          entitlements: [{ status: 'active', type: 'one_time', expires_at: null }],
           license_sessions: [{
             id: '44444444-4444-4444-8444-444444444444',
             device_name: 'Test workstation',
@@ -549,7 +549,7 @@ test('disabled license policies hide rotation and device removal', async ({ page
               self_service_device_removal: false,
             },
         },
-        entitlements: [{ status: 'active', type: 'one_time' }],
+        entitlements: [{ status: 'active', type: 'one_time', expires_at: null }],
         license_sessions: [{
           id: '44444444-4444-4444-8444-444444444444',
           device_name: 'Test workstation',
@@ -653,6 +653,49 @@ test('expired grace-period license entitlements hide key rotation', async ({ pag
   });
 });
 
+test('expired active license entitlements hide key rotation', async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-expired-active-license'));
+  await page.route('**/api/portal/licenses', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      data: [{
+        id: '33333333-3333-4333-8333-333333333333',
+        key_prefix: 'SMNI',
+        key_suffix: 'ABCD',
+        status: 'active',
+        max_devices: 2,
+        expires_at: null,
+        created_at: '2026-08-17T00:00:00.000Z',
+        products: {
+          name: 'Expired Active License',
+          type: 'one_time',
+          product_license_config: {
+            rotation_policy: 'rotate-and-invalidate',
+            self_service_device_removal: true,
+          },
+        },
+        entitlements: [{
+          status: 'active',
+          type: 'one_time',
+          expires_at: '2020-01-01T00:00:00.000Z',
+          grace_period_ends_at: null,
+        }],
+        license_sessions: [],
+      }],
+    }),
+  }));
+
+  await page.goto('/portal/licenses', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: /Expired Active License/ }).click();
+  await expect(page.getByRole('button', { name: 'Rotate key' })).toHaveCount(0);
+  await testInfo.attach('licenses-desktop-expired-active-no-rotation', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
+});
+
 test('rotation success remains truthful when license refresh fails', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-refresh-session'));
   let licenseReads = 0;
@@ -686,7 +729,7 @@ test('rotation success remains truthful when license refresh fails', async ({ pa
               self_service_device_removal: true,
             }],
           },
-          entitlements: [{ status: 'active', type: 'one_time' }],
+          entitlements: [{ status: 'active', type: 'one_time', expires_at: null }],
           license_sessions: [],
         }],
       }),
@@ -745,7 +788,7 @@ test('device removal success remains truthful when license refresh fails', async
               self_service_device_removal: true,
             },
           },
-          entitlements: [{ status: 'active', type: 'one_time' }],
+          entitlements: [{ status: 'active', type: 'one_time', expires_at: null }],
           license_sessions: [{
             id: '44444444-4444-4444-8444-444444444444',
             device_name: 'Test workstation',
@@ -859,7 +902,7 @@ test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async
             self_service_device_removal: true,
           },
         },
-        entitlements: [{ status: 'active', type: 'one_time', grace_period_ends_at: null }],
+        entitlements: [{ status: 'active', type: 'one_time', expires_at: null, grace_period_ends_at: null }],
         license_sessions: [],
       }],
     }),

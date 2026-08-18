@@ -55,6 +55,7 @@ async function cleanFixtures(): Promise<void> {
 async function createFixture(
   entitlementStatus: 'active' | 'cancelled' | 'grace_period',
   linkEntitlementToKey: boolean,
+  expiresAt: string | null = null,
 ): Promise<RotationFixture> {
   const { data: customer, error: customerError } = await supa
     .from('customers')
@@ -143,6 +144,7 @@ async function createFixture(
       license_key_id: linkEntitlementToKey ? key.id : null,
       type: 'one_time',
       status: entitlementStatus,
+      expires_at: expiresAt,
       source: 'purchase',
       granted_role_ids: [],
       granted_channel_ids: [],
@@ -245,13 +247,19 @@ afterAll(async () => {
 
 describe('portal license rotation entitlement guard', () => {
   it.each([
-    { label: 'terminal', status: 'cancelled' as const, linked: true },
-    { label: 'unlinked', status: 'active' as const, linked: false },
-    { label: 'expired grace-period', status: 'grace_period' as const, linked: true },
+    { label: 'terminal', status: 'cancelled' as const, linked: true, expiresAt: null },
+    { label: 'unlinked', status: 'active' as const, linked: false, expiresAt: null },
+    { label: 'expired grace-period', status: 'grace_period' as const, linked: true, expiresAt: null },
+    {
+      label: 'expired active',
+      status: 'active' as const,
+      linked: true,
+      expiresAt: '2020-01-01T00:00:00.000Z',
+    },
   ])(
     'rejects a $label entitlement without changing keys, links, or delivery',
-    async ({ status, linked }) => {
-      const fixture = await createFixture(status, linked);
+    async ({ status, linked, expiresAt }) => {
+      const fixture = await createFixture(status, linked, expiresAt);
       const before = await observe(fixture);
 
       await attemptRotation(fixture);
