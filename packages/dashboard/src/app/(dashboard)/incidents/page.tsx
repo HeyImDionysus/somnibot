@@ -20,7 +20,7 @@ interface Incident {
   status: string;
   source: string;
   assigned_to: string | null;
-  started_at: string;
+  started_at: string | null;
   identified_at: string | null;
   resolved_at: string | null;
   duration_seconds: number | null;
@@ -298,7 +298,7 @@ export default function IncidentsPage() {
                 </div>
                 <p className="mt-1 text-sm font-medium text-discord-text-primary">{inc.title}</p>
                 <div className="mt-1 text-xs text-discord-text-muted">
-                  Started {formatDate(inc.started_at)}
+                  Started {formatDate(inc.started_at ?? inc.created_at)}
                   {inc.duration_seconds !== null && ` • Duration: ${formatDuration(inc.duration_seconds)}`}
                 </div>
               </button>
