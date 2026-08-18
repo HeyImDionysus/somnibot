@@ -417,6 +417,17 @@ export async function generateTranscript(
       html_content: html,
     });
 
+    const isTranscriptReplay = dbError?.code === '23505' && [dbError.message, dbError.details, dbError.hint]
+      .some((field) => field?.includes('ticket_transcripts_guild_ticket_key'));
+    if (isTranscriptReplay) {
+      const { data: stored, error: storedError } = await supabase
+        .from('ticket_transcripts')
+        .select('html_content')
+        .eq('guild_id', guild.id)
+        .eq('ticket_id', ticket.id)
+        .single();
+      if (!storedError && stored) return { success: true, html: stored.html_content };
+    }
     if (dbError) {
       log.error('Failed to save transcript:', dbError.message);
       await reportTranscriptFailure(supabase, eventBus, guild, ticket, dbError.message);

@@ -161,10 +161,19 @@ describe('generateTranscript', () => {
     const channel = makeChannel(3);
     const guild = makeGuild(channel);
     const supabase = makeSupabase({
-      ticket_transcripts: { data: null, error: { message: 'insert failed' } },
+      ticket_transcripts: {
+        data: null,
+        error: {
+          code: '23505',
+          message: 'duplicate key value violates unique constraint "unrelated_key"',
+          details: 'Key (unrelated_id) already exists.',
+          hint: null,
+        },
+      },
     });
     const result = await generateTranscript(guild as any, makeTicket(), supabase as any);
     expect(result.success).toBe(false);
+    expect(supabase.from.mock.calls.filter(([table]) => table === 'ticket_transcripts')).toHaveLength(1);
   });
 
   it('posts transcript to transcript channel', async () => {
@@ -201,5 +210,70 @@ describe('generateTranscript', () => {
     const result = await generateTranscript(guild as any, makeTicket(), supabase as any);
     expect(result.success).toBe(true);
     expect(memberSend).toHaveBeenCalled();
+  });
+
+  it('returns the stored transcript without redelivering when generation is replayed', async () => {
+    // Given: the first insert wins and a concurrent replay receives the
+    // database uniqueness error for the same guild/ticket pair.
+    const channel = makeChannel(2);
+    const transcriptSend = vi.fn().mockResolvedValue(undefined);
+    const memberSend = vi.fn().mockResolvedValue(undefined);
+    const guild = makeGuild(channel, [['transcript-ch', { send: transcriptSend }]]);
+    guild.id = 'g-idempotent';
+    guild.members.fetch.mockResolvedValue({ send: memberSend });
+    let transcriptInsertCount = 0;
+    let storedHtml: string | undefined;
+    const supabase = {
+      from: vi.fn().mockImplementation((table: string) => {
+        if (table === 'ticket_transcripts') {
+          return {
+            insert: vi.fn().mockImplementation((row: { html_content: string }) => {
+              transcriptInsertCount += 1;
+              if (transcriptInsertCount === 1) {
+                storedHtml = row.html_content;
+                return Promise.resolve({ data: null, error: null });
+              }
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code: '23505',
+                  message: 'duplicate key value violates a unique constraint',
+                  details: 'Constraint ticket_transcripts_guild_ticket_key rejected the guild/ticket pair.',
+                  hint: null,
+                },
+              });
+            }),
+            select: vi.fn().mockReturnValue(
+              chainBuilder({ data: { html_content: storedHtml }, error: null }),
+            ),
+          };
+        }
+        if (table === 'ticket_panels') {
+          return chainBuilder({
+            data: { transcript_channel_id: 'transcript-ch', dm_transcript_to_creator: true },
+            error: null,
+          });
+        }
+        return chainBuilder({ data: null, error: null });
+      }),
+    };
+
+    // When: the close path and transcript button replay run concurrently.
+    const typedGuild: Parameters<typeof generateTranscript>[0] = Object.create(guild);
+    const typedSupabase: Parameters<typeof generateTranscript>[2] = Object.create(supabase);
+    const results = await Promise.all([
+      generateTranscript(typedGuild, makeTicket(), typedSupabase),
+      generateTranscript(typedGuild, makeTicket(), typedSupabase),
+    ]);
+
+    // Then: both calls converge on the stored result and only the insert
+    // winner delivers the transcript externally.
+    expect(results).toEqual([
+      { success: true, html: storedHtml },
+      { success: true, html: storedHtml },
+    ]);
+    expect(transcriptInsertCount).toBe(2);
+    expect(transcriptSend).toHaveBeenCalledTimes(1);
+    expect(memberSend).toHaveBeenCalledTimes(1);
   });
 });
