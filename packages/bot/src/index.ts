@@ -49,7 +49,8 @@ import { startPortalRequestNotifier } from './features/commerce/portal-request-n
 import { BotPresenceManager } from './features/discord-ux/index.js';
 import { shutdownBot, type BotLevelServices } from './services/bot-shutdown.js';
 import { acquireRuntimeLease, resolveRuntimeHolderId } from './services/runtime-lease.js';
-import { EmbedBuilder, Events } from 'discord.js';
+import { initializeWhenDiscordReady } from './services/discord-ready.js';
+import { EmbedBuilder } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import { SOMNIBOT_VERSION } from './version.js';
 
@@ -307,7 +308,7 @@ async function main(): Promise<void> {
   void startDashboardSupervisor();
 
   // 6. Post-ready initialization
-  client.once(Events.ClientReady, async () => {
+  initializeWhenDiscordReady(client, async () => {
     log.info('Discord ready — initializing systems...');
     startLauncherIpcHeartbeat(client);
 
@@ -364,6 +365,9 @@ async function main(): Promise<void> {
     }
 
     await runFullBoot(client, botLevelServices);
+  }, (error) => {
+    log.error('Discord-ready initialization failed', { error: String(error) });
+    void shutdown('READY_INITIALIZATION_FAILED', 1);
   });
 
   // ── New guild joined: auto-initialize via GuildRouter ──
