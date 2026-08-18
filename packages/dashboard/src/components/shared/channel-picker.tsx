@@ -517,6 +517,7 @@ export function ChannelPicker({
                 <ChannelIcon type={ch.type} className="text-discord-text-muted" />
                 {ch.name}
                 <button
+                  type="button"
                   onClick={(e) => removeTag(ch.id, e)}
                   onKeyDown={(event) => event.stopPropagation()}
                   aria-label={`Remove ${ch.name}`}
@@ -535,6 +536,7 @@ export function ChannelPicker({
         </div>
         {selected.length > 0 && (
           <button
+            type="button"
             onClick={clear}
             onKeyDown={(event) => event.stopPropagation()}
             aria-label="Clear channel selection"

@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import * as React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
+  ChannelPicker,
   isAuthoritativeChannelSnapshot,
   normalizeSnapshotChannels,
   resolveSelectedChannels,
@@ -23,6 +26,37 @@ const category = {
   manageableByBot: true,
   botPermissions: '16',
 };
+
+describe('ChannelPicker form controls', () => {
+  beforeAll(() => vi.stubGlobal('React', React));
+  afterAll(() => vi.unstubAllGlobals());
+
+  it('renders the single-selection clear control as a non-submit button', () => {
+    const markup = renderToStaticMarkup(React.createElement(
+      'form',
+      null,
+      React.createElement(ChannelPicker, { value: 'channel-1', onChange: () => undefined }),
+    ));
+    const clearButton = markup.match(/<button[^>]*aria-label="Clear channel selection"[^>]*>/)?.[0];
+
+    expect(clearButton).toContain('type="button"');
+  });
+
+  it('renders multi-selection tag removal as a non-submit button', () => {
+    const markup = renderToStaticMarkup(React.createElement(
+      'form',
+      null,
+      React.createElement(ChannelPicker, {
+        value: ['channel-1'],
+        multi: true,
+        onChange: () => undefined,
+      }),
+    ));
+    const removeButton = markup.match(/<button[^>]*aria-label="Remove [^"]+"[^>]*>/)?.[0];
+
+    expect(removeButton).toContain('type="button"');
+  });
+});
 
 describe('snapshotAuthorityAsOf (round 27: gates Send Now via onAuthorityChange)', () => {
   const MOUNT = Date.parse('2026-07-31T04:00:00.000Z');
