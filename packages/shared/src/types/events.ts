@@ -541,6 +541,12 @@ export interface PlatformEventMap {
   'music.capacity_rejected': { userId: string; reason: 'queue_full' | 'user_limit'; limit: number };
   'music.store_outage': { userId: string; operation: string; error: string };
   'music.replay_ignored': { userId: string; action: string; occurrenceId: string; originalStatus: 'claimed' | 'completed' | 'failed' };
+  'music.runtime_outage': { episodeId: string; revision: number; source: 'process_restart' | 'node_error' | 'node_close' | 'node_disconnect' | 'player_closed'; nodeName: string; reason: string };
+  'music.recovery_attempted': { episodeId: string; revision: number; attempt: number; trigger: 'process_restart' | 'node_ready' | 'player_closed' };
+  'music.recovery_succeeded': { episodeId: string; revision: number; attempt: number; trigger: 'process_restart' | 'node_ready' | 'player_closed' };
+  'music.recovery_failed': { episodeId: string; revision: number; attempt: number; trigger: 'process_restart' | 'node_ready' | 'player_closed'; error: string; terminal: boolean };
+  'music.queue_preserved': { episodeId: string; revision: number; trackCount: number; reason: string };
+  'music.manual_reconcile_required': { episodeId: string; revision: number; reason: string; trackCount: number };
   'giveaway.started': { giveawayId: string; prize: string; winnerCount: number; channelId: string; creatorId: string; endsAt: string; requiredRoleId: string | null; requiredLevel: number | null; occurrenceId?: string; correlationId?: string };
   'giveaway.entered': { giveawayId: string; userId: string; withdrawn: boolean; entryCount: number; occurrenceId?: string; correlationId?: string };
   'giveaway.paused': { giveawayId: string; prize: string; actorId: string | null; occurrenceId?: string; correlationId?: string };

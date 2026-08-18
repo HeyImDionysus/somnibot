@@ -12,6 +12,7 @@ import {
   type VoiceBasedChannel,
   ChannelType,
 } from 'discord.js';
+import { randomUUID } from 'node:crypto';
 import type { Shoukaku, Player, Track, TrackExceptionEvent, TrackEndEvent, TrackStartEvent, TrackStuckEvent, WebSocketClosedEvent } from 'shoukaku';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
@@ -28,7 +29,7 @@ import { MusicSelfHealer, type SearchProvider } from './music-self-healer.js';
 import { applyFilterPreset, applyCustomTimescale, describeActiveFilters, type FilterPreset } from './music-filters.js';
 import type { Band, TimescaleSettings } from 'shoukaku';
 import { createLogger } from '@somnibot/shared';
-import { raiseOwnerAlert } from '../../services/alert-service.js';
+import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 import { resolveBrandKit, type BrandKit } from '../branding/index.js';
 import {
   MusicInteractionOccurrenceFence,
@@ -115,6 +116,8 @@ type QueueEndState = {
   sessionRevision: number;
 };
 
+type RuntimeRecoveryTrigger = 'process_restart' | 'node_ready' | 'player_closed';
+
 const DEFAULT_CONFIG: MusicConfig = {
   defaultVolume: 50,
   maxQueueLength: 5000,
@@ -140,6 +143,7 @@ export class MusicPlayerManager {
   private inactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private voiceOperationRevision = 0;
   private reconnectingVoice = false;
+  private recoverySignalPending = false;
   private intentionalVoiceLeaveDepth = 0;
   private disposed = false;
   private queueMutationTail: Promise<void> = Promise.resolve();
@@ -168,12 +172,21 @@ export class MusicPlayerManager {
   private shoukakuEventsRegistered = false;
   private readonly shoukakuReadyHandler = (name: string): void => {
     log.info(`Lavalink node "${name}" ready`);
+    void this.recoverDurableQueue('node_ready').catch((error: unknown) => {
+      log.error('Lavalink ready recovery failed:', error instanceof Error ? error.message : error);
+    });
   };
   private readonly shoukakuErrorHandler = (name: string, error: Error): void => {
     log.error(`Lavalink node "${name}" error:`, error);
+    this.observeRuntimeOutage('node_error', name, error.message);
   };
   private readonly shoukakuCloseHandler = (name: string, code: number, reason: string): void => {
     log.warn(`Lavalink node "${name}" closed: ${code} — ${reason}`);
+    this.observeRuntimeOutage('node_close', name, `${code}: ${reason}`);
+  };
+  private readonly shoukakuDisconnectHandler = (name: string, count: number): void => {
+    log.warn(`Lavalink node "${name}" disconnected, ${count} player(s) affected`);
+    this.observeRuntimeOutage('node_disconnect', name, `${count} player(s) affected`);
   };
 
   constructor(
@@ -199,12 +212,13 @@ export class MusicPlayerManager {
     // V5 Audit P3-8: After restart, check if Shoukaku reconnected to an
     // empty voice channel and start the auto-leave timer immediately.
     // Without this, the bot could sit alone indefinitely after a restart.
+    const queue = await this.queueManager.getQueue(this.guild.id);
     const existingPlayer = this.shoukaku.players?.get(this.guild.id);
     if (existingPlayer) {
-      const queue = await this.queueManager.getQueue(this.guild.id);
       this.setupPlayerEvents(existingPlayer);
       if (!existingPlayer.track && queue && queue.currentIndex < queue.entries.length) {
-        this.playbackRestartRequired = true;
+        await this.openRuntimeOutage('process_restart', 'startup', 'Persisted player is idle');
+        await this.recoverDurableQueue('process_restart', existingPlayer, Math.max(0, existingPlayer.position ?? 0));
       }
       if (queue?.voiceChannelId) {
         const vc = this.guild.channels.cache.get(queue.voiceChannelId);
@@ -216,6 +230,9 @@ export class MusicPlayerManager {
           }
         }
       }
+    } else if (queue && queue.currentIndex < queue.entries.length) {
+      await this.openRuntimeOutage('process_restart', 'startup', 'Process restarted without an in-memory player');
+      await this.recoverDurableQueue('process_restart');
     }
 
     log.info('Player manager started');
@@ -437,6 +454,57 @@ export class MusicPlayerManager {
     }
   }
 
+  private async openRuntimeOutage(
+    source: 'process_restart' | 'node_error' | 'node_close' | 'node_disconnect' | 'player_closed',
+    nodeName: string,
+    reason: string,
+  ): Promise<void> {
+    const episodeId = randomUUID();
+    const { queue, newEpisode } = await this.queueManager.beginRuntimeOutage(
+      this.guild.id,
+      episodeId,
+      reason,
+    );
+    if (!queue || !newEpisode) return;
+
+    const revision = queue.runtimeRevision ?? 0;
+    this.eventBus.emit('music.runtime_outage', this.guild.id, {
+      episodeId,
+      revision,
+      source,
+      nodeName,
+      reason,
+    });
+    this.eventBus.emit('music.queue_preserved', this.guild.id, {
+      episodeId,
+      revision,
+      trackCount: queue.entries.length,
+      reason,
+    });
+    try {
+      await raiseOwnerAlert(this.supabase, this.guild.id, {
+        alertType: 'music_runtime_outage',
+        severity: 'warning',
+        title: 'Music playback interrupted',
+        message: 'The active music queue was preserved while voice playback recovers.',
+        metadata: { episode_id: episodeId, revision, source, node_name: nodeName, reason },
+        guild: this.guild,
+      });
+    } catch (error) {
+      log.warn('Failed to raise music runtime-outage alert:', error instanceof Error ? error.message : error);
+    }
+  }
+
+  private observeRuntimeOutage(
+    source: 'node_error' | 'node_close' | 'node_disconnect',
+    nodeName: string,
+    reason: string,
+  ): void {
+    void this.openRuntimeOutage(source, nodeName, reason).catch((error: unknown) => {
+      log.error('Failed to persist music runtime outage:', error instanceof Error ? error.message : error);
+    });
+  }
+
   // ── Core Playback ───────────────────────────────────────
 
   /** Search and play a track. Returns the queue entry or error message. */
@@ -446,7 +514,7 @@ export class MusicPlayerManager {
     voiceChannel: VoiceBasedChannel,
     textChannel: TextChannel,
   ): Promise<{ success: boolean; message?: string; entry?: QueueEntry; count?: number; playlistName?: string }> {
-    if (this.reconnectingVoice) {
+    if (this.reconnectingVoice || this.recoverySignalPending) {
       return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
     }
     if (this.uncommittedVoiceCleanupInProgress) {
@@ -468,6 +536,10 @@ export class MusicPlayerManager {
       return { success: false, message: 'Music storage is temporarily unavailable — please try again shortly.' };
     }
     if (queueBeforeResolve && !this.queueExhausted) {
+      if (queueBeforeResolve.runtimeState && queueBeforeResolve.runtimeState !== 'ready') {
+        await this.completePlayRequest(requestRevision, false);
+        return { success: false, message: 'Voice is reconnecting — please try again shortly.' };
+      }
       const capacityRejection = this.getCapacityRejection(queueBeforeResolve, userId);
       if (capacityRejection) {
         await this.completePlayRequest(requestRevision, true);
@@ -1485,6 +1557,7 @@ export class MusicPlayerManager {
     this.shoukaku.on('ready', this.shoukakuReadyHandler);
     this.shoukaku.on('error', this.shoukakuErrorHandler);
     this.shoukaku.on('close', this.shoukakuCloseHandler);
+    this.shoukaku.on('disconnect', this.shoukakuDisconnectHandler);
     this.shoukakuEventsRegistered = true;
   }
 
@@ -1493,6 +1566,7 @@ export class MusicPlayerManager {
     this.shoukaku.off('ready', this.shoukakuReadyHandler);
     this.shoukaku.off('error', this.shoukakuErrorHandler);
     this.shoukaku.off('close', this.shoukakuCloseHandler);
+    this.shoukaku.off('disconnect', this.shoukakuDisconnectHandler);
     this.shoukakuEventsRegistered = false;
   }
 
@@ -1789,11 +1863,45 @@ export class MusicPlayerManager {
   }
 
   private async recoverVoiceConnection(player: Player, event: WebSocketClosedEvent): Promise<void> {
+    const activePlayer = this.shoukaku.players.get(this.guild.id);
+    if (
+      this.intentionalVoiceLeaveDepth > 0 ||
+      this.reconnectingVoice ||
+      this.recoverySignalPending ||
+      (activePlayer && activePlayer !== player)
+    ) return;
+    this.recoverySignalPending = true;
+    try {
+      await this.openRuntimeOutage(
+        'player_closed',
+        player.node.name,
+        `${event.code}: ${event.reason || 'no reason'}`,
+      );
+      await this.recoverDurableQueue('player_closed', player, Math.max(0, player.position ?? 0));
+    } finally {
+      this.recoverySignalPending = false;
+    }
+  }
+
+  private async recoverDurableQueue(
+    trigger: RuntimeRecoveryTrigger,
+    stalePlayer?: Player,
+    resumePosition = 0,
+  ): Promise<void> {
     const guildId = this.guild.id;
     const activePlayer = this.shoukaku.players.get(guildId);
-    if (this.intentionalVoiceLeaveDepth > 0 || this.reconnectingVoice || (activePlayer && activePlayer !== player)) {
+    if (
+      this.intentionalVoiceLeaveDepth > 0 ||
+      this.reconnectingVoice ||
+      (stalePlayer && activePlayer && activePlayer !== stalePlayer)
+    ) {
       return;
     }
+
+    const durableQueue = await this.queueManager.getQueue(guildId);
+    if (!durableQueue || durableQueue.runtimeState === 'ready') return;
+    const claim = await this.queueManager.claimRuntimeRecovery(guildId, randomUUID());
+    if (!claim) return;
 
     this.reconnectingVoice = true;
     const recoveryRevision = ++this.voiceOperationRevision;
@@ -1804,24 +1912,31 @@ export class MusicPlayerManager {
     const recoveryIsCurrent = (): boolean => recoveryRevision === this.voiceOperationRevision;
 
     try {
-      log.info(`Player voice websocket closed (${event.code}, remote=${event.byRemote}): ${event.reason || 'no reason'} — attempting reconnect`);
-      const queue = await this.queueManager.getQueue(guildId);
-      if (!recoveryIsCurrent()) return;
-
-      const resumePosition = Math.max(0, player.position ?? 0);
+      const queue = claim.queue;
+      const episodeId = queue.recoveryEpisodeId ?? `revision-${claim.revision}`;
+      log.info(`Music runtime recovery ${episodeId} started at revision ${claim.revision}`);
       await this.clearVoiceConnectionForRecovery(guildId, 'Stale player cleanup');
       if (!recoveryIsCurrent()) return;
 
-      if (!queue || !queue.voiceChannelId) {
-        await this.queueManager.destroyQueue(guildId);
-        this.clearTimers(guildId);
-        return;
-      }
+      const currentTrack = queue.currentIndex < queue.entries.length
+        ? queue.entries[queue.currentIndex]
+        : null;
 
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+          const delay = trigger === 'process_restart' && attempt === 1 ? 0 : attempt * 2000;
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
           if (!recoveryIsCurrent()) return;
+
+          this.eventBus.emit('music.recovery_attempted', guildId, {
+            episodeId,
+            revision: claim.revision,
+            attempt,
+            trigger,
+          });
+          if (!queue.voiceChannelId || !currentTrack?.track) {
+            throw new Error('Durable queue is missing its voice channel or current encoded track');
+          }
 
           const newPlayer = await this.shoukaku.joinVoiceChannel({
             guildId,
@@ -1837,83 +1952,97 @@ export class MusicPlayerManager {
           if (await recoveryWasCancelled()) return;
 
           this.setupPlayerEvents(newPlayer);
-          const currentTrack = queue.currentIndex < queue.entries.length
-            ? queue.entries[queue.currentIndex]
-            : null;
-          const resumeTrack = async (encoded: string): Promise<boolean> => {
-            if (await recoveryWasCancelled()) return false;
-            if (!currentTrack) return false;
-            const playbackRevision = ++this.trackPlaybackRevision;
-            const scheduledStart: PendingTrackStart = {
-              entry: currentTrack,
-              encodedTrack: encoded,
-              playbackRevision,
-              sessionRevision: this.playbackSessionRevision,
-            };
-            this.pendingTrackStarts.push(scheduledStart);
-            try {
-              await newPlayer.playTrack({
-                track: {
-                  encoded,
-                  userData: {
-                    somnibotPlayback: {
-                      playbackRevision,
-                      sessionRevision: scheduledStart.sessionRevision,
-                    },
+          const playbackRevision = ++this.trackPlaybackRevision;
+          const scheduledStart: PendingTrackStart = {
+            entry: currentTrack,
+            encodedTrack: currentTrack.track,
+            playbackRevision,
+            sessionRevision: this.playbackSessionRevision,
+          };
+          this.pendingTrackStarts.push(scheduledStart);
+          try {
+            await newPlayer.playTrack({
+              track: {
+                encoded: currentTrack.track,
+                userData: {
+                  somnibotPlayback: {
+                    playbackRevision,
+                    sessionRevision: scheduledStart.sessionRevision,
                   },
                 },
-                position: currentTrack.isStream ? 0 : resumePosition,
-                volume: queue.volume,
-                paused: queue.paused,
-              });
-            } catch (error) {
-              const pendingIndex = this.pendingTrackStarts.indexOf(scheduledStart);
-              if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
-              throw error;
-            }
-            if (this.trackPlaybackRevision === playbackRevision) {
-              this.playbackRestartRequired = false;
-            }
-            this.appliedPaused = queue.paused;
-            this.appliedVolume = queue.volume;
-            return !(await recoveryWasCancelled());
-          };
-
-          if (currentTrack?.uri) {
-            try {
-              const resolved = await newPlayer.node.rest.resolve(currentTrack.uri);
-              if (await recoveryWasCancelled()) return;
-              if (resolved?.data && !Array.isArray(resolved.data) && 'encoded' in resolved.data) {
-                if (!(await resumeTrack(resolved.data.encoded))) return;
-              } else if (resolved?.data && Array.isArray(resolved.data) && resolved.data.length > 0) {
-                if (!(await resumeTrack(resolved.data[0].encoded))) return;
-              } else if (currentTrack.track) {
-                if (!(await resumeTrack(currentTrack.track))) return;
-              }
-            } catch {
-              if (currentTrack.track) {
-                if (!(await resumeTrack(currentTrack.track))) return;
-              }
-            }
-          } else if (currentTrack?.track) {
-            if (!(await resumeTrack(currentTrack.track))) return;
+              },
+              position: currentTrack.isStream ? 0 : resumePosition,
+              volume: queue.volume,
+              paused: queue.paused,
+            });
+          } catch (error) {
+            const pendingIndex = this.pendingTrackStarts.indexOf(scheduledStart);
+            if (pendingIndex >= 0) this.pendingTrackStarts.splice(pendingIndex, 1);
+            throw error;
           }
+          if (await recoveryWasCancelled()) return;
+
+          const committedQueue = await this.queueManager.finishRuntimeRecovery(
+            guildId,
+            claim,
+            'ready',
+            null,
+          );
+          if (!committedQueue) {
+            await this.clearVoiceConnectionForRecovery(guildId, 'Obsolete recovery cleanup');
+            return;
+          }
+          this.playbackRestartRequired = false;
+          this.appliedPaused = queue.paused;
+          this.appliedVolume = queue.volume;
           if (queue.paused) this.resetInactivityTimer(guildId);
+          try {
+            await resolveOwnerAlert(
+              this.supabase,
+              guildId,
+              'music_runtime_outage',
+              { episode_id: episodeId },
+              { guild: this.guild, notice: 'Music playback recovered and the preserved queue resumed.' },
+            );
+          } catch (error) {
+            log.warn('Failed to resolve music runtime-outage alert:', error instanceof Error ? error.message : error);
+          }
+          this.eventBus.emit('music.recovery_succeeded', guildId, {
+            episodeId,
+            revision: committedQueue.runtimeRevision ?? claim.revision,
+            attempt,
+            trigger,
+          });
           log.info(`Reconnected after ${attempt} attempt(s)`);
           return;
         } catch (error) {
           log.warn(`Reconnect attempt ${attempt}/3 failed:`, error);
+          this.eventBus.emit('music.recovery_failed', guildId, {
+            episodeId,
+            revision: claim.revision,
+            attempt,
+            trigger,
+            error: error instanceof Error ? error.message : String(error),
+            terminal: attempt === 3,
+          });
           await this.clearVoiceConnectionForRecovery(guildId, `Reconnect cleanup after attempt ${attempt}/3`);
         }
       }
 
-      log.error('Failed to reconnect after 3 attempts — destroying queue');
-      this.eventBus.emit('music.stopped', guildId, {
-        userId: undefined,
-        reason: 'connection_lost',
-        trackCount: queue.entries.length,
+      const manualQueue = await this.queueManager.finishRuntimeRecovery(
+        guildId,
+        claim,
+        'manual-reconcile',
+        'Recovery retry budget exhausted',
+      );
+      if (!manualQueue) return;
+      log.error('Failed to reconnect after 3 attempts — queue preserved for manual reconcile');
+      this.eventBus.emit('music.manual_reconcile_required', guildId, {
+        episodeId,
+        revision: manualQueue.runtimeRevision ?? claim.revision,
+        reason: 'Recovery retry budget exhausted',
+        trackCount: manualQueue.entries.length,
       });
-      await this.queueManager.destroyQueue(guildId);
       this.clearTimers(guildId);
     } finally {
       this.reconnectingVoice = false;

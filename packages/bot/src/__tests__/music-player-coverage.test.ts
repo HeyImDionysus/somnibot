@@ -45,7 +45,13 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
   }),
 }));
 
+vi.mock('../services/alert-service.js', () => ({
+  raiseOwnerAlert: vi.fn().mockResolvedValue({ inserted: true, delivered: false }),
+  resolveOwnerAlert: vi.fn().mockResolvedValue(1),
+}));
+
 import { MusicPlayerManager } from '../features/music/music-player.js';
+import { resolveOwnerAlert } from '../services/alert-service.js';
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -53,7 +59,16 @@ function makeValkey() {
   const store = new Map<string, string>();
   return {
     get: vi.fn(async (key: string) => store.get(key) ?? null),
-    set: vi.fn(async (key: string, value: string) => { store.set(key, value); return 'OK'; }),
+    set: vi.fn(async (key: string, value: string, ...args: string[]) => {
+      if (args.includes('NX') && store.has(key)) return null;
+      store.set(key, value);
+      return 'OK';
+    }),
+    incr: vi.fn(async (key: string) => {
+      const next = Number(store.get(key) ?? '0') + 1;
+      store.set(key, String(next));
+      return next;
+    }),
     del: vi.fn(async (key: string) => { store.delete(key); return 1; }),
     _store: store,
   };
@@ -151,7 +166,7 @@ function makeGuild() {
   };
   const textChannel = {
     id: 'tc1',
-    send: vi.fn().mockResolvedValue({ id: 'msg1', edit: vi.fn() }),
+    send: vi.fn().mockResolvedValue({ id: 'msg1', edit: vi.fn(), delete: vi.fn().mockResolvedValue(undefined) }),
   };
   const channelCache = new Map<string, unknown>();
   channelCache.set('vc1', voiceChannel);
@@ -161,7 +176,11 @@ function makeGuild() {
     channels: { cache: channelCache },
     members: {
       cache: new Map(),
-      fetch: vi.fn().mockResolvedValue({ id: 'u1', roles: { cache: new Map() } }),
+      fetch: vi.fn().mockResolvedValue({
+        id: 'u1',
+        roles: { cache: new Map() },
+        permissions: { has: vi.fn().mockReturnValue(false) },
+      }),
     },
   };
 }
@@ -228,6 +247,161 @@ describe('MusicPlayerManager', () => {
 
       await manager.init();
       // Should have started auto-leave timer (no assertion on timer itself, just no crash)
+    });
+
+    it('reconstructs a missing player from the durable queue and resumes once', async () => {
+      const restartShoukaku = makeShoukaku();
+      const restartManager = new MusicPlayerManager(
+        guild as never,
+        restartShoukaku as never,
+        supabase as never,
+        valkey as never,
+        eventBus as never,
+      );
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'persisted-encoding', title: 'Persisted', uri: '', duration: 120000, author: 'A', requestedBy: 'u0', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 37, paused: true, shuffled: false,
+        runtimeState: 'ready', runtimeRevision: 4, recoveryEpisodeId: null,
+      }));
+
+      await restartManager.init();
+
+      const reconstructedPlayer = await restartShoukaku.joinVoiceChannel.mock.results[0]?.value;
+      expect(restartShoukaku.joinVoiceChannel).toHaveBeenCalledOnce();
+      expect(reconstructedPlayer.playTrack).toHaveBeenCalledOnce();
+      expect(reconstructedPlayer.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 'persisted-encoding' }),
+        position: 0,
+        volume: 37,
+        paused: true,
+      }));
+      await expect(restartManager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        currentIndex: 0,
+        runtimeState: 'ready',
+        runtimeRevision: 7,
+      });
+      expect(eventBus.emit).toHaveBeenCalledWith('music.recovery_succeeded', 'g1', expect.objectContaining({
+        trigger: 'process_restart',
+      }));
+      expect(resolveOwnerAlert).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets only one overlapping process-start recovery join and play', async () => {
+      const sharedValkey = makeValkey();
+      await sharedValkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'persisted-encoding', title: 'Persisted', uri: '', duration: 120000, author: 'A', requestedBy: 'u0', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 37, paused: false, shuffled: false,
+        runtimeState: 'degraded', runtimeRevision: 4, recoveryEpisodeId: 'episode-1', runtimeError: 'restart',
+      }));
+      sharedValkey._store.set('music:runtime:g1:outage-episode', 'episode-1');
+      const firstShoukaku = makeShoukaku();
+      const secondShoukaku = makeShoukaku();
+      const firstManager = new MusicPlayerManager(
+        guild as never,
+        firstShoukaku as never,
+        supabase as never,
+        sharedValkey as never,
+        eventBus as never,
+      );
+      const secondManager = new MusicPlayerManager(
+        guild as never,
+        secondShoukaku as never,
+        supabase as never,
+        sharedValkey as never,
+        eventBus as never,
+      );
+
+      await Promise.all([firstManager.init(), secondManager.init()]);
+
+      expect(firstShoukaku.joinVoiceChannel.mock.calls.length + secondShoukaku.joinVoiceChannel.mock.calls.length).toBe(1);
+      const joinedPlayers = [firstShoukaku, secondShoukaku]
+        .flatMap((instance) => instance.joinVoiceChannel.mock.results)
+        .map((result) => result.value)
+        .filter((result) => result !== undefined);
+      const resolvedPlayers = await Promise.all(joinedPlayers);
+      expect(resolvedPlayers.reduce((count, joinedPlayer) => count + joinedPlayer.playTrack.mock.calls.length, 0)).toBe(1);
+    });
+
+    it('does not mask successful recovery when alert resolution fails', async () => {
+      vi.mocked(resolveOwnerAlert).mockRejectedValueOnce(new Error('alert store unavailable'));
+      const restartShoukaku = makeShoukaku();
+      const restartManager = new MusicPlayerManager(
+        guild as never,
+        restartShoukaku as never,
+        supabase as never,
+        valkey as never,
+        eventBus as never,
+      );
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'persisted-encoding', title: 'Persisted', uri: '', duration: 120000, author: 'A', requestedBy: 'u0', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 37, paused: false, shuffled: false,
+        runtimeState: 'ready', runtimeRevision: 0, recoveryEpisodeId: null, runtimeError: null,
+      }));
+
+      await expect(restartManager.init()).resolves.toBeUndefined();
+
+      expect(restartShoukaku.joinVoiceChannel).toHaveBeenCalledOnce();
+      expect(resolveOwnerAlert).toHaveBeenCalledOnce();
+      await expect(restartManager.queueManager.getQueue('g1')).resolves.toMatchObject({ runtimeState: 'ready' });
+    });
+
+    it('adopts an existing outage episode when its queue is still ready', async () => {
+      const restartShoukaku = makeShoukaku();
+      const restartManager = new MusicPlayerManager(
+        guild as never,
+        restartShoukaku as never,
+        supabase as never,
+        valkey as never,
+        eventBus as never,
+      );
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'persisted-encoding', title: 'Persisted', uri: '', duration: 120000, author: 'A', requestedBy: 'u0', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 37, paused: false, shuffled: false,
+        runtimeState: 'ready', runtimeRevision: 4, recoveryEpisodeId: null, runtimeError: null,
+      }));
+      valkey._store.set('music:runtime:g1:outage-episode', 'existing-episode');
+
+      await restartManager.init();
+
+      expect(restartShoukaku.joinVoiceChannel).toHaveBeenCalledOnce();
+      expect(eventBus.emit).toHaveBeenCalledWith('music.recovery_succeeded', 'g1', expect.any(Object));
+    });
+
+    it('deduplicates node error, close, and disconnect into one recoverable episode', async () => {
+      await valkey.set('queue:g1', JSON.stringify({
+        guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
+        entries: [{ track: 'persisted-encoding', title: 'Persisted', uri: '', duration: 120000, author: 'A', requestedBy: 'u0', isStream: false }],
+        currentIndex: 0, loopMode: 'off', volume: 37, paused: false, shuffled: false,
+        runtimeState: 'ready', runtimeRevision: 0, recoveryEpisodeId: null,
+      }));
+      await manager.init();
+      const errorHandler = shoukaku.on.mock.calls.find(([event]) => event === 'error')?.[1];
+      const closeHandler = shoukaku.on.mock.calls.find(([event]) => event === 'close')?.[1];
+      const disconnectHandler = shoukaku.on.mock.calls.find(([event]) => event === 'disconnect')?.[1];
+      const readyHandler = shoukaku.on.mock.calls.find(([event]) => event === 'ready')?.[1];
+      expect(errorHandler).toEqual(expect.any(Function));
+      expect(closeHandler).toEqual(expect.any(Function));
+      expect(disconnectHandler).toEqual(expect.any(Function));
+      expect(readyHandler).toEqual(expect.any(Function));
+
+      errorHandler?.('main', new Error('node unavailable'));
+      closeHandler?.('main', 1006, 'connection reset');
+      disconnectHandler?.('main', 1);
+
+      await vi.waitFor(() => {
+        expect(eventBus.emit.mock.calls.filter(([type]) => type === 'music.runtime_outage')).toHaveLength(1);
+        expect(eventBus.emit.mock.calls.filter(([type]) => type === 'music.queue_preserved')).toHaveLength(1);
+      });
+      readyHandler?.('main');
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(shoukaku.joinVoiceChannel).toHaveBeenCalledOnce());
+
+      expect(eventBus.emit.mock.calls.filter(([type]) => type === 'music.recovery_succeeded')).toHaveLength(1);
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({ runtimeState: 'ready' });
     });
 
     it('marks a persisted queue for restart when the existing player is idle', async () => {
@@ -369,9 +543,9 @@ describe('MusicPlayerManager', () => {
   });
 
   describe('isDJ', () => {
-    it('returns true when no DJ role configured', async () => {
+    it('does not grant DJ privileges to every member when no DJ role is configured', async () => {
       const isDJ = await manager.isDJ('u1');
-      expect(isDJ).toBe(true);
+      expect(isDJ).toBe(false);
     });
   });
 
@@ -2553,7 +2727,7 @@ describe('MusicPlayerManager', () => {
         .toBeLessThan(shoukaku.joinVoiceChannel.mock.invocationCallOrder[0]);
       expect(shoukaku.joinVoiceChannel).toHaveBeenCalledWith(expect.objectContaining({ deaf: true }));
       expect(player.playTrack).toHaveBeenCalledWith({
-        track: expect.objectContaining({ encoded: 'base64track' }),
+        track: expect.objectContaining({ encoded: 't1' }),
         position: 60000,
         volume: 37,
         paused: true,
@@ -2581,7 +2755,7 @@ describe('MusicPlayerManager', () => {
       const recoveryPlayback = player.playTrack.mock.calls[0]?.[0] as {
         track: { encoded: string; userData?: unknown };
       };
-      expect(recoveryPlayback.track.encoded).toBe('base64track');
+      expect(recoveryPlayback.track.encoded).toBe('stale-encoding');
       const endRegistrations = player.on.mock.calls.filter(([event]) => event === 'end');
       const endHandler = endRegistrations[endRegistrations.length - 1]?.[1] as (event: {
         reason: string;
@@ -2730,37 +2904,29 @@ describe('MusicPlayerManager', () => {
 
       const closedHandler = getClosedHandler();
       const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
-      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.advanceTimersByTimeAsync(12_000);
       await reconnect;
 
-      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(2);
-      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(2);
+      expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(3);
+      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(3);
       expect(player.playTrack).toHaveBeenCalledTimes(3);
     });
 
-    it('cancels recovery while the resume track is resolving', async () => {
+    it('resumes the durable encoded track without re-resolving its URI', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
         entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
         currentIndex: 0, loopMode: 'off', volume: 50, paused: false, shuffled: false,
       }));
-      let finishResolve: (() => void) | undefined;
-      player.node.rest.resolve.mockImplementationOnce(() => new Promise((resolve) => {
-        finishResolve = () => resolve({
-          loadType: 'search',
-          data: [{ encoded: 'base64track', info: {} }],
-        });
-      }));
-
       const closedHandler = getClosedHandler();
       const reconnect = closedHandler({ code: 4006, reason: 'Session no longer valid', byRemote: true });
       await vi.advanceTimersByTimeAsync(2_000);
-      manager.shutdown();
-      finishResolve?.();
       await reconnect;
 
-      expect(player.playTrack).not.toHaveBeenCalled();
-      expect(shoukaku.leaveVoiceChannel).toHaveBeenCalledTimes(2);
+      expect(player.node.rest.resolve).not.toHaveBeenCalled();
+      expect(player.playTrack).toHaveBeenCalledWith(expect.objectContaining({
+        track: expect.objectContaining({ encoded: 't1' }),
+      }));
     });
 
     it('leaves the rejoined player when recovery is cancelled during playback', async () => {
@@ -2841,7 +3007,7 @@ describe('MusicPlayerManager', () => {
       expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(1);
     });
 
-    it('destroys and audits the queue after all reconnect attempts fail', async () => {
+    it('preserves the queue in manual-reconcile state after all reconnect attempts fail', async () => {
       await valkey.set('queue:g1', JSON.stringify({
         guildId: 'g1', voiceChannelId: 'vc1', textChannelId: 'tc1',
         entries: [{ track: 't1', title: 'Song', uri: 'u1', duration: 120000, author: 'A', requestedBy: 'u1', isStream: false }],
@@ -2855,11 +3021,19 @@ describe('MusicPlayerManager', () => {
       await reconnect;
 
       expect(shoukaku.joinVoiceChannel).toHaveBeenCalledTimes(3);
-      expect(await valkey.get('queue:g1')).toBeNull();
-      expect(eventBus.emit).toHaveBeenCalledWith('music.stopped', 'g1', expect.objectContaining({
-        reason: 'connection_lost',
+      await expect(manager.queueManager.getQueue('g1')).resolves.toMatchObject({
+        entries: [expect.objectContaining({ track: 't1' })],
+        currentIndex: 0,
+        runtimeState: 'manual-reconcile',
+      });
+      expect(eventBus.emit).not.toHaveBeenCalledWith('music.stopped', 'g1', expect.anything());
+      expect(eventBus.emit).toHaveBeenCalledWith('music.queue_preserved', 'g1', expect.objectContaining({
         trackCount: 1,
       }));
+      expect(eventBus.emit).toHaveBeenCalledWith('music.manual_reconcile_required', 'g1', expect.objectContaining({
+        trackCount: 1,
+      }));
+      expect(resolveOwnerAlert).not.toHaveBeenCalled();
     });
   });
 });

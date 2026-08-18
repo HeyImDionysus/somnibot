@@ -35,7 +35,7 @@ vi.mock('discord.js', () => ({
 vi.mock('../features/music/music-queue.js', () => ({
   MusicQueueManager: class {
     setLimits = vi.fn();
-    getQueue = vi.fn(async () => ({ tracks: [], currentIndex: 0, loopMode: 'off' }));
+    getQueue = vi.fn(async () => null);
     addTrack = vi.fn(async () => 0);
     removeTrack = vi.fn(async () => true);
     clearQueue = vi.fn(async () => true);
@@ -254,10 +254,10 @@ describe('MusicPlayerManager', () => {
 
     await firstManager.init();
     await firstManager.init();
-    expect(shoukaku.on).toHaveBeenCalledTimes(3);
+    expect(shoukaku.on).toHaveBeenCalledTimes(4);
 
     await firstManager.suspend();
-    expect(shoukaku.off).toHaveBeenCalledTimes(3);
+    expect(shoukaku.off).toHaveBeenCalledTimes(4);
     for (const [eventName, listener] of shoukaku.on.mock.calls) {
       expect(shoukaku.off).toHaveBeenCalledWith(eventName, listener);
     }
@@ -270,11 +270,11 @@ describe('MusicPlayerManager', () => {
       makeEventBus(),
     );
     await secondManager.init();
-    expect(shoukaku.on).toHaveBeenCalledTimes(6);
-    expect(shoukaku.off).toHaveBeenCalledTimes(3);
+    expect(shoukaku.on).toHaveBeenCalledTimes(8);
+    expect(shoukaku.off).toHaveBeenCalledTimes(4);
 
     await secondManager.suspend();
-    expect(shoukaku.off).toHaveBeenCalledTimes(6);
+    expect(shoukaku.off).toHaveBeenCalledTimes(8);
   });
 
   it('denies DJ privileges by default when multiple listeners share voice', async () => {

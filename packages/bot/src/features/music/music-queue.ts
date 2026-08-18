@@ -29,6 +29,7 @@ export interface QueueEntry {
 }
 
 export type LoopMode = 'off' | 'track' | 'queue';
+export type MusicRuntimeState = 'ready' | 'degraded' | 'recovering' | 'manual-reconcile';
 
 export interface GuildQueue {
   guildId: string;
@@ -43,7 +44,17 @@ export interface GuildQueue {
   volume: number;
   shuffled: boolean;
   paused: boolean;
+  runtimeState: MusicRuntimeState;
+  runtimeRevision: number;
+  recoveryEpisodeId: string | null;
+  runtimeError: string | null;
 }
+
+export type RuntimeRecoveryClaim = {
+  readonly queue: GuildQueue;
+  readonly token: string;
+  readonly revision: number;
+};
 
 /**
  * V5 Audit [12.1]: Maximum number of entries allowed in a single guild's queue.
@@ -73,6 +84,18 @@ function voteSkipKey(guildId: string): string {
   return `music:votes:${guildId}:skip`;
 }
 
+function runtimeRevisionKey(guildId: string): string {
+  return `music:runtime:${guildId}:revision`;
+}
+
+function recoveryLockKey(guildId: string): string {
+  return `music:runtime:${guildId}:recovery-lock`;
+}
+
+function outageEpisodeKey(guildId: string): string {
+  return `music:runtime:${guildId}:outage-episode`;
+}
+
 // ── Queue Manager ─────────────────────────────────────────
 
 export class MusicQueueManager {
@@ -80,6 +103,15 @@ export class MusicQueueManager {
   private maxPerUserQueue = DEFAULT_MAX_PER_USER_QUEUE;
 
   constructor(private readonly valkey: Valkey) {}
+
+  private async nextRuntimeRevision(guildId: string, persistedRevision: number): Promise<number> {
+    await this.valkey.set(
+      runtimeRevisionKey(guildId),
+      String(persistedRevision),
+      'NX',
+    );
+    return this.valkey.incr(runtimeRevisionKey(guildId));
+  }
 
   /** Apply guild-configured limits loaded by MusicPlayerManager. */
   setLimits(limits: { maxQueueSize?: number; maxPerUserQueue?: number }): void {
@@ -92,7 +124,12 @@ export class MusicQueueManager {
     const raw = await this.valkey.get(queueKey(guildId));
     if (!raw) return null;
     try {
-      return JSON.parse(raw) as GuildQueue;
+      const queue = JSON.parse(raw) as GuildQueue;
+      queue.runtimeState ??= 'ready';
+      queue.runtimeRevision ??= 0;
+      queue.recoveryEpisodeId ??= null;
+      queue.runtimeError ??= null;
+      return queue;
     } catch {
       return null;
     }
@@ -120,7 +157,87 @@ export class MusicQueueManager {
       volume: defaultVolume,
       shuffled: false,
       paused: false,
+      runtimeState: 'ready',
+      runtimeRevision: 0,
+      recoveryEpisodeId: null,
+      runtimeError: null,
     };
+  }
+
+  async beginRuntimeOutage(
+    guildId: string,
+    episodeId: string,
+    reason: string,
+  ): Promise<{ queue: GuildQueue | null; newEpisode: boolean }> {
+    const created = await this.valkey.set(outageEpisodeKey(guildId), episodeId, 'EX', 86_400, 'NX');
+    const queue = await this.getQueue(guildId);
+    if (!queue) {
+      if (created === 'OK') await this.valkey.del(outageEpisodeKey(guildId));
+      return { queue: null, newEpisode: false };
+    }
+    if (created !== 'OK') {
+      const existingEpisodeId = await this.valkey.get(outageEpisodeKey(guildId));
+      if (existingEpisodeId) {
+        queue.recoveryEpisodeId = existingEpisodeId;
+        if (queue.runtimeState === 'ready') {
+          const revision = await this.nextRuntimeRevision(guildId, queue.runtimeRevision);
+          queue.runtimeState = 'degraded';
+          queue.runtimeRevision = revision;
+          queue.runtimeError = reason;
+          await this.saveQueue(queue);
+        }
+      }
+      return { queue, newEpisode: false };
+    }
+
+    const revision = await this.nextRuntimeRevision(guildId, queue.runtimeRevision ?? 0);
+    queue.runtimeState = 'degraded';
+    queue.runtimeRevision = revision;
+    queue.recoveryEpisodeId = episodeId;
+    queue.runtimeError = reason;
+    await this.saveQueue(queue);
+    return { queue, newEpisode: true };
+  }
+
+  async claimRuntimeRecovery(guildId: string, token: string): Promise<RuntimeRecoveryClaim | null> {
+    const claimed = await this.valkey.set(recoveryLockKey(guildId), token, 'EX', 120, 'NX');
+    if (claimed !== 'OK') return null;
+
+    const queue = await this.getQueue(guildId);
+    if (!queue) {
+      await this.valkey.del(recoveryLockKey(guildId));
+      return null;
+    }
+    const revision = await this.nextRuntimeRevision(guildId, queue.runtimeRevision ?? 0);
+    queue.runtimeState = 'recovering';
+    queue.runtimeRevision = revision;
+    await this.saveQueue(queue);
+    return { queue, token, revision };
+  }
+
+  async finishRuntimeRecovery(
+    guildId: string,
+    claim: RuntimeRecoveryClaim,
+    state: 'ready' | 'manual-reconcile',
+    error: string | null,
+  ): Promise<GuildQueue | null> {
+    const [activeToken, activeRevision] = await Promise.all([
+      this.valkey.get(recoveryLockKey(guildId)),
+      this.valkey.get(runtimeRevisionKey(guildId)),
+    ]);
+    if (activeToken !== claim.token || Number(activeRevision) !== claim.revision) return null;
+
+    const queue = await this.getQueue(guildId);
+    if (!queue || queue.runtimeRevision !== claim.revision) return null;
+    const nextRevision = await this.nextRuntimeRevision(guildId, claim.revision);
+    queue.runtimeState = state;
+    queue.runtimeRevision = nextRevision;
+    queue.runtimeError = error;
+    if (state === 'ready') queue.recoveryEpisodeId = null;
+    await this.saveQueue(queue);
+    await this.valkey.del(recoveryLockKey(guildId));
+    if (state === 'ready') await this.valkey.del(outageEpisodeKey(guildId));
+    return queue;
   }
 
   /** Destroy the queue (bot leaving voice). */
@@ -128,6 +245,9 @@ export class MusicQueueManager {
     await this.valkey.del(queueKey(guildId));
     await this.valkey.del(nowPlayingKey(guildId));
     await this.clearVoteSkip(guildId);
+    await this.valkey.del(runtimeRevisionKey(guildId));
+    await this.valkey.del(recoveryLockKey(guildId));
+    await this.valkey.del(outageEpisodeKey(guildId));
   }
 
   // ── Queue Operations ──────────────────────────────────
