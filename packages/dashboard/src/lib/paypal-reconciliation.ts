@@ -4715,7 +4715,7 @@ async function runPass(
       const chunk = expectedKeys.slice(from, from + EXACT_LOOKUP_CHUNK_SIZE);
       const { data: actionRows, error: actionError } = await supabase
         .from('bot_action_queue')
-        .select('idempotency_key, status, created_at')
+        .select('idempotency_key, status, created_at, next_retry_at')
         .in('idempotency_key', chunk);
       if (actionError) {
         return {
@@ -4736,7 +4736,13 @@ async function runPass(
         const inProgressFresh = ['pending', 'processing'].includes(String(row.status))
           && Number.isFinite(createdAtMs)
           && createdAtMs > windowEndMs;
-        if (String(row.status) === 'completed' || inProgressFresh) {
+        const nextRetryAtMs = typeof row.next_retry_at === 'string'
+          ? Date.parse(row.next_retry_at)
+          : Number.NaN;
+        const intentionallyDeferred = String(row.status) === 'pending'
+          && Number.isFinite(nextRetryAtMs)
+          && nextRetryAtMs > nowMs;
+        if (String(row.status) === 'completed' || inProgressFresh || intentionallyDeferred) {
           healthyActionKeys.add(row.idempotency_key);
         }
       }

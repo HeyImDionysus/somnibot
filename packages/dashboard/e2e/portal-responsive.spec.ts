@@ -325,11 +325,12 @@ test('cancelled grace-period readback uses the grace deadline', async ({ page })
         payments: [],
         entitlements: [{
           id: '22222222-2222-4222-8222-222222222222',
-          status: 'grace_period',
+          status: 'cancelled',
           type: 'subscription',
           expires_at: '2026-08-01T12:00:00.000Z',
           grace_period_ends_at: '2026-09-20T12:00:00.000Z',
           cancelled_at: '2026-08-17T12:00:00.000Z',
+          portal_cancellation_access_until: '2026-09-20T12:00:00.000Z',
         }],
       }],
     }),

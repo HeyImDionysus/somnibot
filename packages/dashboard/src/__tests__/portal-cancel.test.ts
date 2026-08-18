@@ -171,6 +171,17 @@ beforeEach(() => {
 
 describe('POST /api/portal/cancel', () => {
   it('schedules cancellation: keeps status active, keeps term-end expiry, cancels the provider sub', async () => {
+    global.fetch = vi.fn(async (url: URL | RequestInfo) => {
+      if (String(url).endsWith('/cancel')) {
+        expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
+        expect(entitlement.portal_cancellation_access_until).toBe('2026-08-23T00:00:00.000Z');
+        expect(entitlement.cancelled_at).toBeNull();
+        paypalCancelCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
     const res = await POST(makeRequest({ entitlement_id: ENT_ID }));
     expect(res.status).toBe(200);
     const json = await res.json();
@@ -301,6 +312,30 @@ describe('POST /api/portal/cancel', () => {
     expect(entitlement.cancelled_at).toBeNull();
   });
 
+  it('resumes a locally reserved cancellation after an ambiguous provider failure', async () => {
+    let providerAttempts = 0;
+    global.fetch = vi.fn(async (url: URL | RequestInfo) => {
+      if (String(url).endsWith('/cancel')) {
+        paypalCancelCalls += 1;
+        providerAttempts += 1;
+        return providerAttempts === 1
+          ? new Response(null, { status: 500 })
+          : new Response(null, { status: 204 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const first = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    expect(first.status).toBe(502);
+    expect(entitlement.cancelled_at).toBeNull();
+    expect(entitlement.portal_cancellation_timing).toBe('end-of-term');
+
+    const retry = await POST(makeRequest({ entitlement_id: ENT_ID }));
+    expect(retry.status).toBe(200);
+    expect(entitlement.cancelled_at).not.toBeNull();
+    expect(paypalCancelCalls).toBe(2);
+  });
+
   it('does not fabricate success when the local schedule update fails', async () => {
     entitlementUpdateError = { message: 'write failed' };
 
@@ -374,8 +409,8 @@ describe('POST /api/portal/cancel', () => {
     expect(response.status).toBe(503);
     expect(entitlement.status).toBe('expired');
     expect(entitlement.cancelled_at).toBeNull();
-    expect(entitlement.portal_cancellation_timing).toBeNull();
-    expect(entitlement.portal_cancellation_access_until).toBeNull();
+    expect(entitlement.portal_cancellation_timing).toBe('immediate');
+    expect(entitlement.portal_cancellation_access_until).not.toBeNull();
     expect(paypalCancelCalls).toBe(1);
   });
 

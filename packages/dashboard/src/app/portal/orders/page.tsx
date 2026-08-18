@@ -21,6 +21,7 @@ interface Entitlement {
   expires_at: string | null;
   grace_period_ends_at: string | null;
   cancelled_at: string | null;
+  portal_cancellation_access_until: string | null;
 }
 
 interface Order {
@@ -72,8 +73,17 @@ function activeSubscription(order: Order): Entitlement | null {
     && ['active', 'grace_period'].includes(entitlement.status)) ?? null;
 }
 
+function displayedSubscription(order: Order): Entitlement | null {
+  return order.entitlements?.find((entitlement) =>
+    entitlement.type === 'subscription'
+    && (entitlement.cancelled_at !== null
+      || ['active', 'grace_period'].includes(entitlement.status))) ?? null;
+}
+
 function accessBoundary(entitlement: Entitlement): string | null {
-  return entitlement.status === 'grace_period'
+  return entitlement.cancelled_at && entitlement.portal_cancellation_access_until
+    ? entitlement.portal_cancellation_access_until
+    : entitlement.status === 'grace_period'
     ? entitlement.grace_period_ends_at
     : entitlement.expires_at;
 }
@@ -171,6 +181,7 @@ export default function PortalOrders() {
                     status: body.data.status,
                     expires_at: body.data.access_until,
                     cancelled_at: body.data.cancellation_scheduled_at,
+                    portal_cancellation_access_until: body.data.access_until,
                   }
                 : entitlement),
           }
@@ -244,11 +255,12 @@ export default function PortalOrders() {
   };
 
   const orderActions = (order: Order) => {
-    const subscription = activeSubscription(order);
+    const cancellableSubscription = activeSubscription(order);
+    const subscription = displayedSubscription(order);
     const subscriptionBoundary = subscription ? accessBoundary(subscription) : null;
     return (
       <div className="flex flex-wrap gap-2">
-        {controls?.self_service_cancellation && order.can_self_service_cancel && subscription && !subscription.cancelled_at && (
+        {controls?.self_service_cancellation && order.can_self_service_cancel && cancellableSubscription && !cancellableSubscription.cancelled_at && (
           <Button size="sm" variant="danger" onClick={() => setCancelTarget(order)}>
             Cancel renewal
           </Button>

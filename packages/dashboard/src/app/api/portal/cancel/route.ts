@@ -147,20 +147,37 @@ export async function POST(request: NextRequest) {
       }
       return scheduledResponse(entitlement, true, appliedTiming);
     }
-    if (confirmedTiming !== cancellationTiming) {
+    const pendingTiming = persistedCancellationTiming(entitlement);
+    const pendingAccessUntil = entitlement.portal_cancellation_access_until;
+    const hasPendingIntent = pendingTiming !== null
+      && typeof pendingAccessUntil === 'string'
+      && Number.isFinite(Date.parse(pendingAccessUntil));
+    if (
+      (pendingTiming === null) !== (pendingAccessUntil === null)
+      || (pendingTiming !== null && !hasPendingIntent)
+    ) {
+      return NextResponse.json(
+        { error: 'The local cancellation request is inconsistent. Please contact the seller.' },
+        { status: 409 },
+      );
+    }
+    if (!hasPendingIntent && confirmedTiming !== cancellationTiming) {
       return NextResponse.json(
         { error: 'The store cancellation policy changed. Reload this page and review the current terms before confirming again.' },
         { status: 409 },
       );
     }
-    if (!['active', 'grace_period'].includes(entitlement.status)) {
+    if (!hasPendingIntent && !['active', 'grace_period'].includes(entitlement.status)) {
       return NextResponse.json({ error: 'This subscription is not active.' }, { status: 409 });
     }
-    const accessUntil = entitlement.status === 'grace_period'
-      ? entitlement.grace_period_ends_at
-      : entitlement.expires_at;
+    const appliedTiming = pendingTiming ?? cancellationTiming;
+    const accessUntil = hasPendingIntent
+      ? pendingAccessUntil
+      : entitlement.status === 'grace_period'
+        ? entitlement.grace_period_ends_at
+        : entitlement.expires_at;
     if (
-      cancellationTiming === 'end-of-term'
+      appliedTiming === 'end-of-term'
       && (typeof accessUntil !== 'string' || !Number.isFinite(Date.parse(accessUntil)))
     ) {
       return NextResponse.json(
@@ -216,6 +233,47 @@ export async function POST(request: NextRequest) {
         { status: 502 },
       );
     }
+    const intentCreatedAt = new Date().toISOString();
+    const appliedAccessUntil = appliedTiming === 'immediate'
+      ? hasPendingIntent ? accessUntil : intentCreatedAt
+      : accessUntil;
+    let cancellationSnapshot = entitlement;
+    if (!hasPendingIntent) {
+      const intentUpdate = admin
+        .from('entitlements')
+        .update({
+          portal_cancellation_timing: appliedTiming,
+          portal_cancellation_access_until: appliedAccessUntil,
+          updated_at: intentCreatedAt,
+        })
+        .eq('id', entitlement.id)
+        .eq('customer_id', session.customer_id)
+        .eq('guild_id', session.guild_id)
+        .eq('status', entitlement.status)
+        .is('cancelled_at', null)
+        .is('portal_cancellation_timing', null)
+        .is('portal_cancellation_access_until', null);
+      if (entitlement.expires_at === null) {
+        intentUpdate.is('expires_at', null);
+      } else {
+        intentUpdate.eq('expires_at', entitlement.expires_at);
+      }
+      if (entitlement.grace_period_ends_at === null) {
+        intentUpdate.is('grace_period_ends_at', null);
+      } else {
+        intentUpdate.eq('grace_period_ends_at', entitlement.grace_period_ends_at);
+      }
+      const { data: intent, error: intentError } = await intentUpdate
+        .select('id, status, type, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, portal_cancellation_access_until, order_id')
+        .maybeSingle();
+      if (intentError || !intent) {
+        return NextResponse.json(
+          { error: 'Cancellation could not be reserved locally. Please retry.' },
+          { status: 503 },
+        );
+      }
+      cancellationSnapshot = intent;
+    }
     const providerUrl = `${config.apiBase}/v1/billing/subscriptions/${subscriptionId}`;
     const res = await fetch(`${providerUrl}/cancel`, {
       method: 'POST',
@@ -251,20 +309,17 @@ export async function POST(request: NextRequest) {
     // single-winner under a race. Immediate policy revokes access now; the
     // default end-of-term policy keeps the entitlement active through expiry.
     const now = new Date().toISOString();
-    const appliedAccessUntil = cancellationTiming === 'immediate' ? now : accessUntil;
-    const cancellationUpdate = cancellationTiming === 'immediate'
+    const shouldRevokeImmediately = appliedTiming === 'immediate'
+      && ['active', 'grace_period'].includes(cancellationSnapshot.status);
+    const cancellationUpdate = shouldRevokeImmediately
       ? {
           cancelled_at: now,
-          portal_cancellation_timing: cancellationTiming,
-          portal_cancellation_access_until: appliedAccessUntil,
           status: 'cancelled',
-          expires_at: now,
+          expires_at: appliedAccessUntil,
           updated_at: now,
         }
       : {
           cancelled_at: now,
-          portal_cancellation_timing: cancellationTiming,
-          portal_cancellation_access_until: appliedAccessUntil,
           updated_at: now,
         };
     const guardedUpdate = admin
@@ -273,19 +328,19 @@ export async function POST(request: NextRequest) {
       .eq('id', entitlement.id)
       .eq('customer_id', session.customer_id)
       .eq('guild_id', session.guild_id)
-      .eq('status', entitlement.status)
+      .eq('status', cancellationSnapshot.status)
       .is('cancelled_at', null)
-      .is('portal_cancellation_timing', null)
-      .is('portal_cancellation_access_until', null);
-    if (entitlement.expires_at === null) {
+      .eq('portal_cancellation_timing', appliedTiming)
+      .eq('portal_cancellation_access_until', appliedAccessUntil);
+    if (cancellationSnapshot.expires_at === null) {
       guardedUpdate.is('expires_at', null);
     } else {
-      guardedUpdate.eq('expires_at', entitlement.expires_at);
+      guardedUpdate.eq('expires_at', cancellationSnapshot.expires_at);
     }
-    if (entitlement.grace_period_ends_at === null) {
+    if (cancellationSnapshot.grace_period_ends_at === null) {
       guardedUpdate.is('grace_period_ends_at', null);
     } else {
-      guardedUpdate.eq('grace_period_ends_at', entitlement.grace_period_ends_at);
+      guardedUpdate.eq('grace_period_ends_at', cancellationSnapshot.grace_period_ends_at);
     }
     const { data: updated, error: updateError } = await guardedUpdate
       .select('id, status, expires_at, grace_period_ends_at, cancelled_at, portal_cancellation_timing, portal_cancellation_access_until')
@@ -300,11 +355,11 @@ export async function POST(request: NextRequest) {
     if (updated) {
       if (
         updated.id !== entitlement.id
-        || (cancellationTiming === 'end-of-term' && !['active', 'grace_period'].includes(updated.status))
-        || (cancellationTiming === 'immediate' && updated.status !== 'cancelled')
-        || (cancellationTiming === 'end-of-term' && updated.expires_at !== entitlement.expires_at)
-        || (cancellationTiming === 'end-of-term' && updated.grace_period_ends_at !== entitlement.grace_period_ends_at)
-        || updated.portal_cancellation_timing !== cancellationTiming
+        || (shouldRevokeImmediately && updated.status !== 'cancelled')
+        || (!shouldRevokeImmediately && updated.status !== cancellationSnapshot.status)
+        || (appliedTiming === 'end-of-term' && updated.expires_at !== cancellationSnapshot.expires_at)
+        || (appliedTiming === 'end-of-term' && updated.grace_period_ends_at !== cancellationSnapshot.grace_period_ends_at)
+        || updated.portal_cancellation_timing !== appliedTiming
         || updated.portal_cancellation_access_until !== appliedAccessUntil
         || typeof updated.cancelled_at !== 'string'
         || !Number.isFinite(Date.parse(updated.cancelled_at))
@@ -314,7 +369,7 @@ export async function POST(request: NextRequest) {
           { status: 503 },
         );
       }
-      return scheduledResponse(updated, false, cancellationTiming);
+      return scheduledResponse(updated, false, appliedTiming);
     }
 
     // A concurrent confirm already scheduled it — resolve to that single entry.
@@ -337,9 +392,9 @@ export async function POST(request: NextRequest) {
         { status: 503 },
       );
     }
-    const appliedTiming = persistedCancellationTiming(current);
+    const currentTiming = persistedCancellationTiming(current);
     if (
-      !appliedTiming
+      !currentTiming
       || typeof current.portal_cancellation_access_until !== 'string'
       || !Number.isFinite(Date.parse(current.portal_cancellation_access_until))
     ) {
@@ -348,20 +403,7 @@ export async function POST(request: NextRequest) {
         { status: 503 },
       );
     }
-    if (
-      appliedTiming === 'end-of-term'
-      && (
-        !['active', 'grace_period'].includes(current.status)
-        || current.expires_at !== entitlement.expires_at
-        || current.grace_period_ends_at !== entitlement.grace_period_ends_at
-      )
-    ) {
-      return NextResponse.json(
-        { error: 'The provider cancelled renewal, but the local schedule is unconfirmed. Please retry.' },
-        { status: 503 },
-      );
-    }
-    return scheduledResponse(current, true, appliedTiming);
+    return scheduledResponse(current, true, currentTiming);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });
