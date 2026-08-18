@@ -112,6 +112,7 @@ export function useChannelPickerKeyboard({
   }, [closePicker, enabledOptions, focusBoundaryOption]);
 
   const onBlurCapture = useCallback<FocusEventHandler<HTMLDivElement>>((event) => {
+    if (event.relatedTarget === null) return;
     if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
     if (open) closePicker(false);
   }, [closePicker, open]);

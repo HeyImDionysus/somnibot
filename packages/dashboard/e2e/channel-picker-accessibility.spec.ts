@@ -29,6 +29,7 @@ async function installRoutes(page: Page): Promise<() => number> {
         name: 'general',
         type: 0,
         position: 1,
+        parent_id: 'category-community',
         manageableByBot: true,
         botPermissions: '3072',
       },
@@ -37,6 +38,7 @@ async function installRoutes(page: Page): Promise<() => number> {
         name: 'read-only',
         type: 0,
         position: 2,
+        parent_id: 'category-community',
         manageableByBot: true,
         botPermissions: '1024',
       },
@@ -45,11 +47,18 @@ async function installRoutes(page: Page): Promise<() => number> {
         name: 'alerts',
         type: 0,
         position: 3,
+        parent_id: 'category-community',
         manageableByBot: true,
         botPermissions: '3072',
       },
     ],
-    categories: [],
+    categories: [{
+      id: 'category-community',
+      name: 'Community',
+      position: 0,
+      manageableByBot: true,
+      botPermissions: '16',
+    }],
   }));
   await page.route('**/api/guild', (route) => fulfillJson(route, { success: true, data: {} }));
   await page.route('**/api/guilds', (route) => fulfillJson(route, { success: true, data: [] }));
@@ -79,6 +88,13 @@ test('supports labelled listbox navigation and field-local recovery', async ({ p
   const alerts = listbox.getByRole('option', { name: 'alerts' });
   const unavailable = listbox.getByRole('option', { name: /read-only/ });
   await expect(general).toBeFocused();
+
+  // When: a pointer stays inside the popup but lands on a non-focusable heading.
+  await page.getByText('Community', { exact: true }).click();
+
+  // Then: null blur relatedTarget does not dismiss an internal interaction.
+  await expect(listbox).toBeVisible();
+  await general.focus();
   await expect(unavailable).toBeDisabled();
   await general.press('ArrowDown');
   await expect(alerts).toBeFocused();

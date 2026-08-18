@@ -41,8 +41,8 @@ interface DiscordCategory {
   readonly position: number;
   readonly parent_id?: string | null;
   readonly parent_name?: string;
-  readonly botPermissions: string | null;
-  readonly manageableByBot: boolean;
+  readonly botPermissions?: string | null;
+  readonly manageableByBot?: boolean;
 }
 
 export type RequiredChannelPermission =
@@ -89,7 +89,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function hasValidChannelShape(value: unknown): value is DiscordChannel {
+function isNormalizableChannel(value: unknown): value is DiscordChannel {
   return isRecord(value)
     && typeof value.id === 'string'
     && typeof value.name === 'string'
@@ -97,16 +97,33 @@ function hasValidChannelShape(value: unknown): value is DiscordChannel {
     && Number.isFinite(value.type)
     && typeof value.position === 'number'
     && Number.isFinite(value.position)
-    && typeof value.manageableByBot === 'boolean'
-    && (value.botPermissions === null || typeof value.botPermissions === 'string');
+    && (value.parent_id === undefined || value.parent_id === null || typeof value.parent_id === 'string')
+    && (value.parent_name === undefined || typeof value.parent_name === 'string')
+    && (value.manageableByBot === undefined || typeof value.manageableByBot === 'boolean')
+    && (value.botPermissions === undefined || value.botPermissions === null || typeof value.botPermissions === 'string')
+    && (value.missing === undefined || typeof value.missing === 'boolean');
 }
 
-function hasValidCategoryShape(value: unknown): value is DiscordCategory {
+function isNormalizableCategory(value: unknown): value is DiscordCategory {
   return isRecord(value)
     && typeof value.id === 'string'
     && typeof value.name === 'string'
     && typeof value.position === 'number'
     && Number.isFinite(value.position)
+    && (value.parent_id === undefined || value.parent_id === null || typeof value.parent_id === 'string')
+    && (value.parent_name === undefined || typeof value.parent_name === 'string')
+    && (value.manageableByBot === undefined || typeof value.manageableByBot === 'boolean')
+    && (value.botPermissions === undefined || value.botPermissions === null || typeof value.botPermissions === 'string');
+}
+
+function isAuthoritativeChannel(value: unknown): value is DiscordChannel {
+  return isNormalizableChannel(value)
+    && typeof value.manageableByBot === 'boolean'
+    && (value.botPermissions === null || typeof value.botPermissions === 'string');
+}
+
+function isAuthoritativeCategory(value: unknown): value is DiscordCategory {
+  return isNormalizableCategory(value)
     && typeof value.manageableByBot === 'boolean'
     && (value.botPermissions === null || typeof value.botPermissions === 'string');
 }
@@ -155,9 +172,9 @@ export function isAuthoritativeChannelSnapshot(payload: unknown, nowMs = Date.no
     && nowMs - snapshotMs <= MAX_SNAPSHOT_AGE_MS
     && snapshotMs - nowMs <= MAX_SNAPSHOT_FUTURE_SKEW_MS
     && Array.isArray(payload.channels)
-    && payload.channels.every(hasValidChannelShape)
+    && payload.channels.every(isAuthoritativeChannel)
     && Array.isArray(payload.categories)
-    && payload.categories.every(hasValidCategoryShape);
+    && payload.categories.every(isAuthoritativeCategory);
 }
 
 export function normalizeSnapshotChannels(payload: unknown): readonly DiscordChannel[] {
@@ -168,13 +185,13 @@ export function normalizeSnapshotChannels(payload: unknown): readonly DiscordCha
     throw new ChannelSnapshotError('Live Discord channel snapshot is malformed');
   }
   const normalizedChannels = channels.map((channel) => {
-    if (!hasValidChannelShape(channel)) {
+    if (!isNormalizableChannel(channel)) {
       throw new ChannelSnapshotError('Live Discord channel snapshot is malformed');
     }
     return channel;
   });
   const normalizedCategories = categories.map((category): DiscordChannel => {
-    if (!hasValidCategoryShape(category)) {
+    if (!isNormalizableCategory(category)) {
       throw new ChannelSnapshotError('Live Discord channel snapshot is malformed');
     }
     return { ...category, type: CHANNEL_TYPE.GUILD_CATEGORY };

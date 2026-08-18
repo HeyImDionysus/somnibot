@@ -200,9 +200,11 @@ export function ChannelPicker({
     () => resolveSelectedChannels(selected, channels, liveAuthoritative),
     [selected, channels, liveAuthoritative],
   );
-  const selectedIssues = selectedChannels
-    .map(permissionIssue)
-    .filter((issue): issue is string => issue !== null);
+  const selectedIssues = [...new Set(
+    selectedChannels
+      .map(permissionIssue)
+      .filter((issue): issue is string => issue !== null),
+  )];
 
   return (
     <ChannelPickerView
