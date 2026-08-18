@@ -298,7 +298,7 @@ test('grace-period cancellation uses the grace deadline', async ({ page }, testI
   });
 });
 
-test('cancelled grace-period readback uses the grace deadline', async ({ page }) => {
+test('cancelled grace-period readback uses the grace deadline', async ({ page }, testInfo) => {
   await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-grace-readback-session'));
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
@@ -339,6 +339,10 @@ test('cancelled grace-period readback uses the grace deadline', async ({ page })
   await page.goto('/portal/orders', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('table').getByText('Renewal cancelled · Access through Sep 20, 2026')).toBeVisible();
   await expect(page.getByText(/Access through Aug 1, 2026/)).toHaveCount(0);
+  await testInfo.attach('orders-desktop-terminal-cancellation-readback', {
+    body: await page.screenshot({ fullPage: true }),
+    contentType: 'image/png',
+  });
 });
 
 test('order load failure does not claim that purchase history is empty', async ({ page }) => {
