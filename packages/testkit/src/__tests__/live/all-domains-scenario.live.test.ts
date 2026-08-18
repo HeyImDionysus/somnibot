@@ -89,6 +89,12 @@ interface DomainResult {
   error?: string;
   activeScenario?: string;
   completedScenarios?: Array<{ scenarioClass: string; elapsedMs: number }>;
+  assertionEvidence?: {
+    readonly schemaVersion: 1;
+    readonly candidateSha: string;
+    readonly domainId: string;
+    readonly records: readonly unknown[];
+  };
 }
 
 async function runDomain(id: string): Promise<DomainResult> {
@@ -115,6 +121,16 @@ function writeShardManifest(): void {
   const manifestPath = process.env.SOMNIBOT_FLEET_MANIFEST;
   if (!manifestPath) return;
 
+  const candidateSha = resolveFleetCandidateSha();
+  for (const result of results) {
+    if (result.error || result.hang) continue;
+    if (
+      result.assertionEvidence?.candidateSha !== candidateSha
+      || result.assertionEvidence.domainId !== result.id
+    ) {
+      throw new Error(`raw assertion evidence is missing or candidate-mismatched for ${result.id}`);
+    }
+  }
   const totals = results.reduce(
     (accumulator, result) => ({
       pass: accumulator.pass + result.pass,
@@ -129,7 +145,7 @@ function writeShardManifest(): void {
     // capability. CI artifacts can therefore drive a real gate-closure plan
     // rather than reducing hundreds of functional gaps to opaque counts.
     schemaVersion: 2,
-    candidateSha: resolveFleetCandidateSha(),
+    candidateSha,
     shard: process.env.SOMNIBOT_FLEET_SHARD ?? 'all',
     assignedDomainIds: assignment.ids,
     totals,

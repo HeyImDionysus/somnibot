@@ -799,9 +799,7 @@ jobs:
             mkdir -p /tmp/somnibot-fleet-evidence
             git archive FETCH_HEAD fleet-proofs \
               | tar -xf - -C /tmp/somnibot-fleet-evidence
-            find /tmp/somnibot-fleet-evidence/fleet-proofs \
-              -maxdepth 1 -type f -name 'fleet-proof-*.json' \
-              -exec cp '{}' artifacts/proofs/ ';'
+            cp -R /tmp/somnibot-fleet-evidence/fleet-proofs/. artifacts/proofs/
             echo "Loaded candidate-bound operator receipts from ${evidence_branch}."
           else
             echo "No operator receipt branch exists for this candidate yet."
