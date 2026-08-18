@@ -351,6 +351,14 @@ export default function IncidentsPage() {
                 Status follows the linked diagnostics alert and updates automatically when that alert clears.
               </p>
             )}
+            {selectedIncident.status === 'resolved' && (
+              <button
+                onClick={() => updateStatus(selectedIncident.id, 'closed')}
+                className="rounded-md bg-discord-bg-tertiary px-3 py-1.5 text-xs font-medium text-discord-text-secondary transition-colors hover:text-discord-text-primary"
+              >
+                Close incident
+              </button>
+            )}
 
             {/* Post-mortem fields */}
             {selectedIncident.impact_summary && (

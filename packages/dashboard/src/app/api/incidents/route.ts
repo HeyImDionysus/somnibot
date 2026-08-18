@@ -188,6 +188,12 @@ export async function POST(request: NextRequest) {
     const parsed = await parseBody(request, incidentCreate);
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
+    if (body.source === 'health_alert') {
+      return NextResponse.json(
+        { error: 'Linked health incidents are created by diagnostics.' },
+        { status: 400 },
+      );
+    }
     const requestOccurrenceId = body.request_id ?? randomUUID();
     const admin = createAdminSupabase();
     const { data: config } = await admin
@@ -333,6 +339,7 @@ export async function PATCH(request: NextRequest) {
       body.status
       && before?.source === 'health_alert'
       && before.source_ref_id
+      && body.status !== before.status
       && !(body.status === 'closed' && before.status === 'resolved')
     ) {
       return NextResponse.json(

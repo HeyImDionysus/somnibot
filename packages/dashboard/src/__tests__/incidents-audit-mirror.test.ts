@@ -117,6 +117,20 @@ describe('GET /api/incidents terminal filtering', () => {
 });
 
 describe('POST /api/incidents owner mirror', () => {
+  it('rejects dashboard creation of diagnostics-owned linked incidents', async () => {
+    const { admin, inserts } = makeAdmin();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await POST(makeRequest('POST', {
+      title: 'Linked diagnostics incident',
+      source: 'health_alert',
+      source_ref_id: 'alert-1',
+    }));
+
+    expect(res.status).toBe(400);
+    expect(inserts).toHaveLength(0);
+  });
+
   it('writes an incident.created audit row and opens an owner alert', async () => {
     const { admin, inserts, upserts } = makeAdmin();
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
@@ -247,6 +261,24 @@ describe('PATCH /api/incidents owner mirror', () => {
 
     expect(res.status).toBe(409);
     expect(updates.some((entry) => entry.table === 'incidents')).toBe(false);
+  });
+
+  it('allows an idempotent linked status retry', async () => {
+    const { admin, updates } = makeAdmin([], {
+      status: 'resolved',
+      source: 'health_alert',
+      source_ref_id: 'alert-1',
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PATCH(makeRequest('PATCH', {
+      id: '00000000-0000-0000-0000-000000000001',
+      status: 'resolved',
+      impact_summary: 'Readback retry',
+    }));
+
+    expect(res.status).toBe(200);
+    expect(updates.some((entry) => entry.table === 'incidents')).toBe(true);
   });
 
   it('allows legacy unlinked health incidents to follow the manual lifecycle', async () => {
