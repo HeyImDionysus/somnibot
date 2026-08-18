@@ -5,6 +5,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { Button } from '@/components/shared/button';
 
 interface PortalData {
   licenses: number;
@@ -36,8 +37,7 @@ function currentGuildId(): string {
   return sessionStorage.getItem('portal_guild') || '';
 }
 
-function getDiscordOAuthUrl(): string {
-  const clientId = process.env.NEXT_PUBLIC_DISCORD_APPLICATION_ID || '';
+function getDiscordOAuthUrl(clientId: string): string {
   const redirectUri = encodeURIComponent(`${window.location.origin}/portal`);
   // CSRF nonce + the target guild, both echoed back by Discord in `state` so the
   // guild survives the round-trip (query params are dropped on the redirect).
@@ -51,6 +51,51 @@ export default function PortalDashboard() {
   const [data, setData] = useState<PortalData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [discordApplicationId, setDiscordApplicationId] = useState<string | null>(null);
+  const [loginConfigError, setLoginConfigError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadLoginConfig() {
+      try {
+        const response = await fetch('/api/portal/config', { cache: 'no-store' });
+        if (!response.ok) {
+          if (active) {
+            setLoginConfigError('Customer portal sign-in is not configured for this installation.');
+          }
+          return;
+        }
+        const body: unknown = await response.json();
+        const applicationId = typeof body === 'object'
+          && body !== null
+          && 'data' in body
+          && typeof body.data === 'object'
+          && body.data !== null
+          && 'discord_application_id' in body.data
+          && typeof body.data.discord_application_id === 'string'
+          ? body.data.discord_application_id
+          : null;
+
+        if (!active) return;
+        if (applicationId) {
+          setDiscordApplicationId(applicationId);
+          setLoginConfigError(null);
+        } else {
+          setLoginConfigError('Customer portal sign-in is not configured for this installation.');
+        }
+      } catch {
+        if (active) {
+          setLoginConfigError('Customer portal sign-in configuration could not be loaded.');
+        }
+      }
+    }
+
+    void loadLoginConfig();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -160,6 +205,30 @@ export default function PortalDashboard() {
     load();
   }, []);
 
+  function startDiscordLogin() {
+    if (!discordApplicationId) return;
+    if (!currentGuildId()) {
+      setError("This portal link is missing its server. Please use your server's portal link (it looks like /portal?guild=…).");
+      return;
+    }
+    window.location.assign(getDiscordOAuthUrl(discordApplicationId));
+  }
+
+  const loginButton = (
+    <Button
+      type="button"
+      onClick={startDiscordLogin}
+      disabled={!discordApplicationId}
+      size="lg"
+      className="mt-6"
+    >
+      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
+      </svg>
+      {discordApplicationId ? 'Sign in with Discord' : 'Preparing Discord sign-in…'}
+    </Button>
+  );
+
   if (error === 'not_authenticated') {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center">
@@ -168,15 +237,12 @@ export default function PortalDashboard() {
         <p className="mt-2 text-discord-text-muted max-w-md">
           Sign in with your Discord account to view your licenses, downloads, and order history.
         </p>
-        <a
-          href={typeof window !== 'undefined' ? getDiscordOAuthUrl() : '#'}
-          className="mt-6 inline-flex items-center gap-2 rounded-md bg-[#5865F2] px-6 py-3 text-sm font-medium text-white hover:bg-[#4752C4] transition-colors"
-        >
-          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
-          </svg>
-          Sign in with Discord
-        </a>
+        {loginButton}
+        {loginConfigError && (
+          <p role="alert" className="mt-3 max-w-md text-sm text-discord-danger">
+            {loginConfigError}
+          </p>
+        )}
       </div>
     );
   }
@@ -187,12 +253,12 @@ export default function PortalDashboard() {
         <div className="text-6xl mb-4">⚠️</div>
         <h1 className="text-xl font-bold text-discord-text-primary">Login Error</h1>
         <p className="mt-2 text-discord-text-muted max-w-md">{error}</p>
-        <a
-          href={typeof window !== 'undefined' ? getDiscordOAuthUrl() : '#'}
-          className="mt-4 text-sm text-discord-accent hover:underline"
-        >
-          Try again
-        </a>
+        {loginButton}
+        {loginConfigError && (
+          <p role="alert" className="mt-3 max-w-md text-sm text-discord-danger">
+            {loginConfigError}
+          </p>
+        )}
       </div>
     );
   }
