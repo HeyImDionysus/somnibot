@@ -42,7 +42,7 @@ jobs:
             exit 1
           fi
 
-          git fetch --quiet origin main "refs/tags/${TAG}:refs/tags/${TAG}"
+          git fetch --force --quiet origin main "refs/tags/${TAG}:refs/tags/${TAG}"
 
           TAG_SHA="$(git rev-parse "${TAG}^{commit}")"
           MAIN_SHA="$(git rev-parse origin/main)"
