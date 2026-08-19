@@ -41,6 +41,11 @@ export function ChannelPickerOptions({
       role="listbox"
       aria-label={label ? `${label} options` : 'Channel options'}
       aria-multiselectable={multi || undefined}
+      onMouseDown={(event) => {
+        if (!(event.target instanceof Element) || !event.target.closest('button')) {
+          event.preventDefault();
+        }
+      }}
       className="max-h-52 overflow-y-auto py-1"
     >
       {allowNone && !multi ? (
