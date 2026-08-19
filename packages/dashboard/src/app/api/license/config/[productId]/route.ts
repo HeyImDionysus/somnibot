@@ -10,6 +10,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { readPendingCompletedProjectPolicy } from '@/lib/store/licensing-handoff';
 import {
   describeSettingChange,
   readRowBefore,
@@ -66,14 +67,21 @@ async function findOwnedProduct(
   supabase: ReturnType<typeof createAdminSupabase>,
   productId: string,
   guildId: string,
-): Promise<{ id: string; name: string } | null> {
+): Promise<{ id: string; name: string; metadata: Record<string, unknown> } | null> {
   const { data } = await supabase
     .from('products')
-    .select('id, name')
+    .select('id, name, metadata')
     .eq('id', productId)
     .eq('guild_id', guildId)
     .maybeSingle();
-  return (data as { id: string; name: string } | null) ?? null;
+  if (!data) return null;
+  return {
+    id: data.id,
+    name: data.name,
+    metadata: data.metadata && typeof data.metadata === 'object' && !Array.isArray(data.metadata)
+      ? data.metadata as Record<string, unknown>
+      : {},
+  };
 }
 
 /** Uniform answer for "not yours" and "not there" — deliberately identical. */
@@ -254,6 +262,36 @@ export async function PUT(
     return dbError(error, 'license/config');
   }
 
+  const pendingPolicy = readPendingCompletedProjectPolicy(product.metadata);
+  const pendingPolicyMatches = pendingPolicy
+    && written.key_prefix === pendingPolicy.keyPrefix
+    && written.max_devices === pendingPolicy.maxDevices
+    && Number(written.heartbeat_interval_seconds) * 1000 === pendingPolicy.heartbeatIntervalMs
+    && written.sdk_cache_ttl_ms === pendingPolicy.sdkCacheTtlMs
+    && written.offline_grace_period_seconds === pendingPolicy.offlineGracePeriodSeconds
+    && sameValue(written.feature_flags, pendingPolicy.featureFlags)
+    && written.require_discord_guild_membership === pendingPolicy.requireDiscordGuildMembership
+    && written.rotation_policy === pendingPolicy.rotationPolicy
+    && written.self_service_device_removal === pendingPolicy.selfServiceDeviceRemoval;
+  if (pendingPolicyMatches) {
+    const existingIntegration = product.metadata.completed_project_licensing;
+    const integration = existingIntegration && typeof existingIntegration === 'object' && !Array.isArray(existingIntegration)
+      ? existingIntegration as Record<string, unknown>
+      : {};
+    const { error: productError } = await supabase
+      .from('products')
+      .update({
+        metadata: {
+          ...product.metadata,
+          completed_project_licensing: { ...integration, policyPending: false },
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', productId)
+      .eq('guild_id', guildId);
+    if (productError) return dbError(productError, 'license/config/product-recovery');
+  }
+
   // The upsert always writes all configured columns, so listing them all would
   // describe every save as changing everything. Report only what really moved.
   const changed = before
@@ -279,7 +317,8 @@ export async function PUT(
       : null;
     // Ownership is no longer part of this test — an unowned product can no
     // longer reach here at all.
-    const canRestore = priorForChanged != null
+    const canRestore = !pendingPolicyMatches
+      && priorForChanged != null
       && Object.keys(priorForChanged).length === changed.length;
 
     await recordAdminChange(
@@ -306,9 +345,11 @@ export async function PUT(
               ),
             }
           : {
-              undoReason: before
-                ? 'the previous license settings could not be read, so there is nothing to restore'
-                : 'this product had no saved license settings before, so there is nothing to restore',
+              undoReason: pendingPolicyMatches
+                ? 'this save completed an activation-locked policy transition, so restoring only the old policy would be unsafe'
+                : before
+                  ? 'the previous license settings could not be read, so there is nothing to restore'
+                  : 'this product had no saved license settings before, so there is nothing to restore',
             }),
       },
       supabase,

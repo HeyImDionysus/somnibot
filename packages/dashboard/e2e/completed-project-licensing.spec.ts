@@ -64,6 +64,7 @@ async function mockStore(page: Page, options: {
           type: body.type,
           delivery_type: body.delivery_type,
           price_cents: body.price_cents,
+          metadata: body.metadata,
           paypal_product_id: body.type === 'free' ? null : 'PROD-SANDBOX-789',
         });
         await route.fulfill({ json: { success: true, data: savedProduct } });
@@ -80,6 +81,32 @@ async function mockStore(page: Page, options: {
         await route.fulfill({ status: 503, json: { success: false, error: 'Temporary policy failure' } });
         return;
       }
+      const metadata = savedProduct.metadata && typeof savedProduct.metadata === 'object' && !Array.isArray(savedProduct.metadata)
+        ? savedProduct.metadata as Record<string, unknown>
+        : {};
+      const completedProject = metadata.completed_project_licensing && typeof metadata.completed_project_licensing === 'object' && !Array.isArray(metadata.completed_project_licensing)
+        ? metadata.completed_project_licensing as Record<string, unknown>
+        : {};
+      const existingConfig = savedProduct.product_license_config[0];
+      savedProduct = product({
+        ...savedProduct,
+        metadata: {
+          ...metadata,
+          completed_project_licensing: { ...completedProject, policyPending: false },
+        },
+        product_license_config: [{
+          ...existingConfig,
+          key_prefix: body.key_prefix,
+          max_devices: body.max_devices,
+          heartbeat_interval_seconds: Number(body.heartbeat_interval_ms) / 1000,
+          sdk_cache_ttl_ms: body.sdk_cache_ttl_ms,
+          offline_grace_period_seconds: body.offline_grace_period_seconds,
+          feature_flags: body.feature_flags,
+          require_discord_guild_membership: body.require_discord_guild_membership,
+          rotation_policy: body.rotation_policy,
+          self_service_device_removal: body.self_service_device_removal,
+        }],
+      });
       await route.fulfill({ json: { success: true, data: product().product_license_config[0] } });
       return;
     }
@@ -94,6 +121,7 @@ async function mockStore(page: Page, options: {
     }
     if (pathname === '/api/store/onboarding') {
       await route.fulfill({ json: { success: true, data: {
+        guildId: 'guild-qa',
         environment: 'sandbox',
         apiBase: 'https://somnibot.example/api',
         credentialsConfigured: options.credentialsConfigured ?? true,
@@ -163,8 +191,15 @@ test('completed project handoff survives reload and creates an inactive product 
   await expect(page.getByText('Loaded authoritative Store product Completed Sentinel.')).toBeVisible();
   const prompt = await page.locator('section[aria-labelledby="generated-prompt-heading"] pre').innerText();
   expect(extractLicensingPromptEnvelope(prompt)).toMatchObject({
-    project: { productId },
-    billing: { model: 'subscription' },
+    project: {
+      productId,
+      apiBase: 'https://somnibot.example/api',
+      context: 'An already-completed Rust plugin whose behavior must be preserved.',
+    },
+    billing: {
+      model: 'subscription',
+      plansAndFeatures: 'Monthly Standard and annual Pro require review.',
+    },
     dynamicPolicy: {
       maxInstallations: 5,
       heartbeatSeconds: 120,
@@ -172,6 +207,28 @@ test('completed project handoff survives reload and creates an inactive product 
       featureFlags: ['alerts', 'exports'],
     },
   });
+});
+
+test('authoritative product loading locks manual edits until the public API readback completes', async ({ page }) => {
+  let releaseProducts: (() => void) | null = null;
+  const productsReady = new Promise<void>((resolve) => { releaseProducts = resolve; });
+  await page.route('**/api/store/onboarding', async (route) => {
+    await route.fulfill({ json: { success: true, data: {
+      guildId: 'guild-qa',
+      apiBase: 'https://public.somnibot.example/api',
+    } } });
+  });
+  await page.route('**/api/store/products', async (route) => {
+    await productsReady;
+    await route.fulfill({ json: { success: true, data: [product()] } });
+  });
+
+  await page.goto(`/project-licensing?productId=${productId}`);
+  await expect(page.getByText('Loading the authoritative Store product and public API base…')).toBeVisible();
+  await expect(page.getByLabel('Project name')).toBeDisabled();
+  releaseProducts?.();
+  await expect(page.getByLabel('Project name')).toHaveValue('Completed Sentinel');
+  await expect(page.getByText('Loaded authoritative Store product Completed Sentinel.', { exact: false })).toBeVisible();
 });
 
 test('undecided billing blocks creation until chosen and explicit cancellation clears the handoff', async ({ page }) => {
@@ -187,17 +244,40 @@ test('undecided billing blocks creation until chosen and explicit cancellation c
 });
 
 test('handoff remains through recoverable policy failure and clears after verified retry', async ({ page }) => {
-  await mockStore(page, { failPolicyOnce: true });
+  let productCreates = 0;
+  let recoveredPolicy: Record<string, unknown> | null = null;
+  await mockStore(page, {
+    failPolicyOnce: true,
+    onProductPost: () => { productCreates += 1; },
+    onPolicyPut: (body) => { recoveredPolicy = body; },
+  });
   await fillCompletedProject(page);
   await page.getByLabel('Billing model').selectOption('one_time');
+  await page.getByLabel('Max installations').fill('5');
+  await page.getByLabel('Heartbeat seconds').fill('120');
+  await page.getByLabel('Offline grace seconds').fill('7200');
+  await page.getByLabel('Structured feature flags').fill('alerts, exports');
   await page.getByRole('button', { name: 'Use in Store' }).click();
   await page.getByLabel('Price ($) *').fill('12.00');
   await page.getByRole('button', { name: 'Create' }).click();
   await expect(page.getByText('Product preserved; setup needs a retry')).toBeVisible();
   expect(await page.evaluate((key) => window.sessionStorage.getItem(key), LICENSING_STORE_HANDOFF_KEY)).not.toBeNull();
+  await page.reload();
+  await expect(page.getByText('Product preserved; setup needs a retry')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Inactive' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'New Product' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Create' })).toHaveCount(0);
+  expect(productCreates).toBe(1);
   await page.getByRole('button', { name: 'Retry license policy' }).click();
   await expect(page.getByText('License policy saved and verified')).toBeVisible();
   expect(await page.evaluate((key) => window.sessionStorage.getItem(key), LICENSING_STORE_HANDOFF_KEY)).toBeNull();
+  expect(recoveredPolicy).toMatchObject({
+    max_devices: 5,
+    heartbeat_interval_ms: 120_000,
+    offline_grace_period_seconds: 7200,
+    feature_flags: ['alerts', 'exports'],
+  });
+  expect(productCreates).toBe(1);
 });
 
 test('free static handoff needs no PayPal and remains usable without responsive overflow', async ({ page }) => {
@@ -225,4 +305,12 @@ test('free static handoff needs no PayPal and remains usable without responsive 
   await expect(page.getByRole('heading', { name: 'Integrate Completed Sentinel' })).toBeVisible();
   expect(submitted).toMatchObject({ type: 'free', price_cents: 0, active: false, delivery_type: 'file' });
   await expect(page.getByText('PayPal is not required.')).toBeVisible();
+  await page.getByRole('link', { name: 'Open Prompt Generator' }).click();
+  await expect(page.getByText('Loaded authoritative Store product Completed Sentinel.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Use in Store' })).toBeDisabled();
+  const prompt = await page.locator('section[aria-labelledby="generated-prompt-heading"] pre').innerText();
+  expect(extractLicensingPromptEnvelope(prompt)).toMatchObject({
+    billing: { model: 'free' },
+    staticPolicy: { outputFormats: 'PDF and ZIP' },
+  });
 });

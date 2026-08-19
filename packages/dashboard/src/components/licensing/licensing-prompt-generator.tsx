@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, Copy, RotateCcw } from 'lucide-react';
+import { z } from 'zod';
 import { Button } from '@/components/shared/button';
 import { Input, Select } from '@/components/shared/input';
 import {
@@ -33,6 +34,11 @@ const INITIAL_DRAFT: LicensingPromptDraft = {
 };
 
 const LICENSING_MODES: readonly LicensingPromptMode[] = ['dynamic', 'static'];
+
+const onboardingResponseSchema = z.object({
+  success: z.literal(true),
+  data: z.object({ apiBase: z.string().url(), guildId: z.string().min(1) }),
+});
 
 function modeButtonClass(active: boolean): string {
   return active
@@ -74,19 +80,34 @@ export function LicensingPromptGenerator() {
   const [copyError, setCopyError] = useState('');
   const [loadMessage, setLoadMessage] = useState('');
   const [handoffError, setHandoffError] = useState('');
+  const [authoritativeLoading, setAuthoritativeLoading] = useState(true);
+  const [activeGuildId, setActiveGuildId] = useState('');
 
   useEffect(() => {
-    const apiBase = `${window.location.origin.replace(/\/$/, '')}/api`;
+    const fallbackApiBase = `${window.location.origin.replace(/\/$/, '')}/api`;
     const productId = new URLSearchParams(window.location.search).get('productId')?.trim();
-    setDraft((current) => ({ ...current, apiBase }));
-    if (!productId) return;
-
     let cancelled = false;
     const loadProduct = async () => {
+      setDraft((current) => ({ ...current, apiBase: fallbackApiBase }));
       try {
-        const response = await fetch('/api/store/products');
-        const body: unknown = await response.json();
-        if (!response.ok || typeof body !== 'object' || body === null || !('data' in body) || !Array.isArray(body.data)) {
+        const onboardingResponse = await fetch('/api/store/onboarding');
+        const onboardingBody = onboardingResponseSchema.safeParse(await onboardingResponse.json());
+        const apiBase = onboardingResponse.ok && onboardingBody.success
+          ? onboardingBody.data.data.apiBase
+          : fallbackApiBase;
+        if (onboardingResponse.ok && onboardingBody.success && !cancelled) {
+          setActiveGuildId(onboardingBody.data.data.guildId);
+        }
+        if (!productId) {
+          if (!cancelled) setDraft((current) => ({ ...current, apiBase }));
+          return;
+        }
+        if (!onboardingResponse.ok || !onboardingBody.success) {
+          throw new Error('invalid onboarding response');
+        }
+        const productResponse = await fetch('/api/store/products');
+        const body: unknown = await productResponse.json();
+        if (!productResponse.ok || typeof body !== 'object' || body === null || !('data' in body) || !Array.isArray(body.data)) {
           throw new Error('invalid product response');
         }
         const product = body.data.find((candidate) => (
@@ -103,6 +124,8 @@ export function LicensingPromptGenerator() {
         }
       } catch {
         if (!cancelled) setLoadMessage('The saved Store product or license policy could not be loaded. Manual prompt generation remains available.');
+      } finally {
+        if (!cancelled) setAuthoritativeLoading(false);
       }
     };
     void loadProduct();
@@ -129,7 +152,10 @@ export function LicensingPromptGenerator() {
   const useInStore = () => {
     try {
       const envelope = buildLicensingPromptEnvelope(draft);
-      window.sessionStorage.setItem(LICENSING_STORE_HANDOFF_KEY, serializeLicensingStoreHandoff(envelope));
+      window.sessionStorage.setItem(
+        LICENSING_STORE_HANDOFF_KEY,
+        serializeLicensingStoreHandoff(envelope, activeGuildId, undefined, crypto.randomUUID()),
+      );
       setHandoffError('');
       window.location.assign('/store?licensingHandoff=1');
     } catch {
@@ -158,7 +184,7 @@ export function LicensingPromptGenerator() {
 
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
-      <section aria-labelledby="prompt-input-heading" className="space-y-5 rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5">
+      <fieldset disabled={authoritativeLoading} aria-labelledby="prompt-input-heading" aria-busy={authoritativeLoading} className="space-y-5 rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5 disabled:opacity-70">
         <div>
           <h2 id="prompt-input-heading" className="text-lg font-semibold text-discord-text-primary">Describe the completed project</h2>
           <p className="mt-1 text-sm text-discord-text-secondary">Attach SomniBot licensing to an existing repository without redesigning or rebuilding the project.</p>
@@ -185,6 +211,7 @@ export function LicensingPromptGenerator() {
           </div>
         </div>
 
+        {authoritativeLoading && <p className="rounded-input border border-discord-accent/40 bg-discord-accent/10 p-3 text-sm text-discord-text-secondary" role="status">Loading the authoritative Store product and public API base…</p>}
         {loadMessage && <p className={`rounded-input border p-3 text-sm ${loadMessage.startsWith('Loaded') ? 'border-discord-success/40 bg-discord-success/10 text-discord-success' : 'border-discord-danger/40 bg-discord-danger/10 text-discord-danger'}`} role={loadMessage.startsWith('Loaded') ? 'status' : 'alert'}>{loadMessage}</p>}
         <Input label="Project name" value={draft.projectName} onChange={(event) => update('projectName', event.target.value)} placeholder="SafePaste" />
         <TextAreaField id="licensing-project-context" label="Completed project context" value={draft.projectContext} onChange={(value) => update('projectContext', value)} placeholder="Describe the existing repository, behavior, language, runtime, packaging, deployment, licensed capabilities, and everything the licensing change must preserve." />
@@ -213,16 +240,16 @@ export function LicensingPromptGenerator() {
           <div className="space-y-4 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
             <Input label="Installation identity" value={draft.installationIdentity} onChange={(event) => update('installationIdentity', event.target.value)} />
             <div className="grid gap-4 sm:grid-cols-3">
-              <Input label="Max installations" type="number" min={1} value={draft.maxInstallations} onChange={(event) => update('maxInstallations', Math.max(1, Number(event.target.value)))} />
-              <Input label="Heartbeat seconds" type="number" min={30} value={draft.heartbeatSeconds} onChange={(event) => update('heartbeatSeconds', Math.max(30, Number(event.target.value)))} />
-              <Input label="Offline grace seconds" type="number" min={0} value={draft.offlineGraceSeconds} onChange={(event) => update('offlineGraceSeconds', Math.max(0, Number(event.target.value)))} />
+              <Input label="Max installations" type="number" min={1} max={100} value={draft.maxInstallations} onChange={(event) => update('maxInstallations', Math.max(1, Math.min(100, Number(event.target.value))))} />
+              <Input label="Heartbeat seconds" type="number" min={60} max={86400} value={draft.heartbeatSeconds} onChange={(event) => update('heartbeatSeconds', Math.max(60, Math.min(86400, Number(event.target.value))))} />
+              <Input label="Offline grace seconds" type="number" min={0} max={604800} value={draft.offlineGraceSeconds} onChange={(event) => update('offlineGraceSeconds', Math.max(0, Math.min(604800, Number(event.target.value))))} />
             </div>
             <Input label="Structured feature flags" value={draft.featureFlags} onChange={(event) => update('featureFlags', event.target.value)} placeholder="pro-mode, exports" />
           </div>
         ) : (
           <TextAreaField id="licensing-output-formats" label="Output formats" value={draft.outputFormats} onChange={(value) => update('outputFormats', value)} placeholder="List every delivered format, including future variants that need a verified buyer-derivative transformer." />
         )}
-      </section>
+      </fieldset>
 
       <section aria-labelledby="generated-prompt-heading" className="self-start rounded-card border border-discord-accent/40 bg-discord-bg-secondary p-5 xl:sticky xl:top-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -237,9 +264,17 @@ export function LicensingPromptGenerator() {
         {handoffError && <p className="mt-4 rounded-input border border-discord-danger/40 bg-discord-danger/10 p-3 text-xs text-discord-danger" role="alert">{handoffError}</p>}
         <pre className="mt-4 max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-input bg-discord-bg-floating p-4 text-xs leading-5 text-discord-text-secondary"><code>{prompt}</code></pre>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button type="button" onClick={() => void copy()} disabled={!requiredReady}><Copy size={16} aria-hidden="true" />{copied ? 'Prompt copied' : 'Copy prompt'}</Button>
-          <Button type="button" variant="secondary" onClick={useInStore} disabled={!requiredReady}><ArrowRight size={16} aria-hidden="true" />Use in Store</Button>
-          <Button type="button" variant="secondary" onClick={clear}><RotateCcw size={16} aria-hidden="true" />Clear</Button>
+          <Button type="button" onClick={() => void copy()} disabled={!requiredReady || authoritativeLoading}><Copy size={16} aria-hidden="true" />{copied ? 'Prompt copied' : 'Copy prompt'}</Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={useInStore}
+            disabled={!requiredReady || authoritativeLoading || !activeGuildId || Boolean(draft.productId)}
+            title={draft.productId ? 'This prompt already comes from an authoritative saved product' : undefined}
+          >
+            <ArrowRight size={16} aria-hidden="true" />Use in Store
+          </Button>
+          <Button type="button" variant="secondary" onClick={clear} disabled={authoritativeLoading}><RotateCcw size={16} aria-hidden="true" />Clear</Button>
         </div>
       </section>
     </div>

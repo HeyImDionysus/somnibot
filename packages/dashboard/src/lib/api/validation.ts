@@ -264,6 +264,7 @@ const productPlanDefinition = z.object({
 }).strict();
 
 const productCreate = z.object({
+  id: uuid.optional(),
   name: safeName,
   description: safeDescription,
   type: z.enum(['one_time', 'subscription', 'free']).default('one_time'),
@@ -304,7 +305,7 @@ const productCreate = z.object({
 //     columns can ever reach the DB, so the undo `products.data` allowlist is
 //     correct by construction (paypal_product_id excluded from both).
 const productUpdate = productCreate
-  .omit({ plans: true })
+  .omit({ plans: true, id: true })
   .partial()
   .extend({ id: uuid })
   .strict();

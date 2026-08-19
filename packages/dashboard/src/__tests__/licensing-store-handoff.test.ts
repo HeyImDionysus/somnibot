@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   LICENSING_STORE_HANDOFF_KEY,
+  hasPendingCompletedProjectPolicy,
   parseLicensingStoreHandoff,
   promptEnvelopeToStorePrefill,
   savedProductToLicensingDraft,
@@ -27,15 +28,38 @@ const draft: LicensingPromptDraft = {
 describe('completed project licensing Store handoff', () => {
   it('uses a fixed versioned browser-session contract', () => {
     const envelope = buildLicensingPromptEnvelope(draft);
-    const serialized = serializeLicensingStoreHandoff(envelope);
+    const serialized = serializeLicensingStoreHandoff(envelope, 'guild-qa');
 
     expect(LICENSING_STORE_HANDOFF_KEY).toContain('v1');
     expect(parseLicensingStoreHandoff(serialized)).toEqual({
       schemaVersion: 1,
+      guildId: 'guild-qa',
       envelope,
     });
     expect(parseLicensingStoreHandoff('{"schemaVersion":2}')).toBeNull();
+    expect(parseLicensingStoreHandoff(JSON.stringify({ schemaVersion: 1, envelope }))).toBeNull();
     expect(parseLicensingStoreHandoff('not-json')).toBeNull();
+  });
+
+  it('preserves the created product identity for reload-safe policy recovery', () => {
+    const envelope = buildLicensingPromptEnvelope(draft);
+    const recovery = { kind: 'license' as const, productId: 'product-preserved-after-create' };
+
+    expect(parseLicensingStoreHandoff(serializeLicensingStoreHandoff(envelope, 'guild-qa', recovery))).toEqual({
+      schemaVersion: 1,
+      guildId: 'guild-qa',
+      envelope,
+      recovery,
+    });
+  });
+
+  it('preserves one stable product-creation request across response-loss retries', () => {
+    const envelope = buildLicensingPromptEnvelope(draft);
+    const creationRequestId = '00000000-0000-4000-8000-000000000431';
+
+    expect(parseLicensingStoreHandoff(
+      serializeLicensingStoreHandoff(envelope, 'guild-qa', undefined, creationRequestId),
+    )).toMatchObject({ creationRequestId });
   });
 
   it.each([
@@ -88,12 +112,27 @@ describe('completed project licensing Store handoff', () => {
         offline_grace_period_seconds: 7200,
         feature_flags: ['exports', 'priority'],
       }],
+      plans: [{
+        name: 'Annual Pro',
+        interval_unit: 'YEAR',
+        interval_count: 1,
+        price_cents: 12000,
+        currency: 'USD',
+        trial_days: 14,
+        active: true,
+      }],
+      metadata: {
+        completed_project_licensing: {
+          projectContext: 'Original Rust architecture and packaging constraints.',
+          installationIdentity: 'One licensed production node',
+        },
+      },
     }, 'https://somnibot.example/api');
 
     expect(mapped).toMatchObject({
       mode: 'dynamic',
       projectName: 'Saved Sentinel',
-      projectContext: 'Customer-facing saved description.',
+      projectContext: 'Original Rust architecture and packaging constraints.',
       productId: '00000000-0000-4000-8000-000000000123',
       apiBase: 'https://somnibot.example/api',
       billingModel: 'free',
@@ -101,7 +140,89 @@ describe('completed project licensing Store handoff', () => {
       heartbeatSeconds: 120,
       offlineGraceSeconds: 7200,
       featureFlags: 'exports, priority',
+      installationIdentity: 'One licensed production node',
+      plansAndFeatures: 'Annual Pro: 120.00 USD every 1 year(s), 14 trial day(s)',
     });
+  });
+
+  it('accepts the authoritative one-to-one license policy object shape', () => {
+    const mapped = savedProductToLicensingDraft({
+      id: '00000000-0000-4000-8000-000000000126',
+      name: 'One-to-one policy',
+      description: 'Saved dynamic product.',
+      type: 'one_time',
+      delivery_type: 'license_key',
+      product_license_config: {
+        max_devices: 4,
+        heartbeat_interval_seconds: 180,
+        offline_grace_period_seconds: 3600,
+        feature_flags: ['priority'],
+      },
+    }, 'https://somnibot.example/api');
+
+    expect(mapped).toMatchObject({
+      maxInstallations: 4,
+      heartbeatSeconds: 180,
+      offlineGraceSeconds: 3600,
+      featureFlags: 'priority',
+    });
+  });
+
+  it('accepts a legacy saved heartbeat but refuses to hand that value into a new Store save', () => {
+    const legacy = buildLicensingPromptEnvelope({ ...draft, heartbeatSeconds: 30 });
+    expect(legacy.dynamicPolicy?.heartbeatSeconds).toBe(30);
+    expect(() => promptEnvelopeToStorePrefill(legacy)).toThrow('at least 60 seconds');
+
+    expect(savedProductToLicensingDraft({
+      id: '00000000-0000-4000-8000-000000000127',
+      name: 'Legacy heartbeat product',
+      description: 'Saved before the current Store minimum.',
+      type: 'one_time',
+      delivery_type: 'license_key',
+      product_license_config: {
+        max_devices: 3,
+        heartbeat_interval_seconds: 30,
+        offline_grace_period_seconds: 3600,
+        feature_flags: [],
+      },
+    }, 'https://somnibot.example/api').heartbeatSeconds).toBe(30);
+  });
+
+  it('uses saved file names and reviewed fallback formats without inventing static delivery details', () => {
+    const base = {
+      id: '00000000-0000-4000-8000-000000000124',
+      name: 'Saved static project',
+      description: 'Customer-facing saved description.',
+      type: 'one_time',
+      delivery_type: 'file',
+      metadata: {
+        completed_project_licensing: {
+          plansAndFeatures: '',
+          outputFormats: 'PDF and ZIP',
+          policyPending: false,
+        },
+      },
+    };
+
+    expect(savedProductToLicensingDraft(base, 'https://somnibot.example/api').outputFormats).toBe('PDF and ZIP');
+    expect(savedProductToLicensingDraft({
+      ...base,
+      product_files: [{ display_name: 'Owner Guide.pdf' }, { file_name: 'archive.zip' }],
+    }, 'https://somnibot.example/api').outputFormats).toBe('Owner Guide.pdf, archive.zip');
+  });
+
+  it('rejects a dynamic product without an actual saved policy and detects pending activation state', () => {
+    expect(() => savedProductToLicensingDraft({
+      id: '00000000-0000-4000-8000-000000000125',
+      name: 'Incomplete dynamic product',
+      description: null,
+      type: 'subscription',
+      delivery_type: 'license_key',
+      product_license_config: [],
+    }, 'https://somnibot.example/api')).toThrow('authoritative saved license policy');
+    expect(hasPendingCompletedProjectPolicy({
+      completed_project_licensing: { policyPending: true },
+    })).toBe(true);
   });
 
   it('rejects malformed authoritative product readback without manufacturing prompt values', () => {

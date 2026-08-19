@@ -53,6 +53,11 @@ function createSupabaseDouble() {
         ops.push({ table, kind, filters: { ...filters, payload } });
         return chain;
       },
+      update(payload: unknown) {
+        kind = 'update';
+        ops.push({ table, kind, filters: { ...filters, payload } });
+        return chain;
+      },
       insert(payload: unknown) {
         kind = 'insert';
         ops.push({ table, kind, filters: { ...filters, payload } });
@@ -63,7 +68,28 @@ function createSupabaseDouble() {
         if (table === 'products') {
           const owned = filters.id === OWN_PRODUCT && filters.guild_id === OWN_GUILD;
           return Promise.resolve({
-            data: owned ? { id: OWN_PRODUCT, name: 'Pro bundle' } : null,
+            data: owned ? {
+              id: OWN_PRODUCT,
+              name: 'Pro bundle',
+              metadata: {
+                completed_project_licensing: {
+                  plansAndFeatures: 'Annual Pro',
+                  outputFormats: '',
+                  policyPending: true,
+                  desiredPolicy: {
+                    keyPrefix: 'SMNI',
+                    maxDevices: 99,
+                    heartbeatIntervalMs: 300000,
+                    sdkCacheTtlMs: 60000,
+                    offlineGracePeriodSeconds: 86400,
+                    featureFlags: [],
+                    requireDiscordGuildMembership: true,
+                    rotationPolicy: 'rotate-and-invalidate',
+                    selfServiceDeviceRemoval: true,
+                  },
+                },
+              },
+            } : null,
             error: null,
           });
         }
@@ -77,6 +103,9 @@ function createSupabaseDouble() {
       },
       single() {
         return Promise.resolve({ data: { product_id: filters.product_id }, error: null });
+      },
+      then(resolve: (value: { data: null; error: null }) => void) {
+        resolve({ data: null, error: null });
       },
     };
     return chain;
@@ -107,16 +136,19 @@ vi.mock('@/lib/admin-changes', () => ({
     ({ kind: 'db', table, match, data }),
 }));
 
-function put(productId: string) {
+import { recordAdminChange } from '@/lib/admin-changes';
+
+function put(productId: string, maxDevices = 99) {
   return new Request(`http://localhost/api/license/config/${productId}`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ max_devices: 99, license_mode: 'portal_only' }),
+    body: JSON.stringify({ max_devices: maxDevices, license_mode: 'portal_only' }),
   }) as unknown as import('next/server').NextRequest;
 }
 
 beforeEach(() => {
   ops = [];
+  vi.mocked(recordAdminChange).mockClear();
 });
 
 describe('GET /api/license/config/[productId] — tenancy', () => {
@@ -183,5 +215,25 @@ describe('PUT /api/license/config/[productId] — tenancy', () => {
     const writes = ops.filter((o) => o.kind === 'upsert');
     expect(writes).toHaveLength(1);
     expect(writes[0]!.table).toBe('product_license_config');
+    const recoveryWrites = ops.filter((o) => o.kind === 'update' && o.table === 'products');
+    expect(recoveryWrites).toHaveLength(1);
+    expect(recoveryWrites[0]!.filters.payload).toMatchObject({
+      metadata: {
+        completed_project_licensing: { policyPending: false },
+      },
+    });
+    const recordedChange = vi.mocked(recordAdminChange).mock.calls[0]?.[0];
+    expect(recordedChange).not.toHaveProperty('undo');
+    expect(recordedChange?.undoReason).toContain('activation-locked policy transition');
+  });
+
+  it('keeps activation blocked when the saved policy does not match the requested policy', async () => {
+    const { PUT } = await import('../app/api/license/config/[productId]/route');
+    const res = await PUT(put(OWN_PRODUCT, 98), {
+      params: Promise.resolve({ productId: OWN_PRODUCT }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(ops.filter((o) => o.kind === 'update' && o.table === 'products')).toHaveLength(0);
   });
 });

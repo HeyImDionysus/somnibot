@@ -92,9 +92,9 @@ const dynamicEnvelopeSchema = baseEnvelopeSchema.extend({
   mode: z.literal('dynamic'),
   dynamicPolicy: z.object({
     installationIdentity: z.string().min(1),
-    maxInstallations: z.number().int().min(1),
-    heartbeatSeconds: z.number().int().min(30),
-    offlineGraceSeconds: z.number().int().min(0),
+    maxInstallations: z.number().int().min(1).max(100),
+    heartbeatSeconds: z.number().int().min(0).max(86_400),
+    offlineGraceSeconds: z.number().int().min(0).max(604_800),
     featureFlags: z.array(z.string().min(1)).default([]),
   }),
   staticPolicy: z.null(),
@@ -183,7 +183,7 @@ function dynamicInstructions(): string {
   return `DYNAMIC IMPLEMENTATION CONTRACT
 Use SomniBot's TypeScript SDK only when it naturally fits the existing stack. Otherwise implement the same validate, heartbeat, and deactivate REST contract in the project's actual language and runtime. Never convert the project or add a second runtime merely for licensing.
 
-Keep PayPal checkout, Discord OAuth customer identity, entitlement issuance, and raw provider secrets outside the distributed project. Accept only the customer key or a short-lived authenticated application session. Bind it to the configured installation identity, enforce the configured active-installation limit, validate before paid features start, follow the server-directed heartbeat, and respect the configured offline grace period.
+Keep PayPal checkout, Discord OAuth customer identity, entitlement issuance, and raw provider secrets outside the distributed project. Accept only the customer key or a short-lived authenticated application session. Bind it to the configured installation identity, enforce the configured active-installation limit, validate before paid features start, follow the server-directed heartbeat, respect the configured offline grace period, and never cache an active validation longer than the authoritative sdk_cache_ttl_ms returned by SomniBot.
 
 Treat timeouts, network failures, rate limits, and 5xx responses as retryable or offline-grace outcomes. Treat refunded, revoked, expired, suspended, cancelled, over-device-limit, or invalidated-session verdicts as terminal. Disable only licensed capabilities without corrupting customer data. Deactivate the exact session on explicit sign-out or removal and only on shutdown paths the runtime can guarantee.
 

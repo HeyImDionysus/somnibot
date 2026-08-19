@@ -70,6 +70,11 @@ describe('licensing prompt generator contract', () => {
     expect(extractLicensingPromptEnvelope(legacyPrompt).dynamicPolicy?.featureFlags).toEqual([]);
   });
 
+  it('rejects policy values that the Store cannot save', () => {
+    expect(() => buildLicensingPromptEnvelope({ ...dynamicDraft, maxInstallations: 101 })).toThrow();
+    expect(() => buildLicensingPromptEnvelope({ ...dynamicDraft, offlineGraceSeconds: 604_801 })).toThrow();
+  });
+
   it('round-trips the structured envelope embedded in the copied prompt', () => {
     // Given a complete owner configuration
     const envelope = buildLicensingPromptEnvelope(dynamicDraft);

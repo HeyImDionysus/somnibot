@@ -76,6 +76,7 @@ describe('GET /api/store/onboarding', () => {
     expect(response.status).toBe(200);
     expect(webhooks.eq).toHaveBeenCalledWith('guild_id', 'guild-onboarding');
     expect(body.data).toMatchObject({
+      guildId: 'guild-onboarding',
       environment: 'sandbox',
       apiBase: 'http://localhost/api',
       credentialsConfigured: true,

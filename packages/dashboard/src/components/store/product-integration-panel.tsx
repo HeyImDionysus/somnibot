@@ -42,6 +42,8 @@ export function ProductIntegrationPanel({
   onRetry,
 }: Props) {
   const guide = buildProductIntegrationGuide(product);
+  const supportsCompletedProjectPrompt = product.delivery_type === 'file'
+    || product.delivery_type === 'license_key';
   return (
     <section className="rounded-card border border-discord-accent/40 bg-discord-bg-secondary p-5" aria-labelledby="integration-heading">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -77,12 +79,18 @@ export function ProductIntegrationPanel({
         <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-discord-text-secondary">
           {guide.steps.map((step) => <li key={step}>{step}</li>)}
         </ol>
-        <p className="mt-4 text-xs text-discord-text-muted">
-          Generate the final implementation contract from this authoritative saved product and license policy. The generator reads these values but never changes them.
-        </p>
-        <Link href={`/project-licensing?productId=${encodeURIComponent(product.id)}`} className="mt-2 inline-flex h-8 items-center rounded-input bg-discord-bg-active px-3 text-xs font-medium text-discord-text-primary hover:bg-discord-border-strong">
-          Open Prompt Generator
-        </Link>
+        {supportsCompletedProjectPrompt ? (
+          <>
+            <p className="mt-4 text-xs text-discord-text-muted">
+              Generate the final implementation contract from this authoritative saved product and license policy. The generator reads these values but never changes them.
+            </p>
+            <Link href={`/project-licensing?productId=${encodeURIComponent(product.id)}`} className="mt-2 inline-flex h-8 items-center rounded-input bg-discord-bg-active px-3 text-xs font-medium text-discord-text-primary hover:bg-discord-border-strong">
+              Open Prompt Generator
+            </Link>
+          </>
+        ) : (
+          <p className="mt-4 text-xs text-discord-text-muted">Completed-project prompts are available for file and license-key delivery products.</p>
+        )}
       </div>
       <div className="mt-5 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
         <h3 className="text-sm font-semibold text-discord-text-primary">Validate safely in sandbox</h3>

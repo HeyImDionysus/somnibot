@@ -50,6 +50,11 @@ import {
 } from '@/lib/store/commerce-plan-recovery';
 import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
 import { writeCommerceAudit } from '@/lib/commerce-audit';
+import {
+  declaresPendingCompletedProjectPolicy,
+  hasPendingCompletedProjectPolicy,
+  readCompletedProjectPolicy,
+} from '@/lib/store/licensing-handoff';
 
 // ── PayPal Helpers ─────────────────────────────────────
 
@@ -179,6 +184,7 @@ async function createPayPalCatalogProduct(
   description: string | null,
   type: 'one_time' | 'subscription',
   paypalConfig: PayPalRuntimeConfig,
+  requestId: string,
 ): Promise<PayPalSyncResult> {
   const readinessError = paypalReadinessError(paypalConfig, 'paid products');
   if (readinessError) {
@@ -200,7 +206,7 @@ async function createPayPalCatalogProduct(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'PayPal-Request-Id': `product-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+        'PayPal-Request-Id': `store-product-${requestId}`,
       },
       body: JSON.stringify({
         name: name.slice(0, 127), // PayPal max 127 chars
@@ -242,6 +248,7 @@ async function createPayPalCatalogProduct(
 async function createPayPalBillingPlan(
   input: PayPalPlanCreation,
   paypalConfig: PayPalRuntimeConfig,
+  requestId: string,
 ): Promise<PayPalSyncResult> {
   const readinessError = paypalReadinessError(paypalConfig, 'subscription plans');
   if (readinessError) {
@@ -262,7 +269,7 @@ async function createPayPalBillingPlan(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'PayPal-Request-Id': `plan-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+        'PayPal-Request-Id': `store-plan-${requestId}`,
       },
       body: JSON.stringify({
         product_id: input.paypalProductId,
@@ -373,9 +380,10 @@ export async function POST(req: NextRequest) {
   const parsed = await parseBody(req, schemas.product.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
-  const operationId = req.headers.get('x-request-id')?.trim() || crypto.randomUUID();
+  const requestedOperationId = req.headers.get('x-request-id')?.trim();
 
   const {
+    id: requestedProductId,
     name,
     description,
     type,
@@ -389,6 +397,46 @@ export async function POST(req: NextRequest) {
     metadata,
     plans: planDefs, // Optional: plan definitions for subscription products
   } = body;
+  const operationId = requestedProductId ?? (requestedOperationId || crypto.randomUUID());
+
+  if (
+    delivery_type === 'license_key'
+    && declaresPendingCompletedProjectPolicy(metadata)
+    && !readCompletedProjectPolicy(metadata)
+  ) {
+    return apiError('The requested license policy contains values the Store cannot save.', 400);
+  }
+
+  if (requestedProductId) {
+    const { data: existing, error: existingError } = await supabase
+      .from('products')
+      .select('*, plans(*), product_license_config(*)')
+      .eq('id', requestedProductId)
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    if (existingError) return dbError(existingError, 'store/products');
+    if (existing) {
+      const recoveryPlan = readPlanRecovery(existing.metadata);
+      if (recoveryPlan) {
+        return NextResponse.json({
+          success: false,
+          code: 'PRODUCT_CREATED_PLAN_SAVE_FAILED',
+          error: 'The preserved product still needs its local subscription plan. Resume and verify the saved recovery contract before activation.',
+          data: {
+            id: existing.id,
+            name: existing.name,
+            paypal_product_id: existing.paypal_product_id,
+            recovery_plan: recoveryPlan,
+          },
+        }, { status: 409 });
+      }
+      return NextResponse.json({
+        success: true,
+        data: existing,
+        replayed: true,
+      });
+    }
+  }
 
   if (!name || !type || !delivery_type || price_cents == null) {
     return NextResponse.json(
@@ -503,6 +551,7 @@ export async function POST(req: NextRequest) {
       description ?? null,
       type === 'subscription' ? 'subscription' : 'one_time',
       tenantPayPalConfig,
+      operationId,
     );
     if (!paypalProduct.ok) {
       await writeCommerceAudit(supabase, {
@@ -521,7 +570,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (type === 'subscription' && requiresPayPal && paypalProductId && tenantPayPalConfig) {
-    for (const plan of preparedPlans) {
+    for (const [planIndex, plan] of preparedPlans.entries()) {
       const paypalPlan = await createPayPalBillingPlan({
         paypalProductId,
         name: plan.name,
@@ -531,7 +580,7 @@ export async function POST(req: NextRequest) {
         intervalCount: plan.intervalCount,
         trialDays: plan.trialDays,
         active: plan.active,
-      }, tenantPayPalConfig);
+      }, tenantPayPalConfig, `${operationId}-${planIndex}`);
       if (!paypalPlan.ok) {
         await writeCommerceAudit(supabase, {
           guildId,
@@ -554,6 +603,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabase
     .from('products')
     .insert({
+      ...(requestedProductId ? { id: requestedProductId } : {}),
       guild_id: guildId,
       name,
       description: description ?? null,
@@ -752,22 +802,46 @@ export async function PUT(req: NextRequest) {
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
+  const includesCompletedProjectMetadata = updates.metadata
+    && Object.prototype.hasOwnProperty.call(updates.metadata, 'completed_project_licensing');
 
   if (
     'granted_role_ids' in updates
     || 'granted_channel_ids' in updates
     || 'delivery_type' in updates
     || 'type' in updates
+    || 'metadata' in updates
     || updates.active === true
   ) {
     const { data: currentTargets, error: currentTargetsError } = await supabase
       .from('products')
-      .select('type, delivery_type, granted_role_ids, granted_channel_ids, active')
+      .select('type, delivery_type, granted_role_ids, granted_channel_ids, active, metadata')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
     if (currentTargetsError) return dbError(currentTargetsError, 'store/products/live-targets');
     if (!currentTargets) return apiError('Product not found for this guild', 404);
+    const convertingToDynamic = updates.delivery_type === 'license_key'
+      && currentTargets.delivery_type !== 'license_key';
+    if (includesCompletedProjectMetadata) {
+      const validConversionLock = convertingToDynamic
+        && updates.active === false
+        && hasPendingCompletedProjectPolicy(updates.metadata)
+        && readCompletedProjectPolicy(updates.metadata) !== null;
+      if (!validConversionLock) {
+        return apiError('Completed-project licensing recovery metadata is server-managed.', 400);
+      }
+      updates.metadata = { ...currentTargets.metadata, ...updates.metadata };
+    }
+    if (convertingToDynamic && !includesCompletedProjectMetadata) {
+      return apiError('Dynamic conversion must remain inactive until its requested license policy is saved.', 409);
+    }
+    if (updates.metadata && hasPendingCompletedProjectPolicy(currentTargets.metadata)) {
+      return apiError('Complete license policy recovery before replacing product metadata.', 409);
+    }
+    if (updates.active === true && hasPendingCompletedProjectPolicy(currentTargets.metadata)) {
+      return apiError('Save and verify the requested license policy before activating this product.', 409);
+    }
 
     const storePolicy = await loadStoreProductPolicy(supabase, guildId);
     if (storePolicy instanceof NextResponse) return storePolicy;
