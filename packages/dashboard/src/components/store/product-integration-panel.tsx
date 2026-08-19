@@ -78,18 +78,24 @@ export function ProductIntegrationPanel({
           {guide.steps.map((step) => <li key={step}>{step}</li>)}
         </ol>
         <p className="mt-4 text-xs text-discord-text-muted">
-          Need an implementation contract for this or another project? The independent Prompt Generator never changes this saved product.
+          Generate the final implementation contract from this authoritative saved product and license policy. The generator reads these values but never changes them.
         </p>
-        <Link href="/project-licensing" className="mt-2 inline-flex h-8 items-center rounded-input bg-discord-bg-active px-3 text-xs font-medium text-discord-text-primary hover:bg-discord-border-strong">
+        <Link href={`/project-licensing?productId=${encodeURIComponent(product.id)}`} className="mt-2 inline-flex h-8 items-center rounded-input bg-discord-bg-active px-3 text-xs font-medium text-discord-text-primary hover:bg-discord-border-strong">
           Open Prompt Generator
         </Link>
       </div>
       <div className="mt-5 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
         <h3 className="text-sm font-semibold text-discord-text-primary">Validate safely in sandbox</h3>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-discord-text-secondary">
-          <li>Keep PayPal in Sandbox and create or activate this product and plan.</li>
-          <li>Buy through the normal storefront with a PayPal sandbox buyer account.</li>
-          <li>Wait for the signed webhook and confirm the delivery described above.</li>
+          {product.type === 'free' ? (
+            <li>Claim the product through the normal free storefront path. PayPal is not required.</li>
+          ) : (
+            <>
+              <li>Keep PayPal in Sandbox and activate this product and plan.</li>
+              <li>Buy through the normal storefront with a PayPal sandbox buyer account.</li>
+              <li>Wait for the signed webhook and confirm the delivery described above.</li>
+            </>
+          )}
           {guide.mode === 'dynamic'
             ? <li>Use the delivered customer key to confirm validation, heartbeat, device visibility, revocation, and deactivation.</li>
             : <li>Confirm the buyer-specific derivative, signed manifest, single-use download, and future-access revocation.</li>}

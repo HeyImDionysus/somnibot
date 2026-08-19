@@ -7,7 +7,7 @@ const source = readFileSync(resolve(import.meta.dirname, '..', 'app', '(dashboar
 describe('store free product form', () => {
   it('offers free type and forces zero price', () => {
     expect(source).toContain("{ value: 'free', label: 'Free' }");
-    expect(source).toContain('options={availableProductTypeOptions}');
+    expect(source).toContain('options={formProductTypeOptions}');
     expect(source).toContain("form.type === 'free' ? 0");
     expect(source).toContain("type === 'free' ? '0.00'");
   });

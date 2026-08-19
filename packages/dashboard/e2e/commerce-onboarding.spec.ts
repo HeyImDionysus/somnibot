@@ -14,7 +14,7 @@ const product = {
   currency: 'USD',
   granted_role_ids: [],
   granted_channel_ids: [],
-  active: true,
+  active: false,
   sort_order: 0,
   metadata: {},
   created_at: '2026-08-10T12:00:00.000Z',
@@ -55,6 +55,7 @@ test('creator completes sandbox product onboarding without source-reading', asyn
     if (pathname === '/api/store/products') {
       if (request.method() === 'POST') {
         const submitted = request.postDataJSON();
+        expect(submitted.active).toBe(false);
         expect(submitted.plans).toEqual([expect.objectContaining({
           name: 'Monthly Pro',
           interval_unit: 'MONTH',
@@ -123,6 +124,7 @@ test('creator completes sandbox product onboarding without source-reading', asyn
   await expect(page.getByText('PLAN-SANDBOX-456')).toBeVisible();
   await expect(page.getByText('does not mint an administrator test key', { exact: false })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Open Prompt Generator' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open Prompt Generator' })).toHaveAttribute('href', `/project-licensing?productId=${product.id}`);
   await expect(page.getByRole('button', { name: 'Copy licensing addendum' })).toHaveCount(0);
   const integrationPanel = page.locator('section[aria-labelledby="integration-heading"]');
   const paypalPolicyPanel = page.locator('section[aria-labelledby="paypal-processing-policy-heading"]');

@@ -4,7 +4,7 @@ const CONFIG_START = '<SOMNIBOT_PROJECT_LICENSING_CONFIG>';
 const CONFIG_END = '</SOMNIBOT_PROJECT_LICENSING_CONFIG>';
 
 export type LicensingPromptMode = 'dynamic' | 'static';
-export type LicensingBillingModel = 'one_time' | 'subscription' | 'multiple' | 'undecided';
+export type LicensingBillingModel = 'one_time' | 'subscription' | 'multiple' | 'free' | 'undecided';
 
 type ProjectSurfaceGroup = {
   readonly id: string;
@@ -66,6 +66,7 @@ export type LicensingPromptDraft = {
   readonly apiBase: string;
   readonly billingModel: LicensingBillingModel;
   readonly plansAndFeatures: string;
+  readonly featureFlags: string;
   readonly outputFormats: string;
   readonly installationIdentity: string;
   readonly maxInstallations: number;
@@ -82,7 +83,7 @@ const baseEnvelopeSchema = z.object({
     apiBase: z.string().min(1),
   }),
   billing: z.object({
-    model: z.enum(['one_time', 'subscription', 'multiple', 'undecided']),
+    model: z.enum(['one_time', 'subscription', 'multiple', 'free', 'undecided']),
     plansAndFeatures: z.string(),
   }),
 });
@@ -94,6 +95,7 @@ const dynamicEnvelopeSchema = baseEnvelopeSchema.extend({
     maxInstallations: z.number().int().min(1),
     heartbeatSeconds: z.number().int().min(30),
     offlineGraceSeconds: z.number().int().min(0),
+    featureFlags: z.array(z.string().min(1)).default([]),
   }),
   staticPolicy: z.null(),
 });
@@ -104,7 +106,7 @@ const staticEnvelopeSchema = baseEnvelopeSchema.extend({
   staticPolicy: z.object({ outputFormats: z.string().min(1) }),
 });
 
-const licensingPromptEnvelopeSchema = z.discriminatedUnion('mode', [
+export const licensingPromptEnvelopeSchema = z.discriminatedUnion('mode', [
   dynamicEnvelopeSchema,
   staticEnvelopeSchema,
 ]);
@@ -123,6 +125,11 @@ export class LicensingPromptParseError extends Error {
 function trimmed(value: string, fallback: string): string {
   const result = value.trim();
   return result.length > 0 ? result : fallback;
+}
+
+export function normalizeFeatureFlags(value: string | readonly string[]): string[] {
+  const values = typeof value === 'string' ? value.split(',') : value;
+  return [...new Set(values.map((flag) => flag.trim()).filter(Boolean))];
 }
 
 export function buildLicensingPromptEnvelope(draft: LicensingPromptDraft): LicensingPromptEnvelope {
@@ -150,6 +157,7 @@ export function buildLicensingPromptEnvelope(draft: LicensingPromptDraft): Licen
           maxInstallations: draft.maxInstallations,
           heartbeatSeconds: draft.heartbeatSeconds,
           offlineGraceSeconds: draft.offlineGraceSeconds,
+          featureFlags: normalizeFeatureFlags(draft.featureFlags),
         },
         staticPolicy: null,
       });
@@ -206,9 +214,9 @@ ${JSON.stringify(envelope, null, 2)}
 ${CONFIG_END}
 
 IMPLEMENTATION RULES
-Inspect the surrounding project idea and any existing repository before choosing an integration. Preserve its language, runtime, architecture, packaging, deployment, configuration, error model, and test conventions. The free-form project description is authoritative; the coverage groups below are adaptation examples, never a project-type menu.
+Inspect the already-completed project and its existing repository before choosing an integration. Preserve its behavior, language, runtime, architecture, packaging, deployment, configuration, error model, and test conventions. Limit changes to the SomniBot licensing integration and the smallest required configuration/documentation seams. The free-form project description is authoritative; the coverage groups below are adaptation examples, never a project-type menu.
 
-The Store product does not exist when this planning prompt is normally generated. When project.productId is null, require a deployment-time SOMNIBOT_PRODUCT_ID (or the surrounding project's equivalent configuration) and document that the owner copies the authoritative ID from the saved Store product. Never invent, guess, or hard-code a product ID.
+When project.productId is null, require a deployment-time SOMNIBOT_PRODUCT_ID (or the surrounding project's equivalent configuration) and document that the owner copies the authoritative ID from the saved Store product. Never invent, guess, or hard-code a product ID. When a saved product ID is present, treat the saved Store product and license policy as authoritative over earlier planning values.
 
 Supported ${envelope.mode} surfaces include:
 ${coverageLines(envelope.mode)}
@@ -218,7 +226,7 @@ SomniBot's database entitlement is the purchase authority. PayPal proves payment
 ${modeInstructions}
 
 ACCEPTANCE CONTRACT
-Prove the normal PayPal Sandbox purchase and signed webhook flow, Discord-linked entitlement, configured billing and explicit feature grants, refund, cancellation where applicable, and manual revocation. Exercise the real built artifact or real generated derivative against SomniBot, not only mocks. Record non-secret evidence for every lifecycle verdict and verify that no raw key, provider secret, customer identifier, or signing secret appears in source, logs, browser bundles, archives, or delivered files.`;
+For paid products, prove the normal PayPal Sandbox purchase and signed webhook flow. For free products, prove the supported free-claim path without PayPal. In both cases prove Discord-linked entitlement, configured billing and explicit feature grants, refund or cancellation where applicable, and manual revocation. Exercise the real built artifact or real generated derivative against SomniBot, not only mocks. Record non-secret evidence for every lifecycle verdict and verify that no raw key, provider secret, customer identifier, or signing secret appears in source, logs, browser bundles, archives, or delivered files.`;
 }
 
 export function extractLicensingPromptEnvelope(prompt: string): LicensingPromptEnvelope {

@@ -35,6 +35,11 @@ import {
   storeProductFacetOptions,
   type StoreProductFacet,
 } from '@/lib/store/store-product-policy';
+import {
+  LICENSING_STORE_HANDOFF_KEY,
+  parseLicensingStoreHandoff,
+  promptEnvelopeToStorePrefill,
+} from '@/lib/store/licensing-handoff';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -95,7 +100,7 @@ const emptyForm: {
   currency: 'USD',
   granted_role_ids: [],
   granted_channel_ids: [],
-  active: true,
+  active: false,
 };
 
 const emptyPlan: SubscriptionPlanDraft = {
@@ -194,9 +199,20 @@ export default function StorePage() {
   const [liveModeConfirmed, setLiveModeConfirmed] = useState(false);
   const [planDraft, setPlanDraft] = useState<SubscriptionPlanDraft>(emptyPlan);
   const [integrationProduct, setIntegrationProduct] = useState<Product | null>(null);
+  const [licensingHandoffActive, setLicensingHandoffActive] = useState(false);
+  const [licensingHandoffMessage, setLicensingHandoffMessage] = useState('');
+  const [licensingPlanNotes, setLicensingPlanNotes] = useState('');
+  const [billingChoiceRequired, setBillingChoiceRequired] = useState(false);
   const [integrationRecovery, setIntegrationRecovery] = useState<{ readonly kind: 'license' | 'plan'; readonly message: string } | null>(null);
   const [pendingPlanRecovery, setPendingPlanRecovery] = useState<CommercePlanRecovery | null>(null);
   const [paypalStatus, setPaypalStatus] = useState<PayPalOnboardingStatus | null>(null);
+  const clearLicensingHandoff = useCallback(() => {
+    window.sessionStorage.removeItem(LICENSING_STORE_HANDOFF_KEY);
+    setLicensingHandoffActive(false);
+    setLicensingHandoffMessage('');
+    setLicensingPlanNotes('');
+    setBillingChoiceRequired(false);
+  }, []);
   const [storeControls, setStoreControls] = useState({
     product_types_enabled: [...defaultStoreProductFacets] as StoreProductFacet[],
     repeat_purchase_policy: 'unique' as 'unique' | 'stackable' | 'renewable' | 'seat-based',
@@ -431,6 +447,43 @@ export default function StorePage() {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = window.sessionStorage.getItem(LICENSING_STORE_HANDOFF_KEY);
+    } catch {
+      setLicensingHandoffMessage('The temporary licensing handoff could not be read. Store setup remains available manually.');
+      return;
+    }
+    if (!stored) return;
+    const handoff = parseLicensingStoreHandoff(stored);
+    if (!handoff) {
+      window.sessionStorage.removeItem(LICENSING_STORE_HANDOFF_KEY);
+      setLicensingHandoffMessage('The temporary licensing handoff was invalid or outdated and was discarded. Store setup remains available manually.');
+      return;
+    }
+    const prefill = promptEnvelopeToStorePrefill(handoff.envelope);
+    setForm({
+      ...emptyForm,
+      name: prefill.name,
+      description: prefill.description,
+      type: prefill.billingType ?? 'one_time',
+      delivery_type: prefill.deliveryType,
+      price_dollars: prefill.billingType === 'free' ? '0.00' : '',
+      active: false,
+    });
+    setLicenseMaxDevices(prefill.maxDevices);
+    setLicenseHeartbeatMs(prefill.heartbeatIntervalMs);
+    setLicenseOfflineGraceSeconds(prefill.offlineGracePeriodSeconds);
+    setLicenseFeatureFlags(prefill.featureFlags.join(', '));
+    setLicensingPlanNotes(prefill.planNotes);
+    setBillingChoiceRequired(prefill.billingChoiceRequired);
+    setLicensingHandoffActive(true);
+    setLicensingHandoffMessage('Completed-project values were loaded from this tab. Review the customer-facing description and Store policy before creating the inactive product.');
+    setEditingId(null);
+    setShowForm(true);
+  }, []);
+
   const openCreate = () => {
     setForm(emptyForm);
     setRotationPolicy('rotate-and-invalidate');
@@ -445,6 +498,8 @@ export default function StorePage() {
     setPlanDraft(emptyPlan);
     setIntegrationRecovery(null);
     setPendingPlanRecovery(null);
+    setBillingChoiceRequired(false);
+    setLicensingPlanNotes('');
     setEditingId(null);
     setShowForm(true);
   };
@@ -540,6 +595,7 @@ export default function StorePage() {
         }
         setIntegrationRecovery(null);
         setPendingPlanRecovery(null);
+        if (licensingHandoffActive) clearLicensingHandoff();
         toast({ title: 'Subscription plan saved and verified', variant: 'success' });
         return;
       }
@@ -555,6 +611,7 @@ export default function StorePage() {
           });
           return;
         }
+        if (licensingHandoffActive) clearLicensingHandoff();
         toast({ title: 'License policy saved and verified', variant: 'success' });
       }
     } catch {
@@ -567,6 +624,10 @@ export default function StorePage() {
 
   const save = async () => {
     // Client-side validation
+    if (billingChoiceRequired) {
+      toast({ title: 'Choose a Store billing model before creating this product', variant: 'error' });
+      return;
+    }
     const priceCents = form.type === 'free' ? 0 : Math.round((parseFloat(form.price_dollars) || 0) * 100);
     if (priceCents < 0) {
       toast({ title: 'Price cannot be negative', variant: 'error' });
@@ -589,7 +650,7 @@ export default function StorePage() {
         currency: form.currency.toUpperCase(),
         granted_role_ids: form.granted_role_ids,
         granted_channel_ids: form.granted_channel_ids,
-        active: form.active,
+        active: editingId ? form.active : false,
         ...(form.type === 'subscription' && !editingId ? {
           plans: [{ ...planDraft, currency: form.currency.toUpperCase() }],
         } : {}),
@@ -641,6 +702,7 @@ export default function StorePage() {
       }
       setIntegrationRecovery(null);
       setPendingPlanRecovery(null);
+      if (!editingId && licensingHandoffActive) clearLicensingHandoff();
       setShowForm(false);
       toast({ title: editingId ? 'Product updated and verified' : 'Product created and verified', variant: 'success' });
     } catch {
@@ -704,6 +766,13 @@ export default function StorePage() {
     (option.value !== 'subscription' || storePolicy.enabledFacets.includes('subscription'))
     && (option.value !== 'free' || storePolicy.enabledFacets.includes('free'))
   ));
+  const formProductTypeOptions = billingChoiceRequired
+    ? [{ value: '', label: 'Choose billing model' }, ...availableProductTypeOptions]
+    : availableProductTypeOptions;
+  const cancelProductForm = () => {
+    if (licensingHandoffActive) clearLicensingHandoff();
+    setShowForm(false);
+  };
 
   // ── Render ──
 
@@ -741,6 +810,12 @@ export default function StorePage() {
       <StoreControlRoom />
 
       <PayPalOnboardingStatusPanel onStatus={setPaypalStatus} />
+
+      {licensingHandoffMessage && (
+        <p className={`rounded-input border p-3 text-sm ${licensingHandoffActive ? 'border-discord-accent/40 bg-discord-accent/10 text-discord-text-secondary' : 'border-discord-warning/40 bg-discord-warning/10 text-discord-warning'}`} role={licensingHandoffActive ? 'status' : 'alert'}>
+          {licensingHandoffMessage}
+        </p>
+      )}
 
       {integrationProduct && (
         <ProductIntegrationPanel
@@ -859,7 +934,7 @@ export default function StorePage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input id="product-name" label="Name *" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Product name" />
             <Input id="product-price" label="Price ($) *" type="number" step="0.01" min="0" value={form.type === 'free' ? '0.00' : form.price_dollars} disabled={form.type === 'free'} onChange={(event) => setForm({ ...form, price_dollars: event.target.value })} placeholder="9.99" />
-            <Select id="product-type" label="Type" value={form.type} onChange={(event) => { const type = event.target.value === 'subscription' ? 'subscription' : event.target.value === 'free' ? 'free' : 'one_time'; setForm({ ...form, type, price_dollars: type === 'free' ? '0.00' : form.price_dollars }); }} options={availableProductTypeOptions} />
+            <Select id="product-type" label="Type" value={billingChoiceRequired ? '' : form.type} onChange={(event) => { const value = event.target.value; if (value !== 'one_time' && value !== 'subscription' && value !== 'free') return; setBillingChoiceRequired(false); setForm({ ...form, type: value, price_dollars: value === 'free' ? '0.00' : form.price_dollars }); }} options={formProductTypeOptions} />
             <Select id="product-delivery-type" label="Licensing mode" value={form.delivery_type} onChange={(event) => { const deliveryType = storePolicy.allowedDeliveryTypes.find((value) => value === event.target.value); if (deliveryType) setForm({ ...form, delivery_type: deliveryType }); }} options={deliveryTypeOptions} />
             <div
               className="sm:col-span-2 rounded-lg border border-discord-accent/40 bg-discord-accent/10 p-4"
@@ -881,17 +956,24 @@ export default function StorePage() {
               </ol>
             </div>
             <div className="sm:col-span-2">
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
+              <label htmlFor="product-description" className="mb-1 block text-xs font-medium text-discord-text-muted">
                 Description
               </label>
               <textarea
+                id="product-description"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
                 rows={3}
                 className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none resize-none"
                 placeholder="Product description"
               />
+              {licensingHandoffActive && <p className="mt-1 text-xs text-discord-warning" role="status">Review this carefully. It came from project context and will be visible to customers.</p>}
             </div>
+            {licensingPlanNotes && (
+              <div className="sm:col-span-2 rounded-input border border-discord-warning/40 bg-discord-warning/10 p-3 text-sm text-discord-text-secondary">
+                <strong className="text-discord-warning">Plan notes to review:</strong> {licensingPlanNotes}
+              </div>
+            )}
             {form.delivery_type === 'license_key' && (
               <div className="sm:col-span-2 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4">
                 <h3 className="text-sm font-semibold text-discord-text-primary">License recovery controls</h3>
@@ -965,20 +1047,24 @@ export default function StorePage() {
               </>
             )}
             <Input id="product-currency" label="Currency" value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value })} placeholder="USD" />
-            <div className="pt-5"><Toggle label="Active" checked={form.active} onChange={(active) => setForm({ ...form, active })} /></div>
+            {editingId ? (
+              <div className="pt-5"><Toggle label="Active" checked={form.active} onChange={(active) => setForm({ ...form, active })} /></div>
+            ) : (
+              <p className="self-end rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-secondary">New products are created inactive. Activate this product from the Store only after its saved policy is verified.</p>
+            )}
           </div>
 
           <div className="mt-4 flex gap-2">
             <Button
               variant="success"
               onClick={save}
-              disabled={saving || !form.name}
+              disabled={saving || !form.name || billingChoiceRequired}
             >
               {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
             </Button>
             <Button
               variant="secondary"
-              onClick={() => setShowForm(false)}
+              onClick={cancelProductForm}
             >
               Cancel
             </Button>
