@@ -37,6 +37,15 @@ export interface PurchaseRoleDeliveryContract {
   discordId: string;
   grantedRoleIds: string[];
   entitlementType: 'one_time' | 'subscription';
+  freeClaim?: true;
+}
+
+export function isFulfillmentEntitlementSource(
+  source: unknown,
+  freeClaim: boolean,
+): boolean {
+  return source === 'purchase'
+    || (freeClaim && source === 'manual');
 }
 
 export interface NonCommerceRoleDeliveryContract {
@@ -2051,7 +2060,10 @@ export class EntitlementService {
       || (row.plan_id ?? null) !== contract.planId
       || row.order_id !== contract.orderId
       || row.type !== contract.entitlementType
-      || (row.source !== 'purchase' && row.source !== null)
+      || (
+        row.source !== null
+        && !isFulfillmentEntitlementSource(row.source, contract.freeClaim === true)
+      )
       || typeof row.status !== 'string'
       || !entitlementStatuses.includes(row.status)
       || !exactRoleVectorsMatch(row.granted_role_ids, contract.grantedRoleIds)
@@ -2139,6 +2151,7 @@ export class EntitlementService {
       )
       || !['one_time', 'subscription'].includes(contract.entitlementType)
       || (contract.entitlementType === 'subscription' && contract.planId === null)
+      || (contract.freeClaim === true && contract.entitlementType !== 'one_time')
     ) {
       throw new Error('Purchase role delivery contract is malformed');
     }

@@ -26,6 +26,7 @@ import {
 import { inspectTemporaryRoleGrant } from './temp-role-ownership.js';
 import {
   EntitlementService,
+  isFulfillmentEntitlementSource,
   PurchaseRoleDeliveryTerminalNoopError,
   type PurchaseRoleDeliveryAttempt,
   type RoleDeliveryActionClaim,
@@ -713,6 +714,7 @@ export class CommerceFulfillmentService {
         discordId: payload.discord_id,
         grantedRoleIds: payload.granted_role_ids,
         entitlementType: payload.entitlement_type,
+        ...(payload.free_claim === true ? { freeClaim: true as const } : {}),
       },
       context,
     );
@@ -952,6 +954,7 @@ export class CommerceFulfillmentService {
         discordId: payload.discord_id,
         grantedRoleIds: payload.granted_role_ids,
         entitlementType: 'one_time' as const,
+        ...(freeClaim ? { freeClaim: true as const } : {}),
       };
       const begun = await this.entitlementService.beginPurchaseRoleDeliveryAttempt(
         entitlementId,
@@ -1053,7 +1056,7 @@ export class CommerceFulfillmentService {
       || typeof data.status !== 'string'
       || !['active', 'pending', 'grace_period', 'suspended', 'expired', 'cancelled']
         .includes(data.status)
-      || (data.source !== 'purchase' && !(payload.free_claim === true && data.source === 'manual'))
+      || !isFulfillmentEntitlementSource(data.source, payload.free_claim === true)
       || !isSameUniqueStringSet(data.granted_role_ids, payload.granted_role_ids)
       || !isSameUniqueStringSet(data.granted_channel_ids, payload.granted_channel_ids)
     ) {

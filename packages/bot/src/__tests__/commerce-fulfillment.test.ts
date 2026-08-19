@@ -67,7 +67,8 @@ const {
   },
 }));
 
-vi.mock('../features/commerce/entitlement-service.js', () => ({
+vi.mock('../features/commerce/entitlement-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../features/commerce/entitlement-service.js')>()),
   PurchaseRoleDeliveryTerminalNoopError: MockTerminalNoopError,
   EntitlementService: class {
     private activeAttempt: any = null;
@@ -1188,6 +1189,62 @@ describe('CommerceFulfillmentService', () => {
   });
 
   describe('one_time_purchase', () => {
+    it('threads the sanctioned manual entitlement source through free-claim delivery', async () => {
+      const payload: FulfillmentPayload = {
+        ...basePayload,
+        order_id: 'free-order-1',
+        order_number: 'ORD-FREE-001',
+        paypal_capture_id: undefined,
+        amount_cents: 0,
+        granted_role_ids: [],
+        license_key_id: 'license-1',
+        free_claim: true,
+      };
+      const supabase = makeSupa({
+        orders: {
+          id: payload.order_id,
+          order_number: payload.order_number,
+          guild_id: payload.guild_id,
+          customer_id: payload.customer_id,
+          product_id: payload.product_id,
+          plan_id: null,
+          paypal_subscription_id: null,
+          amount_cents: 0,
+          currency: payload.currency,
+          source: 'manual',
+          status: 'completed',
+          granted_role_ids_snapshot: [],
+          granted_channel_ids_snapshot: [],
+          temporary_role_grants_snapshot: [],
+          grant_snapshot_frozen_at: '2026-08-19T16:10:56.803886Z',
+        },
+        entitlements: {
+          id: 'free-entitlement-1',
+          customer_id: payload.customer_id,
+          product_id: payload.product_id,
+          plan_id: null,
+          license_key_id: payload.license_key_id,
+          type: 'one_time',
+          status: 'active',
+          source: 'manual',
+          granted_role_ids: [],
+          granted_channel_ids: [],
+        },
+      });
+      Object.assign(service, { supabase });
+
+      const result = await fulfillClaimed(service, payload);
+
+      expect(result.errors).toEqual([]);
+      expect(result.success).toBe(true);
+      expect(mockGrant).not.toHaveBeenCalled();
+      expect(mockBeginRoleDelivery).toHaveBeenCalledWith(
+        'free-entitlement-1',
+        expect.objectContaining({ freeClaim: true }),
+        TEST_ACTION_CLAIM,
+      );
+    });
+
     it('durably confirms the role generation before an exact claimed action begins outward delivery', async () => {
       const supabase = makeSupa();
       service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
