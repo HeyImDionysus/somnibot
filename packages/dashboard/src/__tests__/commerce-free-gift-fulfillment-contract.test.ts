@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const migration = readFileSync(resolve(root, 'packages/supabase/migrations/20260804137000_free_claims_gift_intents.sql'), 'utf8');
+const freeClaimOrderContract = readFileSync(resolve(root, 'packages/supabase/migrations/20260818114000_free_claim_order_contract.sql'), 'utf8');
 const webhook = readFileSync(resolve(root, 'packages/dashboard/src/app/api/paypal/webhook/handlers.ts'), 'utf8');
 const checkout = readFileSync(resolve(root, 'packages/bot/src/features/commerce/payment-handler.ts'), 'utf8');
 const fulfillment = readFileSync(resolve(root, 'packages/bot/src/services/commerce-fulfillment.ts'), 'utf8');
@@ -18,6 +19,18 @@ describe('free claim and gift fulfillment rails', () => {
     expect(migration).toContain('expires_at <= pg_catalog.clock_timestamp()');
     expect(migration).toContain('p_guild_id');
     expect(migration).toContain('commerce_claim_gift_fulfillment');
+  });
+
+  it('creates free orders unfrozen and freezes authoritative policy before completion', () => {
+    expect(freeClaimOrderContract).toContain('commerce_freeze_free_claim_order_contract');
+    expect(freeClaimOrderContract).toContain("'manual', 'pending'");
+    expect(freeClaimOrderContract).toContain("grant_snapshot_frozen_at=pg_catalog.clock_timestamp()");
+    expect(freeClaimOrderContract).toContain("UPDATE public.orders SET status='completed'");
+    expect(freeClaimOrderContract).toContain('NEW.delivery_type_snapshot := v_product.delivery_type');
+    expect(freeClaimOrderContract).toContain('commerce_orders_00_freeze_free_claim_contract');
+    expect(freeClaimOrderContract).toContain('commerce_order_is_free_claim_carrier');
+    expect(freeClaimOrderContract).toContain('free claim request replay identity mismatch');
+    expect(freeClaimOrderContract).not.toContain("'manual', 'completed', v_product.delivery_type");
   });
 
   it('carries only the opaque gift intent id through PayPal metadata', () => {

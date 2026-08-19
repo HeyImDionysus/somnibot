@@ -243,6 +243,13 @@ export async function handleFreeClaimButton(
     p_request_id: requestId, p_guild_id: guildId, p_customer_id: customer.id, p_product_id: productId,
   });
   if (error) {
+    log.error('Free claim RPC failed', {
+      guildId,
+      productId,
+      requestId,
+      code: error.code,
+      message: error.message,
+    });
     await interaction.editReply({ content: '❌ This free claim could not be completed. Please try again later.' });
     return;
   }
