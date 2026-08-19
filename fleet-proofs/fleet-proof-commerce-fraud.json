@@ -1,0 +1,557 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "6db03905b3b359615150ca0b73b7467b32c51642",
+  "domainId": "commerce-fraud",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Signal and incident audit history remains append-only and undeleted (retention honored rather than destroyed).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Run alert messages are removed from the staff channel and no test DMs remain actionable.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Out of the box, five orders by one customer inside an hour raises exactly one velocity signal; ten raises a critical signal.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The signal-write failure is recorded as fraud.signal_write_failed with its cause.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: With fraud_signals writes made to fail, a purchase that would trigger velocity completes normally end to end (order/payment/entitlement rows complete).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner receives the detector-failure notice per the critical-failures-DM-owners decision.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Each rejected rule change is logged with its validation reason.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: PUT /api/fraud/rules with a zero velocity threshold, a non-numeric channel id, and an unknown rule key each return field-level validation errors; the rules rows are unchanged.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Three critical signals landing concurrently produce exactly ONE auto-created incident; racing evaluations observe the existing unresolved incident and attach rather than duplicate.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Replay evaluations appear as no-ops without duplicating signal-creation entries.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Owner DM and staff channel message counts are unchanged by all replays.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Post-restart critical signals still DM the owner; no restart-era finding was lost or re-announced.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: fraud.owner_dm_failed is recorded with the retry outcome traceable.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With the owner's DMs closed, the staff mirror still posts and a later critical signal DMs the owner successfully.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard queue remained the authoritative surface throughout the DM failure and retry.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: With velocity-order-threshold configured to 2, the detector fires on the second order in the window (a control customer with one order raises nothing).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The channel configuration and each mirror post are traceable.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With staff-alert-channel set, every new signal mirrors exactly once to that channel naming type, severity, and entity kind — never buyer payment details.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: No fraud content is visible to the member account anywhere in the guild.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Repeated unauthorized probing of fraud surfaces itself feeds the security signal path.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Alert copy is owner-voiced, calm, and precise, carrying the powered-by-SomniBot attribution on embeds (owner DM + staff-channel alert).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Only guild A's owner and staff channel receive alerts; guild B's surfaces are silent.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees every critical finding through at least one guaranteed surface (critical DM, dashboard fraud queue, incidents page) even when another surface fails.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-processing the same commerce events never duplicates signals, incidents, or notifications for one burst.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    }
+  ]
+}

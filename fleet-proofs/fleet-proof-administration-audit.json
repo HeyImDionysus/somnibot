@@ -1,0 +1,513 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "6db03905b3b359615150ca0b73b7467b32c51642",
+  "domainId": "administration-audit",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The anonymization pass is itself recorded as an audit event.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: No Discord residue from audited run actions remains after teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Run identifiers are anonymized at teardown while the rows remain.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The originating warn/config-edit completes normally in the live Discord guild while being recorded, and the owner can filter by category on /audit.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The degradation banner uses the audit-write-degraded template with {guild-name} and {queued-count}.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Exactly one buffering notice (audit-write-degraded) reaches the owner for the outage window.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The rejected retention attempts are recorded without a config.updated row.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Nothing changed, so teardown verifies zero residue.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: POST /api/retention returns 400 for 7 (below min) and 5000 (above the 3650 max); guild_config has no upper-bound CHECK so the max is enforced only in the dashboard Zod layer.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Both guilds’ run entries follow the anonymize-over-delete contract at teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Both guilds’ actions complete normally and concurrently in the live guilds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Run entries follow the anonymize-over-delete contract at teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The underlying action’s Discord effect exists exactly once, and the audit view shows a single clean entry.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Run entries follow the anonymize-over-delete contract at teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: An action driven just before shutdown appears in the trail after restart via the AuditService final flush.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The converged trail shows no duplicate or missing entries and preserves in-batch ordering.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The converged dashboard audit view renders normally.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Run entries follow the anonymize-over-delete contract at teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Entry count matches driven events exactly after convergence.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: With a transient insert failure injected on one flush, the re-queued batch lands on a subsequent flush with no user-visible disruption.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: No owner alert fires for a single self-recovered flush.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-queue plus flush is idempotent per entry.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The scrub run is itself recorded as an audit event with the anonymized-row count.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Seeded rows follow the anonymize-over-delete contract at teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The retention-updated owner mirror was delivered when data_retention_days changed.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The export action itself is recorded with the requesting owner’s id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "cleanup",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Downloaded export artifacts are removed from the run workspace at teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The CSV/JSON export renders columns for actor/action/target/timestamp, truncates at the export row limit with a clear indicator, and produces no Discord-side effect.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The denied read and the blocked mutation attempts are themselves recorded as audit events.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: No residue exists; teardown verifies unchanged rows.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A member without dashboard.view_audit gets 403 from GET /api/audit and the audit page is hidden / direct navigation denied.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The blocked mutation attempt raises an owner notification.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The cross-read attempts are themselves recorded under the requesting guild.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit page, export UI, and owner-notification copy render in the owner voice with subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "cleanup",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Both guilds verified independently at teardown.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A cross-guild dashboard session sees only its active guild’s entries; switching the guild header cannot read another guild’s trail.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    }
+  ]
+}

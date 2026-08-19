@@ -1,0 +1,524 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "6db03905b3b359615150ca0b73b7467b32c51642",
+  "domainId": "community-welcome-onboarding",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Audit history for the join/onboarding events is anonymized rather than deleted (operational membership rows deleted, audit_logs retained).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: No run-prefixed welcome or goodbye messages and no run roles remain in either test guild after cleanup.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Exactly one welcome post (with card) and one welcome DM appear; member-gated channels stay invisible until onboarding completes, after which the member role is present and channels open.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Append-only audit rows capture the fallback grant with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The welcome channel shows the dm-fallback-notice, and the member role appears within the fallback window despite no completed onboarding.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Exactly one config-alert reaches the owner channel describing the fallback grant and its cause.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One audit row records the rejected welcome-config attempt and its validation reason; no config-change row is written.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard welcome page surfaces a clear validation error for a nonexistent channel id and a malformed interest-role mapping; stored config is unchanged.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Each racing member holds the member role exactly once and the channel shows exactly one welcome per member; onboarding completion racing the fallback timer never double-grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: After replaying the recorded join and completion events, exactly one welcome post, one DM, and one member-role grant exist.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Post-restart completion grants the member role exactly once and no duplicate welcome surfaces exist.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With a transient fault on the first member-role grant, the retry lands the grant exactly once and the member holds the role once with one completion message.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: If retries keep failing the owner is alerted once; a self-healing retry raises none.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The welcome post appears in the newly configured channel using the custom template + card, and the mapped run interest role is granted after the onboarding answer.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: No welcome DM is sent, the goodbye channel shows exactly one branded farewell, and the rejoining member’s /rank shows restored pre-departure XP.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The denied dashboard write and the bypass attempt each produce one audit row naming actor and reason.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: run-member-b cannot obtain the member role or member-gated access without completing onboarding (the role is granted only by the bot; channel perms restrict pre-onboarding members).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every welcome/onboarding state change lands exactly one append-only audit_logs row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing welcome/onboarding surface shows the owner brand kit + voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Guild B’s welcome uses B’s template and channel while guild A’s welcome channel gains no messages.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s join/completion events yields no duplicate welcome posts, welcome DMs, or member-role grants.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    }
+  ]
+}

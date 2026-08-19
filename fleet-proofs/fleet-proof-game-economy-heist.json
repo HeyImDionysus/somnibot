@@ -1,0 +1,491 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "6db03905b3b359615150ca0b73b7467b32c51642",
+  "domainId": "game-economy-heist",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Audit history is anonymized rather than deleted (operational heist rows deleted, audit_logs retained anonymized).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The test guilds contain no run-prefixed heist recruiting, join, or resolution embeds after cleanup.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s triggers yields no duplicate play-money debits, crew payouts, or refunds (entry_fee_paid / claimed_at / paid_at guards).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The heist behavior is observed working in the live test guild: the recruiting embed, one join embed per member, and exactly one success/failure resolution announcement.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s triggers yields no duplicate play-money debits, crew payouts, or refunds (entry_fee_paid / claimed_at / paid_at guards).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: A resolve tick during the outage logs and leaves the heist retryable without crashing; after restoration no debit, payout, or refund is applied twice.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed heist command.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One audit row records the rejected heist configuration attempt with the validation reason; no config-change audit row is written.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard heist page surfaces a clear validation error for a negative entry fee / a minimum-participants value above the maximum.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s triggers yields no duplicate play-money debits, crew payouts, or refunds (entry_fee_paid / claimed_at / paid_at guards).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A /heist join landing exactly as the window expires shows a branded no-charge refusal (or a silent stranded-join refund of its own frozen entry fee), never an unwinnable charged seat.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The heist behavior is observed working in the live test guild: exactly one recruiting embed, one join embed per member, and one resolution announcement despite the replays.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: resumePendingHeists re-schedules the pending heist on boot and posts exactly one resolution announcement to the log channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: With a fault injected on the heist_start insert, the initiator’s entry fee is refunded exactly once and no orphan heist/participant row exists; the clean retry opens exactly one heist for one debit.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The heist behavior is observed working in the live test guild: the recruiting embed advertising the 1000-scaled payout at 55% base, and the branded cancellation announcement refunding each frozen 250.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s triggers yields no duplicate play-money debits, crew payouts, or refunds (entry_fee_paid / claimed_at / paid_at guards).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The recruiting window stays open the configured 120 seconds before the scheduled resolve fires.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s triggers yields no duplicate play-money debits, crew payouts, or refunds (entry_fee_paid / claimed_at / paid_at guards).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: An audit row records the denied heist configuration attempt with actor and reason permission-denied.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A non-admin dashboard session cannot save heist settings (returns an authorization error).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (brand name, colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on the heist embeds.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The heist behavior is observed working in the live test guild: guild A /heist status identical before and after the guild B activity, and guild B’s independent resolution announcement.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. heist-payout-delayed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s triggers yields no duplicate play-money debits, crew payouts, or refunds (entry_fee_paid / claimed_at / paid_at guards).",
+      "observedAt": "2026-08-19T02:40:21.830Z",
+      "artifact": {
+        "path": "fleet-final-observation-6db03905.md",
+        "sha256": "03479efe9b183c9ca3515237a94559822ab63c33003720a904cd1528bbcb0c18"
+      }
+    }
+  ]
+}
