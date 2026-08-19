@@ -16,6 +16,9 @@ vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/notify-bot', () => ({ notifyBot: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordRuntimeConfig: vi.fn() }));
+vi.mock('@/lib/installation-runtime-secret', () => ({ getInstallationRuntimeSecret: vi.fn() }));
+vi.mock('@/lib/supabase/auto-config', () => ({ ensureDiscordAuthProvider: vi.fn() }));
 vi.mock('@/app/api/webhooks/scope', () => ({
   isSoleInstanceOperator: vi.fn(),
 }));
@@ -26,6 +29,9 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { notifyBot } from '@/lib/notify-bot';
 import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
+import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getInstallationRuntimeSecret } from '@/lib/installation-runtime-secret';
+import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 
 import {
   createMockSupabase,
@@ -46,6 +52,14 @@ beforeEach(() => {
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
   vi.mocked(isSoleInstanceOperator).mockResolvedValue(true);
+  vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
+    applicationId: 'existing-application-id',
+    botToken: 'existing-bot-token',
+    clientSecret: 'existing-client-secret',
+    sources: { applicationId: 'saved', botToken: 'saved', clientSecret: 'saved' },
+  });
+  vi.mocked(getInstallationRuntimeSecret).mockResolvedValue('management-access-token');
+  vi.mocked(ensureDiscordAuthProvider).mockResolvedValue({ success: true });
 });
 
 function putSettings(body: unknown) {
@@ -172,6 +186,37 @@ describe('PUT /api/settings', () => {
     expect(upsertArg).toHaveLength(2);
     expect(upsertArg[0]).toMatchObject({ key: 'discord_guild_id', value: '111222333', section: 'discord' });
     expect(upsertArg[1]).toMatchObject({ key: 'discord_application_id', value: '444555666', section: 'discord' });
+    expect(ensureDiscordAuthProvider).toHaveBeenCalledWith({
+      accessToken: 'management-access-token',
+      discordClientId: '444555666',
+      discordClientSecret: 'existing-client-secret',
+      forceCredentialUpdate: true,
+    });
+  });
+
+  it('does not persist Discord identity changes when Supabase Auth rejects them', async () => {
+    vi.mocked(ensureDiscordAuthProvider).mockResolvedValue({ success: false, error: 'provider update denied' });
+
+    const res = await putSettings({
+      section: 'discord',
+      values: { discord_application_id: 'replacement-application-id' },
+    });
+
+    expect(res.status).toBe(409);
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
+
+  it('normalizes PayPal mode and rejects invalid runtime connection values', async () => {
+    mock._query.upsert.mockResolvedValue({ error: null });
+
+    const normalized = await putSettings({ section: 'paypal', values: { paypal_sandbox: 'no' } });
+    expect(normalized.status).toBe(200);
+    expect(mock._query.upsert).toHaveBeenCalledWith([
+      expect.objectContaining({ key: 'paypal_sandbox', value: 'false' }),
+    ], { onConflict: 'key' });
+
+    const invalidPort = await putSettings({ section: 'lavalink', values: { lavalink_port: 'abc' } });
+    expect(invalidPort.status).toBe(400);
   });
 
   it('rejects launcher-only or unknown secret keys instead of writing them as plaintext', async () => {

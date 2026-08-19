@@ -43,6 +43,7 @@ interface AutoConfigOptions {
   signal?: AbortSignal;
   /** Runtime callback URLs displayed/required by the setup surface. */
   callbackUrls?: string[];
+  forceCredentialUpdate?: boolean;
 }
 
 /**
@@ -337,7 +338,7 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     return { success: false, error: 'Could not extract Supabase project ref from URL' };
   }
 
-  if (isManualDiscordAuthProviderConfigured()) {
+  if (isManualDiscordAuthProviderConfigured() && !options?.forceCredentialUpdate) {
     return { success: true, alreadyConfigured: true };
   }
 
@@ -361,7 +362,7 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     const allowListReady = current.ok && getMissingCallbackUrls(currentConfig, callbackUrls).length === 0;
     const siteUrlReady = current.ok && isSiteUrlReady(currentConfig, siteUrl);
 
-    if (providerEnabled && allowListReady && siteUrlReady) {
+    if (providerEnabled && allowListReady && siteUrlReady && !options?.forceCredentialUpdate) {
       return { success: true, alreadyConfigured: true };
     }
 
@@ -370,7 +371,7 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
       uri_allow_list: buildAllowList(currentConfig, callbackUrls),
     };
 
-    if (!providerEnabled) {
+    if (!providerEnabled || options?.forceCredentialUpdate) {
       const { clientId, clientSecret } = await getDiscordCredentials(options);
       if (!clientId || !clientSecret) {
         return {
@@ -412,24 +413,38 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
 
     const verifiedProviderEnabled = verified.config.external_discord_enabled === true
       || verified.config.EXTERNAL_DISCORD_ENABLED === true;
+    const verifiedClientId = verified.config.external_discord_client_id
+      ?? verified.config.EXTERNAL_DISCORD_CLIENT_ID;
+    const verifiedCredentials = !options?.forceCredentialUpdate
+      || verifiedClientId === options.discordClientId?.trim();
     const verifiedMissingCallbackUrls = getMissingCallbackUrls(verified.config, callbackUrls);
     const verifiedSiteUrlReady = isSiteUrlReady(verified.config, siteUrl);
-    if (!verifiedProviderEnabled || verifiedMissingCallbackUrls.length > 0 || !verifiedSiteUrlReady) {
+    if (
+      !verifiedProviderEnabled
+      || !verifiedCredentials
+      || verifiedMissingCallbackUrls.length > 0
+      || !verifiedSiteUrlReady
+    ) {
       const missing = verifiedMissingCallbackUrls.length > 0
         ? ` Missing callback URLs: ${verifiedMissingCallbackUrls.join(', ')}.`
         : '';
       const siteUrlMismatch = !verifiedSiteUrlReady
         ? ` Supabase site URL does not match ${siteUrl}.`
         : '';
+      const credentialMismatch = !verifiedCredentials
+        ? ' Supabase did not return the updated Discord application ID.'
+        : '';
       return {
         success: false,
-        error: `Supabase Management API accepted the auth config update, but verification did not prove Discord auth readiness.${missing}${siteUrlMismatch}`,
+        error: `Supabase Management API accepted the auth config update, but verification did not prove Discord auth readiness.${missing}${siteUrlMismatch}${credentialMismatch}`,
       };
     }
 
     console.log(
       providerEnabled
-        ? '[AutoConfig] ✅ Discord OAuth callback allow-list updated in Supabase'
+        ? options?.forceCredentialUpdate
+          ? '[AutoConfig] ✅ Discord OAuth credentials updated in Supabase'
+          : '[AutoConfig] ✅ Discord OAuth callback allow-list updated in Supabase'
         : '[AutoConfig] ✅ Discord OAuth provider enabled in Supabase',
     );
     return { success: true, alreadyConfigured: false };

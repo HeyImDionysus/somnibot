@@ -63,6 +63,30 @@ const SECRET_KEYS = new Set([
   'valkey_url',
 ]);
 
+function normalizeSavedSetting(key: string, value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (key === 'paypal_sandbox') {
+    const normalized = trimmed.toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return 'true';
+    if (['false', '0', 'no', 'off'].includes(normalized)) return 'false';
+    log.warn('Ignored invalid saved PayPal sandbox mode; deployment fallback remains active');
+    return null;
+  }
+
+  if (key === 'lavalink_port') {
+    const port = Number(trimmed);
+    if (!/^\d+$/.test(trimmed) || port < 1 || port > 65_535) {
+      log.warn('Ignored invalid saved Lavalink port; deployment fallback remains active');
+      return null;
+    }
+    return String(port);
+  }
+
+  return trimmed;
+}
+
 /**
  * Load saved config values from instance_settings into process.env.
  * Call this BEFORE loadConfig() in the boot sequence.
@@ -115,9 +139,10 @@ export async function loadConfigFromDatabase(): Promise<number> {
         const envVar = SETTINGS_TO_ENV[baseKey];
         if (SECRET_KEYS.has(baseKey) && !encrypted) continue;
         if (row.value && envVar) {
-          const value = encrypted
+          const decryptedValue = encrypted
             ? decryptCloudCredential(row.value, baseKey, serviceKey, new URL(supabaseUrl).origin)
             : row.value;
+          const value = decryptedValue ? normalizeSavedSetting(baseKey, decryptedValue) : null;
           if (!value) continue;
           process.env[envVar] = value;
           loaded++;

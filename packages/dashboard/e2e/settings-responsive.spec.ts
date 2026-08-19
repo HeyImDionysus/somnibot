@@ -146,7 +146,7 @@ async function installSettingsRoutes(page: Page) {
 test.describe('Installation settings', () => {
   test.setTimeout(120_000);
 
-  test('saves only changed fields and restores deployment defaults', async ({ page }, testInfo) => {
+  test('saves only changed fields and removes saved overrides', async ({ page }, testInfo) => {
     const { writes } = await installSettingsRoutes(page);
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto('/settings');
@@ -169,14 +169,14 @@ test.describe('Installation settings', () => {
     });
     await expect(applicationId).toHaveValue('444444444444444444');
 
-    await page.getByRole('button', { name: 'Use deployment defaults' }).click();
-    const dialog = page.getByRole('alertdialog', { name: 'Use deployment defaults?' });
+    await page.getByRole('button', { name: 'Remove saved overrides' }).click();
+    const dialog = page.getByRole('alertdialog', { name: 'Remove saved overrides?' });
     await expect(dialog).toBeVisible();
     await testInfo.attach('settings-desktop-reset-confirmation', {
       body: await page.screenshot({ fullPage: true }),
       contentType: 'image/png',
     });
-    await dialog.getByRole('button', { name: 'Use deployment defaults' }).click();
+    await dialog.getByRole('button', { name: 'Remove saved overrides' }).click();
     await expect.poll(() => writes.length).toBe(2);
     expect(writes[1]).toEqual({
       method: 'DELETE',
@@ -205,6 +205,26 @@ test.describe('Installation settings', () => {
     await testInfo.attach('settings-mobile-secret-edit', {
       body: await page.screenshot({ fullPage: true }),
       contentType: 'image/png',
+    });
+    await secretInput.fill('replacement-token');
+    await page.getByRole('button', { name: 'Cancel' }).first().click();
+    await expect(page.getByRole('button', { name: 'Save Discord' })).toBeDisabled();
+  });
+
+  test('removes a saved override even when no deployment fallback exists', async ({ page }) => {
+    const { fixture, writes } = await installSettingsRoutes(page);
+    fixture.sources.valkey_url = 'db';
+    fixture.environmentFallbacks.valkey_url = false;
+    await page.goto('/settings');
+
+    await page.getByRole('button', { name: 'Remove saved overrides' }).last().click();
+    const dialog = page.getByRole('alertdialog', { name: 'Remove saved overrides?' });
+    await dialog.getByRole('button', { name: 'Remove saved overrides' }).click();
+
+    await expect.poll(() => writes.length).toBe(1);
+    expect(writes[0]).toEqual({
+      method: 'DELETE',
+      body: { section: 'valkey', keys: ['valkey_url'] },
     });
   });
 });

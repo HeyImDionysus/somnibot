@@ -128,7 +128,7 @@ export function ConnectionSectionCard({
               {canReset && (
                 <Button variant="secondary" onClick={onReset} className="gap-2 sm:shrink-0">
                   <RotateCcw size={14} aria-hidden="true" />
-                  Use deployment defaults
+                  Remove saved overrides
                 </Button>
               )}
               <Button onClick={onSave} disabled={saving || !canSave} className="gap-2 sm:shrink-0">

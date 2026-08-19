@@ -104,6 +104,52 @@ export const SETTING_SECTIONS: Record<string, string> = {
   sdk_cache_ttl_ms: 'administration',
 };
 
+export type InstallationSettingValidation =
+  | { ok: true; value: string }
+  | { ok: false; error: string };
+
+export function normalizeInstallationSettingValue(
+  key: string,
+  rawValue: string,
+): InstallationSettingValidation {
+  const value = rawValue.trim();
+
+  if (key === 'paypal_sandbox') {
+    const normalized = value.toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return { ok: true, value: 'true' };
+    if (['false', '0', 'no', 'off'].includes(normalized)) return { ok: true, value: 'false' };
+    return { ok: false, error: 'paypal_sandbox must be true or false' };
+  }
+
+  if (key === 'lavalink_port') {
+    const port = Number(value);
+    if (!/^\d+$/.test(value) || port < 1 || port > 65_535) {
+      return { ok: false, error: 'lavalink_port must be an integer between 1 and 65535' };
+    }
+    return { ok: true, value: String(port) };
+  }
+
+  if (key === 'paypal_webhook_url' && value) {
+    try {
+      const url = new URL(value);
+      if (!['http:', 'https:'].includes(url.protocol)) throw new Error('invalid protocol');
+    } catch {
+      return { ok: false, error: 'paypal_webhook_url must be a valid HTTP or HTTPS URL' };
+    }
+  }
+
+  if (key === 'valkey_url' && value) {
+    try {
+      const url = new URL(value);
+      if (!['redis:', 'rediss:'].includes(url.protocol)) throw new Error('invalid protocol');
+    } catch {
+      return { ok: false, error: 'valkey_url must be a valid redis:// or rediss:// URL' };
+    }
+  }
+
+  return { ok: true, value };
+}
+
 function envValue(key: string): string | null {
   for (const name of ENV_MAP[key] ?? []) {
     const value = process.env[name];

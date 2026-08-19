@@ -10,6 +10,7 @@
  */
 
 import { createConnection, type Socket } from 'node:net';
+import { getSavedInstallationRuntimeSecret } from '@/lib/installation-runtime-secret';
 import { randomBytes } from 'node:crypto';
 
 // ── Lightweight Valkey client (raw RESP, zero deps) ─────────
@@ -20,6 +21,8 @@ type ValkeyCommandResult =
   | { kind: 'not_sent' | 'server_error' | 'uncertain' };
 
 let valkeySocket: Socket | null = null;
+let valkeyRuntimeUrl: string | null = null;
+let valkeySavedUrlPromise: Promise<string | null> | null = null;
 let valkeyReady = false;
 let valkeyFailed = false;
 let lastValkeyFailureAt = 0;
@@ -113,6 +116,16 @@ function waitForValkeyReady(timeoutMs = 1000): Promise<boolean> {
 }
 
 async function ensureValkeyReady(): Promise<boolean> {
+  if (!valkeySavedUrlPromise) {
+    valkeySavedUrlPromise = getSavedInstallationRuntimeSecret('valkey_url');
+  }
+  try {
+    const savedUrl = await valkeySavedUrlPromise;
+    valkeyRuntimeUrl = savedUrl || process.env.VALKEY_URL || process.env.REDIS_URL || '';
+  } catch {
+    markValkeyFailed();
+    return false;
+  }
   if (ensureValkey() && valkeyReady) return true;
   if (valkeySocket && !valkeyReady) {
     return waitForValkeyReady();
@@ -129,7 +142,7 @@ function ensureValkey(): boolean {
   if (valkeyReady) return true;
   if (valkeySocket) return false; // connecting
 
-  const url = process.env.VALKEY_URL || process.env.REDIS_URL;
+  const url = valkeyRuntimeUrl;
   if (!url) {
     markValkeyFailed();
     valkeyReady = false;

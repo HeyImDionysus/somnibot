@@ -3,14 +3,17 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 
 const DISCORD_RUNTIME_SETTING_KEYS = [
   'discord_application_id',
+  'discord_bot_token_encrypted',
   'discord_client_secret_encrypted',
 ] as const;
 
 export interface DiscordRuntimeConfig {
   applicationId: string;
+  botToken: string;
   clientSecret: string;
   sources: {
     applicationId: 'env' | 'saved' | 'missing';
+    botToken: 'env' | 'saved' | 'missing';
     clientSecret: 'env' | 'saved' | 'missing';
   };
 }
@@ -18,9 +21,11 @@ export interface DiscordRuntimeConfig {
 export async function getDiscordRuntimeConfig(): Promise<DiscordRuntimeConfig> {
   const config: DiscordRuntimeConfig = {
     applicationId: process.env.DISCORD_APPLICATION_ID?.trim() ?? '',
+    botToken: process.env.DISCORD_TOKEN?.trim() ?? '',
     clientSecret: process.env.DISCORD_CLIENT_SECRET?.trim() ?? '',
     sources: {
       applicationId: process.env.DISCORD_APPLICATION_ID ? 'env' : 'missing',
+      botToken: process.env.DISCORD_TOKEN ? 'env' : 'missing',
       clientSecret: process.env.DISCORD_CLIENT_SECRET ? 'env' : 'missing',
     },
   };
@@ -40,8 +45,13 @@ export async function getDiscordRuntimeConfig(): Promise<DiscordRuntimeConfig> {
     config.sources.applicationId = 'saved';
   }
 
-  const encryptedSecret = data.find((row) => row.key === 'discord_client_secret_encrypted')?.value;
-  if (encryptedSecret) {
+  const encryptedSecrets = [
+    { rowKey: 'discord_bot_token_encrypted', baseKey: 'discord_bot_token', target: 'botToken' },
+    { rowKey: 'discord_client_secret_encrypted', baseKey: 'discord_client_secret', target: 'clientSecret' },
+  ] as const;
+  for (const encryptedSecret of encryptedSecrets) {
+    const encryptedValue = data.find((row) => row.key === encryptedSecret.rowKey)?.value;
+    if (!encryptedValue) continue;
     const bootstrapSecret = process.env.SUPABASE_SECRET_KEY
       || process.env.SUPABASE_SERVICE_ROLE_KEY
       || '';
@@ -52,14 +62,14 @@ export async function getDiscordRuntimeConfig(): Promise<DiscordRuntimeConfig> {
       throw new Error('Supabase bootstrap credentials are required to decrypt saved Discord settings');
     }
     const savedSecret = decryptCloudCredential(
-      encryptedSecret,
-      'discord_client_secret',
+      encryptedValue,
+      encryptedSecret.baseKey,
       bootstrapSecret,
       new URL(supabaseUrl).origin,
     );
-    if (!savedSecret) throw new Error('saved Discord client secret could not be decrypted');
-    config.clientSecret = savedSecret;
-    config.sources.clientSecret = 'saved';
+    if (!savedSecret) throw new Error(`saved ${encryptedSecret.baseKey} could not be decrypted`);
+    config[encryptedSecret.target] = savedSecret;
+    config.sources[encryptedSecret.target] = 'saved';
   }
 
   return config;

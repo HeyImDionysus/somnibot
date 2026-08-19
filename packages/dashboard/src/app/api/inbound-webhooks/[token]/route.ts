@@ -10,6 +10,7 @@ import {
   renderExternalWebhookMessage,
 } from '@/lib/external-webhook-relay';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
 
 const RECEIVER_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const IDEMPOTENCY_HEADERS = [
@@ -156,8 +157,9 @@ export async function POST(
       event: event.event,
       content: event.content,
     });
+    const discord = await getDiscordRuntimeConfig();
     const result = await sendExternalWebhookDiscordMessage({
-      token: process.env.DISCORD_TOKEN ?? '',
+      token: discord.botToken,
       channelId: row.channelId,
       content,
     });

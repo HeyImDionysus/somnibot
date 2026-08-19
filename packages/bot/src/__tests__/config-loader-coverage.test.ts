@@ -112,6 +112,26 @@ describe('loadConfigFromDatabase', () => {
     expect(process.env.DISCORD_APPLICATION_ID).toBe('saved-application-id');
   });
 
+  it('normalizes saved PayPal mode and ignores invalid overrides', async () => {
+    process.env.PAYPAL_SANDBOX = 'true';
+    mockFrom.mockReturnValue(chainBuilder({
+      data: [{ key: 'paypal_sandbox', value: 'no', section: 'paypal' }],
+      error: null,
+    }));
+
+    await expect(loadConfigFromDatabase()).resolves.toBe(1);
+    expect(process.env.PAYPAL_SANDBOX).toBe('false');
+
+    process.env.PAYPAL_SANDBOX = 'true';
+    mockFrom.mockReturnValue(chainBuilder({
+      data: [{ key: 'paypal_sandbox', value: 'definitely', section: 'paypal' }],
+      error: null,
+    }));
+
+    await expect(loadConfigFromDatabase()).resolves.toBe(0);
+    expect(process.env.PAYPAL_SANDBOX).toBe('true');
+  });
+
   it('loads missing non-secret config values but ignores legacy raw secrets', async () => {
     mockFrom.mockReturnValue(
       chainBuilder({

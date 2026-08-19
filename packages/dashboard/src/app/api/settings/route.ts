@@ -9,10 +9,14 @@ import { apiServerError, dbError } from '@/lib/api/response';
 import { recordAdminChange, humanizeColumn } from '@/lib/admin-changes';
 import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 import { encryptCloudCredential } from '@/lib/cloud-credential-crypto';
+import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getInstallationRuntimeSecret } from '@/lib/installation-runtime-secret';
+import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 import {
   ALLOWED_SETTING_KEYS,
   BOOTSTRAP_ONLY_FIELDS,
   ENCRYPTED_SECRET_FIELDS,
+  normalizeInstallationSettingValue,
   readInstallationSettings,
   SETTING_SECTIONS,
 } from '@/lib/installation-settings';
@@ -67,30 +71,36 @@ export async function PUT(request: NextRequest) {
     // V10 Audit §6: Batch all upserts into a single operation to avoid
     // sequential timing that leaks info about which keys were skipped.
     const now = new Date().toISOString();
-    const writableEntries = Object.entries(values)
+    const submittedEntries = Object.entries(values)
       .filter(([, value]) => !value.includes('••••') && value.trim() !== '');
-    const unsupportedKey = writableEntries.find(([key]) => !ALLOWED_SETTING_KEYS.has(key))?.[0];
+    const unsupportedKey = submittedEntries.find(([key]) => !ALLOWED_SETTING_KEYS.has(key))?.[0];
     if (unsupportedKey) {
       return NextResponse.json(
         { error: `Unsupported installation setting: ${unsupportedKey}` },
         { status: 400 },
       );
     }
-    const sectionMismatch = writableEntries.find(([key]) => SETTING_SECTIONS[key] !== section)?.[0];
+    const sectionMismatch = submittedEntries.find(([key]) => SETTING_SECTIONS[key] !== section)?.[0];
     if (sectionMismatch) {
       return NextResponse.json(
         { error: `${sectionMismatch} does not belong to the ${section} settings section` },
         { status: 400 },
       );
     }
-    const bootstrapKey = writableEntries.find(([key]) => BOOTSTRAP_ONLY_FIELDS.has(key))?.[0];
+    const bootstrapKey = submittedEntries.find(([key]) => BOOTSTRAP_ONLY_FIELDS.has(key))?.[0];
     if (bootstrapKey) {
       return NextResponse.json(
         { error: 'Supabase bootstrap settings must be changed in the deployment configuration.' },
         { status: 400 },
       );
     }
-    for (const [key, value] of writableEntries) {
+    const writableEntries: Array<[string, string]> = [];
+    for (const [key, value] of submittedEntries) {
+      const normalized = normalizeInstallationSettingValue(key, value);
+      if (!normalized.ok) {
+        return NextResponse.json({ error: normalized.error }, { status: 400 });
+      }
+      writableEntries.push([key, normalized.value]);
       if (['auto_install_on_quit', 'keychain_required', 'lavalink_enabled', 'update_prompt_before_download'].includes(key) && value !== 'true' && value !== 'false') {
         return NextResponse.json({ error: `${key} must be true or false` }, { status: 400 });
       }
@@ -126,10 +136,57 @@ export async function PUT(request: NextRequest) {
       );
     }
 
+    const updatesDiscordAuth = writableEntries.some(([key]) => (
+      key === 'discord_application_id' || key === 'discord_client_secret'
+    ));
+    let previousDiscordConfig: Awaited<ReturnType<typeof getDiscordRuntimeConfig>> | null = null;
+    let managementAccessToken = '';
+    if (updatesDiscordAuth) {
+      previousDiscordConfig = await getDiscordRuntimeConfig();
+      const submitted = new Map(writableEntries);
+      const nextApplicationId = submitted.get('discord_application_id') ?? previousDiscordConfig.applicationId;
+      const nextClientSecret = submitted.get('discord_client_secret') ?? previousDiscordConfig.clientSecret;
+      if (!nextApplicationId || !nextClientSecret) {
+        return NextResponse.json(
+          { error: 'Discord Application ID and OAuth2 Client Secret are both required to update dashboard login.' },
+          { status: 400 },
+        );
+      }
+      managementAccessToken = await getInstallationRuntimeSecret(
+        'supabase_access_token',
+        ['SUPABASE_ACCESS_TOKEN'],
+      );
+      const providerUpdate = await ensureDiscordAuthProvider({
+        accessToken: managementAccessToken,
+        discordClientId: nextApplicationId,
+        discordClientSecret: nextClientSecret,
+        forceCredentialUpdate: true,
+      });
+      if (!providerUpdate.success) {
+        return NextResponse.json(
+          { error: `Discord login credentials were not changed: ${providerUpdate.error ?? 'Supabase Auth rejected the update.'}` },
+          { status: 409 },
+        );
+      }
+    }
+
     const { error: upsertError } = await admin
       .from('instance_settings')
       .upsert(upsertRows, { onConflict: 'key' });
-    if (upsertError) return dbError(upsertError, 'settings');
+    if (upsertError) {
+      if (previousDiscordConfig?.applicationId && previousDiscordConfig.clientSecret) {
+        const rollback = await ensureDiscordAuthProvider({
+          accessToken: managementAccessToken,
+          discordClientId: previousDiscordConfig.applicationId,
+          discordClientSecret: previousDiscordConfig.clientSecret,
+          forceCredentialUpdate: true,
+        });
+        if (!rollback.success) {
+          console.error('[Settings] Discord Auth rollback could not be verified after the settings write failed');
+        }
+      }
+      return dbError(upsertError, 'settings');
+    }
 
     await notifyBot(auth.ctx.guildId, 'settings', { section });
 

@@ -28,7 +28,6 @@ export function ConnectionSettings() {
   const [sources, setSources] = useState<Record<string, SettingSource>>({});
   const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>({});
   const [lockedFields, setLockedFields] = useState<string[]>([]);
-  const [environmentFallbacks, setEnvironmentFallbacks] = useState<Record<string, boolean>>({});
   const [editingSecrets, setEditingSecrets] = useState<Record<string, boolean>>({});
   const [secretEdits, setSecretEdits] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
@@ -43,7 +42,6 @@ export function ConnectionSettings() {
     setSources(data.sources ?? {});
     setStatuses(data.statuses ?? {});
     setLockedFields(data.lockedFields ?? []);
-    setEnvironmentFallbacks(data.environmentFallbacks ?? {});
   }, []);
 
   const load = useCallback(async () => {
@@ -83,6 +81,11 @@ export function ConnectionSettings() {
     setSecretEdits((current) => {
       const next = { ...current };
       delete next[key];
+      return next;
+    });
+    setDirtyFields((current) => {
+      const next = new Set(current);
+      next.delete(key);
       return next;
     });
   };
@@ -141,7 +144,7 @@ export function ConnectionSettings() {
     if (!section) return;
     const keys = section.fields
       .map((field) => field.key)
-      .filter((key) => sources[key] === 'db' && environmentFallbacks[key]);
+      .filter((key) => sources[key] === 'db');
     if (keys.length === 0) return;
 
     setResetting(true);
@@ -156,8 +159,8 @@ export function ConnectionSettings() {
       await load();
       setResetSection(null);
       toast({
-        title: `${section.title} deployment defaults restored`,
-        description: 'Restart the bot and dashboard to apply the connection change.',
+        title: `${section.title} saved overrides removed`,
+        description: 'After restart, fields with deployment values use them; the others become unconfigured.',
         variant: 'success',
       });
     } catch (error) {
@@ -209,7 +212,7 @@ export function ConnectionSettings() {
           canReset={
             !section.fields.some((field) => dirtyFields.has(field.key))
             && section.fields.some((field) => (
-              sources[field.key] === 'db' && environmentFallbacks[field.key]
+              sources[field.key] === 'db'
             ))
           }
           editingSecrets={editingSecrets}
@@ -228,9 +231,9 @@ export function ConnectionSettings() {
 
       <ConfirmDialog
         open={resetSection !== null}
-        title="Use deployment defaults?"
-        description="Saved overrides in this section will be removed. The environment values already configured by the deployment will take over after the bot and dashboard restart."
-        confirmLabel="Use deployment defaults"
+        title="Remove saved overrides?"
+        description="Saved overrides in this section will be removed. After restart, fields with deployment values use them; fields without one become unconfigured."
+        confirmLabel="Remove saved overrides"
         variant="warning"
         loading={resetting}
         onConfirm={reset}

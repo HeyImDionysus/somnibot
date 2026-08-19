@@ -13,8 +13,9 @@ describe('GET /api/portal/config', () => {
   it('returns the authoritative installation Discord application ID', async () => {
     vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
       applicationId: '123456789012345678',
+      botToken: 'token',
       clientSecret: 'secret',
-      sources: { applicationId: 'saved', clientSecret: 'saved' },
+      sources: { applicationId: 'saved', botToken: 'saved', clientSecret: 'saved' },
     });
 
     const response = await GET();
@@ -32,8 +33,9 @@ describe('GET /api/portal/config', () => {
     async (applicationId) => {
       vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
         applicationId,
+        botToken: 'token',
         clientSecret: 'secret',
-        sources: { applicationId: 'env', clientSecret: 'env' },
+        sources: { applicationId: 'env', botToken: 'env', clientSecret: 'env' },
       });
 
       const response = await GET();

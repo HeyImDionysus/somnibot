@@ -22,6 +22,7 @@ afterEach(() => {
 describe('getDiscordRuntimeConfig', () => {
   it('uses saved application and secret overrides over environment fallbacks', async () => {
     vi.stubEnv('DISCORD_APPLICATION_ID', '111111111111111111');
+    vi.stubEnv('DISCORD_TOKEN', 'environment-token');
     vi.stubEnv('DISCORD_CLIENT_SECRET', 'environment-secret');
     vi.stubEnv('SUPABASE_URL', 'https://project.supabase.co');
     vi.stubEnv('SUPABASE_SECRET_KEY', 'service-role-test-key');
@@ -31,9 +32,16 @@ describe('getDiscordRuntimeConfig', () => {
       'service-role-test-key',
       'https://project.supabase.co',
     );
+    const encryptedToken = encryptCloudCredential(
+      'saved-token',
+      'discord_bot_token',
+      'service-role-test-key',
+      'https://project.supabase.co',
+    );
     registerTable(mock, 'instance_settings').limit.mockResolvedValue({
       data: [
         { key: 'discord_application_id', value: '222222222222222222' },
+        encryptedToken,
         encryptedSecret,
       ],
       error: null,
@@ -41,8 +49,9 @@ describe('getDiscordRuntimeConfig', () => {
 
     await expect(getDiscordRuntimeConfig()).resolves.toEqual({
       applicationId: '222222222222222222',
+      botToken: 'saved-token',
       clientSecret: 'saved-secret',
-      sources: { applicationId: 'saved', clientSecret: 'saved' },
+      sources: { applicationId: 'saved', botToken: 'saved', clientSecret: 'saved' },
     });
   });
 
