@@ -1,5 +1,5 @@
 /**
- * Tests for PUT /api/settings — settings write endpoint.
+ * Tests for /api/settings — authoritative settings read/write contract.
  *
  * Covers the V10 §6 batched upsert fix (sequential → single operation)
  * and the existing validation, auth, and rate-limiting contracts.
@@ -20,7 +20,7 @@ vi.mock('@/app/api/webhooks/scope', () => ({
   isSoleInstanceOperator: vi.fn(),
 }));
 
-import { PUT } from '@/app/api/settings/route';
+import { DELETE, GET, PUT } from '@/app/api/settings/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
@@ -29,6 +29,7 @@ import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 
 import {
   createMockSupabase,
+  registerTable,
   buildRequest,
   mockAuthSuccess,
   mockAuthUnauthorized,
@@ -50,6 +51,67 @@ beforeEach(() => {
 function putSettings(body: unknown) {
   return PUT(buildRequest('/api/settings', { method: 'PUT', body }) as never);
 }
+
+function resetSettings(body: unknown) {
+  return DELETE(buildRequest('/api/settings', { method: 'DELETE', body }) as never);
+}
+
+describe('GET /api/settings', () => {
+  it('returns a saved connection value as the authoritative override while retaining the env fallback', async () => {
+    vi.stubEnv('DISCORD_APPLICATION_ID', 'env-application-id');
+    const settings = registerTable(mock, 'instance_settings');
+    settings.limit.mockResolvedValue({
+      data: [{ key: 'discord_application_id', value: 'saved-application-id', section: 'discord' }],
+      error: null,
+    });
+    registerTable(mock, 'guild').single.mockResolvedValue({ data: null, error: null });
+
+    const res = await GET();
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      values: { discord_application_id: 'saved-application-id' },
+      sources: { discord_application_id: 'db' },
+      environmentFallbacks: { discord_application_id: true },
+    });
+  });
+
+  it('keeps Supabase bootstrap credentials deployment-owned even when a stale DB row exists', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://bootstrap.supabase.co');
+    const settings = registerTable(mock, 'instance_settings');
+    settings.limit.mockResolvedValue({
+      data: [{ key: 'supabase_url', value: 'https://ignored.supabase.co', section: 'supabase' }],
+      error: null,
+    });
+    registerTable(mock, 'guild').single.mockResolvedValue({ data: null, error: null });
+
+    const res = await GET();
+
+    await expect(res.json()).resolves.toMatchObject({
+      values: { supabase_url: 'https://bootstrap.supabase.co' },
+      sources: { supabase_url: 'env' },
+      lockedFields: expect.arrayContaining(['supabase_url']),
+    });
+  });
+
+  it('reports an encrypted saved secret as the authoritative source over an env fallback', async () => {
+    vi.stubEnv('DISCORD_TOKEN', 'env-token');
+    const settings = registerTable(mock, 'instance_settings');
+    settings.limit.mockResolvedValue({
+      data: [{ key: 'discord_bot_token_encrypted', value: 'encrypted-payload', section: 'discord' }],
+      error: null,
+    });
+    registerTable(mock, 'guild').single.mockResolvedValue({ data: null, error: null });
+
+    const res = await GET();
+
+    await expect(res.json()).resolves.toMatchObject({
+      values: { discord_bot_token: '••••••••' },
+      sources: { discord_bot_token: 'db' },
+      environmentFallbacks: { discord_bot_token: true },
+    });
+  });
+});
 
 describe('PUT /api/settings', () => {
   it('returns 429 when rate limited', async () => {
@@ -102,6 +164,7 @@ describe('PUT /api/settings', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+    expect(body.restartRequired).toBe(true);
 
     // V10 §6: Should be ONE upsert call with both rows, not two sequential calls
     expect(mock._query.upsert).toHaveBeenCalledTimes(1);
@@ -115,6 +178,16 @@ describe('PUT /api/settings', () => {
     const res = await putSettings({
       section: 'deployment',
       values: { vps_nextauth_secret: 'must-not-be-written' },
+    });
+
+    expect(res.status).toBe(400);
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a valid setting submitted under the wrong section', async () => {
+    const res = await putSettings({
+      section: 'paypal',
+      values: { discord_application_id: '444555666' },
     });
 
     expect(res.status).toBe(400);
@@ -208,5 +281,42 @@ describe('PUT /api/settings', () => {
     expect(body.error).toContain('Failed to save');
     expect(errorSpy).toHaveBeenCalledWith('[Settings] Save error:', dbError);
     errorSpy.mockRestore();
+  });
+});
+
+describe('DELETE /api/settings', () => {
+  it('removes saved values and encrypted secrets so environment defaults become authoritative again', async () => {
+    const settings = registerTable(mock, 'instance_settings');
+    settings.in.mockResolvedValue({ error: null });
+
+    const res = await resetSettings({
+      section: 'discord',
+      keys: ['discord_application_id', 'discord_bot_token'],
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ ok: true, restartRequired: true });
+    expect(settings.delete).toHaveBeenCalledTimes(1);
+    expect(settings.in).toHaveBeenCalledWith('key', [
+      'discord_application_id',
+      'discord_bot_token_encrypted',
+    ]);
+  });
+
+  it('does not allow Supabase bootstrap fields to be reset from the dashboard', async () => {
+    const res = await resetSettings({ section: 'supabase', keys: ['supabase_url'] });
+
+    expect(res.status).toBe(400);
+    expect(mock._query.delete).not.toHaveBeenCalled();
+  });
+
+  it('does not reset a valid setting through a different section', async () => {
+    const res = await resetSettings({
+      section: 'paypal',
+      keys: ['discord_application_id'],
+    });
+
+    expect(res.status).toBe(400);
+    expect(mock._query.delete).not.toHaveBeenCalled();
   });
 });

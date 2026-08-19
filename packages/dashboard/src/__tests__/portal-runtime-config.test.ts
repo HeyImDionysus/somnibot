@@ -1,13 +1,21 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordRuntimeConfig: vi.fn() }));
+
 import { GET } from '@/app/api/portal/config/route';
+import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
 
 describe('GET /api/portal/config', () => {
-  afterEach(() => {
-    delete process.env.DISCORD_APPLICATION_ID;
+  beforeEach(() => {
+    vi.mocked(getDiscordRuntimeConfig).mockReset();
   });
 
-  it('returns the installation Discord application ID from the live runtime', async () => {
-    process.env.DISCORD_APPLICATION_ID = '123456789012345678';
+  it('returns the authoritative installation Discord application ID', async () => {
+    vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
+      applicationId: '123456789012345678',
+      clientSecret: 'secret',
+      sources: { applicationId: 'saved', clientSecret: 'saved' },
+    });
 
     const response = await GET();
 
@@ -22,7 +30,11 @@ describe('GET /api/portal/config', () => {
   it.each(['', 'not-a-discord-id', '1234'])(
     'fails clearly instead of emitting a broken OAuth link for %j',
     async (applicationId) => {
-      process.env.DISCORD_APPLICATION_ID = applicationId;
+      vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
+        applicationId,
+        clientSecret: 'secret',
+        sources: { applicationId: 'env', clientSecret: 'env' },
+      });
 
       const response = await GET();
 
@@ -32,4 +44,15 @@ describe('GET /api/portal/config', () => {
       });
     },
   );
+
+  it('fails closed when saved configuration cannot be read', async () => {
+    vi.mocked(getDiscordRuntimeConfig).mockRejectedValue(new Error('database unavailable'));
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: 'Customer portal sign-in is temporarily unavailable.',
+    });
+  });
 });

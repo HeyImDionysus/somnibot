@@ -73,7 +73,7 @@ describe('loadConfigFromDatabase', () => {
     expect(result).toBe(0);
   });
 
-  it('returns 0 when all env vars already set', async () => {
+  it('still checks for saved overrides when all env vars are already set', async () => {
     // Set all mapped env vars so there are no missing keys
     process.env.DISCORD_TOKEN = 'set';
     process.env.DISCORD_APPLICATION_ID = 'set';
@@ -92,8 +92,24 @@ describe('loadConfigFromDatabase', () => {
     process.env.SUPABASE_DB_URL = 'set';
     process.env.DASHBOARD_URL = 'set';
 
+    mockFrom.mockReturnValue(chainBuilder({ data: [], error: null }));
+
     const result = await loadConfigFromDatabase();
     expect(result).toBe(0);
+    expect(mockFrom).toHaveBeenCalledWith('instance_settings');
+  });
+
+  it('loads a saved operator override over an environment fallback', async () => {
+    process.env.DISCORD_APPLICATION_ID = 'env-application-id';
+    mockFrom.mockReturnValue(chainBuilder({
+      data: [{ key: 'discord_application_id', value: 'saved-application-id', section: 'discord' }],
+      error: null,
+    }));
+
+    const result = await loadConfigFromDatabase();
+
+    expect(result).toBe(1);
+    expect(process.env.DISCORD_APPLICATION_ID).toBe('saved-application-id');
   });
 
   it('loads missing non-secret config values but ignores legacy raw secrets', async () => {
@@ -232,6 +248,29 @@ describe('syncConfigToDatabase', () => {
 
     const result = await syncConfigToDatabase();
     expect(result).toBeGreaterThan(0);
+  });
+
+  it('does not persist non-secret env fallbacks as saved overrides', async () => {
+    for (const envVar of [
+      'DISCORD_TOKEN',
+      'DISCORD_CLIENT_SECRET',
+      'PAYPAL_CLIENT_SECRET',
+      'PAYPAL_WEBHOOK_ID',
+      'LAVALINK_PASSWORD',
+      'VALKEY_URL',
+      'SUPABASE_ACCESS_TOKEN',
+      'SUPABASE_DB_URL',
+    ]) {
+      delete process.env[envVar];
+    }
+    process.env.DISCORD_GUILD_ID = 'environment-guild';
+    const builder = chainBuilder({ error: null });
+    mockFrom.mockReturnValue(builder);
+
+    const result = await syncConfigToDatabase();
+
+    expect(result).toBe(0);
+    expect(builder.upsert).not.toHaveBeenCalled();
   });
 
   it('handles table not found error', async () => {

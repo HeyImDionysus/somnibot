@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
 
 const APPLICATION_ID_PATTERN = /^\d{17,20}$/;
 
@@ -7,7 +8,15 @@ const NO_STORE_HEADERS = {
 } as const;
 
 export async function GET() {
-  const applicationId = process.env.DISCORD_APPLICATION_ID?.trim() ?? '';
+  let applicationId = '';
+  try {
+    ({ applicationId } = await getDiscordRuntimeConfig());
+  } catch {
+    return NextResponse.json(
+      { error: 'Customer portal sign-in is temporarily unavailable.' },
+      { status: 503, headers: NO_STORE_HEADERS },
+    );
+  }
 
   if (!APPLICATION_ID_PATTERN.test(applicationId)) {
     return NextResponse.json(
