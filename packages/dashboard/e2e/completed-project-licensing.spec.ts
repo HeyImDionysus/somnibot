@@ -129,7 +129,7 @@ test('completed project handoff survives reload and creates an inactive product 
   await fillCompletedProject(page);
   await page.getByLabel('Billing model').selectOption('multiple');
   await page.getByLabel('Plans and licensed capabilities').fill('Monthly Standard and annual Pro require review.');
-  await page.getByLabel('Maximum devices').fill('5');
+  await page.getByLabel('Max installations').fill('5');
   await page.getByLabel('Heartbeat seconds').fill('120');
   await page.getByLabel('Offline grace seconds').fill('7200');
   await page.getByLabel('Structured feature flags').fill('alerts, exports, alerts');
@@ -222,6 +222,7 @@ test('free static handoff needs no PayPal and remains usable without responsive 
     expect(widths.scroll).toBeLessThanOrEqual(widths.client);
   }
   await page.getByRole('button', { name: 'Create' }).click();
+  await expect(page.getByRole('heading', { name: 'Integrate Completed Sentinel' })).toBeVisible();
   expect(submitted).toMatchObject({ type: 'free', price_cents: 0, active: false, delivery_type: 'file' });
   await expect(page.getByText('PayPal is not required.')).toBeVisible();
 });
