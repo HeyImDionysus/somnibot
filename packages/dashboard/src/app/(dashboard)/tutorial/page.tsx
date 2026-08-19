@@ -215,11 +215,11 @@ export default function TutorialPage() {
 
       {/* Tutorial Steps */}
       <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-lg font-medium text-discord-text-primary">
             Steps ({steps.length})
           </h2>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {steps.length === 0 && (
               <button
                 onClick={initBuiltIn}
@@ -248,7 +248,7 @@ export default function TutorialPage() {
                 key={step.id}
                 className="rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-4 space-y-3"
               >
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs text-discord-text-muted font-mono">
                     Step {idx + 1}
                     {step.built_in_key && (

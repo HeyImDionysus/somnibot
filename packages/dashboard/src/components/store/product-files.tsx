@@ -207,13 +207,13 @@ export default function ProductFiles({ productId, productName }: Props) {
             {files.map((f) => (
               <div
                 key={f.id}
-                className="flex items-center justify-between bg-discord-bg-tertiary rounded-lg px-3 py-2.5 group"
+                className="group flex items-center justify-between gap-3 rounded-lg bg-discord-bg-tertiary px-3 py-2.5"
               >
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <span className="text-lg flex-shrink-0">{fileIcon(f.content_type)}</span>
                   <div className="min-w-0">
                     <p className="text-sm font-medium text-white truncate">{f.display_name}</p>
-                    <div className="flex items-center gap-2 text-xs text-discord-text-muted">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-discord-text-muted">
                       <span>{formatBytes(f.file_size)}</span>
                       {f.version && <span>v{f.version}</span>}
                       <span>•</span>
@@ -223,7 +223,7 @@ export default function ProductFiles({ productId, productName }: Props) {
                 </div>
                 <button
                   onClick={(e) => { e.stopPropagation(); deleteFile(f.id, f.display_name); }}
-                  className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity text-sm px-2"
+                  className="shrink-0 px-2 text-sm text-red-400 opacity-100 transition-opacity hover:text-red-300 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                   title="Delete file"
                 >
                   🗑️

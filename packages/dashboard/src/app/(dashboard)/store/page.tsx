@@ -10,6 +10,7 @@ import ProductFiles from '@/components/store/product-files';
 import StoreControlRoom from '@/components/store/store-control-room';
 import { PayPalOnboardingStatusPanel } from '@/components/store/paypal-onboarding-status';
 import { ProductIntegrationPanel } from '@/components/store/product-integration-panel';
+import { StoreProductCard } from '@/components/store/store-product-card';
 import { SubscriptionPlanEditor } from '@/components/store/subscription-plan-editor';
 import type {
   PayPalOnboardingStatus,
@@ -150,40 +151,6 @@ const deliveryTypeLabels: Record<Product['delivery_type'], string> = {
   access_pass: 'Static (legacy)',
   mixed: 'Static (legacy)',
 };
-
-// ── Helpers ───────────────────────────────────────────────
-
-function formatPrice(cents: number, currency: string = 'USD'): string {
-  return `$${(cents / 100).toFixed(2)} ${currency}`;
-}
-
-function typeBadge(type: string) {
-  switch (type) {
-    case 'one_time':
-      return { label: 'One-Time', color: 'bg-discord-info/20 text-discord-info' };
-    case 'subscription':
-      return { label: 'Subscription', color: 'bg-[#FF1493]/20 text-[#FF1493]' };
-    case 'free':
-      return { label: 'Free', color: 'bg-emerald-500/20 text-emerald-300' };
-    default:
-      return { label: type, color: 'bg-discord-bg-tertiary text-discord-text-muted' };
-  }
-}
-
-function deliveryBadge(type: string) {
-  switch (type) {
-    case 'file':
-      return '📁 File';
-    case 'link':
-      return '🔗 Link';
-    case 'access_pass':
-      return '🔑 Access Pass';
-    case 'mixed':
-      return '📦 Mixed';
-    default:
-      return type;
-  }
-}
 
 // ── Component ─────────────────────────────────────────────
 
@@ -1338,76 +1305,21 @@ export default function StorePage() {
       ) : (
         <div className="space-y-3">
           {products.map((p) => {
-            const badge = typeBadge(p.type);
+            const activationLocked = !p.active
+              && (licenseRecoveryProductId === p.id || hasPendingCompletedProjectPolicy(p.metadata));
             return (
-              <div
+              <StoreProductCard
                 key={p.id}
-                className="flex items-center justify-between rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4"
-              >
-                <div className="flex items-center gap-4">
-                  <div
-                    className={`h-2 w-2 rounded-full ${p.active ? 'bg-discord-success' : 'bg-discord-text-muted'}`}
-                  />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-discord-text-primary">{p.name}</span>
-                      <span className={`rounded-full px-2 py-0.5 text-xs ${badge.color}`}>
-                        {badge.label}
-                      </span>
-                      <span className="text-xs text-discord-text-muted">
-                        {deliveryBadge(p.delivery_type)}
-                      </span>
-                    </div>
-                    <div className="mt-1 flex items-center gap-3 text-xs text-discord-text-muted">
-                      <span className="font-semibold text-discord-text-secondary">
-                        {formatPrice(p.price_cents, p.currency)}
-                      </span>
-                      {p.granted_role_ids.length > 0 && (
-                        <span>{p.granted_role_ids.length} role(s)</span>
-                      )}
-                      {p.plans && p.plans.length > 0 && (
-                        <span>{p.plans.length} plan(s)</span>
-                      )}
-                      {licenseConfigForProduct(p) && (
-                        <span>🔑 Licensed</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant={p.active ? 'success' : 'secondary'}
-                    onClick={() => toggleActive(p)}
-                    disabled={!p.active && (licenseRecoveryProductId === p.id || hasPendingCompletedProjectPolicy(p.metadata))}
-                    title={!p.active && (licenseRecoveryProductId === p.id || hasPendingCompletedProjectPolicy(p.metadata)) ? 'Retry and verify the requested license policy before activation' : undefined}
-                  >
-                    {p.active ? 'Active' : 'Inactive'}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => { setFilesProductId(p.id); setFilesProductName(p.name); }}
-                  >
-                    📁 Files
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => openEdit(p)}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={() => setConfirmDelete({ id: p.id, name: p.name })}
-                  >
-                    Delete
-                  </Button>
-                </div>
-              </div>
+                product={p}
+                licensed={licenseConfigForProduct(p) !== null}
+                activationLocked={activationLocked}
+                actions={{
+                  onToggleActive: () => toggleActive(p),
+                  onOpenFiles: () => { setFilesProductId(p.id); setFilesProductName(p.name); },
+                  onEdit: () => openEdit(p),
+                  onDelete: () => setConfirmDelete({ id: p.id, name: p.name }),
+                }}
+              />
             );
           })}
         </div>

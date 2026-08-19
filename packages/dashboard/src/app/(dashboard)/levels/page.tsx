@@ -644,20 +644,20 @@ export default function LevelsPage() {
           ) : (
             <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary divide-y divide-discord-border-subtle">
               {rewards.map((r) => (
-                <div key={r.id} className="flex items-center justify-between px-5 py-3">
-                  <div className="flex items-center gap-4">
+                <div key={r.id} className="flex items-center justify-between gap-3 px-5 py-3">
+                  <div className="flex min-w-0 items-center gap-4">
                     <span className="flex h-10 w-10 items-center justify-center rounded-full bg-discord-accent/10 text-sm font-bold text-discord-accent">
                       {r.level}
                     </span>
-                    <div>
-                      <p className="text-sm font-medium text-discord-text-primary">Level {r.level} → <RoleDisplay roleId={r.role_id} /></p>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]">Level {r.level} → <RoleDisplay roleId={r.role_id} /></p>
                       <p className="text-xs text-discord-text-muted">
                         {r.remove_at_level ? `Removed at level ${r.remove_at_level}` : 'Permanent'}
                         {r.announce ? ' · Announced' : ''}
                       </p>
                     </div>
                   </div>
-                  <button onClick={() => setConfirmDelete({ type: 'reward', id: r.id })} className="text-discord-danger hover:text-discord-danger/80 text-sm transition-standard">
+                  <button onClick={() => setConfirmDelete({ type: 'reward', id: r.id })} className="shrink-0 text-sm text-discord-danger transition-standard hover:text-discord-danger/80">
                     Remove
                   </button>
                 </div>
@@ -704,14 +704,14 @@ export default function LevelsPage() {
           ) : (
             <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary divide-y divide-discord-border-subtle">
               {multipliers.map((m) => (
-                <div key={m.id} className="flex items-center justify-between px-5 py-3">
-                  <div className="flex items-center gap-4">
+                <div key={m.id} className="flex items-center justify-between gap-3 px-5 py-3">
+                  <div className="flex min-w-0 items-center gap-4">
                     <span className="flex h-10 w-10 items-center justify-center rounded-full bg-discord-warning/10 text-sm font-bold text-discord-warning">
                       {m.multiplier}×
                     </span>
-                    <p className="text-sm font-medium text-discord-text-primary"><RoleDisplay roleId={m.role_id} /></p>
+                    <p className="min-w-0 text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]"><RoleDisplay roleId={m.role_id} /></p>
                   </div>
-                  <button onClick={() => setConfirmDelete({ type: 'multiplier', id: m.id })} className="text-discord-danger hover:text-discord-danger/80 text-sm transition-standard">
+                  <button onClick={() => setConfirmDelete({ type: 'multiplier', id: m.id })} className="shrink-0 text-sm text-discord-danger transition-standard hover:text-discord-danger/80">
                     Remove
                   </button>
                 </div>

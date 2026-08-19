@@ -444,11 +444,11 @@ export default function TempChannelsPage() {
         <div className="space-y-3">
           {hubs.map((hub) => (
             <div key={hub.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
-              <div className="flex items-center justify-between px-5 py-4">
+              <div className="flex flex-col items-stretch gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3">
+                  <div className="flex min-w-0 items-start gap-3">
                     <span className="text-2xl">🔊</span>
-                    <div>
+                    <div className="min-w-0">
                       <p className="text-sm font-medium text-discord-text-primary">Hub: <TCChannelName id={hub.hub_channel_id} /></p>
                       <p className="text-xs text-discord-text-muted">
                         Category: <TCChannelName id={hub.category_id} /> · Format: <code className="bg-discord-bg-tertiary px-1 rounded">{hub.naming_format}</code>
@@ -460,7 +460,7 @@ export default function TempChannelsPage() {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 ml-4">
+                <div className="flex flex-wrap items-center justify-end gap-2 sm:ml-4 sm:shrink-0">
                   <div
                     className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${hub.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
                     onClick={() => toggleActive(hub)}

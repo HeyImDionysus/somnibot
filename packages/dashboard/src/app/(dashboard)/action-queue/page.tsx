@@ -393,7 +393,7 @@ export default function ActionQueuePage() {
 
       {/* Pagination */}
       {pagination.totalPages > 1 && (
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-discord-text-muted">
             Page {pagination.page} of {pagination.totalPages} ({pagination.total} total)
           </p>

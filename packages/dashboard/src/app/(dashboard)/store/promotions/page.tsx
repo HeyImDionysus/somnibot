@@ -142,11 +142,11 @@ export default function PromotionsPage() {
           {promos.map((p) => (
             <div
               key={p.id}
-              className="flex items-center justify-between rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4"
+              className="flex flex-col items-stretch gap-3 rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between"
             >
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-medium text-discord-text-primary">{p.name}</span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-discord-text-primary [overflow-wrap:anywhere]">{p.name}</span>
                   <span className="rounded-full bg-discord-bg-tertiary px-2 py-0.5 text-xs text-discord-text-muted">
                     never applied
                   </span>
@@ -156,7 +156,7 @@ export default function PromotionsPage() {
                     </span>
                   )}
                 </div>
-                <div className="mt-1 flex items-center gap-3 text-xs text-discord-text-muted">
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-discord-text-muted">
                   <span className="font-semibold text-discord-text-secondary">
                     {formatDiscount(p.type, p.value)}
                   </span>
@@ -166,7 +166,7 @@ export default function PromotionsPage() {
               </div>
               <button
                 onClick={() => setConfirmDelete({ id: p.id, name: p.name })}
-                className="rounded-input bg-discord-danger/20 px-3 py-1 text-xs text-discord-danger transition-standard hover:bg-discord-danger/30"
+                className="w-full rounded-input bg-discord-danger/20 px-3 py-1 text-xs text-discord-danger transition-standard hover:bg-discord-danger/30 sm:w-auto sm:shrink-0"
               >
                 Delete
               </button>

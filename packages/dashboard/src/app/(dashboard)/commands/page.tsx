@@ -436,7 +436,7 @@ export default function CustomCommandsPage() {
             const q = search.toLowerCase();
             return cmd.name.toLowerCase().includes(q) || cmd.description?.toLowerCase().includes(q);
           }).map((cmd) => (
-            <div key={cmd.id} className="flex items-center justify-between px-5 py-4">
+            <div key={cmd.id} className="flex flex-col items-stretch gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-4 flex-1 min-w-0">
                 <span className="flex h-10 w-10 items-center justify-center rounded-full bg-discord-accent/10 text-lg">
                   ⌨️
@@ -450,7 +450,7 @@ export default function CustomCommandsPage() {
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center justify-end gap-3 sm:shrink-0">
                 <div
                   className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${cmd.enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
                   onClick={() => toggleEnabled(cmd)}

@@ -187,7 +187,7 @@ export default function AnalyticsPage() {
             <h3 className="text-sm font-semibold text-discord-text-primary mb-3">🛡️ Moderation by Type</h3>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               {Object.entries(engagement.moderation.byType).map(([type, count]) => (
-                <div key={type} className="flex items-center justify-between bg-discord-bg-tertiary rounded p-2.5">
+                <div key={type} className="flex items-center justify-between gap-3 rounded bg-discord-bg-tertiary p-2.5">
                   <span className="text-xs text-discord-text-secondary capitalize">{type}</span>
                   <span className="text-sm font-bold text-discord-text-primary">{count}</span>
                 </div>
@@ -340,11 +340,11 @@ export default function AnalyticsPage() {
         ) : (
           <div className="space-y-2">
             {data.products.map((p) => (
-              <div key={p.id} className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-3">
-                <div className="flex items-center gap-3">
-                  <div>
-                    <span className="text-sm font-medium text-discord-text-primary">{p.name}</span>
-                    <div className="flex items-center gap-2 mt-0.5">
+              <div key={p.id} className="flex flex-col items-stretch gap-2 rounded-md bg-discord-bg-tertiary p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="min-w-0">
+                    <span className="text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]">{p.name}</span>
+                    <div className="mt-0.5 flex flex-wrap items-center gap-2">
                       <span className="text-xs text-discord-text-muted">{formatPrice(p.price_cents)}</span>
                       <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${p.active ? 'bg-discord-success/20 text-discord-success' : 'bg-discord-bg-secondary text-discord-text-muted'}`}>
                         {p.active ? 'Active' : 'Inactive'}
@@ -355,7 +355,7 @@ export default function AnalyticsPage() {
                     </div>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right sm:shrink-0">
                   <p className="text-sm font-semibold text-discord-text-primary">{formatPrice(p.revenue)}</p>
                   <p className="text-xs text-discord-text-muted">{p.orders} orders</p>
                 </div>
@@ -378,10 +378,10 @@ export default function AnalyticsPage() {
           </p>
           <div className="space-y-2">
             {data.promotions.map((p) => (
-              <div key={p.id} className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-3">
-                <div>
-                  <span className="text-sm font-medium text-discord-text-primary">{p.name}</span>
-                  <div className="flex items-center gap-2 mt-0.5">
+              <div key={p.id} className="flex flex-col items-stretch gap-2 rounded-md bg-discord-bg-tertiary p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <span className="text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]">{p.name}</span>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-2">
                     {p.coupon_code && (
                       <code className="text-xs bg-discord-bg-secondary px-1.5 py-0.5 rounded text-discord-accent">
                         {p.coupon_code}
@@ -392,7 +392,7 @@ export default function AnalyticsPage() {
                     </span>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right sm:shrink-0">
                   <p className="text-sm font-semibold text-discord-text-primary">
                     {p.current_uses}{p.max_uses ? `/${p.max_uses}` : ''} uses
                   </p>

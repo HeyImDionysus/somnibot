@@ -187,6 +187,29 @@ test('completed project handoff survives reload and creates an inactive product 
   });
   expect(await page.evaluate((key) => window.sessionStorage.getItem(key), LICENSING_STORE_HANDOFF_KEY)).toBeNull();
 
+  // Given: the saved product is rendered in the narrow Store product list.
+  await page.setViewportSize({ width: 375, height: 812 });
+  const productCard = page.getByRole('article', { name: 'Completed Sentinel' });
+
+  // Then: product identity, metadata, and every action reflow inside the card.
+  await expect(productCard).toBeVisible();
+  await expect(productCard.getByText('Subscription', { exact: true })).toBeVisible();
+  await expect(productCard.getByText('Dynamic', { exact: true })).toBeVisible();
+  for (const action of ['Inactive', 'Files', 'Edit', 'Delete']) {
+    await expect(productCard.getByRole('button', { name: action, exact: true })).toBeVisible();
+  }
+  const cardBounds = await productCard.evaluate((element) => {
+    const card = element.getBoundingClientRect();
+    const buttons = Array.from(element.querySelectorAll('button'), (button) => button.getBoundingClientRect());
+    return {
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      buttonsInside: buttons.every((button) => button.left >= card.left && button.right <= card.right),
+    };
+  });
+  expect(cardBounds.scrollWidth).toBeLessThanOrEqual(cardBounds.clientWidth);
+  expect(cardBounds.buttonsInside).toBe(true);
+
   await page.getByRole('link', { name: 'Open Prompt Generator' }).click();
   await expect(page.getByText('Loaded authoritative Store product Completed Sentinel.')).toBeVisible();
   const prompt = await page.locator('section[aria-labelledby="generated-prompt-heading"] pre').innerText();

@@ -240,17 +240,17 @@ export default function FishingPage() {
       ) : (
         <div className="space-y-2">
           {species.map((s) => (
-            <div key={s.id} className="flex items-center justify-between rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4">
-              <div className="flex items-center gap-3">
+            <div key={s.id} className="flex flex-col items-stretch gap-3 rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-start gap-3">
                 <span className="text-2xl">{s.emoji}</span>
-                <div>
-                  <p className="font-semibold text-discord-text-primary">{s.name}</p>
+                <div className="min-w-0">
+                  <p className="font-semibold text-discord-text-primary [overflow-wrap:anywhere]">{s.name}</p>
                   <p className={`text-sm ${RARITY_COLORS[s.rarity] ?? 'text-discord-text-secondary'}`}>
                     {s.rarity.toUpperCase()} • {s.min_weight}–{s.max_weight} kg • 💰 {s.base_price}/ea
                   </p>
                 </div>
               </div>
-              <div className="flex gap-1">
+              <div className="flex justify-end gap-1 sm:shrink-0">
                 <button type="button" aria-label={`Edit ${s.name}`} onClick={() => setEditing(s)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Pencil className="h-4 w-4 text-discord-text-secondary" />
                 </button>

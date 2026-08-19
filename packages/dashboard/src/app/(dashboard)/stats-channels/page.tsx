@@ -370,10 +370,10 @@ export default function StatsChannelsPage() {
             const meta = STAT_TYPES[sc.stat_type];
             return (
               <div key={sc.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
-                <div className="flex items-center justify-between px-5 py-4">
-                  <div className="flex items-center gap-3">
+                <div className="flex flex-col items-stretch gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 items-start gap-3">
                     <span className="text-2xl">{meta?.icon ?? '📊'}</span>
-                    <div>
+                    <div className="min-w-0">
                       <p className="text-sm font-medium text-discord-text-primary">{meta?.label ?? sc.stat_type}</p>
                       <p className="text-xs text-discord-text-muted">
                         Format: <code className="bg-discord-bg-tertiary px-1 rounded">{sc.name_format}</code>
@@ -384,7 +384,7 @@ export default function StatsChannelsPage() {
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center justify-end gap-2 sm:shrink-0">
                     <div
                       className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${sc.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
                       onClick={() => toggleActive(sc)}

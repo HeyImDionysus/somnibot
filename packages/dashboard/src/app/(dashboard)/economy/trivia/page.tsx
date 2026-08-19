@@ -433,7 +433,7 @@ export default function TriviaPage() {
             {questions.map((q) => (
               <div
                 key={q.id}
-                className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-3"
+                className="flex items-center justify-between gap-3 rounded-md bg-discord-bg-tertiary p-3"
               >
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-discord-text-primary truncate">{q.question}</p>
@@ -441,7 +441,7 @@ export default function TriviaPage() {
                     {q.category} • {q.difficulty} • Answer: {q.correct_answer}
                   </p>
                 </div>
-                <div className="flex gap-1 ml-2">
+                <div className="ml-2 flex shrink-0 gap-1">
                   <button onClick={() => setEditing({ ...q })} className="p-1.5 rounded hover:bg-discord-bg-hover">
                     <Pencil className="w-3.5 h-3.5 text-discord-text-secondary" />
                   </button>

@@ -450,7 +450,7 @@ export default function GatheringPage() {
             return (
               <div
                 key={entry.id}
-                className="flex items-center justify-between rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4"
+                className="flex flex-col items-stretch gap-3 rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
@@ -470,7 +470,7 @@ export default function GatheringPage() {
                     Qty: {entry.min_qty}–{entry.max_qty} · Weight: {entry.weight} · Sell: {entry.sell_value.toLocaleString()} · Tier ≥ {entry.tool_tier}
                   </p>
                 </div>
-                <div className="flex items-center gap-1 ml-2">
+                <div className="flex items-center justify-end gap-1 sm:ml-2 sm:shrink-0">
                   <button
                     className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-discord-text-primary"
                     onClick={() => setEditEntry(entry)}

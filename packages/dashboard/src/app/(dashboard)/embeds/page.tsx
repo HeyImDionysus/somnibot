@@ -507,11 +507,11 @@ export default function EmbedBuilderPage() {
               {embed.description && (
                 <p className="text-xs text-discord-text-muted mt-1 line-clamp-2">{embed.description}</p>
               )}
-              <div className="mt-3 flex items-center justify-between">
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs text-discord-text-muted">
                   {embed.fields?.length || 0} fields
                 </span>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     onClick={() => setSendTargetId(embed.id)}
                     className="flex items-center gap-1 text-discord-text-muted hover:text-discord-success text-xs transition-standard"

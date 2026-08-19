@@ -200,8 +200,8 @@ export default function AchievementsPage() {
           ) : (
             <div className="space-y-2">
               {achievements.map((a) => (
-                <div key={a.id} className="bg-discord-bg-secondary rounded-lg p-3 flex items-center justify-between">
-                  <div>
+                <div key={a.id} className="flex flex-col items-stretch gap-3 rounded-lg bg-discord-bg-secondary p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 [overflow-wrap:anywhere]">
                     <span className="text-xl mr-2">{a.badge_emoji}</span>
                     <span className="text-discord-text-primary font-medium">{a.name}</span>
                     {a.hidden && <span className="ml-2 text-xs text-discord-text-secondary italic">(hidden)</span>}
@@ -210,7 +210,7 @@ export default function AchievementsPage() {
                       {a.reward_currency > 0 && ` — 💰 ${a.reward_currency}`}
                     </span>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex justify-end gap-1 sm:shrink-0">
                     <button type="button" aria-label={`Edit ${a.name}`} onClick={() => setEditing({ ...a })} className="flex h-11 w-11 items-center justify-center rounded hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
                     <button type="button" aria-label={`Delete ${a.name}`} onClick={() => setDeleteId(a.id)} className="flex h-11 w-11 items-center justify-center rounded hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
                   </div>
