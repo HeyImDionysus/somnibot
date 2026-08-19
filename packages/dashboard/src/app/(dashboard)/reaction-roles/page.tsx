@@ -563,10 +563,10 @@ export default function ReactionRolesPage() {
             </div>
             <div className="divide-y divide-discord-border-subtle">
               {mappings.map((rr) => (
-                <div key={rr.id} className="flex items-center justify-between px-5 py-3">
-                  <div className="flex items-center gap-3">
+                <div key={rr.id} className="flex flex-col items-stretch gap-3 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 items-center gap-3">
                     <span className="text-2xl">{rr.emoji}</span>
-                    <div>
+                    <div className="min-w-0">
                       <p className="text-sm font-medium text-discord-text-primary"><RRRoleName id={rr.role_id} /></p>
                       <p className="text-xs text-discord-text-muted">
                         {rr.exclusive_group ? `Group: ${rr.exclusive_group}` : 'No group'}
@@ -575,7 +575,7 @@ export default function ReactionRolesPage() {
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center justify-end gap-2 sm:shrink-0">
                     <button
                       type="button"
                       role="switch"

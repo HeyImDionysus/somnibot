@@ -522,13 +522,13 @@ export default function GiveawaysPage() {
             const badge = statusBadge(g.status);
             return (
               <div key={g.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
-                <div className="flex items-center justify-between px-5 py-4">
+                <div className="flex flex-col items-stretch gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3">
+                    <div className="flex min-w-0 items-start gap-3">
                       <span className="text-2xl">🎉</span>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium text-discord-text-primary">{g.prize}</p>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]">{g.prize}</p>
                           <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.color}`}>
                             {badge.label}
                           </span>
@@ -549,7 +549,7 @@ export default function GiveawaysPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 ml-4">
+                  <div className="flex flex-wrap items-center justify-end gap-3 sm:ml-4 sm:shrink-0">
                     {g.status === 'active' && (
                       <>
                         <button onClick={() => setConfirmAction({ type: 'end', id: g.id, prize: g.prize })}

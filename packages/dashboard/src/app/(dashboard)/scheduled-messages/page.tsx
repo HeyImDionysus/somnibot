@@ -511,12 +511,12 @@ export default function ScheduledMessagesPage() {
 
             return (
               <div key={sm.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
-                <div className="flex items-center justify-between px-5 py-4">
+                <div className="flex flex-col items-stretch gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3">
+                    <div className="flex min-w-0 items-start gap-3">
                       <span className="text-2xl">⏰</span>
-                      <div>
-                        <p className="text-sm font-medium text-discord-text-primary">{sm.name}</p>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]">{sm.name}</p>
                         <p className="text-xs text-discord-text-muted">
                           {describeCron(sm.cron_expression)} · {sm.timezone} · <SMChannelName id={sm.channel_id} />
                         </p>
@@ -530,7 +530,7 @@ export default function ScheduledMessagesPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 ml-4">
+                  <div className="flex flex-wrap items-center justify-end gap-2 sm:ml-4 sm:shrink-0">
                     <div
                       className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${sm.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
                       onClick={() => toggleActive(sm)}
