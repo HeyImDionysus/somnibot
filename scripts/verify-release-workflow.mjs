@@ -62,6 +62,16 @@ assert.doesNotMatch(
 assert.doesNotMatch(releaseWorkflow, /macos-latest|\.dmg|--mac/, 'release workflow must not publish macOS');
 assert.match(
   ciWorkflow,
+  /Install Chromium runtime[\s\S]*playwright install chromium/,
+  'browser CI must install the Playwright Chromium runtime',
+);
+assert.doesNotMatch(
+  ciWorkflow,
+  /playwright install --with-deps chromium/,
+  'browser CI must not block on transient Ubuntu mirror package installation',
+);
+assert.match(
+  ciWorkflow,
   /cp -R \/tmp\/somnibot-fleet-evidence\/fleet-proofs\/\. artifacts\/proofs\//,
   'candidate evidence loading must retain receipt witness artifacts for aggregate hash verification',
 );
