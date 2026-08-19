@@ -25,6 +25,7 @@ const fleetSetup = read('packages/testkit/src/__tests__/live/live-setup.ts');
 const localSupabaseResolver = read('packages/testkit/src/local-supabase.ts');
 const rootPackage = JSON.parse(read('package.json'));
 const npmrc = read('.npmrc');
+const releaseBuildStep = releaseWorkflow.match(/- name: Build & package[\s\S]*?(?=\n      - name:)/)?.[0] ?? '';
 
 assert.match(releaseWorkflow, /- 'v1\.0\.0'/, 'release trigger must be limited to v1.0.0');
 assert.match(releaseWorkflow, /Only the approved v1\.0\.0 launcher release may be published\./);
@@ -91,6 +92,16 @@ assert.match(
   buildScript,
   /rmSync\(RELEASE_DIR, \{ recursive: true, force: true \}\)/,
   'launcher packaging must remove stale generated release outputs before building',
+);
+assert.match(
+  buildScript,
+  /'--publish',[\s\S]*'never'/,
+  'launcher packaging must never publish before the controlled release job',
+);
+assert.doesNotMatch(
+  releaseBuildStep,
+  /GH_TOKEN/,
+  'matrix build jobs must not receive a token that enables implicit electron-builder publishing',
 );
 assert.match(
   builderConfig,
