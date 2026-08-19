@@ -15,6 +15,7 @@ const dynamicDraft: LicensingPromptDraft = {
   apiBase: 'https://somnibot.example/api',
   billingModel: 'subscription',
   plansAndFeatures: 'Standard grants alerts; Pro grants alerts and automation.',
+  featureFlags: 'alerts, automation, alerts',
   outputFormats: '',
   installationIdentity: 'One installation is one game-server deployment.',
   maxInstallations: 3,
@@ -46,9 +47,32 @@ describe('licensing prompt generator contract', () => {
         maxInstallations: 3,
         heartbeatSeconds: 300,
         offlineGraceSeconds: 86_400,
+        featureFlags: ['alerts', 'automation'],
       },
       staticPolicy: null,
     });
+  });
+
+  it('accepts free billing and normalizes older version-one envelopes without feature flags', () => {
+    const freeEnvelope = buildLicensingPromptEnvelope({
+      ...dynamicDraft,
+      billingModel: 'free',
+      featureFlags: '',
+    });
+
+    expect(freeEnvelope.billing.model).toBe('free');
+    expect(freeEnvelope.dynamicPolicy?.featureFlags).toEqual([]);
+
+    const legacyPrompt = renderLicensingPrompt(freeEnvelope).replace(
+      ',\n    "featureFlags": []',
+      '',
+    );
+    expect(extractLicensingPromptEnvelope(legacyPrompt).dynamicPolicy?.featureFlags).toEqual([]);
+  });
+
+  it('rejects policy values that the Store cannot save', () => {
+    expect(() => buildLicensingPromptEnvelope({ ...dynamicDraft, maxInstallations: 101 })).toThrow();
+    expect(() => buildLicensingPromptEnvelope({ ...dynamicDraft, offlineGraceSeconds: 604_801 })).toThrow();
   });
 
   it('round-trips the structured envelope embedded in the copied prompt', () => {

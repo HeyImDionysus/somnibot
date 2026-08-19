@@ -63,6 +63,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       success: true,
       data: {
+        guildId: auth.ctx.guildId,
         environment: paypal.sandbox ? 'sandbox' : 'live',
         apiBase: dashboardApiBase(request.nextUrl.origin),
         credentialsConfigured: Boolean(paypal.clientId && paypal.clientSecret),

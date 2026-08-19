@@ -30,6 +30,7 @@ export type CommerceProductIdentity = {
 };
 
 export type PayPalOnboardingStatus = {
+  readonly guildId?: string;
   readonly environment: 'sandbox' | 'live';
   readonly apiBase: string;
   readonly credentialsConfigured: boolean;

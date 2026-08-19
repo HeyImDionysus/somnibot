@@ -19,7 +19,7 @@ test('owner generates and reuses a stateless project licensing prompt', async ({
 
   await page.goto('/project-licensing');
   await expect(page.getByRole('heading', { name: 'Project Licensing Prompt' })).toBeVisible();
-  await expect(page.getByText('Nothing on this page is saved.')).toBeVisible();
+  await expect(page.getByText('Nothing is saved on the server.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: /save/i })).toHaveCount(0);
   await expect(page.getByLabel(/Store product ID/i)).toHaveCount(0);
   await expect(page.getByLabel('SomniBot API base')).toHaveCount(0);
@@ -31,7 +31,7 @@ test('owner generates and reuses a stateless project licensing prompt', async ({
   const copyButton = page.getByRole('button', { name: 'Copy prompt' });
   await expect(copyButton).toBeDisabled();
   await page.getByLabel('Project name').fill('Universal Asset Kit');
-  await page.getByLabel('Project description').fill('A reusable set of documents, source templates, images, audio, and future downloadable formats.');
+  await page.getByLabel('Completed project context').fill('A reusable set of documents, source templates, images, audio, and future downloadable formats.');
   await page.getByRole('radio', { name: /static/i }).click();
   await page.getByLabel('Output formats').fill('PDF, PNG, SVG, ZIP, HTML, CSS, WAV, and future project files');
   await expect(copyButton).toBeEnabled();

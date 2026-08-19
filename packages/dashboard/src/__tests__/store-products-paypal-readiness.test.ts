@@ -153,6 +153,127 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(writeCommerceAudit).not.toHaveBeenCalled();
   });
 
+  it('returns the existing product when a stable creation request is retried', async () => {
+    const productId = '00000000-0000-4000-8000-000000000431';
+    vi.stubGlobal('fetch', vi.fn());
+    productsTable.maybeSingle.mockResolvedValueOnce({
+      data: {
+        id: productId,
+        guild_id: 'guild-1',
+        name: 'Founder Pass',
+        type: 'free',
+        delivery_type: 'license_key',
+        plans: [],
+        product_license_config: [],
+      },
+      error: null,
+    });
+
+    const res = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      headers: { 'x-request-id': productId },
+      body: {
+        ...baseProductBody,
+        id: productId,
+        type: 'free',
+        price_cents: 0,
+        active: false,
+      },
+    }));
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      success: true,
+      replayed: true,
+      data: { id: productId },
+    });
+    expect(productsTable.insert).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(notifyBot).not.toHaveBeenCalled();
+  });
+
+  it('returns the preserved plan recovery instead of completing an incomplete replay', async () => {
+    const productId = '00000000-0000-4000-8000-000000000432';
+    const recoveryPlan = {
+      id: '00000000-0000-4000-8000-000000000433',
+      product_id: productId,
+      product_active: false,
+      name: 'Annual Pro',
+      paypal_plan_id: 'P-RECOVERY',
+      interval_unit: 'YEAR',
+      interval_count: 1,
+      price_cents: 2500,
+      currency: 'USD',
+      trial_days: 0,
+      active: true,
+    };
+    productsTable.maybeSingle.mockResolvedValueOnce({
+      data: {
+        id: productId,
+        name: 'Founder Pass',
+        paypal_product_id: 'PROD-RECOVERY',
+        metadata: { commerce_plan_recovery: recoveryPlan },
+      },
+      error: null,
+    });
+
+    const res = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      headers: { 'x-request-id': productId },
+      body: {
+        ...baseProductBody,
+        id: productId,
+        type: 'subscription',
+        active: false,
+      },
+    }));
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      success: false,
+      code: 'PRODUCT_CREATED_PLAN_SAVE_FAILED',
+      data: { id: productId, recovery_plan: recoveryPlan },
+    });
+    expect(productsTable.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsaveable desired policy before product or PayPal creation', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+
+    const res = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        ...baseProductBody,
+        type: 'free',
+        price_cents: 0,
+        active: false,
+        metadata: {
+          completed_project_licensing: {
+            policyPending: true,
+            desiredPolicy: {
+              keyPrefix: 'X',
+              maxDevices: 3,
+              heartbeatIntervalMs: 300000,
+              sdkCacheTtlMs: 60000,
+              offlineGracePeriodSeconds: 86400,
+              featureFlags: [],
+              requireDiscordGuildMembership: true,
+              rotationPolicy: 'rotate-and-invalidate',
+              selfServiceDeviceRemoval: true,
+            },
+          },
+        },
+      },
+    }));
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'The requested license policy contains values the Store cannot save.',
+    });
+    expect(productsTable.insert).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('blocks paid product creation before database writes when PayPal is not ready', async () => {
     (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     vi.stubGlobal('fetch', vi.fn());

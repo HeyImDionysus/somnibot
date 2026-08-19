@@ -35,6 +35,15 @@ import {
   storeProductFacetOptions,
   type StoreProductFacet,
 } from '@/lib/store/store-product-policy';
+import {
+  LICENSING_STORE_HANDOFF_KEY,
+  hasPendingCompletedProjectPolicy,
+  parseLicensingStoreHandoff,
+  promptEnvelopeToStorePrefill,
+  readCompletedProjectPolicy,
+  serializeLicensingStoreHandoff,
+  type LicensingStoreHandoffV1,
+} from '@/lib/store/licensing-handoff';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -56,7 +65,7 @@ interface Product {
   created_at: string;
   updated_at: string;
   plans?: Plan[];
-  product_license_config?: LicenseConfig[];
+  product_license_config?: LicenseConfig | LicenseConfig[] | null;
 }
 
 type Plan = SubscriptionPlan;
@@ -74,6 +83,26 @@ interface LicenseConfig {
   store_keys_hashed: boolean;
   rotation_policy: 'rotate-and-invalidate' | 'disabled';
   self_service_device_removal: boolean;
+}
+
+function licenseConfigForProduct(product: Product): LicenseConfig | null {
+  const relation = product.product_license_config;
+  return Array.isArray(relation) ? relation[0] ?? null : relation ?? null;
+}
+
+function licenseConfigMatchesDesiredPolicy(
+  config: LicenseConfig,
+  desired: NonNullable<ReturnType<typeof readCompletedProjectPolicy>>,
+): boolean {
+  return config.key_prefix === desired.keyPrefix
+    && config.max_devices === desired.maxDevices
+    && config.heartbeat_interval_seconds * 1000 === desired.heartbeatIntervalMs
+    && config.sdk_cache_ttl_ms === desired.sdkCacheTtlMs
+    && config.offline_grace_period_seconds === desired.offlineGracePeriodSeconds
+    && JSON.stringify(config.feature_flags) === JSON.stringify(desired.featureFlags)
+    && config.require_discord_guild_membership === desired.requireDiscordGuildMembership
+    && config.rotation_policy === desired.rotationPolicy
+    && config.self_service_device_removal === desired.selfServiceDeviceRemoval;
 }
 
 const emptyForm: {
@@ -95,7 +124,7 @@ const emptyForm: {
   currency: 'USD',
   granted_role_ids: [],
   granted_channel_ids: [],
-  active: true,
+  active: false,
 };
 
 const emptyPlan: SubscriptionPlanDraft = {
@@ -166,6 +195,7 @@ export default function StorePage() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingOriginalDeliveryType, setEditingOriginalDeliveryType] = useState<Product['delivery_type'] | null>(null);
   const [filesProductId, setFilesProductId] = useState<string | null>(null);
   const [filesProductName, setFilesProductName] = useState<string>('');
   const [form, setForm] = useState(emptyForm);
@@ -194,9 +224,46 @@ export default function StorePage() {
   const [liveModeConfirmed, setLiveModeConfirmed] = useState(false);
   const [planDraft, setPlanDraft] = useState<SubscriptionPlanDraft>(emptyPlan);
   const [integrationProduct, setIntegrationProduct] = useState<Product | null>(null);
+  const [licensingHandoffActive, setLicensingHandoffActive] = useState(false);
+  const [licensingHandoffMessage, setLicensingHandoffMessage] = useState('');
+  const [licensingPlanNotes, setLicensingPlanNotes] = useState('');
+  const [billingChoiceRequired, setBillingChoiceRequired] = useState(false);
+  const [licensingHandoff, setLicensingHandoff] = useState<LicensingStoreHandoffV1 | null>(null);
+  const [licenseRecoveryProductId, setLicenseRecoveryProductId] = useState<string | null>(null);
+  const [pendingCreateRequestId, setPendingCreateRequestId] = useState<string | null>(null);
   const [integrationRecovery, setIntegrationRecovery] = useState<{ readonly kind: 'license' | 'plan'; readonly message: string } | null>(null);
   const [pendingPlanRecovery, setPendingPlanRecovery] = useState<CommercePlanRecovery | null>(null);
   const [paypalStatus, setPaypalStatus] = useState<PayPalOnboardingStatus | null>(null);
+  const clearLicensingHandoff = useCallback(() => {
+    window.sessionStorage.removeItem(LICENSING_STORE_HANDOFF_KEY);
+    setLicensingHandoffActive(false);
+    setLicensingHandoffMessage('');
+    setLicensingPlanNotes('');
+    setBillingChoiceRequired(false);
+    setLicensingHandoff(null);
+    setLicenseRecoveryProductId(null);
+  }, []);
+  const persistLicenseRecovery = useCallback((productId: string, kind: 'license' | 'setup' = 'license') => {
+    setLicenseRecoveryProductId(productId);
+    try {
+      const stored = window.sessionStorage.getItem(LICENSING_STORE_HANDOFF_KEY);
+      const handoff = stored ? parseLicensingStoreHandoff(stored) : null;
+      if (!handoff) return;
+      const recovery = { kind, productId };
+      window.sessionStorage.setItem(
+        LICENSING_STORE_HANDOFF_KEY,
+        serializeLicensingStoreHandoff(
+          handoff.envelope,
+          handoff.guildId,
+          recovery,
+          handoff.creationRequestId,
+        ),
+      );
+      setLicensingHandoff({ ...handoff, recovery });
+    } catch {
+      setLicensingHandoffMessage('The product remains inactive, but this tab could not persist its policy-recovery identity. Retry the policy before leaving this page.');
+    }
+  }, []);
   const [storeControls, setStoreControls] = useState({
     product_types_enabled: [...defaultStoreProductFacets] as StoreProductFacet[],
     repeat_purchase_policy: 'unique' as 'unique' | 'stackable' | 'renewable' | 'seat-based',
@@ -235,6 +302,16 @@ export default function StorePage() {
             kind: 'plan',
             message: 'This inactive product has a saved subscription-plan recovery. Retry reconciles PayPal and the local plan before reactivation.',
           });
+        } else {
+          const licenseRecoverable = loadedProducts.find((product) => hasPendingCompletedProjectPolicy(product.metadata));
+          if (licenseRecoverable) {
+            setIntegrationProduct(licenseRecoverable);
+            setLicenseRecoveryProductId(licenseRecoverable.id);
+            setIntegrationRecovery({
+              kind: 'license',
+              message: 'This inactive product still needs its requested license policy. Retry and verify it before activation.',
+            });
+          }
         }
       }
       const guildJson = await guildRes.json();
@@ -431,7 +508,126 @@ export default function StorePage() {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = window.sessionStorage.getItem(LICENSING_STORE_HANDOFF_KEY);
+    } catch {
+      setLicensingHandoffMessage('The temporary licensing handoff could not be read. Store setup remains available manually.');
+      return;
+    }
+    if (!stored) return;
+    const handoff = parseLicensingStoreHandoff(stored);
+    if (!handoff) {
+      window.sessionStorage.removeItem(LICENSING_STORE_HANDOFF_KEY);
+      setLicensingHandoffMessage('The temporary licensing handoff was invalid or outdated and was discarded. Store setup remains available manually.');
+      return;
+    }
+    setLicensingHandoff(handoff);
+    setLicensingHandoffActive(true);
+    if (!paypalStatus?.guildId) return;
+    if (handoff.guildId !== paypalStatus.guildId) {
+      window.sessionStorage.removeItem(LICENSING_STORE_HANDOFF_KEY);
+      setLicensingHandoff(null);
+      setLicensingHandoffActive(false);
+      setLicensingHandoffMessage('The temporary licensing handoff belonged to a different server and was discarded. Store setup remains available manually.');
+      return;
+    }
+    if (handoff.recovery) {
+      setLicenseRecoveryProductId(handoff.recovery.productId);
+      setLicensingHandoffMessage('The preserved product was restored from this tab. Product creation is locked so retry cannot create a duplicate.');
+      setShowForm(false);
+      const restoreProduct = async () => {
+        try {
+          const response = await fetch('/api/store/products');
+          const body: { success?: boolean; data?: Product[] } = await response.json();
+          const product = body.data?.find((candidate) => candidate.id === handoff.recovery?.productId);
+          if (!response.ok || body.success === false || !body.data || !product) {
+            throw new Error('recovery product not found');
+          }
+          setProducts(body.data);
+          setIntegrationProduct(product);
+          const desiredPolicy = readCompletedProjectPolicy(product.metadata);
+          const policyPending = hasPendingCompletedProjectPolicy(product.metadata);
+          if (desiredPolicy) {
+            setLicenseKeyPrefix(desiredPolicy.keyPrefix);
+            setLicenseMaxDevices(desiredPolicy.maxDevices);
+            setLicenseHeartbeatMs(desiredPolicy.heartbeatIntervalMs);
+            setLicenseSdkCacheTtlMs(desiredPolicy.sdkCacheTtlMs);
+            setLicenseOfflineGraceSeconds(desiredPolicy.offlineGracePeriodSeconds);
+            setLicenseFeatureFlags(desiredPolicy.featureFlags.join(', '));
+            setLicenseRequireMembership(desiredPolicy.requireDiscordGuildMembership);
+            setRotationPolicy(desiredPolicy.rotationPolicy);
+            setSelfServiceDeviceRemoval(desiredPolicy.selfServiceDeviceRemoval);
+          }
+          const planRecovery = readPlanRecovery(product.metadata);
+          if (planRecovery) {
+            setPendingPlanRecovery(planRecovery);
+            setIntegrationRecovery({
+              kind: 'plan',
+              message: 'This inactive product still needs its subscription plan and license policy. Retry resumes the preserved setup without creating a duplicate.',
+            });
+          } else {
+            const savedConfig = licenseConfigForProduct(product);
+            if (!policyPending && desiredPolicy && savedConfig && licenseConfigMatchesDesiredPolicy(savedConfig, desiredPolicy)) {
+              clearLicensingHandoff();
+              setIntegrationRecovery(null);
+              setLicensingHandoffMessage('The preserved product setup was already complete, so the stale recovery marker was cleared.');
+              return;
+            }
+            if (!policyPending) {
+              setIntegrationRecovery(null);
+              setLicensingHandoffMessage('The saved product no longer reports a pending policy, but its authoritative policy could not be matched to this handoff. No automatic retry will overwrite it.');
+              return;
+            }
+            setIntegrationRecovery({
+              kind: 'license',
+              message: 'This inactive product still needs its requested license policy. Retry and verify the saved policy before activation.',
+            });
+          }
+        } catch {
+          setLicensingHandoffMessage('The preserved product could not be reloaded. Creation remains locked; retry after the Store product list is available.');
+        }
+      };
+      void restoreProduct();
+      return;
+    }
+    let prefill: ReturnType<typeof promptEnvelopeToStorePrefill>;
+    try {
+      prefill = promptEnvelopeToStorePrefill(handoff.envelope);
+    } catch {
+      window.sessionStorage.removeItem(LICENSING_STORE_HANDOFF_KEY);
+      setLicensingHandoff(null);
+      setLicensingHandoffActive(false);
+      setLicensingHandoffMessage('The temporary licensing handoff contained values the Store cannot save and was discarded. Store setup remains available manually.');
+      return;
+    }
+    setForm({
+      ...emptyForm,
+      name: prefill.name,
+      description: prefill.description,
+      type: prefill.billingType ?? 'one_time',
+      delivery_type: prefill.deliveryType,
+      price_dollars: prefill.billingType === 'free' ? '0.00' : '',
+      active: false,
+    });
+    setLicenseMaxDevices(prefill.maxDevices);
+    setLicenseHeartbeatMs(prefill.heartbeatIntervalMs);
+    setLicenseOfflineGraceSeconds(prefill.offlineGracePeriodSeconds);
+    setLicenseFeatureFlags(prefill.featureFlags.join(', '));
+    setLicensingPlanNotes(prefill.planNotes);
+    setBillingChoiceRequired(prefill.billingChoiceRequired);
+    setLicensingHandoffMessage('Completed-project values were loaded from this tab. Review the customer-facing description and Store policy before creating the inactive product.');
+    setEditingId(null);
+    setEditingOriginalDeliveryType(null);
+    setShowForm(true);
+  }, [clearLicensingHandoff, paypalStatus?.guildId]);
+
   const openCreate = () => {
+    if (integrationRecovery || licenseRecoveryProductId) {
+      toast({ title: 'Finish the preserved product setup before creating another product', variant: 'error' });
+      return;
+    }
     setForm(emptyForm);
     setRotationPolicy('rotate-and-invalidate');
     setSelfServiceDeviceRemoval(true);
@@ -444,12 +640,19 @@ export default function StorePage() {
     setLicenseRequireMembership(true);
     setPlanDraft(emptyPlan);
     setIntegrationRecovery(null);
+    setPendingCreateRequestId(null);
     setPendingPlanRecovery(null);
+    setBillingChoiceRequired(false);
+    setLicensingPlanNotes('');
     setEditingId(null);
     setShowForm(true);
   };
 
   const openEdit = (p: Product) => {
+    setBillingChoiceRequired(false);
+    setLicensingPlanNotes('');
+    setLicensingHandoffActive(false);
+    setLicensingHandoffMessage('');
     setForm({
       name: p.name,
       description: p.description ?? '',
@@ -461,7 +664,7 @@ export default function StorePage() {
       granted_channel_ids: p.granted_channel_ids ?? [],
       active: p.active,
     });
-    const licenseConfig = p.product_license_config?.[0];
+    const licenseConfig = licenseConfigForProduct(p);
     setRotationPolicy(licenseConfig?.rotation_policy ?? 'rotate-and-invalidate');
     setSelfServiceDeviceRemoval(licenseConfig?.self_service_device_removal ?? true);
     setLicenseKeyPrefix(licenseConfig?.key_prefix ?? 'SMNI');
@@ -472,6 +675,7 @@ export default function StorePage() {
     setLicenseFeatureFlags((licenseConfig?.feature_flags ?? []).join(', '));
     setLicenseRequireMembership(licenseConfig?.require_discord_guild_membership ?? true);
     setEditingId(p.id);
+    setEditingOriginalDeliveryType(p.delivery_type);
     setIntegrationProduct(p);
     setPlanDraft(p.plans?.[0] ?? { ...emptyPlan, currency: p.currency, price_cents: p.price_cents });
     setShowForm(true);
@@ -508,6 +712,22 @@ export default function StorePage() {
     return result.error ?? 'The license policy could not be saved.';
   };
 
+  const licensePolicyMatches = (product: Product): boolean => {
+    const config = licenseConfigForProduct(product);
+    if (!config) return false;
+    const expectedFlags = licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean);
+    return config.key_prefix === licenseKeyPrefix
+      && config.max_devices === licenseMaxDevices
+      && config.heartbeat_interval_seconds * 1000 === licenseHeartbeatMs
+      && config.sdk_cache_ttl_ms === licenseSdkCacheTtlMs
+      && config.offline_grace_period_seconds === licenseOfflineGraceSeconds
+      && JSON.stringify(config.feature_flags) === JSON.stringify(expectedFlags)
+      && config.require_discord_guild_membership === licenseRequireMembership
+      && config.rotation_policy === rotationPolicy
+      && config.self_service_device_removal === selfServiceDeviceRemoval
+      && !hasPendingCompletedProjectPolicy(product.metadata);
+  };
+
   const retryIntegrationRecovery = async () => {
     if (!integrationProduct || !integrationRecovery) return;
     try {
@@ -538,8 +758,19 @@ export default function StorePage() {
           });
           return;
         }
-        setIntegrationRecovery(null);
         setPendingPlanRecovery(null);
+        if (hasPendingCompletedProjectPolicy(verifiedProduct.metadata)) {
+          setLicenseRecoveryProductId(verifiedProduct.id);
+          setIntegrationRecovery({
+            kind: 'license',
+            message: 'The subscription plan is saved. The preserved license policy still needs to be saved and verified before activation.',
+          });
+          toast({ title: 'Subscription plan saved; license policy retry remains', variant: 'success' });
+          return;
+        }
+        setLicenseRecoveryProductId(null);
+        setIntegrationRecovery(null);
+        if (licensingHandoffActive) clearLicensingHandoff();
         toast({ title: 'Subscription plan saved and verified', variant: 'success' });
         return;
       }
@@ -548,13 +779,15 @@ export default function StorePage() {
       setIntegrationRecovery(policyError ? { kind: 'license', message: policyError } : null);
       if (!policyError) {
         const verifiedProduct = await readbackProduct(integrationProduct.id);
-        if (!verifiedProduct) {
+        if (!verifiedProduct || !licensePolicyMatches(verifiedProduct)) {
           setIntegrationRecovery({
             kind: 'license',
-            message: 'The license policy was saved, but authoritative product readback failed. Retry safely.',
+            message: 'The license policy save returned, but authoritative readback did not match. Retry safely.',
           });
           return;
         }
+        setLicenseRecoveryProductId(null);
+        if (licensingHandoffActive) clearLicensingHandoff();
         toast({ title: 'License policy saved and verified', variant: 'success' });
       }
     } catch {
@@ -567,6 +800,10 @@ export default function StorePage() {
 
   const save = async () => {
     // Client-side validation
+    if (billingChoiceRequired && !editingId) {
+      toast({ title: 'Choose a Store billing model before creating this product', variant: 'error' });
+      return;
+    }
     const priceCents = form.type === 'free' ? 0 : Math.round((parseFloat(form.price_dollars) || 0) * 100);
     if (priceCents < 0) {
       toast({ title: 'Price cannot be negative', variant: 'error' });
@@ -576,10 +813,24 @@ export default function StorePage() {
       toast({ title: 'Currency is required', variant: 'error' });
       return;
     }
+    if (form.delivery_type === 'license_key' && !/^[A-Z]{2,8}$/.test(licenseKeyPrefix)) {
+      toast({ title: 'License key prefix must contain 2 to 8 uppercase letters', variant: 'error' });
+      return;
+    }
 
+    const convertingToDynamic = editingId !== null
+      && editingOriginalDeliveryType !== 'license_key'
+      && form.delivery_type === 'license_key';
+    const createRequestId = editingId
+      ? null
+      : licensingHandoff?.creationRequestId ?? pendingCreateRequestId ?? crypto.randomUUID();
+    if (createRequestId) setPendingCreateRequestId(createRequestId);
+    let preservedProductId: string | null = createRequestId;
+    let productResponseReceived = false;
     setSaving(true);
     try {
       const payload = {
+        ...(createRequestId ? { id: createRequestId } : {}),
         ...(editingId ? { id: editingId } : {}),
         name: form.name,
         description: form.description || null,
@@ -589,20 +840,49 @@ export default function StorePage() {
         currency: form.currency.toUpperCase(),
         granted_role_ids: form.granted_role_ids,
         granted_channel_ids: form.granted_channel_ids,
-        active: form.active,
+        active: convertingToDynamic ? false : editingId ? form.active : false,
         ...(form.type === 'subscription' && !editingId ? {
           plans: [{ ...planDraft, currency: form.currency.toUpperCase() }],
+        } : {}),
+        ...((!editingId && (licensingHandoff || form.delivery_type === 'license_key')) || convertingToDynamic ? {
+          metadata: {
+            completed_project_licensing: {
+              plansAndFeatures: licensingHandoff?.envelope.billing.plansAndFeatures ?? '',
+              projectContext: licensingHandoff?.envelope.project.context ?? form.description,
+              outputFormats: licensingHandoff?.envelope.staticPolicy?.outputFormats ?? '',
+              installationIdentity: licensingHandoff?.envelope.dynamicPolicy?.installationIdentity ?? '',
+              policyPending: form.delivery_type === 'license_key',
+              ...(form.delivery_type === 'license_key' ? {
+                desiredPolicy: {
+                  keyPrefix: licenseKeyPrefix,
+                  maxDevices: licenseMaxDevices,
+                  heartbeatIntervalMs: licenseHeartbeatMs,
+                  sdkCacheTtlMs: licenseSdkCacheTtlMs,
+                  offlineGracePeriodSeconds: licenseOfflineGraceSeconds,
+                  featureFlags: licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean),
+                  requireDiscordGuildMembership: licenseRequireMembership,
+                  rotationPolicy,
+                  selfServiceDeviceRemoval,
+                },
+              } : {}),
+            },
+          },
         } : {}),
       };
 
       const res = await fetch('/api/store/products', {
         method: editingId ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(createRequestId ? { 'x-request-id': createRequestId } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
       const json = await res.json();
+      productResponseReceived = true;
       const productId = json.data?.id ?? editingId;
+      preservedProductId = typeof productId === 'string' ? productId : null;
       if (!res.ok || json.success === false) {
         if (productId && typeof productId === 'string') {
           const preserved = await readbackProduct(productId);
@@ -613,6 +893,7 @@ export default function StorePage() {
               ? commercePlanRecoverySchema.safeParse(recoveryPlan)
               : null;
             const planRecovery = parsedRecovery?.success ? parsedRecovery.data : null;
+            persistLicenseRecovery(productId, planRecovery ? 'setup' : 'license');
             setPendingPlanRecovery(planRecovery);
             setIntegrationRecovery({
               kind: planRecovery ? 'plan' : 'license',
@@ -629,22 +910,46 @@ export default function StorePage() {
         const policyError = await saveLicensePolicy(productId);
         if (policyError) {
           await readbackProduct(productId);
+          persistLicenseRecovery(productId);
           setIntegrationRecovery({ kind: 'license', message: policyError });
           setShowForm(false);
           toast({ title: 'Product saved, but license policy was not saved', variant: 'error' });
           return;
         }
       }
-      if (!productId || !(await readbackProduct(productId))) {
+      const verifiedProduct = productId ? await readbackProduct(productId) : null;
+      if (!productId || !verifiedProduct || (form.delivery_type === 'license_key' && !licensePolicyMatches(verifiedProduct))) {
+        if (productId && form.delivery_type === 'license_key') {
+          persistLicenseRecovery(productId);
+          setIntegrationRecovery({
+            kind: 'license',
+            message: 'The license policy may have been saved, but authoritative product readback failed. Retry safely before activation.',
+          });
+          setShowForm(false);
+        }
         toast({ title: 'Product saved, but authoritative readback failed', variant: 'error' });
         return;
       }
       setIntegrationRecovery(null);
+      setPendingCreateRequestId(null);
       setPendingPlanRecovery(null);
+      if (!editingId && licensingHandoffActive) clearLicensingHandoff();
       setShowForm(false);
       toast({ title: editingId ? 'Product updated and verified' : 'Product created and verified', variant: 'success' });
     } catch {
-      toast({ title: 'Network error — could not save product', variant: 'error' });
+      if (preservedProductId && form.delivery_type === 'license_key' && productResponseReceived) {
+        persistLicenseRecovery(preservedProductId);
+        setIntegrationRecovery({
+          kind: 'license',
+          message: 'The product was saved, but policy verification lost contact with the dashboard API. Retry the preserved policy before activation.',
+        });
+        setShowForm(false);
+        toast({ title: 'Product preserved; license policy needs a retry', variant: 'error' });
+      } else if (preservedProductId) {
+        toast({ title: 'The response was interrupted. Retry is safe and will reuse the same product request.', variant: 'error' });
+      } else {
+        toast({ title: 'Network error — could not save product', variant: 'error' });
+      }
     } finally {
       setSaving(false);
     }
@@ -666,6 +971,10 @@ export default function StorePage() {
   };
 
   const toggleActive = async (p: Product) => {
+    if (!p.active && (licenseRecoveryProductId === p.id || hasPendingCompletedProjectPolicy(p.metadata))) {
+      toast({ title: 'Retry and verify the requested license policy before activation', variant: 'error' });
+      return;
+    }
     try {
       const res = await fetch('/api/store/products', {
         method: 'PUT',
@@ -704,6 +1013,15 @@ export default function StorePage() {
     (option.value !== 'subscription' || storePolicy.enabledFacets.includes('subscription'))
     && (option.value !== 'free' || storePolicy.enabledFacets.includes('free'))
   ));
+  const unresolvedHandoffBilling = billingChoiceRequired && editingId === null;
+  const formProductTypeOptions = unresolvedHandoffBilling
+    ? [{ value: '', label: 'Choose billing model' }, ...availableProductTypeOptions]
+    : availableProductTypeOptions;
+  const cancelProductForm = () => {
+    if (licensingHandoffActive) clearLicensingHandoff();
+    setShowForm(false);
+    setEditingOriginalDeliveryType(null);
+  };
 
   // ── Render ──
 
@@ -717,7 +1035,13 @@ export default function StorePage() {
             Manage products, pricing, and delivery
           </p>
         </div>
-        <Button onClick={openCreate}>New Product</Button>
+        <Button
+          onClick={openCreate}
+          disabled={integrationRecovery !== null || licenseRecoveryProductId !== null}
+          title={integrationRecovery || licenseRecoveryProductId ? 'Finish the preserved product setup first' : undefined}
+        >
+          New Product
+        </Button>
       </div>
 
       {/* Stats Row */}
@@ -741,6 +1065,12 @@ export default function StorePage() {
       <StoreControlRoom />
 
       <PayPalOnboardingStatusPanel onStatus={setPaypalStatus} />
+
+      {licensingHandoffMessage && (
+        <p className={`rounded-input border p-3 text-sm ${licensingHandoffActive ? 'border-discord-accent/40 bg-discord-accent/10 text-discord-text-secondary' : 'border-discord-warning/40 bg-discord-warning/10 text-discord-warning'}`} role={licensingHandoffActive ? 'status' : 'alert'}>
+          {licensingHandoffMessage}
+        </p>
+      )}
 
       {integrationProduct && (
         <ProductIntegrationPanel
@@ -859,7 +1189,7 @@ export default function StorePage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Input id="product-name" label="Name *" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Product name" />
             <Input id="product-price" label="Price ($) *" type="number" step="0.01" min="0" value={form.type === 'free' ? '0.00' : form.price_dollars} disabled={form.type === 'free'} onChange={(event) => setForm({ ...form, price_dollars: event.target.value })} placeholder="9.99" />
-            <Select id="product-type" label="Type" value={form.type} onChange={(event) => { const type = event.target.value === 'subscription' ? 'subscription' : event.target.value === 'free' ? 'free' : 'one_time'; setForm({ ...form, type, price_dollars: type === 'free' ? '0.00' : form.price_dollars }); }} options={availableProductTypeOptions} />
+            <Select id="product-type" label="Type" value={unresolvedHandoffBilling ? '' : form.type} onChange={(event) => { const value = event.target.value; if (value !== 'one_time' && value !== 'subscription' && value !== 'free') return; setBillingChoiceRequired(false); setForm({ ...form, type: value, price_dollars: value === 'free' ? '0.00' : form.price_dollars }); }} options={formProductTypeOptions} />
             <Select id="product-delivery-type" label="Licensing mode" value={form.delivery_type} onChange={(event) => { const deliveryType = storePolicy.allowedDeliveryTypes.find((value) => value === event.target.value); if (deliveryType) setForm({ ...form, delivery_type: deliveryType }); }} options={deliveryTypeOptions} />
             <div
               className="sm:col-span-2 rounded-lg border border-discord-accent/40 bg-discord-accent/10 p-4"
@@ -881,17 +1211,24 @@ export default function StorePage() {
               </ol>
             </div>
             <div className="sm:col-span-2">
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
+              <label htmlFor="product-description" className="mb-1 block text-xs font-medium text-discord-text-muted">
                 Description
               </label>
               <textarea
+                id="product-description"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
                 rows={3}
                 className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none resize-none"
                 placeholder="Product description"
               />
+              {licensingHandoffActive && <p className="mt-1 text-xs text-discord-warning" role="status">Review this carefully. It came from project context and will be visible to customers.</p>}
             </div>
+            {licensingPlanNotes && (
+              <div className="sm:col-span-2 rounded-input border border-discord-warning/40 bg-discord-warning/10 p-3 text-sm text-discord-text-secondary">
+                <strong className="text-discord-warning">Plan notes to review:</strong> {licensingPlanNotes}
+              </div>
+            )}
             {form.delivery_type === 'license_key' && (
               <div className="sm:col-span-2 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary/40 p-4">
                 <h3 className="text-sm font-semibold text-discord-text-primary">License recovery controls</h3>
@@ -965,20 +1302,24 @@ export default function StorePage() {
               </>
             )}
             <Input id="product-currency" label="Currency" value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value })} placeholder="USD" />
-            <div className="pt-5"><Toggle label="Active" checked={form.active} onChange={(active) => setForm({ ...form, active })} /></div>
+            {editingId ? (
+              <div className="pt-5"><Toggle label="Active" checked={form.active} onChange={(active) => setForm({ ...form, active })} /></div>
+            ) : (
+              <p className="self-end rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-secondary">New products are created inactive. Activate this product from the Store only after its saved policy is verified.</p>
+            )}
           </div>
 
           <div className="mt-4 flex gap-2">
             <Button
               variant="success"
               onClick={save}
-              disabled={saving || !form.name}
+              disabled={saving || !form.name || unresolvedHandoffBilling || integrationRecovery !== null || licenseRecoveryProductId !== null}
             >
               {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
             </Button>
             <Button
               variant="secondary"
-              onClick={() => setShowForm(false)}
+              onClick={cancelProductForm}
             >
               Cancel
             </Button>
@@ -1027,7 +1368,7 @@ export default function StorePage() {
                       {p.plans && p.plans.length > 0 && (
                         <span>{p.plans.length} plan(s)</span>
                       )}
-                      {p.product_license_config && p.product_license_config.length > 0 && (
+                      {licenseConfigForProduct(p) && (
                         <span>🔑 Licensed</span>
                       )}
                     </div>
@@ -1039,6 +1380,8 @@ export default function StorePage() {
                     size="sm"
                     variant={p.active ? 'success' : 'secondary'}
                     onClick={() => toggleActive(p)}
+                    disabled={!p.active && (licenseRecoveryProductId === p.id || hasPendingCompletedProjectPolicy(p.metadata))}
+                    title={!p.active && (licenseRecoveryProductId === p.id || hasPendingCompletedProjectPolicy(p.metadata)) ? 'Retry and verify the requested license policy before activation' : undefined}
                   >
                     {p.active ? 'Active' : 'Inactive'}
                   </Button>
