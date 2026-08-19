@@ -10,6 +10,7 @@ import {
   ChannelType,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { bindSupabaseRpc } from '../../services/supabase-rpc.js';
 import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
 import { deterministicUuidV8 } from '../../utils/deterministic-uuid.js';
@@ -334,7 +335,7 @@ async function executeAction(
         ctx.member.id,
         productId,
       ]);
-      const rpc = ctx.supabase.rpc as unknown as (
+      const rpc = bindSupabaseRpc(ctx.supabase) as unknown as (
         name: string,
         params: Record<string, unknown>,
       ) => Promise<{ data: unknown; error: { message: string } | null }>;

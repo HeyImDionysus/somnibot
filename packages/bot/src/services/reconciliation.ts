@@ -10,6 +10,7 @@
 
 import type { Guild } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { bindSupabaseRpc } from './supabase-rpc.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Reconciliation');
@@ -218,7 +219,7 @@ export async function runReconciliation(
             throw new Error('Unresolved paid-role intent query returned mismatched evidence');
           }
           const { data: carrierValue, error: carrierError } = await (
-            supabase.rpc as (
+            bindSupabaseRpc(supabase) as (
               fn: string,
               params: Record<string, unknown>,
             ) => ReturnType<typeof supabase.rpc>
@@ -341,7 +342,7 @@ export async function runReconciliation(
               // No row means no current paid repair authority, so Discord is
               // intentionally left untouched.
               const { data: carrierValue, error: carrierError } = await (
-                supabase.rpc as (
+                bindSupabaseRpc(supabase) as (
                   fn: string,
                   params: Record<string, unknown>,
                 ) => ReturnType<typeof supabase.rpc>
