@@ -37,6 +37,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
+import { bindSupabaseRpc } from './supabase-rpc.js';
 import { codePointLength, sqlSpaceTrim } from '../utils/prize-snapshot.js';
 import {
   CommerceFulfillmentService,
@@ -881,7 +882,7 @@ export async function handleReconcileEntitlementRoles(
     }
 
     const { data, error } = await (
-      supabase.rpc as (
+      bindSupabaseRpc(supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof supabase.rpc>
@@ -1130,7 +1131,7 @@ async function handleDeliverReceipt(
     );
 
     const { data: generationData, error: generationError } = await (
-      supabase.rpc as (
+      bindSupabaseRpc(supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof supabase.rpc>
@@ -2573,7 +2574,7 @@ async function requestNonCommerceRelinkActivation(
   context: ClaimedActionContext,
 ): Promise<{ activationActionId: string | null; disposition: 'enqueued' | 'superseded' }> {
   const { data, error } = await (
-    supabase.rpc as (
+    bindSupabaseRpc(supabase) as (
       fn: string,
       params: Record<string, unknown>,
     ) => ReturnType<typeof supabase.rpc>
@@ -2602,7 +2603,7 @@ async function prepareNonCommerceRoleCleanup(
   context: ClaimedActionContext,
 ): Promise<{ intentId: string | null; disposition: NonCommerceCleanupDisposition }> {
   const { data, error } = await (
-    supabase.rpc as (
+    bindSupabaseRpc(supabase) as (
       fn: string,
       params: Record<string, unknown>,
     ) => ReturnType<typeof supabase.rpc>
@@ -2642,7 +2643,7 @@ async function deferNonCommerceRelinkCleanup(
   context: ClaimedActionContext,
 ): Promise<'deferred' | 'stale_claim'> {
   const { data, error } = await (
-    supabase.rpc as (
+    bindSupabaseRpc(supabase) as (
       fn: string,
       params: Record<string, unknown>,
     ) => ReturnType<typeof supabase.rpc>
@@ -3280,7 +3281,7 @@ async function processAction(
   // the row iff status was still 'pending' when this caller flipped it.
   // V5 Audit §6.P3a: Use unknown-schema cast to call RPCs not in generated types.
   const { data: claimed, error: claimErr } = await (
-    supabase.rpc as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
+    bindSupabaseRpc(supabase) as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
   )('bot_action_queue_claim', {
     p_action_id: action.id,
     p_protocol_version: ACTION_QUEUE_CLAIM_PROTOCOL_VERSION,
@@ -3365,7 +3366,7 @@ async function processAction(
       let retryTransition: ReturnType<typeof parseRetryClaimTransition> = null;
       for (let transitionAttempt = 0; transitionAttempt < 2; transitionAttempt++) {
         const { data: retryEvidence, error: retryError } = await (
-          supabase.rpc as (
+          bindSupabaseRpc(supabase) as (
             fn: string,
             params: Record<string, unknown>,
           ) => ReturnType<typeof supabase.rpc>
@@ -3430,7 +3431,7 @@ async function processAction(
   let finalDisposition: FinalClaimDisposition | null = retryFinalDisposition;
   if (finalDisposition === null) {
     const { data: finishApplied, error: finishError } = await (
-      supabase.rpc as (
+      bindSupabaseRpc(supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof supabase.rpc>
@@ -3561,7 +3562,7 @@ async function recoverStaleActions(
   scheduler: LaneScheduler,
 ): Promise<void> {
   const { data: recovered, error } = await (
-    supabase.rpc as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
+    bindSupabaseRpc(supabase) as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
   )('bot_action_queue_recover_stale', {
     p_guild_id: guild.id,
     p_timeout_seconds: STALE_PROCESSING_TIMEOUT_SECS,

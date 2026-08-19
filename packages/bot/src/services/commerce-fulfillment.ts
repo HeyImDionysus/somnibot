@@ -24,6 +24,7 @@ import {
   type CommerceOutwardResult,
 } from './commerce-outward.js';
 import { inspectTemporaryRoleGrant } from './temp-role-ownership.js';
+import { bindSupabaseRpc } from './supabase-rpc.js';
 import {
   EntitlementService,
   isFulfillmentEntitlementSource,
@@ -1745,7 +1746,7 @@ export class CommerceFulfillmentService {
     roleWasPresent: boolean,
   ): Promise<TemporaryRoleAttachment> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1845,7 +1846,7 @@ export class CommerceFulfillmentService {
     roleId: string,
   ): Promise<TemporaryRolePromotion> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1911,7 +1912,7 @@ export class CommerceFulfillmentService {
     settled: boolean;
   }> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>

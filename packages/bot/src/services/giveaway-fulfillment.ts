@@ -10,6 +10,7 @@
 import type { Guild } from 'discord.js';
 import { EmbedBuilder } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { bindSupabaseRpc } from './supabase-rpc.js';
 import type { PlatformEventBus } from './event-bus.js';
 import { createLogger, type PlatformEvent } from '@somnibot/shared';
 import { applyBrand, resolveBrandKit } from '../features/branding/index.js';
@@ -195,7 +196,7 @@ export class GiveawayFulfillmentService {
       winnerId,
       productId,
     ]);
-    const rpc = this.supabase.rpc as unknown as (
+    const rpc = bindSupabaseRpc(this.supabase) as unknown as (
       name: string,
       params: Record<string, unknown>,
     ) => Promise<{ data: unknown; error: { message: string } | null }>;

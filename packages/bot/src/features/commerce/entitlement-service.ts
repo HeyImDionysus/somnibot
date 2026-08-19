@@ -6,6 +6,7 @@
  */
 import type { Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { bindSupabaseRpc } from '../../services/supabase-rpc.js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { raiseOwnerAlert, resolveOwnerAlert } from '../../services/alert-service.js';
 import { createLogger } from '@somnibot/shared';
@@ -317,7 +318,7 @@ export class EntitlementService {
         throw new Error('Subscription entitlement requires exact lifecycle expiry');
       }
       const { data, error } = await (
-        this.supabase.rpc as (
+        bindSupabaseRpc(this.supabase) as (
           fn: string,
           params: Record<string, unknown>,
         ) => ReturnType<typeof this.supabase.rpc>
@@ -537,7 +538,7 @@ export class EntitlementService {
     }
 
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -862,7 +863,7 @@ export class EntitlementService {
     }
 
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1096,7 +1097,7 @@ export class EntitlementService {
     }
 
     const { data: lifecycleData, error: lifecycleError } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1214,7 +1215,7 @@ export class EntitlementService {
     }
 
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1347,7 +1348,7 @@ export class EntitlementService {
     }
 
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1509,7 +1510,7 @@ export class EntitlementService {
     attempt: PurchaseRoleDeliveryAttempt,
   ): Promise<boolean> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1538,7 +1539,7 @@ export class EntitlementService {
     roleWasPresent: boolean,
   ): Promise<RoleDeliveryAttachment> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1632,7 +1633,7 @@ export class EntitlementService {
     roleId: string,
   ): Promise<RoleDeliveryPromotion> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1681,7 +1682,7 @@ export class EntitlementService {
     roleId: string,
   ): Promise<RoleDeliveryBaselineConfirmation> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1730,7 +1731,7 @@ export class EntitlementService {
     roleId: string,
   ): Promise<void> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1783,7 +1784,7 @@ export class EntitlementService {
     disposition: PurchaseRoleDeliveryDisposition;
   }> {
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
@@ -1898,7 +1899,7 @@ export class EntitlementService {
     ) {
       throw new Error('Paid role cleanup claim is malformed');
     }
-    const rpc = this.supabase.rpc as (
+    const rpc = bindSupabaseRpc(this.supabase) as (
       fn: string,
       params: Record<string, unknown>,
     ) => ReturnType<typeof this.supabase.rpc>;
@@ -2569,7 +2570,7 @@ export class EntitlementService {
       throw new Error('role ownership proof identity is malformed');
     }
     const { data, error } = await (
-      this.supabase.rpc as (
+      bindSupabaseRpc(this.supabase) as (
         fn: string,
         params: Record<string, unknown>,
       ) => ReturnType<typeof this.supabase.rpc>
