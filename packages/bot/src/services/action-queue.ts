@@ -3238,6 +3238,8 @@ export const ACTION_HANDLERS: Record<string, ActionHandler> = {
 // V5 Audit §6.5: in-process retry budget for transient handler failures
 // (exponential backoff 30s → 60s → 120s — see processAction below).
 const HANDLER_MAX_RETRIES = 3;
+const RETRY_INTENT_RACE_MAX_ATTEMPTS = 11;
+const RETRY_INTENT_RACE_WAIT_MS = 1_000;
 
 // Payload fields that must never be copied into audit_logs. Queue and DLQ
 // rows intentionally keep the plaintext license key so a failed delivery
@@ -3364,7 +3366,11 @@ async function processAction(
         p_next_retry_at: new Date(Date.now() + backoffMs).toISOString(),
       };
       let retryTransition: ReturnType<typeof parseRetryClaimTransition> = null;
-      for (let transitionAttempt = 0; transitionAttempt < 2; transitionAttempt++) {
+      for (
+        let transitionAttempt = 0;
+        transitionAttempt < RETRY_INTENT_RACE_MAX_ATTEMPTS;
+        transitionAttempt++
+      ) {
         const { data: retryEvidence, error: retryError } = await (
           bindSupabaseRpc(supabase) as (
             fn: string,
@@ -3381,6 +3387,11 @@ async function processAction(
           return;
         }
         if (retryTransition.disposition !== 'intent_raced') break;
+        if (transitionAttempt < RETRY_INTENT_RACE_MAX_ATTEMPTS - 1) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, RETRY_INTENT_RACE_WAIT_MS);
+          });
+        }
       }
 
       if (!retryTransition || retryTransition.disposition === 'intent_raced') {
