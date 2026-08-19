@@ -8,8 +8,24 @@ const migration = readFileSync(
   ),
   'utf8',
 );
+const missingOutwardEvidenceMigration = readFileSync(
+  new URL(
+    '../../../supabase/migrations/20260819140000_fail_closed_missing_fulfillment_outward.sql',
+    import.meta.url,
+  ),
+  'utf8',
+);
 
 describe('checkout double-charge migration safety contracts', () => {
+  it('requeues legacy fulfillment when no receipt or event evidence exists', () => {
+    expect(missingOutwardEvidenceMigration).toMatch(
+      /IF NOT v_has_legacy_rows THEN\s+RETURN 'requeue';/i,
+    );
+    expect(missingOutwardEvidenceMigration).not.toMatch(
+      /IF NOT v_has_legacy_rows THEN\s+RETURN 'complete';/i,
+    );
+  });
+
   it('preserves an existing active checkout before ranking later recovery rows', () => {
     expect(migration).toMatch(
       /ORDER BY\s+paid_order\.checkout_active DESC,\s+paid_order\.created_at DESC,\s+paid_order\.id DESC/i,

@@ -800,7 +800,7 @@ describe('deliver_receipt action', () => {
     }
   });
 
-  it('reclassifies an intent race before scheduling the sole valid requeue transition', async () => {
+  it('waits for a concurrent intent controller before scheduling the sole valid requeue transition', async () => {
     vi.useFakeTimers();
     try {
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
@@ -809,16 +809,21 @@ describe('deliver_receipt action', () => {
       const supa = makeSupa([deliveryAction()], {
         retryResults: [
           { data: [{ applied: false, disposition: 'intent_raced' }], error: null },
+          { data: [{ applied: false, disposition: 'intent_raced' }], error: null },
+          { data: [{ applied: false, disposition: 'intent_raced' }], error: null },
           { data: [{ applied: true, disposition: 'requeued' }], error: null },
         ],
       });
 
-      await startActionQueueListener(guild, supa);
+      const listenerStarted = startActionQueueListener(guild, supa);
+      await vi.advanceTimersByTimeAsync(3_000);
+      await listenerStarted;
 
       expect(
         supa.rpc.mock.calls.filter(([name]: [string]) =>
           name === 'bot_action_queue_retry_claim'),
-      ).toHaveLength(2);
+      ).toHaveLength(4);
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1_000);
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
       expect(
         supa.rpc.mock.calls.filter(([name]: [string]) =>
