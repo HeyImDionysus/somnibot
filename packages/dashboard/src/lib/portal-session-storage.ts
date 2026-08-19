@@ -25,7 +25,7 @@ export function getPortalToken(guildId = portalGuildId()): string | null {
 
 export function setPortalToken(guildId: string, token: string): void {
   localStorage.setItem(`${TOKEN_PREFIX}${guildId}`, token);
-  sessionStorage.removeItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`);
+  localStorage.removeItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`);
   announcePortalTokenChange();
 }
 
@@ -36,15 +36,15 @@ export function clearPortalToken(guildId = portalGuildId()): void {
 }
 
 export function suppressPortalAutoLogin(guildId = portalGuildId()): void {
-  if (guildId) sessionStorage.setItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`, '1');
+  if (guildId) localStorage.setItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`, '1');
 }
 
 export function isPortalAutoLoginSuppressed(guildId = portalGuildId()): boolean {
-  return Boolean(guildId && sessionStorage.getItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`));
+  return Boolean(guildId && localStorage.getItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`));
 }
 
 export function allowPortalAutoLogin(guildId = portalGuildId()): void {
-  if (guildId) sessionStorage.removeItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`);
+  if (guildId) localStorage.removeItem(`${AUTO_LOGIN_SUPPRESSED_PREFIX}${guildId}`);
 }
 
 export function portalLoginUrl(guildId = portalGuildId()): string {

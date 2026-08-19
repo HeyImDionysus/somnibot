@@ -107,6 +107,10 @@ test('portal sign out stays signed out instead of silently exchanging the dashbo
   expect(exchanges).toBe(0);
   await expect.poll(() => page.evaluate((id) => localStorage.getItem(`portal_token:${id}`), guildId))
     .toBeNull();
+  await expect.poll(() => page.evaluate(
+    (id) => localStorage.getItem(`portal_auto_login_suppressed:${id}`),
+    guildId,
+  )).toBe('1');
 });
 
 test('a stale portal token is replaced once from the existing dashboard session', async ({ page }) => {

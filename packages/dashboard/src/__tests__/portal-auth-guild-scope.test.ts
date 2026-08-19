@@ -106,6 +106,16 @@ beforeEach(() => {
     remaining: 9,
     retryAfterMs: 0,
   });
+  vi.mocked(rateLimits.portalDashboardSession).mockReset().mockResolvedValue({
+    limited: false,
+    remaining: 5,
+    retryAfterMs: 0,
+  });
+  vi.mocked(rateLimits.portalData).mockReset().mockResolvedValue({
+    limited: false,
+    remaining: 29,
+    retryAfterMs: 0,
+  });
   insertedSession = null;
   (createAdminSupabase as any).mockReturnValue(makeAdmin());
   process.env.DISCORD_APPLICATION_ID = 'app-id';
@@ -199,6 +209,45 @@ describe('POST /api/portal/auth guild scoping', () => {
     expect(res.status).toBe(429);
     expect(requireAuth).not.toHaveBeenCalled();
     expect(createAdminSupabase).not.toHaveBeenCalled();
+    expect(insertedSession).toBeNull();
+  });
+
+  it('rate-limits malformed payloads before parsing their bodies', async () => {
+    vi.mocked(rateLimits.portalAuth).mockResolvedValueOnce({
+      limited: true,
+      remaining: 0,
+      retryAfterMs: 60_000,
+    });
+    const request = new NextRequest('https://dash.example/api/portal/auth', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://dash.example',
+        'x-forwarded-for': '1.2.3.4',
+      },
+      body: '{malformed-json',
+    });
+
+    const res = await POST(request);
+
+    expect(res.status).toBe(429);
+    expect(createAdminSupabase).not.toHaveBeenCalled();
+  });
+
+  it('confines local launcher exchanges to its configured guilds', async () => {
+    vi.mocked(requireAuth).mockResolvedValue({
+      ok: true,
+      userId: 'local-owner',
+      discordId: 'discord-user-1',
+      localGuildIds: ['guild-A'],
+    });
+
+    const res = await POST(makeRequest({
+      action: 'dashboard_session',
+      guild_id: 'guild-B',
+    }));
+
+    expect(res.status).toBe(403);
     expect(insertedSession).toBeNull();
   });
 
@@ -305,5 +354,6 @@ describe('DELETE /api/portal/auth', () => {
 
     expect(responses.map((response) => response.status).sort()).toEqual([200, 401]);
     expect(auditCount).toBe(1);
+    expect(rateLimits.portalData).not.toHaveBeenCalled();
   });
 });

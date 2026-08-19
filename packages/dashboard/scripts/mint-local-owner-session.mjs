@@ -73,9 +73,26 @@ if (created.error && !/already been registered|already exists/i.test(created.err
 }
 
 const anon = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
+const initialSignIn = await anon.auth.signInWithPassword({ email, password });
+if (initialSignIn.error || !initialSignIn.data.user) {
+  console.error(`signIn failed: ${initialSignIn.error?.message ?? 'no user'}`);
+  process.exit(1);
+}
+
+const updated = await admin.auth.admin.updateUserById(initialSignIn.data.user.id, {
+  app_metadata: {
+    ...initialSignIn.data.user.app_metadata,
+    discord_id: discordId,
+  },
+});
+if (updated.error) {
+  console.error(`updateUser failed: ${updated.error.message}`);
+  process.exit(1);
+}
+
 const signIn = await anon.auth.signInWithPassword({ email, password });
 if (signIn.error || !signIn.data.session) {
-  console.error(`signIn failed: ${signIn.error?.message ?? 'no session'}`);
+  console.error(`refreshed signIn failed: ${signIn.error?.message ?? 'no session'}`);
   process.exit(1);
 }
 

@@ -18,6 +18,13 @@ vi.mock('@/lib/api/rate-limit', () => ({
 vi.mock('@/lib/api/signed-url', () => ({
   generateSignedDownloadUrl: vi.fn(() => 'https://signed.example/dl'),
 }));
+vi.mock('@/lib/discord-runtime-config', () => ({
+  getDiscordRuntimeConfig: vi.fn(async () => ({
+    applicationId: 'app-id',
+    clientSecret: 'secret',
+    sources: { applicationId: 'env', clientSecret: 'env' },
+  })),
+}));
 
 import { POST as authPost } from '@/app/api/portal/auth/route';
 import { POST as downloadLinkPost } from '@/app/api/portal/download-link/route';

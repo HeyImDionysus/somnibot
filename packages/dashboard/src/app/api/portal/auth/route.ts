@@ -58,20 +58,21 @@ export async function POST(request: NextRequest) {
   // header wrote attacker-chosen addresses into the record used to investigate
   // account takeover. Both are fixed by counting from the right.
   try {
+    const clientIp = getClientIp(request);
+    const ipLimit = await rateLimits.portalAuth(clientIp);
+    if (ipLimit.limited) {
+      return NextResponse.json(
+        {
+          error: 'Too many login attempts. Try again later.',
+          retry_after: Math.ceil(ipLimit.retryAfterMs / 1000),
+        },
+        { status: 429 },
+      );
+    }
     const parsed = await parseBody(request, portalAuthSchema);
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
     const dashboardOccurrenceId = body.action === 'dashboard_session' ? randomUUID() : undefined;
-    const clientIp = getClientIp(request);
-    if (body.action === 'login' || body.action === 'dashboard_session') {
-      const rl = await rateLimits.portalAuth(clientIp);
-      if (rl.limited) {
-        return NextResponse.json(
-          { error: 'Too many login attempts. Try again later.', retry_after: Math.ceil(rl.retryAfterMs / 1000) },
-          { status: 429 },
-        );
-      }
-    }
     const admin = createAdminSupabase();
 
     {
@@ -105,6 +106,21 @@ export async function POST(request: NextRequest) {
             success: false,
           });
           return auth.response;
+        }
+        if (auth.localGuildIds && !auth.localGuildIds.includes(body.guild_id)) {
+          await writeCommerceAudit(admin, {
+            guildId: body.guild_id,
+            actorType: 'user',
+            actorId: auth.userId,
+            action: 'portal.login_denied',
+            targetType: 'portal_session',
+            details: { reason: 'launcher_guild_out_of_scope', ipAddress: clientIp },
+            success: false,
+          });
+          return NextResponse.json(
+            { error: 'This server is not configured for the local launcher session.' },
+            { status: 403 },
+          );
         }
         const rl = await rateLimits.portalDashboardSession(auth.userId, clientIp);
         if (rl.limited) {
@@ -330,14 +346,6 @@ export async function DELETE(request: NextRequest) {
     }
 
     const tokenHash = hashToken(token);
-    const rl = await rateLimits.portalData(tokenHash);
-    if (rl.limited) {
-      return NextResponse.json(
-        { error: 'Too many portal requests. Try again later.', retry_after: Math.ceil(rl.retryAfterMs / 1000) },
-        { status: 429 },
-      );
-    }
-
     const admin = createAdminSupabase();
     const { data: revokedRows, error: sessionError } = await admin.rpc(
       'revoke_portal_session_atomic',
