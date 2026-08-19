@@ -289,7 +289,7 @@ jobs:
       - name: Build shared
         run: pnpm --filter @somnibot/shared build
       - name: Install Chromium runtime
-        run: pnpm --filter @somnibot/dashboard exec playwright install --with-deps chromium
+        run: pnpm --filter @somnibot/dashboard exec playwright install chromium
       - name: Run rendered dashboard browser tests
         run: pnpm --filter @somnibot/dashboard test:e2e
         env:
