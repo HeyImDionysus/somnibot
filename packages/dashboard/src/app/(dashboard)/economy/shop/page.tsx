@@ -347,11 +347,11 @@ export default function ShopPage() {
             <h3 className="text-sm font-semibold text-discord-text-secondary uppercase tracking-wider">{category}</h3>
             <div className="rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary divide-y divide-discord-bg-tertiary">
               {catItems.map((item) => (
-                <div key={item.id} className="flex items-center justify-between px-4 py-3">
-                  <div className="flex items-center gap-3 min-w-0">
+                <div key={item.id} className="flex flex-col items-stretch gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex min-w-0 items-start gap-3">
                     <span className="text-xl">{item.emoji}</span>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <p className="text-sm font-medium text-discord-text-primary truncate">{item.name}</p>
                         {!item.active && (
                           <span className="rounded bg-discord-bg-tertiary px-1.5 py-0.5 text-[10px] text-discord-text-muted uppercase">Hidden</span>
@@ -360,7 +360,7 @@ export default function ShopPage() {
                       <p className="text-xs text-discord-text-secondary truncate">{item.description || 'No description'}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-4 shrink-0">
+                  <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end">
                     <div className="text-right">
                       <p className="text-sm font-medium text-discord-text-primary">{item.price.toLocaleString()}</p>
                       {item.stock !== null && (

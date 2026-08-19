@@ -210,18 +210,18 @@ export default function AdventuresPage() {
       ) : (
         <div className="space-y-2">
           {adventures.map((a) => (
-            <div key={a.id} className="flex items-center justify-between rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4">
-              <div className="flex items-center gap-3">
+            <div key={a.id} className="flex flex-col items-stretch gap-3 rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-start gap-3">
                 <span className="text-2xl">{a.emoji}</span>
-                <div>
-                  <p className="font-semibold text-discord-text-primary">{a.name}</p>
+                <div className="min-w-0">
+                  <p className="font-semibold text-discord-text-primary [overflow-wrap:anywhere]">{a.name}</p>
                   <p className="text-sm text-discord-text-secondary">
                     {TYPE_EMOJI[a.adventure_type] ?? '❓'} {a.adventure_type} • {a.difficulty} • {a.min_scenes}–{a.max_scenes} scenes
                   </p>
                   {a.description && <p className="text-xs text-discord-text-muted mt-1">{a.description}</p>}
                 </div>
               </div>
-              <div className="flex gap-1">
+              <div className="flex justify-end gap-1 sm:shrink-0">
                 <button type="button" aria-label={`Edit ${a.name}`} onClick={() => setEditing(a)} className="flex h-11 w-11 items-center justify-center rounded hover:bg-discord-bg-tertiary">
                   <Pencil className="h-4 w-4 text-discord-text-secondary" />
                 </button>

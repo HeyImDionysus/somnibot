@@ -644,10 +644,10 @@ export default function TeamSettingsPage() {
                 {invitations.map((inv) => (
                   <div
                     key={inv.id}
-                    className="flex items-center justify-between rounded-md bg-discord-bg-tertiary px-3 py-2"
+                    className="flex flex-col items-stretch gap-2 rounded-md bg-discord-bg-tertiary px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono text-xs text-discord-text-primary truncate">{inv.discord_id}</span>
                         <span className="rounded-full bg-[#FF1493]/20 px-2 py-0.5 text-[10px] font-medium text-[#FF1493]">
                           {inv.dashboard_roles?.name || 'role'}
@@ -658,7 +658,7 @@ export default function TeamSettingsPage() {
                         <span>Expires {formatDate(inv.expires_at)}</span>
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-3">
+                    <div className="flex shrink-0 items-center justify-end gap-3">
                       <button
                         onClick={() => void resendInvitation(inv.id)}
                         className="text-xs text-discord-text-muted hover:text-[#FF1493] transition-colors"

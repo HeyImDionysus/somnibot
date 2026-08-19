@@ -355,7 +355,7 @@ export default function MembersPage() {
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <span className="text-xs text-discord-text-muted">
             Page {page} of {totalPages} · Showing {(page - 1) * limit + 1}–{Math.min(page * limit, total)} of {total}
           </span>

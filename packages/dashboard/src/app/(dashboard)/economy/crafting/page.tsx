@@ -418,10 +418,10 @@ export default function CraftingPage() {
           {recipes.map((recipe) => (
             <div
               key={recipe.id}
-              className="flex items-center justify-between rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4"
+              className="flex flex-col items-stretch gap-3 rounded-lg border border-discord-bg-tertiary bg-discord-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between"
             >
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-lg">{recipe.emoji}</span>
                   <span className="font-medium text-discord-text-primary">{recipe.name}</span>
                   <span className="text-xs text-discord-text-secondary">({recipe.category})</span>
@@ -436,7 +436,7 @@ export default function CraftingPage() {
                   {recipe.inputs.map((i) => `${i.qty}x ${i.item_name}`).join(' + ')} → {recipe.output_qty}x output
                 </p>
               </div>
-              <div className="flex items-center gap-1 ml-2">
+              <div className="flex items-center justify-end gap-1 sm:ml-2 sm:shrink-0">
                 <button
                   className="flex h-11 w-11 items-center justify-center rounded text-discord-text-secondary hover:text-discord-text-primary"
                   onClick={() => setEditRecipe(recipe)}

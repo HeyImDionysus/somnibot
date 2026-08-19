@@ -150,12 +150,12 @@ export default function PollsPage() {
         ) : (
           <div className="space-y-2">
             {polls.map((p) => (
-              <div key={p.id} className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-3">
-                <div>
-                  <p className="text-sm text-discord-text-primary">{p.title}</p>
+              <div key={p.id} className="flex items-start justify-between gap-3 rounded-md bg-discord-bg-tertiary p-3">
+                <div className="min-w-0">
+                  <p className="text-sm text-discord-text-primary [overflow-wrap:anywhere]">{p.title}</p>
                   <p className="text-xs text-discord-text-secondary">{new Date(p.created_at).toLocaleDateString()}</p>
                 </div>
-                <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_BADGE[p.status] ?? ''}`}>{p.status}</span>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[p.status] ?? ''}`}>{p.status}</span>
               </div>
             ))}
           </div>
@@ -170,12 +170,12 @@ export default function PollsPage() {
         ) : (
           <div className="space-y-2">
             {predictions.map((p) => (
-              <div key={p.id} className="flex items-center justify-between rounded-md bg-discord-bg-tertiary p-3">
-                <div>
-                  <p className="text-sm text-discord-text-primary">{p.title}</p>
+              <div key={p.id} className="flex items-start justify-between gap-3 rounded-md bg-discord-bg-tertiary p-3">
+                <div className="min-w-0">
+                  <p className="text-sm text-discord-text-primary [overflow-wrap:anywhere]">{p.title}</p>
                   <p className="text-xs text-discord-text-secondary">Pool: {p.total_pool.toLocaleString()} coins • {new Date(p.created_at).toLocaleDateString()}</p>
                 </div>
-                <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_BADGE[p.status] ?? ''}`}>{p.status}</span>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[p.status] ?? ''}`}>{p.status}</span>
               </div>
             ))}
           </div>

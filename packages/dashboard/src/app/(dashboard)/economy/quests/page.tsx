@@ -182,8 +182,8 @@ export default function QuestsPage() {
           ) : (
             <div className="space-y-2">
               {quests.map((q) => (
-                <div key={q.id} className="bg-discord-bg-secondary rounded-lg p-3 flex items-center justify-between">
-                  <div>
+                <div key={q.id} className="flex flex-col items-stretch gap-3 rounded-lg bg-discord-bg-secondary p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 [overflow-wrap:anywhere]">
                     <span className={`text-xs px-2 py-0.5 rounded ${q.quest_type === 'daily' ? 'bg-blue-500/20 text-blue-300' : 'bg-purple-500/20 text-purple-300'}`}>
                       {q.quest_type}
                     </span>
@@ -192,7 +192,7 @@ export default function QuestsPage() {
                       ({q.action_type} × {q.target_count}) — 💰 {q.reward_currency} + ✨ {q.reward_xp} XP
                     </span>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex justify-end gap-1 sm:shrink-0">
                     <button type="button" aria-label={`Edit ${q.title}`} onClick={() => setEditing({ ...q })} className="flex h-11 w-11 items-center justify-center rounded hover:text-discord-accent text-discord-text-secondary"><Pencil className="w-4 h-4" /></button>
                     <button type="button" aria-label={`Delete ${q.title}`} onClick={() => setDeleteId(q.id)} className="flex h-11 w-11 items-center justify-center rounded hover:text-red-400 text-discord-text-secondary"><Trash2 className="w-4 h-4" /></button>
                   </div>

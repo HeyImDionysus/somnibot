@@ -154,17 +154,17 @@ export default function HeistPage() {
             ) : (
               <div className="space-y-2">
                 {heists.map((h) => (
-                  <div key={h.id} className="bg-discord-bg-secondary rounded-lg p-3 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
+                  <div key={h.id} className="flex flex-col items-stretch gap-3 rounded-lg bg-discord-bg-secondary p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex min-w-0 items-start gap-3">
                       {STATUS_ICONS[h.status] ?? null}
-                      <div>
-                        <span className="text-discord-text-primary font-medium">{h.target_name}</span>
+                      <div className="min-w-0 [overflow-wrap:anywhere]">
+                        <span className="font-medium text-discord-text-primary">{h.target_name}</span>
                         <span className="ml-2 text-sm text-discord-text-secondary">
                           👥 {h.participants.length} — 💰 {h.target_payout.toLocaleString()} — 🎯 {h.success_chance}%
                         </span>
                       </div>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right sm:shrink-0">
                       <span className={`text-xs px-2 py-0.5 rounded ${
                         h.status === 'success' ? 'bg-green-500/20 text-green-300' :
                         h.status === 'failed' ? 'bg-red-500/20 text-red-300' :

@@ -113,27 +113,27 @@ export default function TranscriptsPage() {
   if (viewing) {
     return (
       <div className="mx-auto max-w-5xl space-y-4 p-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
             <button
               onClick={() => setViewing(null)}
               className="text-sm text-discord-text-muted hover:text-discord-text-primary"
             >
               ← Back
             </button>
-            <h1 className="text-xl font-bold text-discord-text-primary">
+            <h1 className="min-w-0 text-xl font-bold text-discord-text-primary [overflow-wrap:anywhere]">
               Ticket #{viewing.ticket_number} — Transcript
             </h1>
           </div>
           <button
             onClick={downloadTranscript}
-            className="rounded-md border border-discord-border-subtle px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary hover:text-discord-text-primary"
+            className="w-full rounded-md border border-discord-border-subtle px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary hover:text-discord-text-primary sm:w-auto sm:shrink-0"
           >
             ⬇️ Download HTML
           </button>
         </div>
 
-        <div className="text-xs text-discord-text-muted flex gap-4">
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-discord-text-muted">
           <span>💬 {viewing.message_count} messages</span>
           <span>👥 {viewing.participant_ids.length} participants</span>
           <span>📅 {new Date(viewing.created_at).toLocaleString()}</span>
