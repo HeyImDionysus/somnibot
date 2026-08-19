@@ -145,12 +145,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $releaseDir = 'packages/launcher/release'
-          $files = if ('${{ matrix.artifact }}' -eq 'windows') {
-            @(Get-ChildItem $releaseDir -File | Where-Object { $_.Extension -in '.exe', '.yml', '.yaml' })
-          } else {
-            @(Get-ChildItem $releaseDir -File | Where-Object { $_.Name -like '*.AppImage' -or $_.Extension -in '.yml', '.yaml' })
-          }
-          if ($files.Count -eq 0) { throw 'No release files were produced.' }
+          $primaryName = if ('${{ matrix.artifact }}' -eq 'windows') { 'SomniBot-Setup-1.0.0.exe' } else { 'SomniBot-1.0.0.AppImage' }
+          $metadataName = if ('${{ matrix.artifact }}' -eq 'windows') { 'latest.yml' } else { 'latest-linux.yml' }
+          $files = @(
+            Get-Item (Join-Path $releaseDir $primaryName)
+            Get-Item (Join-Path $releaseDir $metadataName)
+          )
 
           $checksumName = "SHA256SUMS-${{ matrix.artifact }}"
           $checksumLines = $files | Sort-Object Name | ForEach-Object {
@@ -179,8 +179,7 @@ jobs:
           name: somnibot-${{ matrix.artifact }}
           path: |
             ${{ matrix.artifact == 'windows' && 'packages/launcher/release/*.exe' || 'packages/launcher/release/*.AppImage' }}
-            packages/launcher/release/*.yml
-            packages/launcher/release/*.yaml
+            ${{ matrix.artifact == 'windows' && 'packages/launcher/release/latest.yml' || 'packages/launcher/release/latest-linux.yml' }}
             packages/launcher/release/SHA256SUMS-${{ matrix.artifact }}
             packages/launcher/release/provenance-${{ matrix.artifact }}.json
           if-no-files-found: error

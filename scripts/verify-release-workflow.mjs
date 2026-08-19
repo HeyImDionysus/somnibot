@@ -44,6 +44,21 @@ assert.match(releaseWorkflow, /Stale launcher 0\.1\.0 output survived into the r
 assert.doesNotMatch(releaseWorkflow, /WINDOWS_CODESIGN_PFX_BASE64|signtool sign/, 'release must not require a signing certificate');
 assert.match(releaseWorkflow, /SHA256SUMS-\$\{\{ matrix\.artifact \}\}/);
 assert.match(releaseWorkflow, /provenance-\$\{\{ matrix\.artifact \}\}\.json/);
+assert.match(
+  releaseWorkflow,
+  /matrix\.artifact == 'windows'.*packages\/launcher\/release\/latest\.yml.*packages\/launcher\/release\/latest-linux\.yml/,
+  'each platform artifact must upload only its matching updater metadata',
+);
+assert.match(
+  releaseWorkflow,
+  /Get-Item \(Join-Path \$releaseDir \$primaryName\)[\s\S]*Get-Item \(Join-Path \$releaseDir \$metadataName\)/,
+  'checksums and provenance must cover only the primary artifact and matching updater metadata',
+);
+assert.doesNotMatch(
+  releaseWorkflow,
+  /packages\/launcher\/release\/\*\.ya?ml/,
+  'release uploads must not merge platform-specific builder debug files under one name',
+);
 assert.doesNotMatch(releaseWorkflow, /macos-latest|\.dmg|--mac/, 'release workflow must not publish macOS');
 assert.match(
   ciWorkflow,
