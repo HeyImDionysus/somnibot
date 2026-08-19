@@ -56,6 +56,57 @@ describe('ChannelPicker form controls', () => {
 
     expect(removeButton).toContain('type="button"');
   });
+
+  it('uses a native labelled disclosure without nested interactive controls', () => {
+    const markup = renderToStaticMarkup(React.createElement(
+      'form',
+      null,
+      React.createElement(ChannelPicker, {
+        value: 'channel-1',
+        label: 'Discord destination',
+        onChange: () => undefined,
+      }),
+    ));
+    const trigger = markup.match(/<button[^>]*aria-haspopup="listbox"[^>]*>/)?.[0];
+    const triggerId = trigger?.match(/\sid="([^"]+)"/)?.[1];
+
+    expect(markup).not.toContain('role="button"');
+    expect(trigger).toContain('type="button"');
+    expect(trigger).toContain('aria-expanded="false"');
+    expect(trigger).toMatch(/aria-controls="[^"]+"/);
+    expect(triggerId).toBeTruthy();
+    expect(markup).toContain(`for="${triggerId}"`);
+    expect(markup.indexOf('aria-label="Clear channel selection"'))
+      .toBeGreaterThan(markup.indexOf('</button>'));
+  });
+
+  it('associates hint and field error text with the invalid trigger', () => {
+    const markup = renderToStaticMarkup(React.createElement(ChannelPicker, {
+      value: null,
+      label: 'Discord destination',
+      hint: 'Choose a channel SomniBot can reach.',
+      error: 'Choose a destination from a fresh live Discord snapshot.',
+      onChange: () => undefined,
+    }));
+    const trigger = markup.match(/<button[^>]*aria-haspopup="listbox"[^>]*>/)?.[0];
+    const describedBy = trigger?.match(/aria-describedby="([^"]+)"/)?.[1]?.split(' ') ?? [];
+
+    expect(trigger).toContain('aria-invalid="true"');
+    expect(describedBy).toHaveLength(2);
+    for (const id of describedBy) expect(markup).toContain(`id="${id}"`);
+    expect(markup).toContain('role="alert"');
+  });
+
+  it('announces one shared permission issue for multiple selected channels', () => {
+    const markup = renderToStaticMarkup(React.createElement(ChannelPicker, {
+      value: ['channel-1', 'channel-2'],
+      multi: true,
+      requiredBotPermissions: ['SendMessages'],
+      onChange: () => undefined,
+    }));
+
+    expect(markup.match(/role="alert"/g) ?? []).toHaveLength(1);
+  });
 });
 
 describe('snapshotAuthorityAsOf (round 27: gates Send Now via onAuthorityChange)', () => {
@@ -116,6 +167,22 @@ describe('ChannelPicker snapshot authority', () => {
         name: 'Community',
         type: 4,
       }));
+  });
+
+  it('preserves legacy channels while keeping their snapshot non-authoritative', () => {
+    const payload = {
+      awaitingSnapshot: false,
+      snapshotVersion: 1,
+      snapshotAt: new Date(NOW).toISOString(),
+      data: [{ id: 'legacy-channel', name: 'legacy', type: 0, position: 1 }],
+      categories: [{ id: 'legacy-category', name: 'Legacy category', position: 0 }],
+    };
+
+    expect(normalizeSnapshotChannels(payload)).toEqual([
+      expect.objectContaining({ id: 'legacy-channel', name: 'legacy', type: 0 }),
+      expect.objectContaining({ id: 'legacy-category', name: 'Legacy category', type: 4 }),
+    ]);
+    expect(isAuthoritativeChannelSnapshot(payload, NOW)).toBe(false);
   });
 
   it.each([

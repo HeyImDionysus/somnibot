@@ -93,6 +93,10 @@ Use the shared primitives where they fit:
 - `Input`/`Select`/`Toggle`: visible label, concise help where needed, clear
   focus state, and a field-local error adjacent to the field. Never rely only
   on a generic page error to explain a validation failure.
+- `ChannelPicker`: a labelled native disclosure controlling a searchable
+  listbox. Clear/remove actions are sibling buttons rather than nested
+  controls; hint and field errors are referenced by the trigger; Arrow keys,
+  Home/End, Escape, and focus return remain available from the keyboard.
 - `Card`, `Badge`, `EmptyState`, loading skeleton, error boundary, and toast:
   use their semantic variants; loading, empty, error, and successful states are
   distinct states rather than a blank region or a permanently spinning action.

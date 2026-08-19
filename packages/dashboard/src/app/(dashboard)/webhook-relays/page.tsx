@@ -9,7 +9,10 @@ import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Input } from '@/components/shared/input';
 import { useToast } from '@/components/shared/toast';
 import { useDiscordNames } from '@/hooks/use-discord-names';
-import { clearResolvedDestinationError } from '@/lib/webhook-relay-form-validation';
+import {
+  clearResolvedDestinationError,
+  destinationValidationError,
+} from '@/lib/webhook-relay-form-validation';
 
 const DEFAULT_TEMPLATE = '**{source} — {event}**\n{content}';
 
@@ -197,8 +200,9 @@ function RelayForm({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.channelId || !authoritative) {
-      setError('Choose a destination from a fresh live Discord snapshot.');
+    const destinationError = destinationValidationError(draft.channelId, authoritative);
+    if (destinationError) {
+      setError(destinationError);
       return;
     }
     setError(null);
@@ -235,6 +239,7 @@ function RelayForm({
         channelTypes={['text', 'announcement']}
         requiredBotPermissions={['ViewChannel', 'SendMessages']}
         onAuthorityChange={setAuthoritative}
+        error={error ?? undefined}
         disabled={busy}
       />
       <div className="space-y-1">
@@ -259,7 +264,6 @@ function RelayForm({
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-discord-text-muted">Preview</p>
         <p className="whitespace-pre-wrap break-words text-sm text-discord-text-primary">{preview}</p>
       </div>
-      {error ? <p role="alert" className="text-sm text-discord-danger">{error}</p> : null}
       <div className="flex flex-wrap justify-end gap-3">
         <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>Cancel</Button>
         <Button type="submit" disabled={busy || !authoritative}>{busy ? 'Saving…' : submitLabel}</Button>
