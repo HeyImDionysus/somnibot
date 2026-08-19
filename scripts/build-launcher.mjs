@@ -492,8 +492,8 @@ function buildElectron() {
       '--dir': '--dir',
     }[platformArg] ?? '';
 
-  // Run electron-builder from the launcher directory.
-  // GH_TOKEN env var enables GitHub Releases publishing.
+  // Run electron-builder from the launcher directory. Publishing is owned by
+  // the release workflow after both platform artifacts pass verification.
   const releaseOutput = path.relative(LAUNCHER_DIR, RELEASE_DIR).split(path.sep).join('/');
   runPnpm([
     'exec',
@@ -502,6 +502,8 @@ function buildElectron() {
     '--config',
     'electron-builder.yml',
     `--config.directories.output=${releaseOutput}`,
+    '--publish',
+    'never',
   ], {
     cwd: LAUNCHER_DIR,
   });

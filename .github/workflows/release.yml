@@ -97,7 +97,6 @@ jobs:
       - name: Build & package
         run: node scripts/build-launcher.mjs ${{ matrix.platform }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
 
       - name: Validate packaged release contract
