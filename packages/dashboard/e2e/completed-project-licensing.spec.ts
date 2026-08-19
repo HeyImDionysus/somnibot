@@ -143,7 +143,7 @@ test('completed project handoff survives reload and creates an inactive product 
   await expect(page.getByLabel('Heartbeat interval (ms)')).toHaveValue('120000');
   await expect(page.getByLabel('Offline grace (seconds)')).toHaveValue('7200');
   await expect(page.getByLabel('SDK feature flags')).toHaveValue('alerts, exports');
-  await expect(page.getByText('Plan notes to review:', { exact: false })).toContainText('Monthly Standard and annual Pro');
+  await expect(page.getByText('Plan notes to review:', { exact: true }).locator('..')).toContainText('Monthly Standard and annual Pro');
   await page.reload();
   await expect(page.getByPlaceholder('Product name')).toHaveValue('Completed Sentinel');
 
