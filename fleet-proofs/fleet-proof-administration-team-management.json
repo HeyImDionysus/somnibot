@@ -60,17 +60,6 @@
     },
     {
       "scenario": "DEF",
-      "assertionClass": "audit",
-      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
-      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: An audit_logs row (team.invite_sent + team.invite_accepted) is written with actor + target for this transition.",
-      "observedAt": "2026-08-19T02:10:39.067Z",
-      "artifact": {
-        "path": "fleet-final-observation-f966.md",
-        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
-      }
-    },
-    {
-      "scenario": "DEF",
       "assertionClass": "branding",
       "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
       "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: All invitation copy speaks in the owner’s configured voice with subtle powered-by-SomniBot attribution.",
