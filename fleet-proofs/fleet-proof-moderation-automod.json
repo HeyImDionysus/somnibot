@@ -1,0 +1,634 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "d9b833b07cb9671cc5b76bda4b4a4905e8129e60",
+  "domainId": "moderation-automod",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained anonymized).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The test guild contains no run-prefixed automod mod-log messages or member DMs after cleanup.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Observe mode logs the spam-burst and external-invite detections to the mod log while every message stays visible and no member is timed out.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every automod detection/enforcement lands exactly one append-only audit_logs row (actor=automod, guild, rule, correlation id).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With Valkey blocked, word and caps rules keep evaluating from DB-loaded rules while the Valkey-backed spam/duplicate counters degrade to inert (no false punishment); after restore the counters resume.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One audit row records the rejected rule submission with the validation reason; no rule-change audit row is written.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard rules editor surfaces a clear validation error for a catastrophic-backtracking regex / an empty word list, and the engine independently refuses known-catastrophic regex shapes at evaluation time.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every automod detection/enforcement lands exactly one append-only audit_logs row (actor=automod, guild, rule, correlation id).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Ten near-simultaneous messages tripping the spam rule punish the member exactly once per window, and a concurrent dashboard rule save is either fully visible or fully invisible to each message’s evaluation.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every automod detection/enforcement lands exactly one append-only audit_logs row (actor=automod, guild, rule, correlation id).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the recorded messageCreate event for an enforced violation yields no second deletion, infraction, DM, or mod-log post; the member timeout state is byte-identical.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every automod detection/enforcement lands exactly one append-only audit_logs row (actor=automod, guild, rule, correlation id).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: The Valkey rules cache rebuilds within its 60-second TTL after restart and no in-flight violation is double-actioned.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Every automod detection/enforcement lands exactly one append-only audit_logs row (actor=automod, guild, rule, correlation id).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With a transient fault injected on the first infractions insert, the retry lands exactly one infraction row, one member DM, and one mod-log entry.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The retried infraction write reuses the original correlation key, so infractions shows one row for the violation, not two.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every automod detection/enforcement lands exactly one append-only audit_logs row (actor=automod, guild, rule, correlation id).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The violating message disappears and the member receives the branded enforcement DM naming the rule + appeal path.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every automod detection/enforcement lands exactly one append-only audit_logs row (actor=automod, guild, rule, correlation id).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Only run-member-a’s non-exempt all-caps message is detected; the exempt-role holder, the exempt channel, and moderators (ManageMessages/Administrator) produce no detection.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: An audit row records the denied rules access with actor id, route, and reason permission-denied.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A member dashboard session hitting the automod rules page or its API routes receives a permission error and can neither read nor write rules.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Append-only audit rows capture each automod action with actor id, guild id, and the run-prefixed correlation id.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod mod-log embeds and member DMs match the owner's white-label brand kit + voice preset, with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A message violating guild A’s word filter posts untouched in guild B, and the invite filter’s allow-own-server logic resolves against the message’s own guild.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Automod failure branches (rules-load failure, budget exhaustion, rejected enforcement) raise exactly one owner alert carrying a reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the recorded messageCreate event yields no second deletion, infraction, DM, or mod-log post (one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    }
+  ]
+}

@@ -1,0 +1,447 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "d9b833b07cb9671cc5b76bda4b4a4905e8129e60",
+  "domainId": "commerce-licenses",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Any key-prefix / device-limit configuration changed during scenarios is restored after cleanup.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Test roles granted through activations are removed from all test accounts after the sweep.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The activation embed uses the owner brand with the subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The outage window is recorded as license.validate_unavailable with recovery visible in the trail.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: The degraded response copy reassures the customer their activation keeps working.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: license_sessions rows are unchanged during the outage and refreshed (not duplicated) on recovery.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: With /api/license/validate unreachable the SDK returns validate-degraded and existing activations keep working; recovery reconciles the session with no duplicate row.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Queued client retries from the outage window are absorbed without session duplication.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Failed activation attempts are logged with the hashed submission (never raw plaintext) for abuse analysis.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The refusal copy stays friendly and branded with no technical detail.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Both racers are logged with their outcomes and the winning transition appears once.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The losing device receives the branded device-limit-reached message, not an error dump.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Replays appear as no-op audit entries without duplicating the original transition rows.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Replay responses reuse the friendly already-done copy rather than errors.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The audit trail is continuous across the restart with no gap or duplicate transitions.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Post-restart surfaces render identical owner branding.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The transient failure and the reconciliation are both traceable in the audit trail.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: The buyer-facing activation message never exposes the transient hiccup.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: After reconciliation the member holds each contracted role exactly once despite the first role-add failing.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The retry path cannot double-add roles thanks to the delivery-intent mutation fencing.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The refused bind, the self-service removal, and the successful rebind are each audited.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The device-limit-reached copy names the configured limit and points to the owner-branded portal.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: No Discord-side role/entitlement churn from device changes — the holder’s roles stay stable throughout.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The rotation notice uses the key-rotated template with product name and new key tail in the owner’s voice.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The denied foreign activation and the denied /license info call are logged with caller identities.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Denial messages are branded and reveal nothing about the key’s true owner.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: The cross-guild attempt is logged under guild B without referencing guild A’s key identity.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Each guild’s refusal/success copy uses its own brand configuration.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Unresolved role delivery and abuse patterns surface to the owner while the dashboard licenses page reflects key state — healthy activity stays quiet.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    }
+  ]
+}

@@ -1,0 +1,568 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "d9b833b07cb9671cc5b76bda4b4a4905e8129e60",
+  "domainId": "game-economy-fishing",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The test guilds contain no run-prefixed catch embeds, collection displays, or leaderboard entries after cleanup.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Each fishing action also lands an audit row with a run-prefixed correlation id, and audit history is anonymized rather than deleted.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on fishing embeds.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner receives a single dependency-degradation alert for the outage window (not one per failed fishing command).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One audit row records the rejected fishing configuration attempt with the validation reason; no config-change audit row is written.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard fishing page surfaces a clear validation error for a negative cooldown / a junk+treasure sum above 100.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Two simultaneous /fish cast invocations yield exactly one recorded catch and one cooldown refusal (atomic Valkey SET NX), and a race to discover the final species pays the collection bonus exactly once.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The live guild shows one catch embed and one branded replay refusal for the redelivered interaction.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Post-restart, a cast attempted while the prior per-user cooldown is still live is refused (the Valkey cooldown TTL survives the reboot), proving no double-catch and no lost cooldown.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: After the injected credit fault run-member-a sees the branded catch-payout-failed notice rather than a false success; the operator retry credits the exact catch value once and the wallet reflects a single credit.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner alert channel receives exactly one reasoned catch-payout-failed / payout-degraded alert for the injected fault with a remediation hint.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The failed credit and its retry apply under one idempotency key, so the ledger shows exactly one credit for the catch — never zero-paid-but-recorded and never a double credit.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The full white-label brand kit (colors, voice preset, powered-by-SomniBot attribution) matches the owner brand kit on fishing embeds.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Discovering the final species posts the completion embed with no bonus credited, casts never yield treasure, and normal fish/junk catches still auto-sell and appear in /fish collection.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: An audit row records the denied fishing configuration attempt with actor and reason permission-denied.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A commerce-purchased fishing item is never sellable on the real paid store (no real-store sell path).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A non-admin dashboard session cannot save fishing settings (returns an authorization error).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Member-facing fishing surfaces (catch embed, cooldown refusal, collection/leaderboard) show the owner brand name, colors, and voice preset with the powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Guild A’s /fish collection is identical before and after guild B activity, and guild B’s casts credit guild B’s wallet against guild B’s own species table, observed in the live guilds.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (payout-degraded) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering the /fish cast interaction yields exactly one catch row and one wallet credit (persisted idempotency keys show one effect per logical action).",
+      "observedAt": "2026-08-19T04:41:21.538Z",
+      "artifact": {
+        "path": "fleet-final-observation-d9b833b0.md",
+        "sha256": "c409447fd8855d44ca63a8259018265723e93523fc4fbede62b81e85ab0b6e80"
+      }
+    }
+  ]
+}
