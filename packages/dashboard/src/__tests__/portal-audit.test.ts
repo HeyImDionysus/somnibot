@@ -22,6 +22,7 @@ vi.mock('@/lib/api/signed-url', () => ({
 import { POST as authPost } from '@/app/api/portal/auth/route';
 import { POST as downloadLinkPost } from '@/app/api/portal/download-link/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { loginDependencyFailure } from '@/lib/api/portal-login-dependency';
 
 const PRODUCT_UUID = '22222222-2222-2222-2222-222222222222';
 const FILE_UUID = '33333333-3333-3333-3333-333333333333';
@@ -40,6 +41,12 @@ interface AdminOpts {
 
 function makeAdmin(opts: AdminOpts = {}) {
   return {
+    rpc: async (name: string) => name === 'issue_portal_session_atomic'
+      ? {
+          data: opts.sessionInsertError ? null : '44444444-4444-4444-8444-444444444444',
+          error: opts.sessionInsertError ?? null,
+        }
+      : { data: null, error: { message: `unexpected RPC ${name}` } },
     from: (table: string) => {
       if (table === 'audit_logs') {
         const persist = (rows: Record<string, unknown> | readonly Record<string, unknown>[]) => {
@@ -118,6 +125,28 @@ beforeEach(() => {
 });
 
 describe('POST /api/portal/auth — login audit', () => {
+  it('keeps a stable correlation while recording separate dashboard exchange failures', async () => {
+    const admin = makeAdmin();
+    await loginDependencyFailure(admin as unknown as ReturnType<typeof createAdminSupabase>, {
+      guildId: 'guild-1',
+      code: 'dashboard-session:user-1:guild-1',
+      cause: 'session_dependency',
+      occurrenceId: 'exchange-1',
+    });
+    await loginDependencyFailure(admin as unknown as ReturnType<typeof createAdminSupabase>, {
+      guildId: 'guild-1',
+      code: 'dashboard-session:user-1:guild-1',
+      cause: 'session_dependency',
+      occurrenceId: 'exchange-2',
+    });
+
+    expect(auditRows.map((row) => row.occurrence_key)).toEqual([
+      'portal.login_failed:session_dependency:exchange-1',
+      'portal.login_failed:session_dependency:exchange-2',
+    ]);
+    expect(new Set(auditRows.map((row) => row.correlation_id)).size).toBe(1);
+  });
+
   it('writes one sanitized portal.login_failed row on login dependency failure', async () => {
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(makeAdmin());
     global.fetch = vi.fn(async () => {
@@ -193,7 +222,7 @@ describe('POST /api/portal/auth — login audit', () => {
       actor_id: 'discord-1',
       category: 'commerce',
       target_type: 'portal_session',
-      target_id: 'cust-1',
+      target_id: '44444444-4444-4444-8444-444444444444',
       success: true,
     });
   });

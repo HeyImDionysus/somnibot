@@ -592,6 +592,9 @@ export const rateLimits = {
   portalAuth: (ip: string) =>
     checkRateLimit(`portal:auth:${ip}`, 10, 300_000),
 
+  portalDashboardSession: (userId: string, ip: string) =>
+    checkRateLimit(`portal:dashboard-session:${userId}:${ip}`, 6, 300_000),
+
   /** Portal data: 30 reads per minute per token hash (V6 Audit §7.1) */
   portalData: (tokenHash: string) =>
     checkRateLimit(`portal:data:${tokenHash}`, 30, 60_000),

@@ -64,6 +64,7 @@ const created = await admin.auth.admin.createUser({
   email,
   password,
   email_confirm: true,
+  app_metadata: { discord_id: discordId },
   user_metadata: { provider_id: discordId, sub: discordId, full_name: `Render Rig Owner` },
 });
 if (created.error && !/already been registered|already exists/i.test(created.error.message)) {

@@ -91,6 +91,7 @@ type LoginDependencyFailure = {
   readonly code: string;
   readonly cause: LoginDependencyCause;
   readonly actorId?: string;
+  readonly occurrenceId?: string;
 };
 
 export async function loginDependencyFailure(
@@ -104,7 +105,8 @@ export async function loginDependencyFailure(
     action: 'portal.login_failed',
     targetType: 'portal_session',
     details: { cause: failure.cause },
-    occurrenceKey: `portal.login_failed:${failure.cause}:${hashOccurrenceSecret(failure.code)}`,
+    correlationId: `portal.login:${hashOccurrenceSecret(failure.code)}`,
+    occurrenceKey: `portal.login_failed:${failure.cause}:${failure.occurrenceId ?? hashOccurrenceSecret(failure.code)}`,
     success: false,
   });
   return NextResponse.json(

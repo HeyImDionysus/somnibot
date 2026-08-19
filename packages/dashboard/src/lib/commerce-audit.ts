@@ -23,6 +23,7 @@ export interface CommerceAuditEntry {
   targetType: string;
   targetId?: string | null;
   details?: Record<string, unknown>;
+  correlationId?: string;
   occurrenceKey?: string;
   /** false for denied/refused attempts so they are queryable. */
   success?: boolean;
@@ -46,6 +47,7 @@ export async function writeCommerceAudit(
       target_type: entry.targetType,
       target_id: entry.targetId ?? null,
       details: entry.details ?? {},
+      correlation_id: entry.correlationId ?? null,
       occurrence_key: entry.occurrenceKey ?? null,
       success: entry.success ?? true,
     };

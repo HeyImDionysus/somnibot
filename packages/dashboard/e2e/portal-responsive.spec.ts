@@ -1,6 +1,161 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+
+const PORTAL_GUILD_ID = 'portal-responsive-guild';
+
+async function seedPortalToken(page: Page, token: string): Promise<void> {
+  await page.addInitScript(({ guildId, value }) => {
+    sessionStorage.setItem('portal_guild', guildId);
+    localStorage.setItem(`portal_token:${guildId}`, value);
+  }, { guildId: PORTAL_GUILD_ID, value: token });
+}
 
 test.setTimeout(120_000);
+
+test('customer portal reuses the dashboard session and scopes the token to its guild', async ({ page }) => {
+  const guildId = 'guild-session-a';
+  let exchangeBody: unknown;
+  await page.route('/api/portal/config', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { discord_application_id: 'discord-app' } }),
+  }));
+  await page.route('/api/portal/auth', async (route) => {
+    exchangeBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, data: { token: 'guild-a-token' } }),
+    });
+  });
+  await page.route(/\/api\/portal\/(licenses|orders|downloads)$/, (route) => {
+    expect(route.request().headers()['x-portal-token']).toBe('guild-a-token');
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, data: [] }),
+    });
+  });
+
+  await page.goto(`/portal?guild=${guildId}`);
+
+  await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign Out' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Licenses' }))
+    .toHaveAttribute('href', `/portal/licenses?guild=${guildId}`);
+  expect(exchangeBody).toEqual({ action: 'dashboard_session', guild_id: guildId });
+  await expect.poll(() => page.evaluate((id) => localStorage.getItem(`portal_token:${id}`), guildId))
+    .toBe('guild-a-token');
+});
+
+test('a fresh-tab portal deep link recovers its guild-scoped session', async ({ page }) => {
+  const guildId = 'guild-deep-link';
+  await page.addInitScript(({ id }) => {
+    localStorage.setItem('portal_last_guild', id);
+    localStorage.setItem(`portal_token:${id}`, 'deep-link-token');
+  }, { id: guildId });
+  await page.route('/api/portal/licenses', (route) => {
+    expect(route.request().headers()['x-portal-token']).toBe('deep-link-token');
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, data: [] }),
+    });
+  });
+
+  await page.goto('/portal/licenses');
+
+  await expect(page.getByRole('heading', { name: 'Your Licenses' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Orders' }))
+    .toHaveAttribute('href', `/portal/orders?guild=${guildId}`);
+});
+
+test('portal sign out stays signed out instead of silently exchanging the dashboard session again', async ({ page }) => {
+  const guildId = 'guild-logout';
+  await page.addInitScript(({ id }) => {
+    if (sessionStorage.getItem('portal_logout_test_seeded')) return;
+    sessionStorage.setItem('portal_logout_test_seeded', '1');
+    sessionStorage.setItem('portal_guild', id);
+    localStorage.setItem(`portal_token:${id}`, 'logout-token');
+  }, { id: guildId });
+  let exchanges = 0;
+  await page.route('/api/portal/config', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { discord_application_id: 'discord-app' } }),
+  }));
+  await page.route('/api/portal/auth', (route) => {
+    if (route.request().method() === 'DELETE') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true }),
+      });
+    }
+    exchanges += 1;
+    return route.fulfill({ status: 500, body: '{}' });
+  });
+  await page.route(/\/api\/portal\/(licenses|orders|downloads)$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ success: true, data: [] }),
+  }));
+
+  await page.goto(`/portal?guild=${guildId}`);
+  await page.getByRole('button', { name: 'Sign Out' }).click();
+
+  await expect(page.getByRole('button', { name: 'Sign in with Discord' })).toBeVisible();
+  expect(exchanges).toBe(0);
+  await expect.poll(() => page.evaluate((id) => localStorage.getItem(`portal_token:${id}`), guildId))
+    .toBeNull();
+});
+
+test('a stale portal token is replaced once from the existing dashboard session', async ({ page }) => {
+  const guildId = 'guild-stale';
+  await page.addInitScript(({ id }) => {
+    sessionStorage.setItem('portal_guild', id);
+    localStorage.setItem(`portal_token:${id}`, 'stale-token');
+  }, { id: guildId });
+  await page.route('/api/portal/config', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { discord_application_id: 'discord-app' } }),
+  }));
+  await page.route('/api/portal/auth', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ success: true, data: { token: 'fresh-token' } }),
+  }));
+  await page.route(/\/api\/portal\/(licenses|orders|downloads)$/, (route) => route.fulfill({
+    status: route.request().headers()['x-portal-token'] === 'stale-token' ? 401 : 200,
+    contentType: 'application/json',
+    body: JSON.stringify(route.request().headers()['x-portal-token'] === 'stale-token'
+      ? { error: 'expired' }
+      : { success: true, data: [] }),
+  }));
+
+  await page.goto(`/portal?guild=${guildId}`);
+
+  await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible();
+  await expect.poll(() => page.evaluate((id) => localStorage.getItem(`portal_token:${id}`), guildId))
+    .toBe('fresh-token');
+});
+
+test('a dashboard account without a customer record can still use explicit Discord login', async ({ page }) => {
+  await page.route('/api/portal/config', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ data: { discord_application_id: 'discord-app' } }),
+  }));
+  await page.route('/api/portal/auth', (route) => route.fulfill({
+    status: 404,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'No account found' }),
+  }));
+
+  await page.goto('/portal?guild=guild-other-customer');
+
+  await expect(page.getByRole('button', { name: 'Sign in with Discord' })).toBeVisible();
+});
 
 for (const session of ['signed out', 'signed in'] as const) {
   for (const viewport of [
@@ -9,7 +164,7 @@ for (const session of ['signed out', 'signed in'] as const) {
   ] as const) {
     test(`customer portal navigation reflows without horizontal scrolling on ${viewport.name} while ${session}`, async ({ page }) => {
       if (session === 'signed in') {
-        await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-responsive-session'));
+        await seedPortalToken(page, 'portal-responsive-session');
         await page.route(/\/api\/portal\/(licenses|orders|downloads)(?:\?.*)?$/, (route) =>
           route.fulfill({
             status: 200,
@@ -40,7 +195,7 @@ for (const session of ['signed out', 'signed in'] as const) {
 }
 
 test('subscription cancellation and support requests are reachable and truthful on mobile', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-action-session'));
+  await seedPortalToken(page, 'portal-action-session');
   let requestCount = 0;
   let cancelRequestTiming: unknown;
 
@@ -155,7 +310,7 @@ test('subscription cancellation and support requests are reachable and truthful 
 });
 
 test('disabled portal controls hide unavailable customer actions', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-policy-session'));
+  await seedPortalToken(page, 'portal-policy-session');
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -203,7 +358,7 @@ test('disabled portal controls hide unavailable customer actions', async ({ page
 });
 
 test('immediate cancellation warns that access ends now', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-immediate-session'));
+  await seedPortalToken(page, 'portal-immediate-session');
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -251,7 +406,7 @@ test('immediate cancellation warns that access ends now', async ({ page }, testI
 });
 
 test('a retained cancellation request reconfirms its original timing after policy changes', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-retained-cancellation-session'));
+  await seedPortalToken(page, 'portal-retained-cancellation-session');
   let confirmedTiming: unknown;
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
@@ -313,7 +468,7 @@ test('a retained cancellation request reconfirms its original timing after polic
 });
 
 test('grace-period cancellation uses the grace deadline', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-grace-session'));
+  await seedPortalToken(page, 'portal-grace-session');
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -361,7 +516,7 @@ test('grace-period cancellation uses the grace deadline', async ({ page }, testI
 });
 
 test('cancelled grace-period readback uses the grace deadline', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-grace-readback-session'));
+  await seedPortalToken(page, 'portal-grace-readback-session');
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -408,7 +563,7 @@ test('cancelled grace-period readback uses the grace deadline', async ({ page },
 });
 
 test('order load failure does not claim that purchase history is empty', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-order-failure-session'));
+  await seedPortalToken(page, 'portal-order-failure-session');
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 503,
     contentType: 'application/json',
@@ -421,7 +576,7 @@ test('order load failure does not claim that purchase history is empty', async (
 });
 
 test('non-provider subscription grants do not offer PayPal cancellation', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-manual-grant-session'));
+  await seedPortalToken(page, 'portal-manual-grant-session');
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -467,7 +622,7 @@ test('non-provider subscription grants do not offer PayPal cancellation', async 
 });
 
 test('license load failure does not claim that the account has no licenses', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-load-failure'));
+  await seedPortalToken(page, 'portal-license-load-failure');
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 503,
     contentType: 'application/json',
@@ -487,7 +642,7 @@ test('license load failure does not claim that the account has no licenses', asy
   { name: 'mobile', width: 375, height: 812 },
   { name: 'desktop', width: 1440, height: 900 },
 ] as const).forEach((viewport) => test(`license rotation and device removal are reachable behind explicit confirmations on ${viewport.name}`, async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-session'));
+  await seedPortalToken(page, 'portal-license-session');
   let licenseReads = 0;
   let rotateCalls = 0;
   let removeCalls = 0;
@@ -594,7 +749,7 @@ test('license load failure does not claim that the account has no licenses', asy
 }));
 
 test('server-supported non-active license key states expose rotation', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-rotatable-key-states'));
+  await seedPortalToken(page, 'portal-rotatable-key-states');
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -634,7 +789,7 @@ test('server-supported non-active license key states expose rotation', async ({ 
 });
 
 test('disabled license policies hide rotation and device removal', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-policy-session'));
+  await seedPortalToken(page, 'portal-license-policy-session');
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -681,7 +836,7 @@ test('disabled license policies hide rotation and device removal', async ({ page
 });
 
 test('terminal license entitlements hide key rotation', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-terminal-license'));
+  await seedPortalToken(page, 'portal-terminal-license');
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -719,7 +874,7 @@ test('terminal license entitlements hide key rotation', async ({ page }, testInf
 });
 
 test('expired grace-period license entitlements hide key rotation', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-expired-grace-license'));
+  await seedPortalToken(page, 'portal-expired-grace-license');
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -761,7 +916,7 @@ test('expired grace-period license entitlements hide key rotation', async ({ pag
 });
 
 test('expired active license entitlements hide key rotation', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-expired-active-license'));
+  await seedPortalToken(page, 'portal-expired-active-license');
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -804,7 +959,7 @@ test('expired active license entitlements hide key rotation', async ({ page }, t
 });
 
 test('rotation success remains truthful when license refresh fails', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-license-refresh-session'));
+  await seedPortalToken(page, 'portal-license-refresh-session');
   let licenseReads = 0;
   await page.route('**/api/portal/licenses', (route) => {
     licenseReads += 1;
@@ -863,7 +1018,7 @@ test('rotation success remains truthful when license refresh fails', async ({ pa
 });
 
 test('device removal success remains truthful when license refresh fails', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-device-refresh-session'));
+  await seedPortalToken(page, 'portal-device-refresh-session');
   let licenseReads = 0;
   await page.route('**/api/portal/licenses', (route) => {
     licenseReads += 1;
@@ -926,7 +1081,7 @@ test('device removal success remains truthful when license refresh fails', async
 });
 
 test('a pending seller request cannot be replaced or edited before it settles', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-request-pending-session'));
+  await seedPortalToken(page, 'portal-request-pending-session');
   await page.route('**/api/portal/orders', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -987,7 +1142,7 @@ test('a pending seller request cannot be replaced or edited before it settles', 
 });
 
 test('an in-flight rotation dialog ignores Escape and backdrop dismissal', async ({ page }, testInfo) => {
-  await page.addInitScript(() => localStorage.setItem('portal_token', 'portal-rotation-pending-session'));
+  await seedPortalToken(page, 'portal-rotation-pending-session');
   await page.route('**/api/portal/licenses', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',

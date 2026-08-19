@@ -13,6 +13,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createServerSupabase } from '@/lib/supabase/server';
+import { verifiedDiscordId } from '@/lib/verified-discord-identity';
 
 // ── Catalog control defaults (administration.json:743-763) ──────────────────
 export const TEAM_CONTROL_DEFAULTS = {
@@ -89,12 +90,6 @@ export interface SessionIdentity {
   discordId: string;
 }
 
-function extractDiscordId(user: { user_metadata?: Record<string, unknown> }): string | null {
-  const meta = user.user_metadata;
-  if (!meta) return null;
-  return (meta.provider_id as string) || (meta.sub as string) || null;
-}
-
 /**
  * Resolve the signed-in user's raw Discord OAuth identity WITHOUT requiring a
  * guild scope. The invitee has no owned guild and no dashboard_user_roles
@@ -108,7 +103,7 @@ export async function getSessionIdentity(): Promise<SessionIdentity | null> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return null;
-  const discordId = extractDiscordId(user);
+  const discordId = verifiedDiscordId(user);
   if (!discordId) return null;
   return { userId: user.id, discordId };
 }

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { Button } from '@/components/shared/button';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { clearPortalToken, getPortalToken, portalLoginUrl } from '@/lib/portal-session-storage';
 
 interface LicenseSession {
   id: string;
@@ -84,17 +85,17 @@ export default function PortalLicenses() {
   const [keysLoaded, setKeysLoaded] = useState(false);
 
   const loadKeys = useCallback(async () => {
-    const token = localStorage.getItem('portal_token');
+    const token = getPortalToken();
     if (!token) {
-      window.location.href = '/portal';
+      window.location.href = portalLoginUrl();
       return;
     }
     const response = await fetch('/api/portal/licenses', {
       headers: { 'x-portal-token': token },
     });
     if (response.status === 401) {
-      localStorage.removeItem('portal_token');
-      window.location.href = '/portal';
+      clearPortalToken();
+      window.location.href = portalLoginUrl();
       return;
     }
     const body = await response.json();
@@ -106,7 +107,7 @@ export default function PortalLicenses() {
   }, []);
 
   const removeDevice = async () => {
-    const token = localStorage.getItem('portal_token');
+    const token = getPortalToken();
     if (!token || !removeTarget) return;
     setMutation('remove');
     setNotice(null);
@@ -138,7 +139,7 @@ export default function PortalLicenses() {
   };
 
   const rotateKey = async () => {
-    const token = localStorage.getItem('portal_token');
+    const token = getPortalToken();
     if (!token || !rotateTarget) return;
     setMutation('rotate');
     setNotice(null);
