@@ -1,0 +1,645 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "f966761eb2ad3e0026422e61a1c4094abc37543a",
+  "domainId": "music-player-fairness",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Audit rows from the run remain present and unmodified (never-delete honored).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Run-prefixed Valkey queue + vote keys are removed by the sweeper (zero remaining).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Run-created channels, roles, and fairness messages are deleted from the test guilds.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: One music.self_skip row for A and one music.vote_cast row for B; no music.force_skip row for B.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: A requester self-skips instantly while a non-requester's /skip opens a listener-majority vote (50% threshold), posting track-queued → self-skip-confirm → vote-progress embeds.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Re-delivering B’s vote interaction leaves the tally at exactly one vote.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Exactly one music.playback_backend_failed audit row exists for the outage episode.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The persisted queue + config rows are unchanged by the outage and the open vote tally is intact.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Stopping the Lavalink node mid-track posts the playback-error embed once in the bound text channel with the track title and reason; the session enters degraded.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: The owner receives exactly one notification identifying the guild and the backend outage.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: The outage grants no skips: the vote tally and current index re-read identical before and after the failure.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One config.rejected audit row records the invalid payload attempt without storing the invalid values as applied state.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "database-RLS",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: PUT /api/music with a not-a-snowflake dj_role_id and a vote threshold of 0 returns a validation error and persists nothing.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Live fairness behavior (self-skip + majority voting) is identical before and after the rejected write.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Replaying the invalid PUT produces the same rejection and still persists nothing.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: One skip audit row exists for the track regardless of how many concurrent actors raced.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "database-RLS",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: The queue currentIndex advanced by exactly one and the vote set for the old track is deleted exactly once.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Two threshold-completing votes plus a simultaneous self-skip advance the queue exactly one position, post exactly one skip embed, and clear the tally once.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: The concurrent losers’ interactions are absorbed idempotently with no double advance.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: One audit row exists per unique logical action; replayed deliveries add no rows.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "database-RLS",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: The vote set for the track contains the user id exactly once and the queue currentIndex advanced exactly once for the self-skip.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: A second identical /skip vote yields an already-voted ephemeral reply with no tally increase; a re-delivered self-skip advances the queue zero additional positions.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: End-state queue and vote structures are byte-identical between single-delivery and duplicate-delivery runs.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Pre-restart audit rows remain and post-restart rows continue the same episode without duplication.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "database-RLS",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: The persisted queue in Valkey re-reads unchanged across the restart with requestedBy intact.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: After restart A can still self-skip, the surviving vote tally still counts toward the same track, and one more listener vote completes the majority.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Restart-time recovery does not re-fire completed skips: the queue advances only from post-restart actions.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: One recovery audit row follows the failure row; retry loops do not multiply audit entries.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "database-RLS",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: The queue record shows the same entries and currentIndex after recovery as before the outage.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Restarting Lavalink leads the bot to reconnect automatically and resume the persisted current track without a duplicate track-queued embed; a subsequent self-skip works.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: At most one recovery notice follows the outage notification; retry attempts do not spam the owner.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Reconnect attempts never double-start the track: exactly one live player exists for the guild after convergence.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: One music.force_skip row records the DJ actor, the skipped track, and arbitration basis dj-role.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "database-RLS",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The DJ-role write path is owner-scoped: a non-owner PUT /api/music is rejected before any guild_config write.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: A DJ-role holder’s /skip force-skips member A’s playing track immediately (no vote), and /stop, /volume, /remove also succeed for the DJ, naming the next track.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Replaying the DJ’s /skip advances the queue no further than the single original skip.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Three music.vote_cast rows and exactly one music.vote_skip_passed row exist for the track.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: With threshold 100 and three human listeners, two votes leave the track playing (vote-progress 2 of 3) and the third vote skips exactly once (vote-skip-complete).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Re-delivering the third voter’s interaction does not skip a second track or restart the tally.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: music.fairness_denied rows record each denied attempt with actor and attempted action.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "database-RLS",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A logged-in non-owner’s PUT /api/music returns a permission error (requireGuildOwner) and changes nothing.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: A non-DJ member’s /stop, /remove on another’s track, and /volume are each denied ephemerally (fairness-denied / DJ-required) while playback continues uninterrupted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Replaying a denied interaction produces the same denial and no state change.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Audit rows carry the correct guild id and no cross-guild rows appear.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Every player-fairness embed uses the guild brand name + configured tone preset and carries the powered-by-SomniBot footer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Votes cast in guild A never appear in guild B’s tally, guild A’s DJ role grants nothing in guild B, and changing A’s threshold leaves B’s voting math unchanged.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "owner-present production Discord and Lavalink readback plus exact-final process and CI",
+      "observation": "Owner-present production playback, natural end, replay, disconnect recovery, queue preservation, position advance, and Stop cleanup remain bound to this contract; exact-final music recovery, build, deployment health, and strict producer jobs passed. Named promise: Replaying guild A interactions changes nothing in guild B.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    }
+  ]
+}

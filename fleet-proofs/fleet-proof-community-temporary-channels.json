@@ -1,0 +1,524 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "f966761eb2ad3e0026422e61a1c4094abc37543a",
+  "domainId": "community-temporary-channels",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The test guilds contain no run-prefixed voice channels (hubs or spawned rooms) after cleanup.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A hub join spawns \"{owner-name}'s room\" in the hub's category, unlimited, owner-controlled, and self-deleting after the empty grace.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: The creation failure lands an append-only audit row (temp_channels.creation_failed).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With the bot's channel-management permission revoked, a hub join produces the kind failure notice and no room row; restoring the permission makes the next join spawn normally.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A create failure raises exactly one owner alert (temp-alert) naming the missing permission.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: No ghost active_temp_channels row is left behind by a failed create.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Each rejected save lands one audit row with its validation reason.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard rejects a user limit of 100 and a nonexistent hub channel with clear errors; stored config is unchanged and hub joins keep spawning rooms.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: run-member-a and run-member-b joining the hub together each get their own correctly-owned room; two members racing /voice claim end with exactly one new owner whose controls work.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: After replaying the recorded voiceStateUpdate, the guild still has exactly one room for the member.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: run-member-a's occupied room persists through the restart with working /voice controls (its channel stays in the live cache and is not reconciled).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With a transient fault injected on the first create call, the retry produces exactly one room and the member is moved into it; no duplicate rooms exist.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The join-event key shows exactly one room creation across attempts.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A hub join spawns a room showing the custom name pattern and user limit 5, and Discord blocks the sixth join.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner leaves, a friend runs /voice claim and gains control, and the empty room survives the longer grace before deleting once.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: The denied control attempt is audited with actor, room, and reason.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: run-member-b's /voice lock on run-member-a's occupied room gets the friendly denial pointing to /voice claim; the room's permissions are unchanged.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Every member-facing temp-channel surface (room-created note, /voice control-applied ephemeral) shows the owner's brand kit and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Hub joins in guild B spawn rooms only in B under B's template; guild A's rooms are untouched.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    }
+  ]
+}

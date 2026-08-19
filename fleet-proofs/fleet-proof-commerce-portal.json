@@ -1,0 +1,634 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "f966761eb2ad3e0026422e61a1c4094abc37543a",
+  "domainId": "commerce-portal",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Portal action audit rows remain append-only after the operational sweep (audit retained, not deleted).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Any Discord-side effects of run portal actions (role retention windows, cancellations) are unwound on test accounts.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner queue holds no lingering test requests post-sweep.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Login, signed-link issuance, and the successful download are each audited for the customer.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "database-RLS",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The issued session carries the default 604800000ms (7-day) TTL from a real OAuth sign-in.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: OAuth uses the buyer’s real Discord identity and the portal shows exactly that account’s purchases.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A signed download link honours the 300000ms (5-minute) default TTL and reusing it after expiry serves zero bytes.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Failed logins during the outage are recorded as portal.login_failed with the dependency cause.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The login-failed page stays calm and branded without exposing provider errors.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "database-RLS",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: No session rows are created during the outage window.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: With Discord’s token endpoint unreachable, a fresh sign-in shows login-failed and no partial identity is trusted; sign-in recovers when Discord does.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A sustained OAuth outage raises exactly one deduped owner alert.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Retried sign-ins during the outage cannot mint sessions from stale codes afterward.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Each rejection is logged with enough detail to spot probing patterns.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: No Discord account is affected and no OAuth session is established from the invalid inputs.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Repeating tampered requests indefinitely yields identical refusals with only rate-limit state accumulating.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Both racers are logged with the winner’s effect appearing once.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A rotation racing a device removal leaves a consistent final state (one new key generation, device correctly detached).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner sees one coherent subscription and key state, not conflicting entries.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Replays are visible as no-ops without duplicating the original action entries.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Role and entitlement state reflect the single original effect of each mutation.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner queue holds one request entry regardless of resubmissions.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "replay-safety",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Replayed cancellation confirmations, key rotations, device removals, and request submissions each resolve to their single original effect, including the PayPal non-renewal call.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The audit trail is continuous across the restart with no gaps or duplicates.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Post-restart the subscriber’s roles still reflect the retained-until-term-end access.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The owner queue still shows the pending request after restart.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: In-flight requests spanning the restart are absorbed idempotently.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The transient failure is traceable without polluting the customer’s action history.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The interim error state is a branded, retryable notice rather than a broken page.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The induced transient DB failure makes the first orders fetch return a friendly error; the automatic retry returns the complete, correctly-scoped list.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The cancellation is audited with actor, subscription id, and effective date.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The cancellation-scheduled copy is owner-voiced, states the exact retained-access date, and avoids guilt-tripping.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "database-RLS",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Under the default cancellation-timing=\"end-of-term\", a confirmed cancellation sets the entitlement's end-of-term expiry (access retained until term end) rather than revoking immediately.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The subscriber keeps all perk roles after cancelling until the term-end date; /license check still shows the entitlement active with its end date.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard subscription view shows the scheduled cancellation as a churn signal for the owner.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "exact-final PayPal Sandbox provider webhook replay database and CI readback",
+      "observation": "Fresh Sandbox authentication, provider order idempotency, terminal provider truth, exact refund-event replay, and unchanged customer-state readback passed on the deployed final SHA; portal cancellation duplicate-call fencing also passed its exact-final PostgreSQL and CI contract. Named promise: Confirming the cancellation twice stays a single scheduled cancellation with one provider (PayPal) call.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The config change, the expired-link refusal, and the request filing are each audited.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "database-RLS",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Shortening download-link-ttl-ms to 60s makes a link older than a minute refused while a fresh one works.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: No Discord-side money or role effect occurs from filing the refund request.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: An enabled refund request routes the buyer’s ask into the owner’s dashboard queue as pending, with no auto-refund and no payments mutation.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Filing the same refund request twice dedupes to one queue entry.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A’s cross-customer attempts are logged as refusals with A’s identity.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The portal renders the owner brand throughout with the subtle powered-by-SomniBot attribution and no third-party look.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Customer B’s roles, keys, and DMs are untouched by A’s attempts.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Repeated cross-customer probing is visible to the owner via the security surface.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: No sequence of replayed probes escalates A’s access.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The guild-B login attempt is audited under guild B with no reference to guild-A data.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Each portal renders its own guild’s brand kit, proving branding is guild-scoped.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The same Discord identity authenticates in both portals yet sees strictly guild-scoped results (guild B shows the no-purchases notice).",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Repeated cross-guild logins never leak or link data across guilds.",
+      "observedAt": "2026-08-19T02:10:39.067Z",
+      "artifact": {
+        "path": "fleet-final-observation-f966.md",
+        "sha256": "f3bff5f73be1f7a7a31700eb4696d533aba2b5c9d370653deaf23fc4907d6d46"
+      }
+    }
+  ]
+}
