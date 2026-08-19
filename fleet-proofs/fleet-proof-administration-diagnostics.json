@@ -1,0 +1,667 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "2edc9d0e4d4416d9b04b96e3db7c9943df3204ad",
+  "domainId": "administration-diagnostics",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Run audit rows persist after cleanup; none are deleted by the sweep.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: No stale run-guild alert messages remain uncontextualized in the owner channel after teardown.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: No alert lifecycle events exist for the healthy window (memory stays under the default 512MB threshold).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The reported ws ping is a live value from the real gateway connection.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Each alert condition mirrors once on open and once on recovery to the owner notification channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: diagnostics.dependency_down is recorded for the outage.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: With Valkey stopped, the snapshot still writes valkey_connected=false and a critical valkey_disconnected alert opens once.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Exactly one open and one resolve notification for the outage condition.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The rejected attempts are recorded (with the offending bound) without any config.updated rows.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "database-RLS",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: A negative ws-ping threshold, a zero memory threshold, or a sub-floor snapshot interval is rejected and stored thresholds are unchanged.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Two racing evaluations deliver one owner notification for the condition.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The service role reads this guild's alerts row while anon/authenticated clients read zero (service-role-only RLS).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-evaluating the identical breaching snapshot updates the message/severity in place and delivers a single owner notification for the condition.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: One unresolved alert row exists per type regardless of evaluation count.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: No spurious alert churn is logged from the restart itself.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Each alert condition mirrors once on open and once on recovery to the owner notification channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: A restart does not duplicate alert rows for ongoing conditions.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: The transient failure is logged without alert noise (diagnostics.snapshot_failed).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: With one snapshot write transiently failing, the following 60s tick writes successfully and the freshness gap never exceeds two intervals.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: No stale alert fires for a single missed tick.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: The threshold change is recorded with before/after values.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The service role reads this guild's alerts row while anon/authenticated clients read zero (service-role-only RLS).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: With memory-alert-threshold-mb set to 128 (below actual usage), the next evaluation opens exactly one memory_high alert whose severity follows the 1.5x rule.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: The owner mirror for the memory_high alert includes a suggested next step, once per condition.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Continued breaching snapshots update the same memory_high row.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: The threshold change and alert lifecycle are recorded.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The service role reads this guild's alerts row while anon/authenticated clients read zero (service-role-only RLS).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: With ws-ping-alert-threshold-ms set to 1, the next evaluation opens exactly one ws_ping_high alert (memory stays quiet), independent of SET-A.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Each alert condition mirrors once on open and once on recovery to the owner notification channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: Denied diagnostics-view attempts are logged with the member's id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The service role reads this guild's alerts row while anon/authenticated clients read zero (service-role-only RLS).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: A member without dashboard.view_diagnostics receives 403 from GET /api/diagnostics and the /diagnostics route; the member's dashboard hides diagnostics navigation.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: No alert fires for routine permission denials.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Alert events are recorded under the correct guild.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Only guild A's owner channel receives guild A's alerts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: An alert in guild A notifies only guild A (per-guild alert rows).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    }
+  ]
+}

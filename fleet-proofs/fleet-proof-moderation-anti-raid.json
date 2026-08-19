@@ -1,0 +1,667 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "2edc9d0e4d4416d9b04b96e3db7c9943df3204ad",
+  "domainId": "moderation-anti-raid",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained in anonymized form).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The test guild ban list contains no scripted raid joiners, no run-prefixed raid-log messages remain, and verification is at its original level after cleanup.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: No lingering scripted-joiner bans or leftover verification/invite changes survive the sweep.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With anti-raid disabled, fifteen joins in ten seconds (incl. a day-old account) all remain members: no DM, kick, ban, verification change, or raid alert anywhere.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: No join is window-tracked while disabled (the sliding-window Valkey keys are never written).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With Valkey blocked, a scripted flood still trips stage-one containment from the capped in-memory window, and joins after recovery are tracked normally without double-counting.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner receives a SINGLE tracking-degradation alert for the outage window rather than one alert per join.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: On Valkey recovery, in-memory window state re-syncs to Valkey without double-counting the joins seen during the outage.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One audit row records the rejected anti-raid configuration attempt with the validation reason; no config-change audit row is written.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard surfaces a clear validation error for a join threshold below two, a negative window, or a malformed containment ladder.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Twenty near-simultaneous joins produce a window count of twenty, one raid-mode activation, one raid alert, and exactly one containment action per raid-window joiner.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: Concurrent joins each count exactly once under the atomic Valkey sorted-set pipeline (zremrangebyscore + zadd + zcard), so containment engages exactly once and only one raid alert posts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: After replaying the flood events exactly one raid alert exists and no member was actioned twice.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: Re-delivering the flood's gateway join events leaves the join-window count, member states, raid-mode state, and alert count byte-identical to the pre-replay snapshot (each real join counts once; replays are deduplicated no-ops).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Restarting during an active lockdown leaves raid mode active on boot; when the cooldown expires verification is restored, invites are recreated, and raid bans are lifted exactly once.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: The Valkey-persisted raid state (raid-mode, prev level, invite snapshots, ban list) survives the restart and drives exactly one restore pass.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With a transient fault injected on the first raid-log post and one containment kick, the retries land exactly one raid alert and remove the affected joiner exactly once.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: The retried post and kick reuse their original correlation keys, so the raid log carries one alert and the joiner one removal, not two.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A three-day-old account is DMed the branded age explanation and removed without a ban; a 12-joins-in-10s flood raises exactly one raid alert, raid-window joiners are DMed then kicked, and a post-cooldown join flows untouched.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: The sliding join window trips stage-one containment at the configured threshold and auto-reverses after five calm minutes.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A persisting flood raises verification to Very High, existing invites are deleted (settings snapshotted), and after the cooldown verification returns to its prior level, invites are recreated with fresh codes, and a single all-clear summary reports the exact counts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: The pre-lockdown verification level and paused-invite snapshots are stored durably (antiraid:prevlevel / antiraid:invites) and replayed exactly once on restore.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The denied settings access is audited with the actor id, route, and reason 'permission-denied'.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: run-member-b's dashboard session receives a permission error and anti-raid behavior on the next join is byte-identical before and after the denied attempt.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Assertion class declared by the catalog scenario.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Deferral DMs and raid-log embeds carry the owner's brand name, colors, voice preset, and the powered-by-SomniBot attribution with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: During guild A's raid, a join to guild B succeeds untouched while the same joiner is turned away from A; guild B's verification level and invites are unchanged.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Anti-raid failure branches (missing lockdown permission, incomplete restore, degraded tracking) each raise exactly one reasoned owner alert.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: Each guild's sliding-window and raid-mode keys are namespaced per guild (antiraid:joins:<guildId>, antiraid:raidmode:<guildId>), so A's flood never trips B.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    }
+  ]
+}

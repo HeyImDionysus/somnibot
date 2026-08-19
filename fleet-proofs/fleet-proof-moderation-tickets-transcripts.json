@@ -1,0 +1,502 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "2edc9d0e4d4416d9b04b96e3db7c9943df3204ad",
+  "domainId": "moderation-tickets-transcripts",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Audit history is anonymized rather than deleted (operational ticket rows deleted; audit_logs and transcripts for an erased member retained with identity anonymized after /forgetme).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The test guilds contain no run-prefixed ticket panels, threads, or transcript posts after cleanup.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Clicking a panel button opens a private thread visible only to the creator + managers + bot (run-member-b gets an access error), and closing locks the thread, posts the close embed + feedback stars, saves the HTML transcript, and DMs the creator their copy.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: With database access blocked, a panel click yields the branded ticket-create-failed reply and no ticket thread is left behind; recovery opens with the next sequential number.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner receives a single dependency-degradation alert for the outage window rather than one alert per failed interaction.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One audit row records each rejected configuration attempt with the validation reason; no config-change audit row is written for the failed saves.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard rejects an inactivity close threshold at/below the warning threshold, a max-open-per-user of zero, and a nonexistent panel channel with clear errors; stored config is unchanged and the panel keeps working on the next open.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A double-clicked panel button produces one ticket under the max-open cap, and a concurrent Close button + /ticket close settle into one close, one close embed, and one transcript.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Re-delivering the recorded panel-open and close interactions yields no second thread, close embed, feedback prompt, or transcript.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Append-only audit rows for the pre-restart actions remain after the restart; no audit row is deleted.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The surviving ticket’s Close/Claim/Transcript buttons still work post-restart (stateless custom ids) and the inactivity warning fires from the persisted last-activity timestamp.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Audit rows record the create rollback, the transcript failure, and the successful retry.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "database-RLS",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The service role reads this guild's tickets rows while an anon client reads zero of them (RLS deny-all).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: A tickets insert that fails after thread creation deletes the orphan thread (compensation); the member’s retry produces exactly one ticket, and a failed transcript store is retried by the operator to exactly one stored transcript.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner alert channel receives exactly one reasoned alert per exercised failure branch and none for the eventual successes.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The retried insert and transcript store reuse their original keys, so the database shows one tickets row and one ticket_transcripts row, never two.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The panel configuration change and each ticket action are captured as append-only audit rows.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The edited panel shows the dropdown, the intake modal collects the fields into the intro, a third open returns the branded limit reply, and the close posts one transcript file to the transcript channel plus one DM.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The configuration change, the inactivity warning, and the auto-close are captured as append-only audit rows.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Fast inactivity timers fire the warning at the configured hour and auto-close at the close threshold, and the feedback prompt is disabled on close.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "audit",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Each denied lifecycle attempt lands one audit row with actor, ticket number, and reason permission-denied.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The private thread stays invisible to the unprivileged member.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Each guild keeps its own append-only audit rows; ticket actions in one guild never write rows scoped to the other.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "exact-final filesystem PostgreSQL integration and CI readback",
+      "observation": "The previously named implementation gap is present in the exact-final source and its focused behavioral or PostgreSQL lane passed before integration; exact-final type, build, integration, and strict producer jobs passed. Named promise: Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Guild A's panel, open tickets, and transcript channel are byte-identical before and after a guild B activity burst.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s panel-open and close interactions yields no duplicate ticket threads, status changes, transcripts, or feedback prompts.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    }
+  ]
+}

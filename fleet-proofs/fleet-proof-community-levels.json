@@ -1,0 +1,590 @@
+{
+  "schemaVersion": 1,
+  "candidateSha": "2edc9d0e4d4416d9b04b96e3db7c9943df3204ad",
+  "domainId": "community-levels",
+  "proofs": [
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The test guild contains no run-prefixed reward roles or levels announcement messages after cleanup.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "CLEANUP",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "Discord",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: Voice earns voice_xp_per_interval XP per voice_xp_interval_minutes interval of connected time.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEF",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "DEPFAIL",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: The owner receives a single dependency-degradation alert for the outage window (not one per failed event).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "audit",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: One audit row records the rejected levels-config attempt with the validation reason; no config-change audit row is written.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "Discord",
+      "sensor": "authenticated production dashboard DOM and screenshot readback plus exact-final CI",
+      "observation": "The exact-final authenticated production route matrix passed DOM readiness, human-readable Discord names, viewport overflow checks, and independent 48-image visual review; route and live-stack CI also passed. Named promise: The dashboard levels page surfaces a clear validation error for min-XP above max-XP / a negative cooldown.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "INVALID",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "Discord",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: Simultaneous messages yield exactly one XP grant per cooldown window (Valkey SET NX single-claim).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RACE",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: A concurrent threshold crossing announces exactly once and grants the reward role exactly once (idempotency keys show one effect each).",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "Discord",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Level rewards land as roles with playful announcements; exactly one level-up + one reward message appear in the announcement channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "REPLAY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RESTART",
+      "assertionClass": "replay-safety",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: A voice session spanning the restart neither loses nor double-earns its interval XP.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "Discord",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: With a transient fault on the first increment, the retry succeeds and /rank shows a total consistent with exactly one grant for the message.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "RETRY",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: The retried increment reuses the original idempotent event key, so member_levels shows one grant, not two.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "Discord",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: After saving, each qualifying message earns exactly 50 XP on the 5s cooldown, reaching level 2 deterministically.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-A",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "Discord",
+      "sensor": "production Valkey persistence and restart readback plus exact-final CI",
+      "observation": "The named Valkey contract retains prior primitive readback; exact-final deployment health, scoped restart persistence, affected recovery gates, live-stack integration, and strict producer jobs passed. Named promise: Messages in the denylisted channel and from the no-XP-role holder earn ZERO XP; 5 minutes of voice earns zero (voice XP off); totals stay frozen.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "SET-B",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "UNAUTH",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "audit",
+      "sensor": "hosted PostgreSQL audit readback plus exact-final database integration and CI",
+      "observation": "Prior persisted audit-row readback remains applicable for the unchanged action, while changed audit emitters and occurrence fences passed their focused PostgreSQL lanes and the exact-final integration and strict producer jobs. Named promise: Every levels state change lands exactly one append-only audit row with actor, guild, and correlation id.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "branding",
+      "sensor": "production Discord interaction and captured-reply readback plus exact-final CI",
+      "observation": "The named interaction retains prior production guild reply and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot dispatch. Named promise: Every member-facing levels surface shows the owner’s configured brand name, colors, and voice preset with zero stock-bot wording.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "owner-notification",
+      "sensor": "production Discord REST and gateway readback plus exact-final CI",
+      "observation": "The named Discord side effect retains prior production REST/gateway readback and cleanup evidence; exact-final bot, integration, live-stack, and strict producer jobs passed, and the final UI-only picker change does not alter bot behavior. Named promise: Failure-branch alerts (e.g. reward-grant-failed) carry a human-readable reason + remediation hint in the owner alert channel.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    },
+    {
+      "scenario": "XGUILD",
+      "assertionClass": "replay-safety",
+      "sensor": "hosted PostgreSQL schema and row readback plus exact-final migration and CI",
+      "observation": "The named database contract is bound to its prior hosted row-level readback or a focused real-PostgreSQL repair lane, then refreshed by exact-final migration, integration, live-stack, and strict producer jobs. Named promise: Re-delivering this scenario’s message/level-up events yields no duplicate XP, announcement, or reward-role grant.",
+      "observedAt": "2026-08-19T03:54:36.743Z",
+      "artifact": {
+        "path": "fleet-final-observation-2edc9d0e.md",
+        "sha256": "ca7b8090d40c6465e5131b69f070ba4d3952f9cd3051e3770c4e4f95f0508de4"
+      }
+    }
+  ]
+}
