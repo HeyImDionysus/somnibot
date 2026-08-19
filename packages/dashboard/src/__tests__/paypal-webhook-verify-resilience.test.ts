@@ -120,6 +120,9 @@ beforeEach(() => {
   process.env.PAYPAL_CLIENT_SECRET = '<<mock-client-secret>>';
   process.env.PAYPAL_WEBHOOK_ID = 'test-webhook-id';
   process.env.PAYPAL_WEBHOOK_URL = 'http://localhost/api/paypal/webhook';
+  const admin = createMockSupabase();
+  registerTable(admin, 'instance_settings').limit.mockResolvedValue({ data: [], error: null });
+  (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
   vi.stubGlobal('fetch', mockFetch);
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -261,6 +264,7 @@ describe('raisePayPalVerifyUnavailableAlert', () => {
   function setupAlertMocks(guildId: string) {
     process.env.DISCORD_GUILD_ID = guildId;
     const mock = createMockSupabase();
+    registerTable(mock, 'instance_settings').limit.mockResolvedValue({ data: [], error: null });
     const alertsQuery = registerTable(mock, 'alerts');
     // Terminal `.select('id')` of the refresh UPDATE chain. Default: no
     // existing unresolved alert (0 rows updated) → falls through to INSERT.
@@ -332,6 +336,7 @@ describe('POST /api/paypal/webhook — verify failure status mapping', () => {
   it('responds 503 (not 401) and records no event when verification infrastructure is down', async () => {
     process.env.DISCORD_GUILD_ID = 'guild-route-503';
     const mock = createMockSupabase();
+    registerTable(mock, 'instance_settings').limit.mockResolvedValue({ data: [], error: null });
     const alertsQuery = registerTable(mock, 'alerts');
     alertsQuery.select.mockResolvedValue({ data: [], error: null });
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
@@ -355,6 +360,7 @@ describe('POST /api/paypal/webhook — verify failure status mapping', () => {
   it('still responds 401 with no alert when the signature is actually invalid', async () => {
     process.env.DISCORD_GUILD_ID = 'guild-route-401';
     const mock = createMockSupabase();
+    registerTable(mock, 'instance_settings').limit.mockResolvedValue({ data: [], error: null });
     const alertsQuery = registerTable(mock, 'alerts');
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
     fetchScript([tokenOk], [verifyFailure]);
