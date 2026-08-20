@@ -12,6 +12,12 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { ShoppingBag, Plus, Pencil, Trash2 } from 'lucide-react';
+import { RolePicker } from '@/components/shared/role-picker';
+import {
+  ECONOMY_ITEM_EFFECT_TYPES,
+  isManualEconomyItemEffect,
+} from '@somnibot/shared/constants/economy';
+import type { EconomyItemUseEffect } from '@somnibot/shared/types';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -29,7 +35,7 @@ interface ShopItem {
   require_role_id: string | null;
   grant_role_id: string | null;
   usable: boolean;
-  use_effect: Record<string, unknown> | null;
+  use_effect: EconomyItemUseEffect | null;
   durability: number | null;
   tradeable: boolean;
   active: boolean;
@@ -42,6 +48,23 @@ interface ShopItem {
 // choices (features/economy/commands.ts) and the categories used by the
 // content seeder and crafting outputs.
 const CATEGORIES = ['Tools', 'Protection', 'Farming', 'Accessories', 'Bait', 'Seeds', 'Materials', 'Consumables', 'Roles', 'Cosmetics', 'Lootboxes'] as const;
+
+const ITEM_EFFECT_META: Record<EconomyItemUseEffect['type'], { label: string; description: string }> = {
+  padlock: { label: 'Padlock protection', description: 'Automatically blocks one robbery and is consumed.' },
+  shovel: { label: 'Gathering shovel', description: 'Automatically used for digging gathering sources.' },
+  pickaxe: { label: 'Gathering pickaxe', description: 'Automatically used for mining gathering sources.' },
+  hunting_rifle: { label: 'Hunting tool', description: 'Automatically used for hunting gathering sources.' },
+  wallet_credit: { label: 'Coin consumable', description: 'Members use this item to receive the configured virtual currency.' },
+  xp_credit: { label: 'XP consumable', description: 'Members use this item to receive XP and any crossed level rewards.' },
+  role_grant: { label: 'Role consumable', description: 'Members use this item to queue the selected Discord role grant.' },
+};
+
+function defaultEffect(type: EconomyItemUseEffect['type']): EconomyItemUseEffect {
+  if (type === 'wallet_credit' || type === 'xp_credit') return { type, amount: 100 };
+  if (type === 'role_grant') return { type, role_id: '' };
+  if (type === 'shovel' || type === 'pickaxe' || type === 'hunting_rifle') return { type, tier: 1 };
+  return { type };
+}
 
 const BLANK_ITEM: Partial<ShopItem> = {
   name: '',
@@ -79,6 +102,23 @@ function ItemFormModal({
 
   const update = <K extends keyof ShopItem>(key: K, value: ShopItem[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const effect = form.use_effect ?? null;
+  const effectMeta = effect ? ITEM_EFFECT_META[effect.type] : undefined;
+  const behaviorValid = (!effect || Boolean(effectMeta))
+    && (effect?.type !== 'role_grant' || Boolean(effect.role_id));
+  const setEffectType = (value: string) => {
+    if (value === 'none') {
+      setForm((prev) => ({ ...prev, usable: false, use_effect: null }));
+      return;
+    }
+    const type = value as EconomyItemUseEffect['type'];
+    setForm((prev) => ({
+      ...prev,
+      usable: isManualEconomyItemEffect(type),
+      use_effect: defaultEffect(type),
+    }));
   };
 
   return (
@@ -125,6 +165,115 @@ function ItemFormModal({
             placeholder="Protects you from robbery once"
           />
         </label>
+
+        <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-primary/40 p-4 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-discord-text-primary">Item behavior</h3>
+            <p className="text-xs text-discord-text-muted">
+              Choose the exact bot behavior. Automatic tools work in their related game command; consumables are activated with /use.
+            </p>
+          </div>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-discord-text-secondary">Behavior</span>
+            <select
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
+              value={effect?.type ?? 'none'}
+              onChange={(event) => setEffectType(event.target.value)}
+            >
+              <option value="none">Inventory or crafting material only</option>
+              {effect && !effectMeta && (
+                <option value={effect.type}>Legacy or unsupported behavior</option>
+              )}
+              {ECONOMY_ITEM_EFFECT_TYPES.map((type) => (
+                <option key={type} value={type}>{ITEM_EFFECT_META[type].label}</option>
+              ))}
+            </select>
+          </label>
+          {effectMeta && (
+            <p className="text-xs text-discord-text-secondary">{effectMeta.description}</p>
+          )}
+          {effect && !effectMeta && (
+            <p className="text-xs text-yellow-300">
+              This item contains an older behavior that SomniBot cannot run. Select a supported behavior before saving.
+            </p>
+          )}
+          {effect && (effect.type === 'wallet_credit' || effect.type === 'xp_credit') && (
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-discord-text-secondary">
+                {effect.type === 'wallet_credit' ? 'Virtual currency awarded' : 'XP awarded'}
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={1_000_000_000}
+                value={effect.amount ?? 1}
+                onChange={(event) => update('use_effect', {
+                  type: effect.type,
+                  amount: Math.max(1, Number.parseInt(event.target.value, 10) || 1),
+                })}
+                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
+              />
+            </label>
+          )}
+          {effect?.type === 'role_grant' && (
+            <RolePicker
+              label="Role granted when used"
+              value={effect.role_id || null}
+              onChange={(value) => update('use_effect', {
+                type: 'role_grant',
+                role_id: (value as string | null) ?? '',
+              })}
+              placeholder="Select role…"
+            />
+          )}
+          {effect && (effect.type === 'shovel' || effect.type === 'pickaxe' || effect.type === 'hunting_rifle') && (
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-discord-text-secondary">Tool tier</span>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={effect.tier ?? 1}
+                onChange={(event) => update('use_effect', {
+                  type: effect.type,
+                  tier: Math.min(10, Math.max(1, Number.parseInt(event.target.value, 10) || 1)),
+                })}
+                className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
+              />
+            </label>
+          )}
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <RolePicker
+            label="Required role to buy"
+            value={form.require_role_id ?? null}
+            onChange={(value) => update('require_role_id', (value as string | null) ?? null)}
+            placeholder="No role required"
+          />
+          <RolePicker
+            label="Role granted on purchase"
+            value={form.grant_role_id ?? null}
+            onChange={(value) => update('grant_role_id', (value as string | null) ?? null)}
+            placeholder="No purchase role"
+          />
+        </div>
+
+        {(effect?.type === 'shovel' || effect?.type === 'pickaxe' || effect?.type === 'hunting_rifle') && (
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-discord-text-secondary">Durability (empty = never wears out)</span>
+            <input
+              type="number"
+              min={1}
+              value={form.durability ?? ''}
+              onChange={(event) => update('durability', event.target.value
+                ? Math.max(1, Number.parseInt(event.target.value, 10) || 1)
+                : null)}
+              placeholder="Unlimited"
+              className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
+            />
+          </label>
+        )}
 
         {/* Category */}
         <label className="flex flex-col gap-1">
@@ -220,7 +369,7 @@ function ItemFormModal({
           </button>
           <button
             onClick={() => onSave(form)}
-            disabled={saving || !form.name?.trim()}
+            disabled={saving || !form.name?.trim() || !behaviorValid}
             className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? 'Saving...' : item.id ? 'Update' : 'Create'}
@@ -358,6 +507,11 @@ export default function ShopPage() {
                         )}
                       </div>
                       <p className="text-xs text-discord-text-secondary truncate">{item.description || 'No description'}</p>
+                      <p className="text-xs text-discord-text-muted">
+                        {item.use_effect
+                          ? ITEM_EFFECT_META[item.use_effect.type]?.label ?? 'Legacy or unsupported behavior'
+                          : 'Inventory or crafting material'}
+                      </p>
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end">

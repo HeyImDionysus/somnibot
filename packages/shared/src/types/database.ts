@@ -1807,11 +1807,10 @@ export type EconomyItemCategory =
   | 'Lootboxes';
 
 export interface EconomyItemUseEffect {
-  type: 'xp_boost' | 'coin_boost' | 'padlock' | 'alarm' | 'adventure_ticket' | 'role_grant' | 'custom';
-  duration_minutes?: number;
-  multiplier?: number;
+  type: 'padlock' | 'shovel' | 'pickaxe' | 'hunting_rifle' | 'wallet_credit' | 'xp_credit' | 'role_grant';
+  amount?: number;
   role_id?: string;
-  custom_data?: Record<string, unknown>;
+  tier?: number;
 }
 
 export interface DbEconomyItem {

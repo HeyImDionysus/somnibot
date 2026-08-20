@@ -118,6 +118,7 @@ function makeManager(overrides: any = {}) {
 
 function makeInteraction(commandName: string, options: Record<string, any> = {}) {
   return {
+    id: 'interaction-1',
     commandName,
     options: {
       getSubcommand: vi.fn().mockReturnValue(options.sub ?? commandName),
@@ -321,11 +322,13 @@ describe('handleEconomyCommand', () => {
     expect(mgr.getInventory).toHaveBeenCalled();
   });
 
-  it('handles use command (stub)', async () => {
+  it('uses an inventory item with the interaction id as the replay fence', async () => {
     const mgr = makeManager();
     const int = makeInteraction('use', { str: 'item1' });
     await handleEconomyCommand(int as any, mgr as any);
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    expect(int.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(mgr.useItem).toHaveBeenCalledWith('u1', 'item1', 'interaction-1');
+    expect(int.editReply).toHaveBeenCalledWith({ content: 'Used Sword' });
   });
 
   it('handles economy-leaderboard command', async () => {

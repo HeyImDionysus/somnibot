@@ -2985,7 +2985,19 @@ async function handleBulkRoleAdd(
     return { success: true, data: { memberId, roleId, skipped: true } };
   }
 
-  await member.roles.add(roleId, 'SomniBot dashboard — bulk role assign');
+  const source = payload.source === 'economy_item_use' ? 'economy_item_use' : 'dashboard_bulk';
+  await member.roles.add(
+    roleId,
+    source === 'economy_item_use'
+      ? 'SomniBot economy item used'
+      : 'SomniBot dashboard — bulk role assign',
+  );
+  eventBus.emit('role.gained', guild.id, {
+    discordId: memberId,
+    roleId,
+    roleName: guild.roles.cache.get(roleId)?.name ?? roleId,
+    source: source === 'economy_item_use' ? 'bot' : 'dashboard',
+  });
   return { success: true, data: { memberId, roleId } };
 }
 

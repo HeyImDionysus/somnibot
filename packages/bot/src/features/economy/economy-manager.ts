@@ -17,6 +17,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { randomInt } from 'node:crypto';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
+import { handleLevelUp } from '../levels/level-announcer.js';
 
 const log = createLogger('Economy');
 
@@ -86,6 +87,63 @@ export interface TransactionResult {
   balance: WalletData;
   message: string;
   streak?: StreakData;
+}
+
+export interface ItemUseResult {
+  success: boolean;
+  message: string;
+  replayed?: boolean;
+  indeterminate?: boolean;
+}
+
+interface ItemUseRpcResult {
+  status: 'applied' | 'rejected';
+  replayed?: boolean;
+  message?: string;
+  item_name?: string;
+  item_emoji?: string;
+  effect_type?: 'wallet_credit' | 'xp_credit' | 'role_grant';
+  amount?: number;
+  role_id?: string;
+  action_id?: string;
+  xp_result?: {
+    new_xp?: number;
+    old_level?: number;
+    new_level?: number;
+    leveled_up?: boolean;
+  };
+}
+
+function parseItemUseResult(value: unknown): ItemUseRpcResult | null {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const result = value as Record<string, unknown>;
+  if (result.status !== 'applied' && result.status !== 'rejected') return null;
+  const effectType = result.effect_type;
+  const xpValue = result.xp_result;
+  const xpResult = xpValue != null && typeof xpValue === 'object' && !Array.isArray(xpValue)
+    ? xpValue as Record<string, unknown>
+    : null;
+  return {
+    status: result.status,
+    replayed: typeof result.replayed === 'boolean' ? result.replayed : undefined,
+    message: typeof result.message === 'string' ? result.message : undefined,
+    item_name: typeof result.item_name === 'string' ? result.item_name : undefined,
+    item_emoji: typeof result.item_emoji === 'string' ? result.item_emoji : undefined,
+    effect_type: effectType === 'wallet_credit' || effectType === 'xp_credit' || effectType === 'role_grant'
+      ? effectType
+      : undefined,
+    amount: typeof result.amount === 'number' ? result.amount : undefined,
+    role_id: typeof result.role_id === 'string' ? result.role_id : undefined,
+    action_id: typeof result.action_id === 'string' ? result.action_id : undefined,
+    xp_result: xpResult
+      ? {
+          new_xp: typeof xpResult.new_xp === 'number' ? xpResult.new_xp : undefined,
+          old_level: typeof xpResult.old_level === 'number' ? xpResult.old_level : undefined,
+          new_level: typeof xpResult.new_level === 'number' ? xpResult.new_level : undefined,
+          leveled_up: typeof xpResult.leveled_up === 'boolean' ? xpResult.leveled_up : undefined,
+        }
+      : undefined,
+  };
 }
 
 // ── Random helpers (crypto-backed) ────────────────────────
@@ -1376,6 +1434,104 @@ export class EconomyManager {
         durability_remaining: row.durability_remaining as number | null,
       };
     });
+  }
+
+  async useItem(
+    userId: string,
+    itemSelector: string,
+    requestId: string,
+  ): Promise<ItemUseResult> {
+    const execute = () => this.supabase.rpc('economy_use_item_atomic', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_selector: itemSelector,
+      p_request_id: requestId,
+    });
+
+    let response = await execute();
+    if (response.error) response = await execute();
+
+    let result = parseItemUseResult(response.data);
+    if (!result && response.error) {
+      const readback = await this.supabase
+        .from('economy_item_use_operations')
+        .select('result')
+        .eq('guild_id', this.guild.id)
+        .eq('user_id', userId)
+        .eq('request_id', requestId)
+        .maybeSingle();
+      result = parseItemUseResult(readback.data?.result);
+    }
+
+    if (!result) {
+      log.error('economy_use_item_atomic returned no authoritative result', {
+        guildId: this.guild.id,
+        userId,
+        requestId,
+        detail: response.error?.message ?? 'malformed result',
+      });
+      return {
+        success: false,
+        indeterminate: true,
+        message: '⚠️ SomniBot could not confirm whether the item was used. Check your inventory before trying again.',
+      };
+    }
+
+    if (result.status === 'rejected') {
+      return { success: false, message: `❌ ${result.message ?? 'That item could not be used.'}` };
+    }
+
+    const name = result.item_name ?? itemSelector;
+    const emoji = result.item_emoji ?? '📦';
+    const suffix = result.replayed ? ' The original result was safely replayed.' : '';
+
+    if (result.effect_type === 'wallet_credit') {
+      const cfg = await this.loadConfig();
+      return {
+        success: true,
+        replayed: result.replayed,
+        message: `${emoji} Used **${name}** and received **${(result.amount ?? 0).toLocaleString()} ${cfg.currency_name}**.${suffix}`,
+      };
+    }
+
+    if (result.effect_type === 'xp_credit') {
+      const xp = result.xp_result;
+      if (
+        !result.replayed
+        && xp?.leveled_up
+        && typeof xp.old_level === 'number'
+        && typeof xp.new_level === 'number'
+        && typeof xp.new_xp === 'number'
+      ) {
+        await handleLevelUp(
+          this.guild,
+          this.supabase,
+          eventBus,
+          userId,
+          xp.old_level,
+          xp.new_level,
+          xp.new_xp,
+        );
+      }
+      return {
+        success: true,
+        replayed: result.replayed,
+        message: `${emoji} Used **${name}** and received **${(result.amount ?? 0).toLocaleString()} XP**.${suffix}`,
+      };
+    }
+
+    if (result.effect_type === 'role_grant') {
+      return {
+        success: true,
+        replayed: result.replayed,
+        message: `${emoji} Used **${name}**. The <@&${result.role_id ?? ''}> role grant is queued and will retry automatically if Discord is temporarily unavailable.${suffix}`,
+      };
+    }
+
+    return {
+      success: false,
+      message: '❌ This item does not have a supported consumable behavior.',
+    };
   }
 
   // ── Chat income ─────────────────────────────────────────

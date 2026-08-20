@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 287 migration files in packages/supabase/migrations/
+ * Source: 288 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2176,6 +2176,16 @@ export interface DbEconomyInventory {
   durability_remaining: number | null;
   acquired_at: string;
   updated_at: string;
+}
+
+export interface DbEconomyItemUseOperations {
+  guild_id: string;
+  user_id: string;
+  request_id: string;
+  requested_item: string;
+  item_id: string;
+  result: Json;
+  created_at: string;
 }
 
 export interface DbEconomyItems {
