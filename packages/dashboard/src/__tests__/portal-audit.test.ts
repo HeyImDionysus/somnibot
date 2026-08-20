@@ -19,7 +19,7 @@ vi.mock('@/lib/api/signed-url', () => ({
   generateSignedDownloadUrl: vi.fn(() => 'https://signed.example/dl'),
 }));
 vi.mock('@/lib/discord-runtime-config', () => ({
-  getDiscordRuntimeConfig: vi.fn(async () => ({
+  getDiscordOAuthRuntimeConfig: vi.fn(async () => ({
     applicationId: 'app-id',
     clientSecret: 'secret',
     sources: { applicationId: 'env', clientSecret: 'env' },

@@ -1,21 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordRuntimeConfig: vi.fn() }));
+vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordOAuthRuntimeConfig: vi.fn() }));
 
 import { GET } from '@/app/api/portal/config/route';
-import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getDiscordOAuthRuntimeConfig } from '@/lib/discord-runtime-config';
 
 describe('GET /api/portal/config', () => {
   beforeEach(() => {
-    vi.mocked(getDiscordRuntimeConfig).mockReset();
+    vi.mocked(getDiscordOAuthRuntimeConfig).mockReset();
   });
 
   it('returns the authoritative installation Discord application ID', async () => {
-    vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
+    vi.mocked(getDiscordOAuthRuntimeConfig).mockResolvedValue({
       applicationId: '123456789012345678',
-      botToken: 'token',
       clientSecret: 'secret',
-      sources: { applicationId: 'saved', botToken: 'saved', clientSecret: 'saved' },
+      sources: { applicationId: 'saved', clientSecret: 'saved' },
     });
 
     const response = await GET();
@@ -31,11 +30,10 @@ describe('GET /api/portal/config', () => {
   it.each(['', 'not-a-discord-id', '1234'])(
     'fails clearly instead of emitting a broken OAuth link for %j',
     async (applicationId) => {
-      vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
+      vi.mocked(getDiscordOAuthRuntimeConfig).mockResolvedValue({
         applicationId,
-        botToken: 'token',
         clientSecret: 'secret',
-        sources: { applicationId: 'env', botToken: 'env', clientSecret: 'env' },
+        sources: { applicationId: 'env', clientSecret: 'env' },
       });
 
       const response = await GET();
@@ -48,7 +46,7 @@ describe('GET /api/portal/config', () => {
   );
 
   it('fails closed when saved configuration cannot be read', async () => {
-    vi.mocked(getDiscordRuntimeConfig).mockRejectedValue(new Error('database unavailable'));
+    vi.mocked(getDiscordOAuthRuntimeConfig).mockRejectedValue(new Error('database unavailable'));
 
     const response = await GET();
 

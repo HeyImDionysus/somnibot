@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getDiscordOAuthRuntimeConfig } from '@/lib/discord-runtime-config';
 
 const APPLICATION_ID_PATTERN = /^\d{17,20}$/;
 
@@ -10,7 +10,7 @@ const NO_STORE_HEADERS = {
 export async function GET() {
   let applicationId = '';
   try {
-    ({ applicationId } = await getDiscordRuntimeConfig());
+    ({ applicationId } = await getDiscordOAuthRuntimeConfig());
   } catch {
     return NextResponse.json(
       { error: 'Customer portal sign-in is temporarily unavailable.' },
