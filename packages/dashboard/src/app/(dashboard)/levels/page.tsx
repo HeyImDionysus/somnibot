@@ -16,6 +16,7 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Trophy } from 'lucide-react';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import Link from 'next/link';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -32,6 +33,8 @@ interface LevelConfig {
   xp_channel_list: string[];
   level_up_channel_id: string | null;
   level_up_message: string | null;
+  currency_name: string;
+  currency_emoji: string;
   rank_card_accent_color: number | null;
   rank_card_background: string | null;
   no_xp_role_id: string | null;
@@ -42,10 +45,24 @@ interface LevelReward {
   id: string;
   guild_id: string;
   level: number;
-  role_id: string;
+  reward_type: 'role' | 'currency' | 'item';
+  role_id: string | null;
+  remove_role_id: string | null;
   remove_at_level: number | null;
+  currency_amount: number | null;
+  item_id: string | null;
+  item_quantity: number | null;
+  economy_items: { name: string; emoji: string } | null;
   announce: boolean;
   created_at: string;
+}
+
+interface RewardItem {
+  id: string;
+  name: string;
+  emoji: string;
+  category: string;
+  active: boolean;
 }
 
 interface XpMultiplier {
@@ -77,6 +94,8 @@ const DEFAULT_CONFIG: LevelConfig = {
   xp_channel_list: [],
   level_up_channel_id: null,
   level_up_message: null,
+  currency_name: 'Coins',
+  currency_emoji: '🪙',
   rank_card_accent_color: null,
   rank_card_background: null,
   no_xp_role_id: null,
@@ -118,6 +137,7 @@ export default function LevelsPage() {
 
   const [config, setConfig] = useState<LevelConfig>(DEFAULT_CONFIG);
   const [rewards, setRewards] = useState<LevelReward[]>([]);
+  const [rewardItems, setRewardItems] = useState<RewardItem[]>([]);
   const [multipliers, setMultipliers] = useState<XpMultiplier[]>([]);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [lbTotal, setLbTotal] = useState(0);
@@ -135,8 +155,13 @@ export default function LevelsPage() {
 
   // Reward form
   const [newRewardLevel, setNewRewardLevel] = useState(5);
+  const [newRewardType, setNewRewardType] = useState<'role' | 'currency' | 'item'>('role');
   const [newRewardRoleId, setNewRewardRoleId] = useState('');
+  const [newRewardRemoveRoleId, setNewRewardRemoveRoleId] = useState('');
   const [newRewardRemoveAt, setNewRewardRemoveAt] = useState('');
+  const [newRewardCurrencyAmount, setNewRewardCurrencyAmount] = useState(100);
+  const [newRewardItemId, setNewRewardItemId] = useState('');
+  const [newRewardItemQuantity, setNewRewardItemQuantity] = useState(1);
   const [newRewardAnnounce, setNewRewardAnnounce] = useState(true);
 
   // Multiplier form
@@ -156,6 +181,7 @@ export default function LevelsPage() {
         setConfig({ ...DEFAULT_CONFIG, ...json.config });
         setRewards(json.rewards);
         setMultipliers(json.multipliers);
+        setRewardItems(json.reward_items ?? []);
       } else {
         setError(json.error);
       }
@@ -253,25 +279,66 @@ export default function LevelsPage() {
   };
 
   const addReward = async () => {
-    if (!newRewardRoleId) return;
     setError(null);
+    if (newRewardLevel < 1) {
+      setError('Reward level must be at least 1.');
+      return;
+    }
+    if (newRewardType === 'role' && !newRewardRoleId) {
+      setError('Select the role this reward should grant.');
+      return;
+    }
+    if (newRewardType === 'role' && newRewardRemoveRoleId === newRewardRoleId) {
+      setError('The role to remove must differ from the reward role.');
+      return;
+    }
+    if (
+      newRewardType === 'role'
+      && newRewardRemoveAt
+      && Number(newRewardRemoveAt) <= newRewardLevel
+    ) {
+      setError('The awarded role can only expire after its reward level.');
+      return;
+    }
+    if (newRewardType === 'currency' && newRewardCurrencyAmount < 1) {
+      setError('Currency rewards must be at least 1.');
+      return;
+    }
+    if (newRewardType === 'item' && !newRewardItemId) {
+      setError('Select the inventory item this reward should grant.');
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      type: 'reward',
+      reward_type: newRewardType,
+      level: newRewardLevel,
+      announce: newRewardAnnounce,
+    };
+    if (newRewardType === 'role') {
+      payload.role_id = newRewardRoleId;
+      payload.remove_role_id = newRewardRemoveRoleId || null;
+      payload.remove_at_level = newRewardRemoveAt ? Number(newRewardRemoveAt) : null;
+    } else if (newRewardType === 'currency') {
+      payload.currency_amount = newRewardCurrencyAmount;
+    } else {
+      payload.item_id = newRewardItemId;
+      payload.item_quantity = newRewardItemQuantity;
+    }
+
     try {
       const res = await fetch('/api/levels', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'reward',
-          level: newRewardLevel,
-          role_id: newRewardRoleId,
-          remove_at_level: newRewardRemoveAt ? parseInt(newRewardRemoveAt, 10) : null,
-          announce: newRewardAnnounce,
-        }),
+        body: JSON.stringify(payload),
       });
       const json = await res.json();
       if (json.success) {
         setRewards([...rewards, json.data]);
         setNewRewardRoleId('');
+        setNewRewardRemoveRoleId('');
         setNewRewardRemoveAt('');
+        setNewRewardItemId('');
         toast({ title: 'Reward added', variant: 'success' });
       } else {
         setError(json.error);
@@ -363,7 +430,7 @@ export default function LevelsPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Levels & XP</h1>
-          <p className="text-sm text-discord-text-muted">Configure the leveling system, role rewards, and XP multipliers</p>
+          <p className="text-sm text-discord-text-muted">Configure XP, Discord roles, virtual currency, inventory rewards, and multipliers</p>
         </div>
         <label className="flex cursor-pointer items-center gap-2">
           <span className="text-sm text-discord-text-secondary">
@@ -605,26 +672,93 @@ export default function LevelsPage() {
         <div className="space-y-4">
           <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5">
             <h2 className="mb-4 text-lg font-semibold text-discord-text-primary">Add Level Reward</h2>
-            <div className="grid gap-4 sm:grid-cols-4">
+            <p className="mb-4 text-sm text-discord-text-muted">
+              Rewards are delivered once when a member crosses the configured level, including multi-level jumps.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <div>
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Level</label>
                 <input type="number" min={1} value={newRewardLevel} onChange={(e) => setNewRewardLevel(Number(e.target.value))}
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
               </div>
-              <div>
+              <label className="text-xs font-medium text-discord-text-muted">
+                Reward Type
+                <select
+                  value={newRewardType}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === 'role' || value === 'currency' || value === 'item') {
+                      setNewRewardType(value);
+                    }
+                  }}
+                  className="mt-1 w-full rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+                >
+                  <option value="role">Discord role</option>
+                  <option value="currency">Virtual currency</option>
+                  <option value="item">Inventory item</option>
+                </select>
+              </label>
+              {newRewardType === 'role' && (
                 <RolePicker
                   label="Reward Role"
                   value={newRewardRoleId || null}
-                  onChange={(v) => setNewRewardRoleId((v as string) ?? '')}
+                  onChange={(value) => setNewRewardRoleId(typeof value === 'string' ? value : '')}
                   placeholder="Select role…"
                 />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Remove at Level</label>
-                <input type="text" value={newRewardRemoveAt} onChange={(e) => setNewRewardRemoveAt(e.target.value)} placeholder="Optional"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
-              </div>
-              <div className="flex items-end">
+              )}
+              {newRewardType === 'role' && (
+                <RolePicker
+                  label="Role to Remove"
+                  value={newRewardRemoveRoleId || null}
+                  onChange={(value) => setNewRewardRemoveRoleId(typeof value === 'string' ? value : '')}
+                  placeholder="Keep existing roles"
+                  allowNone
+                />
+              )}
+              {newRewardType === 'role' && (
+                <label className="text-xs font-medium text-discord-text-muted">
+                  Remove Awarded Role at Level
+                  <input type="number" min={newRewardLevel + 1} max={200} value={newRewardRemoveAt} onChange={(e) => setNewRewardRemoveAt(e.target.value)} placeholder="Never"
+                    className="mt-1 w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </label>
+              )}
+              {newRewardType === 'currency' && (
+                <label className="text-xs font-medium text-discord-text-muted">
+                  Currency Amount
+                  <input type="number" min={1} max={1_000_000_000} value={newRewardCurrencyAmount} onChange={(e) => setNewRewardCurrencyAmount(Number(e.target.value))}
+                    className="mt-1 w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </label>
+              )}
+              {newRewardType === 'item' && (
+                <div>
+                  <label className="text-xs font-medium text-discord-text-muted">
+                    Inventory Item
+                    <select
+                      value={newRewardItemId}
+                      onChange={(event) => setNewRewardItemId(event.target.value)}
+                      className="mt-1 w-full rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+                    >
+                      <option value="">Select an item…</option>
+                      {rewardItems.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.emoji} {item.name} · {item.category}{item.active ? '' : ' · inactive in shop'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <Link href="/economy/shop" className="mt-1 inline-block text-xs text-discord-accent hover:underline">
+                    Create or edit reward items in Economy Shop
+                  </Link>
+                </div>
+              )}
+              {newRewardType === 'item' && (
+                <label className="text-xs font-medium text-discord-text-muted">
+                  Quantity
+                  <input type="number" min={1} max={1000} value={newRewardItemQuantity} onChange={(e) => setNewRewardItemQuantity(Number(e.target.value))}
+                    className="mt-1 w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </label>
+              )}
+              <div className="flex items-end lg:col-start-3">
                 <button onClick={addReward} className="w-full rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard">
                   Add Reward
                 </button>
@@ -650,11 +784,26 @@ export default function LevelsPage() {
                       {r.level}
                     </span>
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]">Level {r.level} → <RoleDisplay roleId={r.role_id} /></p>
-                      <p className="text-xs text-discord-text-muted">
-                        {r.remove_at_level ? `Removed at level ${r.remove_at_level}` : 'Permanent'}
+                      <div className="text-sm font-medium text-discord-text-primary [overflow-wrap:anywhere]">
+                        <span>Level {r.level} → </span>
+                        {r.reward_type === 'role' && r.role_id && <RoleDisplay roleId={r.role_id} />}
+                        {r.reward_type === 'currency' && (
+                          <span>{config.currency_emoji} {r.currency_amount?.toLocaleString()} {config.currency_name}</span>
+                        )}
+                        {r.reward_type === 'item' && (
+                          <span>{r.economy_items?.emoji ?? '📦'} {r.item_quantity}× {r.economy_items?.name ?? 'Unavailable item'}</span>
+                        )}
+                      </div>
+                      <div className="text-xs text-discord-text-muted">
+                        {r.reward_type === 'role' && r.remove_role_id && (
+                          <span>Removes <RoleDisplay roleId={r.remove_role_id} /> · </span>
+                        )}
+                        {r.reward_type === 'role' && (
+                          <span>{r.remove_at_level ? `Awarded role expires at level ${r.remove_at_level}` : 'Awarded role is permanent'}</span>
+                        )}
+                        {r.reward_type !== 'role' && <span>Delivered once</span>}
                         {r.announce ? ' · Announced' : ''}
-                      </p>
+                      </div>
                     </div>
                   </div>
                   <button onClick={() => setConfirmDelete({ type: 'reward', id: r.id })} className="shrink-0 text-sm text-discord-danger transition-standard hover:text-discord-danger/80">

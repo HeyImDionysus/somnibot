@@ -3213,6 +3213,89 @@ async function handleTriviaPayoutRetry(
 
 // Exported for tests: registration coverage (the X2/39 dead letter was an
 // action queued with NO registered handler) + direct handler unit tests.
+export async function handleLevelRewardRoleDelivery(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+  context: ClaimedActionContext,
+): Promise<ActionResult> {
+  const allowed = new Set([
+    'delivery_id',
+    'guild_id',
+    'member_id',
+    'reward_id',
+    'delivery_kind',
+    'grant_role_id',
+    'remove_role_id',
+  ]);
+  const grantRoleId = payload.grant_role_id;
+  const removeRoleId = payload.remove_role_id;
+  if (
+    Object.keys(payload).some((field) => !allowed.has(field))
+    || payload.delivery_id !== context.actionId
+    || payload.guild_id !== guild.id
+    || typeof payload.member_id !== 'string'
+    || !/^\d{17,20}$/.test(payload.member_id)
+    || typeof payload.reward_id !== 'string'
+    || !UUID_PATTERN.test(payload.reward_id)
+    || !['award', 'expiry'].includes(String(payload.delivery_kind))
+    || (grantRoleId !== null && (typeof grantRoleId !== 'string' || !/^\d{17,20}$/.test(grantRoleId)))
+    || (removeRoleId !== null && (typeof removeRoleId !== 'string' || !/^\d{17,20}$/.test(removeRoleId)))
+    || (grantRoleId === null && removeRoleId === null)
+    || grantRoleId === removeRoleId
+  ) {
+    return { success: false, error: 'Malformed level reward role delivery', retryable: false };
+  }
+
+  try {
+    const member = await guild.members.fetch(payload.member_id);
+    if (typeof grantRoleId === 'string' && !member.roles.cache.has(grantRoleId)) {
+      await member.roles.add(grantRoleId, 'SomniBot level reward');
+      eventBus.emit('role.gained', guild.id, {
+        discordId: payload.member_id,
+        roleId: grantRoleId,
+        roleName: guild.roles.cache.get(grantRoleId)?.name ?? grantRoleId,
+        source: 'levels',
+      });
+    }
+    if (typeof removeRoleId === 'string' && member.roles.cache.has(removeRoleId)) {
+      await member.roles.remove(removeRoleId, 'SomniBot level reward replacement');
+      eventBus.emit('role.lost', guild.id, {
+        discordId: payload.member_id,
+        roleId: removeRoleId,
+        roleName: guild.roles.cache.get(removeRoleId)?.name ?? removeRoleId,
+        source: 'levels',
+      });
+    }
+
+    const { data, error } = await supabase.rpc('complete_level_reward_role_delivery', {
+      p_delivery_id: context.actionId,
+      p_action_id: context.actionId,
+      p_guild_id: guild.id,
+    });
+    if (error || data !== true) {
+      return {
+        success: false,
+        error: `Level reward completion could not be confirmed: ${error?.message ?? 'invalid readback'}`,
+      };
+    }
+    return {
+      success: true,
+      data: {
+        deliveryId: context.actionId,
+        memberId: payload.member_id,
+        grantRoleId,
+        removeRoleId,
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export const ACTION_HANDLERS: Record<string, ActionHandler> = {
   create_role: handleCreateRole,
   update_role: handleUpdateRole,
@@ -3241,6 +3324,7 @@ export const ACTION_HANDLERS: Record<string, ActionHandler> = {
   bulk_send_dm: handleBulkSendDm,
   emit_audit_event: handleEmitAuditEvent,
   trivia_payout_retry: handleTriviaPayoutRetry,
+  deliver_level_reward_roles: handleLevelRewardRoleDelivery,
   sync_repair_drift: handleSyncRepairDrift,
   sync_accept_drift: handleSyncAcceptDrift,
   sync_ignore_drift: handleSyncIgnoreDrift,

@@ -597,14 +597,52 @@ const ticketPanelCreate = z.object({
 
 // ── Level reward schemas ────────────────────────────
 
-const levelRewardCreate = z.object({
-  type: z.enum(['reward', 'multiplier']),
-  level: z.number().int().min(1).max(200).optional(),
-  role_id: snowflake.optional(),
-  remove_at_level: z.number().int().min(0).max(200).optional().nullable(),
+const roleLevelRewardCreate = z.object({
+  type: z.literal('reward'),
+  reward_type: z.literal('role').optional(),
+  level: z.number().int().min(1).max(200),
+  role_id: snowflake,
+  remove_role_id: snowflake.optional().nullable(),
+  remove_at_level: z.number().int().min(2).max(200).optional().nullable(),
   announce: z.boolean().optional(),
-  multiplier: z.number().min(0.1).max(10).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.remove_role_id === value.role_id) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['remove_role_id'], message: 'Replacement role must differ from reward role' });
+  }
+  if (value.remove_at_level != null && value.remove_at_level <= value.level) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['remove_at_level'], message: 'Removal level must be greater than reward level' });
+  }
 });
+
+const currencyLevelRewardCreate = z.object({
+  type: z.literal('reward'),
+  reward_type: z.literal('currency'),
+  level: z.number().int().min(1).max(200),
+  currency_amount: z.number().int().min(1).max(1_000_000_000),
+  announce: z.boolean().optional(),
+}).strict();
+
+const itemLevelRewardCreate = z.object({
+  type: z.literal('reward'),
+  reward_type: z.literal('item'),
+  level: z.number().int().min(1).max(200),
+  item_id: uuid,
+  item_quantity: z.number().int().min(1).max(1000),
+  announce: z.boolean().optional(),
+}).strict();
+
+const levelMultiplierCreate = z.object({
+  type: z.literal('multiplier'),
+  role_id: snowflake,
+  multiplier: z.number().min(0.1).max(10),
+}).strict();
+
+const levelRewardCreate = z.union([
+  roleLevelRewardCreate,
+  currencyLevelRewardCreate,
+  itemLevelRewardCreate,
+  levelMultiplierCreate,
+]);
 
 // ── Stats channel schemas ───────────────────────────
 

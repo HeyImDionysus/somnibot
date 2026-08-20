@@ -845,8 +845,13 @@ export interface DbLevelReward {
   id: string;
   guild_id: string | null;
   level: number;
-  role_id: string;
+  reward_type: 'role' | 'currency' | 'item';
+  role_id: string | null;
+  remove_role_id: string | null;
   remove_at_level: number | null;
+  currency_amount: number | null;
+  item_id: string | null;
+  item_quantity: number | null;
   announce: boolean;
   created_at: string;
 }

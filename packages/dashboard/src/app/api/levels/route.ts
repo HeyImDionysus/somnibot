@@ -55,13 +55,15 @@ export async function GET(req: NextRequest) {
     const pageSize = 20;
     const offset = page * pageSize;
 
-    const { data, count } = await supabase
+    const { data, count, error } = await supabase
       .from('member_levels')
       .select('member_id, xp, level, total_messages, voice_minutes', { count: 'exact' })
       .eq('guild_id', guildId)
       .order('xp', { ascending: false })
       .range(offset, offset + pageSize - 1)
       .limit(1000);
+
+    if (error) return dbError(error, 'levels');
 
     return NextResponse.json({
       success: true,
@@ -73,17 +75,17 @@ export async function GET(req: NextRequest) {
   }
 
   // Full settings bundle
-  const [configResult, rewardsResult, multipliersResult] = await Promise.all([
+  const [configResult, rewardsResult, multipliersResult, itemsResult] = await Promise.all([
     supabase
       .from('guild_config')
       .select(
-        'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, rank_card_accent_color, rank_card_background, no_xp_role_id, level_curve',
+        'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, currency_name, currency_emoji, rank_card_accent_color, rank_card_background, no_xp_role_id, level_curve',
       )
       .eq('guild_id', guildId)
       .maybeSingle(),
     supabase
       .from('level_rewards')
-      .select('*')
+      .select('*, economy_items(name, emoji)')
       .eq('guild_id', guildId)
       .order('level', { ascending: true })
       .limit(1000),
@@ -93,13 +95,27 @@ export async function GET(req: NextRequest) {
       .eq('guild_id', guildId)
       .order('multiplier', { ascending: false })
       .limit(1000),
+    supabase
+      .from('economy_items')
+      .select('id, name, emoji, category, active')
+      .eq('guild_id', guildId)
+      .order('category', { ascending: true })
+      .order('name', { ascending: true })
+      .limit(1000),
   ]);
+
+  const loadError = configResult.error
+    ?? rewardsResult.error
+    ?? multipliersResult.error
+    ?? itemsResult.error;
+  if (loadError) return dbError(loadError, 'levels');
 
   return NextResponse.json({
     success: true,
     config: configResult.data ?? {},
     rewards: rewardsResult.data ?? [],
     multipliers: multipliersResult.data ?? [],
+    reward_items: itemsResult.data ?? [],
   });
 }
 
@@ -168,25 +184,63 @@ export async function POST(req: NextRequest) {
   const parsed = await parseBody(req, schemas.levelReward.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
-  const type = body.type as string;
+  const type = body.type;
 
   if (type === 'reward') {
-    const { level, role_id, remove_at_level, announce } = body;
-    if (level == null || !role_id) {
-      return NextResponse.json(
-        { success: false, error: 'Missing required fields: level, role_id' },
-        { status: 400 },
-      );
+    const rewardType = body.reward_type ?? 'role';
+    let roleId: string | null = null;
+    let removeRoleId: string | null = null;
+    let removeAtLevel: number | null = null;
+    let currencyAmount: number | null = null;
+    let itemId: string | null = null;
+    let itemQuantity: number | null = null;
+
+    if (rewardType === 'item') {
+      if (body.reward_type !== 'item') {
+        return NextResponse.json({ success: false, error: 'Invalid item reward' }, { status: 400 });
+      }
+      const { data: item, error: itemError } = await supabase
+        .from('economy_items')
+        .select('id')
+        .eq('id', body.item_id)
+        .eq('guild_id', guildId)
+        .maybeSingle();
+      if (itemError) return dbError(itemError, 'levels');
+      if (!item) {
+        return NextResponse.json(
+          { success: false, error: 'The selected economy item is not available in this server.' },
+          { status: 400 },
+        );
+      }
+      itemId = body.item_id;
+      itemQuantity = body.item_quantity;
+    } else if (rewardType === 'currency') {
+      if (body.reward_type !== 'currency') {
+        return NextResponse.json({ success: false, error: 'Invalid currency reward' }, { status: 400 });
+      }
+      currencyAmount = body.currency_amount;
+    } else {
+      if (body.reward_type !== undefined && body.reward_type !== 'role') {
+        return NextResponse.json({ success: false, error: 'Invalid role reward' }, { status: 400 });
+      }
+      roleId = body.role_id;
+      removeRoleId = body.remove_role_id ?? null;
+      removeAtLevel = body.remove_at_level ?? null;
     }
 
     const { data, error } = await supabase
       .from('level_rewards')
       .insert({
         guild_id: guildId,
-        level,
-        role_id,
-        remove_at_level: remove_at_level ?? null,
-        announce: announce ?? true,
+        level: body.level,
+        reward_type: rewardType,
+        role_id: roleId,
+        remove_role_id: removeRoleId,
+        remove_at_level: removeAtLevel,
+        currency_amount: currencyAmount,
+        item_id: itemId,
+        item_quantity: itemQuantity,
+        announce: body.announce ?? true,
       })
       .select()
       .single();
@@ -249,6 +303,10 @@ export async function DELETE(req: NextRequest) {
       { success: false, error: 'Missing id or type' },
       { status: 400 },
     );
+  }
+
+  if (type !== 'reward' && type !== 'multiplier') {
+    return NextResponse.json({ success: false, error: 'Invalid type' }, { status: 400 });
   }
 
   const table = type === 'reward' ? 'level_rewards' : 'xp_multipliers';

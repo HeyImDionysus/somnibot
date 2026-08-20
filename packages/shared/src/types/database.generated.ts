@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 288 migration files in packages/supabase/migrations/
+ * Source: 289 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -835,10 +835,15 @@ export interface DbLevelReward {
   id: string;
   guild_id: string;
   level: number;
-  role_id: string;
+  role_id: string | null;
   remove_at_level: number | null;
   announce: boolean;
   created_at: string;
+  reward_type: string;
+  remove_role_id: string | null;
+  currency_amount: number | null;
+  item_id: string | null;
+  item_quantity: number | null;
 }
 
 export interface DbXpMultiplier {
@@ -2528,6 +2533,19 @@ export interface DbHealthMetrics {
   metric_type: string;
   value_ms: number;
   recorded_at: string;
+}
+
+export interface DbLevelRewardDeliveries {
+  id: string;
+  guild_id: string;
+  member_id: string;
+  reward_id: string;
+  delivery_kind: 'award' | 'expiry';
+  reached_level: number;
+  status: 'queued' | 'completed';
+  action_id: string | null;
+  created_at: string;
+  completed_at: string | null;
 }
 
 export interface DbLevelUnlockConfigs {
