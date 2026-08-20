@@ -413,9 +413,14 @@ export async function POST(req: NextRequest) {
   }
 
   if (device_fingerprint && seatTrackingEnabled) {
+    const activatesPendingKey = result.key_status === 'pending_activation';
     const { data: deviceResult, error: deviceError } = await supabase
-      .rpc('license_validate_device', {
+      .rpc(activatesPendingKey ? 'license_validate_device_atomic' : 'license_validate_device', {
         p_license_key_id: result.key_id,
+        ...(activatesPendingKey ? {
+          p_product_id: product_id,
+          p_activate_pending: true,
+        } : {}),
         p_device_fingerprint: device_fingerprint,
         p_device_name: device_name ?? null,
         p_app_version: app_version ?? null,
@@ -466,6 +471,51 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // The locked RPC can observe a terminal key transition that won after the
+    // initial lookup. Preserve that authoritative verdict instead of turning
+    // it into a retryable outage, which would let the SDK apply offline grace.
+    if (
+      deviceResult?.status === 'revoked'
+      || deviceResult?.status === 'suspended'
+      || deviceResult?.status === 'expired'
+    ) {
+      const terminalStatus = deviceResult.status;
+      await logValidation(
+        supabase,
+        result.key_id ?? null,
+        product_id,
+        device_fingerprint,
+        terminalStatus,
+        clientIp,
+        app_version,
+      );
+      return NextResponse.json({
+        valid: false,
+        status: terminalStatus,
+        error: `License is ${terminalStatus}`,
+      });
+    }
+
+    if (
+      deviceResult?.status === 'key_unavailable'
+      || deviceResult?.status === 'product_mismatch'
+    ) {
+      await logValidation(
+        supabase,
+        result.key_id ?? null,
+        product_id,
+        device_fingerprint,
+        deviceResult.status,
+        clientIp,
+        app_version,
+      );
+      return NextResponse.json({
+        valid: false,
+        status: 'revoked',
+        error: 'License is no longer valid for this product',
+      });
+    }
+
     // Defence in depth against the same class of bug: the RPC answered, but
     // with no session id and no recognised status. Treat "no seat granted" as
     // a failure to validate rather than silently issuing a seatless success.
@@ -496,9 +546,22 @@ export async function POST(req: NextRequest) {
 
     // Guaranteed non-null by the guard above.
     sessionId = deviceResult.session_id;
+
+    if (deviceResult.activated && result.product_guild_id) {
+      await writeCommerceAudit(supabase, {
+        guildId: result.product_guild_id,
+        actorType: 'system',
+        actorId: 'license-validator',
+        action: 'license.key_activated',
+        targetType: 'license_key',
+        targetId: result.key_id,
+        details: { productId: product_id, activation: 'first_project_validation' },
+        occurrenceKey: `license.key_activated:${result.key_id}`,
+      });
+    }
   }
 
-  if (result.key_status === 'pending_activation') {
+  if (result.key_status === 'pending_activation' && !seatTrackingEnabled) {
     const activation = await activateOnFirstValidation(
       supabase,
       result.key_id!,

@@ -317,4 +317,80 @@ describe('POST /api/license/validate', () => {
     expect(body.status).toBe('device_fingerprint_required');
     expect(tables.update).not.toHaveBeenCalled();
   });
+
+  it('atomically activates a tracked pending key while granting its first session', async () => {
+    const lookup = {
+      found: true,
+      key_id: 'key-pending',
+      key_status: 'pending_activation',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-1',
+      entitlement_status: 'active',
+      entitlement_expires_at: null,
+      product_guild_id: 'guild-1',
+      config_max_devices: 3,
+      config_device_policy: 'reject',
+      config_heartbeat_interval_seconds: 300,
+    };
+    mockRpc.mockImplementation(async (fn: string) => {
+      if (fn === 'license_validate_lookup') return { data: lookup, error: null };
+      if (fn === 'license_validate_device_atomic') {
+        return {
+          data: { status: 'created', session_id: 'session-1', activated: true },
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    });
+    const licenseKeys = mockTable({ data: null, error: null });
+    const tables = mockTable({ data: null, error: null });
+    mockFrom.mockImplementation((table: string) => (
+      table === 'license_keys' ? licenseKeys : tables
+    ));
+
+    const response = await POST(makeReq({ device_fingerprint: 'device-1' }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ valid: true, status: 'active', session_id: 'session-1' });
+    expect(mockRpc).toHaveBeenCalledWith('license_validate_device_atomic', expect.objectContaining({
+      p_activate_pending: true,
+      p_product_id: '00000000-0000-4000-a000-000000000001',
+    }));
+    expect(licenseKeys.update).not.toHaveBeenCalled();
+  });
+
+  it.each(['revoked', 'suspended', 'expired'] as const)(
+    'returns the terminal %s verdict when a key transition wins before atomic activation',
+    async (terminalStatus) => {
+    const lookup = {
+      found: true,
+      key_id: 'key-pending',
+      key_status: 'pending_activation',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-1',
+      entitlement_status: 'active',
+      entitlement_expires_at: null,
+      config_max_devices: 3,
+      config_device_policy: 'reject',
+    };
+    mockRpc.mockImplementation(async (fn: string) => {
+      if (fn === 'license_validate_lookup') return { data: lookup, error: null };
+      if (fn === 'license_validate_device_atomic') {
+        return { data: { status: terminalStatus, session_id: null, activated: false }, error: null };
+      }
+      return { data: null, error: null };
+    });
+    const tables = mockTable({ data: null, error: null });
+
+    const response = await POST(makeReq({ device_fingerprint: 'device-1' }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ valid: false, status: terminalStatus });
+    expect(tables.update).not.toHaveBeenCalled();
+    },
+  );
 });
