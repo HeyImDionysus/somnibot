@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { requireGuildOwner } from '@/lib/api/require-owner';
@@ -50,14 +51,25 @@ export async function POST(request: NextRequest) {
 
   const admin = createAdminSupabase();
   const slot = slotResult.data;
-  const path = `${auth.ctx.guildId}/${slot}.${extension}`;
+  const columns = assetConfig[slot];
+  const { data: before, error: readError } = await admin
+    .from('guild_config')
+    .select('brand_logo_storage_path, brand_header_storage_path, brand_background_storage_path')
+    .eq('guild_id', auth.ctx.guildId)
+    .maybeSingle();
+  if (readError) return dbError(readError, 'branding/assets');
+  const previousPath = slot === 'logo'
+    ? before?.brand_logo_storage_path
+    : slot === 'header'
+      ? before?.brand_header_storage_path
+      : before?.brand_background_storage_path;
+  const path = `${auth.ctx.guildId}/${slot}/${randomUUID()}.${extension}`;
   const { error: uploadError } = await admin.storage.from('brand-assets').upload(path, bytes, {
     contentType: file.type,
-    upsert: true,
+    upsert: false,
   });
   if (uploadError) return dbError(uploadError, 'branding/assets');
   const { data: publicUrl } = admin.storage.from('brand-assets').getPublicUrl(path);
-  const columns = assetConfig[slot];
   const updates = { [columns.url]: publicUrl.publicUrl, [columns.path]: path };
   const { error: updateError } = await admin
     .from('guild_config')
@@ -65,6 +77,12 @@ export async function POST(request: NextRequest) {
   if (updateError) {
     await admin.storage.from('brand-assets').remove([path]);
     return dbError(updateError, 'branding/assets');
+  }
+  if (typeof previousPath === 'string' && previousPath && previousPath !== path) {
+    const { error: cleanupError } = await admin.storage.from('brand-assets').remove([previousPath]);
+    if (cleanupError) {
+      console.error('[Branding] Previous asset cleanup failed after replacement:', cleanupError.message);
+    }
   }
   await notifyBot(auth.ctx.guildId, 'branding', updates);
   return NextResponse.json({ success: true, slot, url: publicUrl.publicUrl });

@@ -150,6 +150,11 @@ BEGIN
       'commerce_reserve_checkout_pricing: pricing is already reserved';
   END IF;
 
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'promotion:first-purchase:' || v_intent.guild_id || ':' || v_intent.customer_id::TEXT,
+    0
+  ));
+
   IF v_code = '' THEN
     UPDATE public.commerce_checkout_intents
        SET final_amount_cents = v_product.price_cents
@@ -181,10 +186,6 @@ BEGIN
   END IF;
 
   IF v_promotion.first_purchase_only THEN
-    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-      'promotion:first-purchase:' || v_intent.guild_id || ':' || v_intent.customer_id::TEXT,
-      0
-    ));
     IF EXISTS (
       SELECT 1
         FROM public.orders

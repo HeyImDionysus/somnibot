@@ -2072,6 +2072,7 @@ export interface DbAdventureSession {
   status: AdventureSessionStatus;
   loot_collected: { item_name: string; qty: number }[];
   currency_collected: number;
+  health_remaining: number;
   items_brought: { item_name: string; qty: number }[];
   message_id: string | null;
   channel_id: string | null;

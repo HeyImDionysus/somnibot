@@ -63,6 +63,12 @@ const RULE_TYPES = [
 const DISCORD_NATIVE_RULE_TYPES = new Set(['word_filter', 'link_filter', 'invite_filter', 'spam_filter', 'mention_spam']);
 const DISCORD_NATIVE_ACTIONS = new Set(['delete', 'warn', 'mute']);
 
+function supportsDiscordNativeMirror(rule: Partial<AutoModRule>): boolean {
+  return DISCORD_NATIVE_RULE_TYPES.has(rule.type ?? 'word_filter')
+    && DISCORD_NATIVE_ACTIONS.has(rule.action ?? 'warn')
+    && !(rule.type === 'invite_filter' && rule.config?.allowOwnServer === true);
+}
+
 const ACTIONS = [
   { value: 'delete', label: 'Delete Only', color: 'text-blue-400' },
   { value: 'warn', label: 'Delete + Warn', color: 'text-yellow-400' },
@@ -436,8 +442,7 @@ function RuleEditor({
   onCancel: () => void;
   nameError: string | null;
 }) {
-  const supportsNativeMirror = DISCORD_NATIVE_RULE_TYPES.has(rule.type ?? 'word_filter')
-    && DISCORD_NATIVE_ACTIONS.has(rule.action ?? 'warn');
+  const supportsNativeMirror = supportsDiscordNativeMirror(rule);
   return (
     <div className="rounded-lg border-2 border-discord-accent/30 bg-discord-bg-secondary p-6">
       <h3 className="text-lg font-medium text-discord-text-primary">
@@ -487,7 +492,17 @@ function RuleEditor({
         </div>
 
         {/* Type-specific config */}
-        <RuleConfig type={rule.type ?? 'word_filter'} config={rule.config ?? {}} onChange={(config) => onChange({ ...rule, config })} />
+        <RuleConfig
+          type={rule.type ?? 'word_filter'}
+          config={rule.config ?? {}}
+          onChange={(config) => {
+            const nextRule = { ...rule, config };
+            onChange({
+              ...nextRule,
+              sync_to_discord: supportsDiscordNativeMirror(nextRule) ? rule.sync_to_discord : false,
+            });
+          }}
+        />
 
         {/* Action */}
         <div>

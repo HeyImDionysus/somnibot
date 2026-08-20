@@ -410,6 +410,53 @@ describe('PUT /api/settings', () => {
 });
 
 describe('DELETE /api/settings', () => {
+  it('preserves the outgoing PayPal secret before resetting the saved credential', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://project.supabase.co');
+    vi.stubEnv('SUPABASE_SECRET_KEY', 'bootstrap-secret');
+    vi.mocked(getInstallationRuntimeSecret).mockImplementation(async (key) => (
+      key === 'paypal_client_secret' ? 'outgoing-paypal-secret' : 'management-access-token'
+    ));
+    const settings = registerTable(mock, 'instance_settings');
+    settings.upsert.mockResolvedValue({ error: null });
+    settings.in.mockResolvedValue({ error: null });
+
+    const res = await resetSettings({
+      section: 'paypal',
+      keys: ['paypal_client_secret'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(settings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'paypal_client_secret_v1_previous_encrypted',
+        section: 'paypal',
+        value: expect.stringMatching(/^somnibot-cloud-v1:/),
+      }),
+      { onConflict: 'key' },
+    );
+    expect(JSON.stringify(settings.upsert.mock.calls)).not.toContain('outgoing-paypal-secret');
+    expect(settings.upsert.mock.invocationCallOrder[0]).toBeLessThan(settings.in.mock.invocationCallOrder[0]);
+    expect(settings.in).toHaveBeenCalledWith('key', ['paypal_client_secret_encrypted']);
+  });
+
+  it('retains the saved PayPal credential when preserving the outgoing secret fails', async () => {
+    vi.stubEnv('SUPABASE_URL', 'https://project.supabase.co');
+    vi.stubEnv('SUPABASE_SECRET_KEY', 'bootstrap-secret');
+    vi.mocked(getInstallationRuntimeSecret).mockResolvedValue('outgoing-paypal-secret');
+    const settings = registerTable(mock, 'instance_settings');
+    settings.upsert.mockResolvedValue({ error: { message: 'preserve failed' } });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await resetSettings({
+      section: 'paypal',
+      keys: ['paypal_client_secret'],
+    });
+
+    expect(res.status).toBe(500);
+    expect(settings.delete).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
   it('removes saved values and encrypted secrets so environment defaults become authoritative again', async () => {
     const settings = registerTable(mock, 'instance_settings');
     settings.in.mockResolvedValue({ error: null });

@@ -2056,6 +2056,7 @@ export interface DbEconomyAdventureSessions {
   ended_at: string | null;
   loot_failed: boolean;
   scenes_traversed: number;
+  health_remaining: number;
 }
 
 export interface DbEconomyAdventures {

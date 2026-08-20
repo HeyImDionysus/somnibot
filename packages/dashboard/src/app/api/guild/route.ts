@@ -22,6 +22,25 @@ function normalizeGuildConfig(config: unknown): unknown | null {
   return typeof config === 'object' && config !== null ? config : null;
 }
 
+async function readPrimaryGuildId(admin: ReturnType<typeof createAdminSupabase>): Promise<{
+  readonly value: string | null;
+  readonly error: { readonly message: string } | null;
+}> {
+  const { data, error } = await admin
+    .from('instance_settings')
+    .select('value')
+    .eq('key', 'discord_guild_id')
+    .maybeSingle();
+  if (error) return { value: null, error };
+  const configured = typeof data?.value === 'string' && data.value.trim()
+    ? data.value
+    : process.env.DISCORD_GUILD_ID ?? process.env.NEXT_PUBLIC_DISCORD_GUILD_ID ?? '';
+  return {
+    value: configured.split(',').map((part) => part.trim()).find(Boolean) ?? null,
+    error: null,
+  };
+}
+
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -51,6 +70,8 @@ export async function GET() {
     .select('member_count')
     .eq('guild_id', guildId)
     .maybeSingle();
+  const primaryGuild = await readPrimaryGuildId(admin);
+  if (primaryGuild.error) return dbError(primaryGuild.error, 'guild');
 
   return NextResponse.json({
     success: true,
@@ -59,6 +80,7 @@ export async function GET() {
     desiredState,
     memberCount: liveState?.member_count ?? 0,
     totalRoles: guild.total_roles ?? null,
+    isPrimaryGuild: primaryGuild.value === guildId,
   });
 }
 
@@ -81,6 +103,16 @@ export async function PATCH(request: NextRequest) {
   }
 
   const admin = createAdminSupabase();
+  if (updates.custom_bot_statuses !== undefined) {
+    const primaryGuild = await readPrimaryGuildId(admin);
+    if (primaryGuild.error) return dbError(primaryGuild.error, 'guild');
+    if (primaryGuild.value !== guildId) {
+      return NextResponse.json(
+        { error: 'Bot presence is installation-wide and can only be changed from the primary server.' },
+        { status: 409 },
+      );
+    }
+  }
   const before = await readGuildConfigBefore(admin, guildId, Object.keys(updates));
 
   const { error } = await admin

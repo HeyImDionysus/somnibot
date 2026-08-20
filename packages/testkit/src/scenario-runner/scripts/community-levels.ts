@@ -84,6 +84,23 @@ interface LevelRewardRow {
   announce: boolean;
 }
 
+async function seedRoleReward(
+  handle: LiveClientHandle,
+  level: number,
+  roleId: string,
+): Promise<void> {
+  const { error } = await handle.supabase.from('level_rewards').insert({
+    guild_id: handle.guildId,
+    level,
+    reward_type: 'role',
+    role_id: roleId,
+    announce: true,
+  });
+  if (error) {
+    throw new Error(`Unable to seed the level-${level} role reward: ${error.message}`);
+  }
+}
+
 // ── Small live-stack helpers ──────────────────────────────────────────────
 
 function declaredDefault(domain: DomainContract, controlId: string): JsonValue | undefined {
@@ -632,7 +649,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 /** SET-A — dashboard config takes live effect: XP pinned to 50/msg @ 5s, a
  *  run-prefixed reward role bound at level 2. */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
-  const rewardRole = `${ctx.runPrefix}reward-lvl2`;
+  const rewardRole = ctx.snowflake('reward-lvl2');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -646,9 +663,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   const userA = ctx.userId('a');
 
   // Bind a reward role at level 2 (the real level_rewards binding the announcer reads).
-  await handle.supabase
-    .from('level_rewards')
-    .insert({ guild_id: handle.guildId, level: 2, role_id: rewardRole, announce: true });
+  await seedRoleReward(handle, 2, rewardRole);
 
   // Config round-trips into the exact guild_config row the bot's loadLevelConfig reads.
   const cfg = await readLevelsConfig(handle);
@@ -1177,7 +1192,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { levels_enabled: true } });
   const userA = ctx.userId('a');
   const userB = ctx.userId('b');
-  const rewardRole = `${ctx.runPrefix}cleanup-reward`;
+  const rewardRole = ctx.snowflake('cleanup-reward');
 
   // Create run-prefixed operational rows across the levels tables.
   await seedMemberLevel(handle, userA, { xp: 500, level: 5, totalMessages: 25 });
@@ -1188,9 +1203,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
       { guild_id: handle.guildId, member_id: userA, accent_color: 0xff1493, overlay_opacity: 0.5 },
       { onConflict: 'guild_id,member_id' },
     );
-  await handle.supabase
-    .from('level_rewards')
-    .insert({ guild_id: handle.guildId, level: 5, role_id: rewardRole, announce: true });
+  await seedRoleReward(handle, 5, rewardRole);
 
   const levelsBefore = await countGuildRows(handle, 'member_levels');
   const rankBefore = await countGuildRows(handle, 'member_rank_settings');

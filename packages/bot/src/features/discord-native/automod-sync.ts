@@ -30,6 +30,12 @@ export interface AutoModRule {
     regex_patterns?: string[];
     keyword_preset?: ('profanity' | 'sexual_content' | 'slurs')[];
     mention_limit?: number;
+    words?: string[];
+    matchMode?: 'exact' | 'wildcard' | 'regex';
+    domains?: string[];
+    mode?: 'blacklist' | 'whitelist';
+    allowOwnServer?: boolean;
+    maxMentions?: number;
     alert_channel_id?: string;
     timeout_seconds?: number;
   };
@@ -50,9 +56,40 @@ const TRIGGER_TYPE_MAP: Record<string, AutoModerationRuleTriggerType> = {
 };
 
 const MANAGED_RULE_PREFIX = 'SB:';
+const DISCORD_INVITE_PATTERN = String.raw`(?:discord\.gg|discord(?:app)?\.com\/invite)\/[-A-Za-z0-9]+`;
 
 function managedRuleName(rule: Pick<AutoModRule, 'id' | 'name'>): string {
   return `${MANAGED_RULE_PREFIX}${rule.id.slice(0, 8)} ${rule.name}`.slice(0, 100);
+}
+
+export function buildDiscordTriggerMetadata(
+  rule: Pick<AutoModRule, 'type' | 'config'>,
+): Record<string, unknown> | null {
+  const cfg = rule.config ?? {};
+  switch (rule.type) {
+    case 'word_filter': {
+      const words = cfg.words ?? cfg.keywords ?? [];
+      if (cfg.matchMode === 'regex') return { regexPatterns: words };
+      return { keywordFilter: words };
+    }
+    case 'link_filter': {
+      const domains = cfg.domains ?? [];
+      if (cfg.mode === 'whitelist') {
+        return { regexPatterns: [String.raw`https?:\/\/[^\s]+`], allowList: domains };
+      }
+      return { keywordFilter: domains.map((domain) => `*${domain}*`) };
+    }
+    case 'invite_filter':
+      return cfg.allowOwnServer ? null : { regexPatterns: [DISCORD_INVITE_PATTERN] };
+    case 'mention_spam':
+      return { mentionTotalLimit: cfg.maxMentions ?? cfg.mention_limit ?? 5 };
+    case 'spam_filter':
+      return {};
+    case 'duplicate_filter':
+    case 'caps_filter':
+    case 'newline_spam':
+      return null;
+  }
 }
 
 export class AutoModSync {
@@ -164,10 +201,11 @@ export class AutoModSync {
         }
 
         // Build trigger metadata from config JSONB
-        const triggerMetadata: Record<string, unknown> = {};
-        if (cfg.keywords?.length) triggerMetadata.keywordFilter = cfg.keywords;
-        if (cfg.regex_patterns?.length) triggerMetadata.regexPatterns = cfg.regex_patterns;
-        if (cfg.mention_limit) triggerMetadata.mentionTotalLimit = cfg.mention_limit;
+        const triggerMetadata = buildDiscordTriggerMetadata(rule);
+        if (triggerMetadata === null) {
+          log.warn(`Rule "${rule.name}" cannot be mirrored without changing its configured behavior`);
+          continue;
+        }
 
         const discordName = managedRuleName(rule);
         desiredNames.add(discordName);

@@ -13,6 +13,7 @@ export function BotPresenceSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [isPrimaryGuild, setIsPrimaryGuild] = useState<boolean | null>(null);
   useUnsavedWarning(dirty);
 
   useEffect(() => {
@@ -20,10 +21,12 @@ export function BotPresenceSettings() {
       .then(async (response) => {
         const data = await response.json() as {
           config?: { custom_bot_statuses?: string[] };
+          isPrimaryGuild?: boolean;
           error?: string;
         };
         if (!response.ok) throw new Error(data.error ?? 'Bot presence could not be loaded');
         setStatuses(data.config?.custom_bot_statuses ?? []);
+        setIsPrimaryGuild(data.isPrimaryGuild === true);
       })
       .catch((error: unknown) => {
         toast({ title: error instanceof Error ? error.message : 'Bot presence could not be loaded', variant: 'error' });
@@ -73,6 +76,10 @@ export function BotPresenceSettings() {
             <Loader2 size={14} className="animate-spin" aria-hidden="true" />
             Loading statuses…
           </div>
+        ) : isPrimaryGuild === false ? (
+          <div className="rounded-input bg-discord-bg-tertiary p-3 text-sm text-discord-text-secondary ring-1 ring-discord-border-subtle">
+            Bot presence is installation-wide. Switch to the primary server to edit the statuses used by the running bot.
+          </div>
         ) : statuses.map((status, index) => (
           <div key={index} className="flex min-w-0 items-center gap-2">
             <label htmlFor={`custom-status-${index}`} className="sr-only">Custom status {index + 1}</label>
@@ -103,7 +110,7 @@ export function BotPresenceSettings() {
             </button>
           </div>
         ))}
-        {!loading && statuses.length < 20 && (
+        {!loading && isPrimaryGuild === true && statuses.length < 20 && (
           <button
             type="button"
             onClick={() => {
@@ -116,12 +123,12 @@ export function BotPresenceSettings() {
             Add Status
           </button>
         )}
-        <div className="flex justify-end pt-2">
+        {isPrimaryGuild === true && <div className="flex justify-end pt-2">
           <Button onClick={() => void save()} disabled={loading || saving || !dirty} className="gap-2">
             {saving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
             Save Statuses
           </Button>
-        </div>
+        </div>}
       </div>
     </Card>
   );

@@ -404,6 +404,36 @@ export async function DELETE(request: NextRequest) {
           );
         }
       }
+      if (keys.includes('paypal_client_secret')) {
+        const bootstrapSecret = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+        const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+        const projectOrigin = supabaseUrl ? new URL(supabaseUrl).origin : '';
+        if (!bootstrapSecret || !projectOrigin) {
+          return NextResponse.json(
+            { error: 'Supabase bootstrap credentials are required to preserve outstanding checkout signatures.' },
+            { status: 409 },
+          );
+        }
+        const outgoingPayPalSecret = await getInstallationRuntimeSecret(
+          'paypal_client_secret',
+          ['PAYPAL_CLIENT_SECRET'],
+        );
+        if (outgoingPayPalSecret) {
+          const retained = encryptCloudCredential(
+            outgoingPayPalSecret,
+            'paypal_client_secret_v1_previous',
+            bootstrapSecret,
+            projectOrigin,
+          );
+          const { error: preserveError } = await admin
+            .from('instance_settings')
+            .upsert(
+              { ...retained, section: 'paypal', updated_at: new Date().toISOString() },
+              { onConflict: 'key' },
+            );
+          if (preserveError) return dbError(preserveError, 'settings');
+        }
+      }
       const { error } = await admin
         .from('instance_settings')
         .delete()

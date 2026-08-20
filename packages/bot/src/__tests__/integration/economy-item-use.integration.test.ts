@@ -13,6 +13,8 @@ interface UseResult {
   replayed?: boolean;
   effect_type?: string;
   action_id?: string;
+  code?: string;
+  delivery_compensated?: boolean;
 }
 
 async function useItem(
@@ -128,7 +130,7 @@ describe('economy_use_item_atomic', () => {
     expect(Number(level.data!.xp)).toBe(50);
   });
 
-  it('queues one durable role grant and refuses automatic tools without consuming them', async () => {
+  it('returns a role item exactly once when durable Discord delivery fails', async () => {
     const roleUse = await useItem('Member Badge', 'use-role-1');
     expect(roleUse.error).toBeNull();
     expect(roleUse.data).toMatchObject({ status: 'applied', effect_type: 'role_grant' });
@@ -147,6 +149,35 @@ describe('economy_use_item_atomic', () => {
       },
     });
 
+    const failed = await supa.from('bot_action_queue')
+      .update({ status: 'failed', error_message: 'role no longer exists' })
+      .eq('id', roleUse.data!.action_id);
+    expect(failed.error).toBeNull();
+    expect(await inventoryQuantity(itemIds.role)).toBe(2);
+
+    const replay = await useItem('Member Badge', 'use-role-1');
+    expect(replay.error).toBeNull();
+    expect(replay.data).toMatchObject({
+      status: 'rejected',
+      code: 'role_delivery_failed',
+      delivery_compensated: true,
+      replayed: true,
+    });
+
+    const repeatedFailure = await supa.from('bot_action_queue')
+      .update({ status: 'failed', error_message: 'role still unavailable' })
+      .eq('id', roleUse.data!.action_id);
+    expect(repeatedFailure.error).toBeNull();
+    expect(await inventoryQuantity(itemIds.role)).toBe(2);
+
+    const failureAudits = await supa.from('audit_logs')
+      .select('*', { count: 'exact', head: true })
+      .eq('guild_id', guildId)
+      .eq('occurrence_key', 'economy.item_use_delivery_failed:use-role-1');
+    expect(failureAudits.count).toBe(1);
+  });
+
+  it('refuses automatic tools without consuming them', async () => {
     const automatic = await useItem('Padlock', 'use-padlock-1');
     expect(automatic.error).toBeNull();
     expect(automatic.data).toMatchObject({ status: 'rejected' });

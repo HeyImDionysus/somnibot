@@ -1,3 +1,12 @@
+ALTER TABLE public.economy_adventure_sessions
+  ADD COLUMN IF NOT EXISTS health_remaining SMALLINT NOT NULL DEFAULT 100;
+
+ALTER TABLE public.economy_adventure_sessions
+  DROP CONSTRAINT IF EXISTS economy_adventure_sessions_health_remaining_check;
+ALTER TABLE public.economy_adventure_sessions
+  ADD CONSTRAINT economy_adventure_sessions_health_remaining_check
+  CHECK (health_remaining BETWEEN 0 AND 100);
+
 CREATE OR REPLACE FUNCTION public.upsert_economy_adventure_graph(
   p_guild_id TEXT,
   p_adventure JSONB

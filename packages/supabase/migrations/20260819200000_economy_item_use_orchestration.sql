@@ -269,6 +269,93 @@ REVOKE ALL ON FUNCTION public.economy_use_item_atomic(TEXT, TEXT, TEXT, TEXT)
 GRANT EXECUTE ON FUNCTION public.economy_use_item_atomic(TEXT, TEXT, TEXT, TEXT)
   TO service_role;
 
+CREATE OR REPLACE FUNCTION public.restore_failed_economy_role_item_use()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_operation public.economy_item_use_operations%ROWTYPE;
+BEGIN
+  IF OLD.status = 'failed'
+     OR NEW.status <> 'failed'
+     OR NEW.action <> 'bulk_role_add'
+     OR NEW.payload ->> 'source' <> 'economy_item_use' THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT * INTO v_operation
+    FROM public.economy_item_use_operations
+   WHERE guild_id = NEW.guild_id
+     AND user_id = NEW.payload ->> 'member_id'
+     AND request_id = NEW.payload ->> 'request_id'
+     AND item_id::TEXT = NEW.payload ->> 'item_id'
+   FOR UPDATE;
+
+  IF NOT FOUND OR v_operation.result ->> 'delivery_compensated' = 'true' THEN
+    RETURN NEW;
+  END IF;
+
+  INSERT INTO public.economy_inventory (guild_id, user_id, item_id, quantity)
+  VALUES (v_operation.guild_id, v_operation.user_id, v_operation.item_id, 1)
+  ON CONFLICT (guild_id, user_id, item_id) DO UPDATE
+    SET quantity = public.economy_inventory.quantity + 1,
+        updated_at = pg_catalog.now();
+
+  UPDATE public.economy_item_use_operations
+     SET result = result || pg_catalog.jsonb_build_object(
+       'status', 'rejected',
+       'code', 'role_delivery_failed',
+       'message', 'The role could not be delivered, so the item was returned.',
+       'delivery_compensated', true
+     )
+   WHERE guild_id = v_operation.guild_id
+     AND user_id = v_operation.user_id
+     AND request_id = v_operation.request_id;
+
+  INSERT INTO public.audit_logs (
+    guild_id,
+    actor_type,
+    actor_id,
+    action,
+    category,
+    target_type,
+    target_id,
+    details,
+    correlation_id,
+    occurrence_key,
+    success,
+    error_message
+  ) VALUES (
+    v_operation.guild_id,
+    'system',
+    'action-queue',
+    'economy.item_use_delivery_failed',
+    'economy',
+    'economy_item',
+    v_operation.item_id::TEXT,
+    pg_catalog.jsonb_build_object('action_id', NEW.id),
+    v_operation.request_id,
+    'economy.item_use_delivery_failed:' || v_operation.request_id,
+    false,
+    NEW.error_message
+  ) ON CONFLICT (guild_id, occurrence_key) DO NOTHING;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS economy_role_item_delivery_failure_restore ON public.bot_action_queue;
+CREATE TRIGGER economy_role_item_delivery_failure_restore
+AFTER UPDATE OF status ON public.bot_action_queue
+FOR EACH ROW EXECUTE FUNCTION public.restore_failed_economy_role_item_use();
+
+REVOKE ALL ON FUNCTION public.restore_failed_economy_role_item_use()
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.restore_failed_economy_role_item_use()
+  TO service_role;
+
 NOTIFY pgrst, 'reload schema';
 
 COMMIT;

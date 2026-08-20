@@ -25,6 +25,7 @@ describe('promotion checkout redemption migration', () => {
     expect(reserve).toContain('pending_order.status = \'pending\'');
     expect(reserve).toContain('reserved.order_id IS NULL');
     expect(reserve).toContain('pg_advisory_xact_lock');
+    expect(reserve.indexOf('pg_advisory_xact_lock')).toBeLessThan(reserve.indexOf("IF v_code = '' THEN"));
     expect(reserve).toContain('prior_intent.final_amount_cents IS NOT NULL');
     expect(reserve).toContain('SET promotion_id = v_promotion.id');
     expect(reserve).toContain('final_amount_cents = v_final');

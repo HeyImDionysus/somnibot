@@ -29,7 +29,7 @@ import { createTicket, claimTicket, closeTicket, reopenTicket, deleteTicket } fr
 import { canMemberManageTicket, emitTicketDenied, ticketDeniedMessage } from './ticket-authz.js';
 import { generateTranscript } from './transcript-generator.js';
 import { createLogger } from '@somnibot/shared';
-import { applyBrand, resolveBrandKit, voice } from '../branding/index.js';
+import { applyBrand, resolveBrandKit, voice, type BrandKit } from '../branding/index.js';
 
 const log = createLogger('TicketInteractions');
 
@@ -62,6 +62,28 @@ interface IntakeFormField {
   required?: boolean;
   min_length?: number;
   max_length?: number;
+}
+
+type IntakeResponse = {
+  readonly label: string;
+  readonly value: string;
+};
+
+export function buildIntakeResponseEmbeds(
+  responses: readonly IntakeResponse[],
+  brandKit: BrandKit,
+  submittedBy: string,
+): EmbedBuilder[] {
+  return responses.map(({ label, value }, index) => applyBrand(
+    new EmbedBuilder()
+      .setColor(brandKit.accentColor)
+      .setTitle(index === 0 ? 'Intake form responses' : `Intake response ${index + 1}`)
+      .setDescription(value)
+      .setTimestamp()
+      .setFooter({ text: `${label} · Submitted by ${submittedBy}` }),
+    brandKit,
+    { intent: 'info' },
+  ));
 }
 
 // ── Main Router ──────────────────────────────────────────
@@ -609,27 +631,21 @@ async function handleIntakeModalSubmit(
 
   // Post the intake form responses into the ticket channel
   const intakeFields = (panel.intake_form_fields || []) as IntakeFormField[];
-  const responses: string[] = [];
+  const responses: IntakeResponse[] = [];
 
   for (let i = 0; i < intakeFields.length; i++) {
     const field = intakeFields[i]!;
     const value = interaction.fields.getTextInputValue(`field_${i}`).trim();
     if (value) {
-      responses.push(`**${field.label}:**\n${value}`);
+      responses.push({ label: field.label, value });
     }
   }
 
   if (responses.length > 0) {
     const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });
-    const intakeEmbed = new EmbedBuilder()
-      .setColor(brandKit.accentColor)
-      .setTitle('📝 Intake Form Responses')
-      .setDescription(responses.join('\n\n'))
-      .setTimestamp()
-      .setFooter({ text: `Submitted by ${interaction.user.tag}` });
-    applyBrand(intakeEmbed, brandKit, { intent: 'info' });
-
-    await result.channel.send({ embeds: [intakeEmbed] });
+    await result.channel.send({
+      embeds: buildIntakeResponseEmbeds(responses, brandKit, interaction.user.tag),
+    });
   }
 
   const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });

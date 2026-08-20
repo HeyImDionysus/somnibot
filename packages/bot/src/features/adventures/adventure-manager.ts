@@ -82,9 +82,23 @@ interface Session {
   status: string;
   loot_collected: { item_name: string; qty: number }[];
   currency_collected: number;
+  health_remaining?: number;
   message_id: string | null;
   channel_id: string | null;
   scenes_traversed?: number;
+}
+
+type ScenePresentation = {
+  readonly adventure: Adventure;
+  readonly scene: Scene;
+  readonly sessionId: string | null;
+  readonly lootCount: number;
+  readonly healthRemaining: number;
+  readonly kit: BrandKit;
+};
+
+export function applyAdventureDamage(healthRemaining: number, damagePct: number): number {
+  return Math.max(0, Math.min(100, healthRemaining) - Math.max(0, Math.min(100, damagePct)));
 }
 
 // ── Difficulty Multipliers ────────────────────────────────
@@ -873,7 +887,14 @@ export class AdventureManager {
     });
 
     // Build embed + buttons
-    const { embed, row } = this.buildSceneEmbed(adventure, scene, sessionId, 0, config.brandKit);
+    const { embed, row } = this.buildSceneEmbed({
+      adventure,
+      scene,
+      sessionId,
+      lootCount: 0,
+      healthRemaining: 100,
+      kit: config.brandKit,
+    });
     return { embed, row, sessionId };
   }
 
@@ -925,6 +946,18 @@ export class AdventureManager {
     // Process choice rewards
     const lootCollected = [...sess.loot_collected];
     let currencyCollected = sess.currency_collected;
+    const healthRemaining = applyAdventureDamage(sess.health_remaining ?? 100, choice.damage_pct ?? 0);
+
+    if (healthRemaining === 0) {
+      await this.endSession({ ...sess, health_remaining: 0 }, 'failed', [], 0);
+      const embed = brandedEmbed(kit, {
+        intent: 'danger',
+        title: 'Adventure failed',
+        description: `That choice dealt ${choice.damage_pct ?? 0}% damage and reduced your health to 0. No rewards were awarded.`,
+      });
+      await interaction.update({ embeds: [embed], components: [] });
+      return;
+    }
 
     // Add currency from choice
     if (choice.currency > 0) {
@@ -943,7 +976,7 @@ export class AdventureManager {
     // Navigate to next scene
     if (choice.next_scene_index === null) {
       // End adventure — same as ending scene
-      await this.endSession(sess, 'completed', lootCollected, currencyCollected);
+      await this.endSession({ ...sess, health_remaining: healthRemaining }, 'completed', lootCollected, currencyCollected);
       const embed = brandedEmbed(kit, {
         intent: 'primary',
         title: '🏁 Adventure Complete!',
@@ -961,7 +994,7 @@ export class AdventureManager {
       .single();
 
     if (!nextScene) {
-      await this.endSession(sess, 'completed', lootCollected, currencyCollected);
+      await this.endSession({ ...sess, health_remaining: healthRemaining }, 'completed', lootCollected, currencyCollected);
       const embed = brandedEmbed(kit, {
         intent: 'primary',
         title: '🏁 Adventure Complete!',
@@ -998,6 +1031,7 @@ export class AdventureManager {
         current_scene_id: next.id,
         loot_collected: lootCollected,
         currency_collected: currencyCollected,
+        health_remaining: healthRemaining,
         scenes_traversed: scenesTraversed,
       })
       .eq('id', sessionId);
@@ -1010,7 +1044,12 @@ export class AdventureManager {
       const finalLoot = endType === 'death' ? [] : endType === 'partial' ? lootCollected.slice(0, Math.ceil(lootCollected.length / 2)) : lootCollected;
       const finalCurrency = endType === 'death' ? 0 : endType === 'partial' ? Math.floor(currencyCollected / 2) : currencyCollected;
 
-      await this.endSession(sess, endType === 'death' ? 'failed' : 'completed', finalLoot, finalCurrency);
+      await this.endSession(
+        { ...sess, health_remaining: endType === 'death' ? 0 : healthRemaining },
+        endType === 'death' ? 'failed' : 'completed',
+        finalLoot,
+        finalCurrency,
+      );
 
       const color = endType === 'success' ? 0x4caf50 : endType === 'death' ? 0xf44336 : 0xff9800;
       const title = next.is_ending
@@ -1035,7 +1074,14 @@ export class AdventureManager {
       .single();
 
     const adv = advData as Adventure;
-    const { embed, row } = this.buildSceneEmbed(adv, next, sessionId, lootCollected.length, kit);
+    const { embed, row } = this.buildSceneEmbed({
+      adventure: adv,
+      scene: next,
+      sessionId,
+      lootCount: lootCollected.length,
+      healthRemaining,
+      kit,
+    });
 
     const updatePayload: { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } = { embeds: [embed], components: [] };
     if (row) updatePayload.components = [row];
@@ -1044,18 +1090,19 @@ export class AdventureManager {
 
   // ── Helpers ─────────────────────────────────────────────
 
-  private buildSceneEmbed(
-    adventure: Adventure,
-    scene: Scene,
-    sessionId: string | null,
-    lootCount: number,
-    kit: BrandKit,
-  ): { embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder> | null } {
+  private buildSceneEmbed({
+    adventure,
+    scene,
+    sessionId,
+    lootCount,
+    healthRemaining,
+    kit,
+  }: ScenePresentation): { embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder> | null } {
     const embed = applyBrand(
       new EmbedBuilder()
         .setTitle(`${adventure.emoji} ${adventure.name}`)
         .setDescription(scene.text)
-        .setFooter({ text: `Scene ${scene.scene_index + 1} • Items collected: ${lootCount}` }),
+        .setFooter({ text: `Scene ${scene.scene_index + 1} • Health: ${healthRemaining}/100 • Items collected: ${lootCount}` }),
       kit,
       { intent: 'primary' },
     );
@@ -1100,6 +1147,7 @@ export class AdventureManager {
         status,
         loot_collected: loot,
         currency_collected: currency,
+        health_remaining: session.health_remaining ?? 100,
         ended_at: new Date().toISOString(),
       })
       .eq('id', session.id);

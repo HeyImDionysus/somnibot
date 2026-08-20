@@ -168,3 +168,15 @@ describe('diagnostics controls', () => {
     expect(persistedConfig).toEqual(beforeInvalid);
   });
 });
+
+describe('installation-wide bot presence', () => {
+  it('rejects status edits from a non-primary server', async () => {
+    vi.stubEnv('DISCORD_GUILD_ID', '999999999999999999,111111111111111111');
+
+    const res = await PATCH(patch({ custom_bot_statuses: ['Serving the community'] }));
+
+    expect(res.status).toBe(409);
+    expect(configUpsert).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+});
