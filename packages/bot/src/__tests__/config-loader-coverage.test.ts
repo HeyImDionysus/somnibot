@@ -167,13 +167,13 @@ describe('loadConfigFromDatabase', () => {
   });
 
   it('rejects an invalid saved encrypted secret instead of using an environment fallback', async () => {
-    process.env.PAYPAL_CLIENT_SECRET = 'environment-fallback';
+    process.env['PAYPAL_CLIENT_SECRET'] = 'environment-fallback';
     mockFrom.mockReturnValue(chainBuilder({
       data: [{ key: 'paypal_client_secret_encrypted', value: 'not-valid-ciphertext', section: 'paypal' }],
       error: null,
     }));
     await expect(loadConfigFromDatabase()).rejects.toThrow('failed validation');
-    expect(process.env.PAYPAL_CLIENT_SECRET).toBe('environment-fallback');
+    expect(process.env['PAYPAL_CLIENT_SECRET']).toBe('environment-fallback');
   });
 
   it('rejects connection exceptions instead of booting with deployment fallbacks', async () => {
