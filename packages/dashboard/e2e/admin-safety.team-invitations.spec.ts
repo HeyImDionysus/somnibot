@@ -351,6 +351,7 @@ test.describe('Dashboard admin mutation safety', () => {
       exempt_channels: [],
       log_to_mod_channel: true,
       sync_to_discord: false,
+      priority: 0,
       created_at: '2030-01-01T12:00:00.000Z',
     };
     let deleteRequests = 0;

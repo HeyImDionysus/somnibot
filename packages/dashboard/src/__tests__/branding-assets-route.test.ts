@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const createAdminSupabaseMock = vi.hoisted(() => vi.fn());
 
@@ -52,6 +52,10 @@ function createBrandingAdmin(updateError: { readonly message: string } | null) {
 }
 
 describe('POST /api/branding/assets', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(checkAdminRateLimit).mockResolvedValue(null);
@@ -65,7 +69,7 @@ describe('POST /api/branding/assets', () => {
   it('removes only the new object when metadata persistence fails', async () => {
     const fixture = createBrandingAdmin({ message: 'metadata failed' });
     createAdminSupabaseMock.mockReturnValue(fixture.admin);
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const response = await POST(brandingRequest() as never);
 
@@ -75,7 +79,6 @@ describe('POST /api/branding/assets', () => {
     expect(uploadedPath).not.toBe('guild-1/logo/old.png');
     expect(fixture.remove).toHaveBeenCalledOnce();
     expect(fixture.remove).toHaveBeenCalledWith([uploadedPath]);
-    errorSpy.mockRestore();
   });
 
   it('removes the previous object only after the new metadata is authoritative', async () => {
