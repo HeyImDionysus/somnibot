@@ -4,7 +4,7 @@
  * GET    — List all items (active + inactive)
  * POST   — Create a new item
  * PATCH  — Update an existing item
- * DELETE — Delete an item (removes from inventory too via CASCADE)
+ * DELETE — Archive an item while preserving inventory and configured references
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -236,13 +236,16 @@ export async function DELETE(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
-    // Capture the whole row first — once it is gone this record is the only
-    // remaining copy of what the item was.
     const before = await readRowBefore(admin, 'economy_items', { id, guild_id: ctx.guildId });
+    if (!before) {
+      return NextResponse.json({ success: false, error: 'Item not found' }, { status: 404 });
+    }
+
+    const updatedAt = new Date().toISOString();
 
     const { error } = await admin
       .from('economy_items')
-      .delete()
+      .update({ active: false, updated_at: updatedAt })
       .eq('id', id)
       .eq('guild_id', ctx.guildId);
 
@@ -255,17 +258,19 @@ export async function DELETE(request: NextRequest) {
     await recordCrudChange({
       guildId: ctx.guildId,
       actorId: ctx.discordId,
-      operation: 'deleted',
-      action: 'shop.item_deleted',
+      operation: 'updated',
+      action: 'shop.item_archived',
       table: 'economy_items',
       targetType: 'shop item',
       targetId: id,
-      label: before?.name as string | undefined,
+      label: typeof before.name === 'string' ? before.name : undefined,
       before,
+      after: { ...before, active: false, updated_at: updatedAt },
+      match: { id, guild_id: ctx.guildId },
       blastRadius: 'medium',
     }, admin);
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, archived: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     return apiServerError(err, 'economy/shop');

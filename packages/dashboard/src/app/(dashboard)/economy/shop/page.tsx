@@ -1,7 +1,7 @@
 /**
  * Economy Shop Management — CRUD for shop items.
  *
- * Admins can create, edit, reorder, and delete items that members
+ * Admins can create, edit, reorder, and archive items that members
  * buy with virtual currency via /buy and /shop commands.
  */
 'use client';
@@ -11,7 +11,7 @@ import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
-import { ShoppingBag, Plus, Pencil, Trash2 } from 'lucide-react';
+import { ShoppingBag, Plus, Pencil, Archive } from 'lucide-react';
 import { RolePicker } from '@/components/shared/role-picker';
 import {
   ECONOMY_ITEM_EFFECT_TYPES,
@@ -389,7 +389,7 @@ export default function ShopPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editingItem, setEditingItem] = useState<Partial<ShopItem> | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [archivingId, setArchivingId] = useState<string | null>(null);
 
   const loadItems = useCallback(async () => {
     try {
@@ -432,18 +432,18 @@ export default function ShopPage() {
     }
   };
 
-  const handleDeleteItem = async () => {
-    if (!deletingId) return;
+  const handleArchiveItem = async () => {
+    if (!archivingId) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/economy/shop?id=${deletingId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/economy/shop?id=${archivingId}`, { method: 'DELETE' });
       const json = await res.json();
       if (json.success) {
-        toast({ title: 'Item deleted', variant: 'success' });
-        setDeletingId(null);
+        toast({ title: 'Item archived', variant: 'success' });
+        setArchivingId(null);
         await loadItems();
       } else {
-        toast({ title: json.error || 'Failed to delete', variant: 'error' });
+        toast({ title: json.error || 'Failed to archive', variant: 'error' });
       }
     } catch {
       toast({ title: 'Network error', variant: 'error' });
@@ -529,13 +529,16 @@ export default function ShopPage() {
                       >
                         <Pencil className="h-4 w-4" />
                       </button>
-                      <button
-                        onClick={() => setDeletingId(item.id)}
-                        className="rounded p-1.5 text-discord-text-secondary hover:bg-red-500/10 hover:text-red-400"
-                        title="Delete"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      {item.active && (
+                        <button
+                          onClick={() => setArchivingId(item.id)}
+                          className="rounded p-1.5 text-discord-text-secondary hover:bg-red-500/10 hover:text-red-400"
+                          title="Archive"
+                          aria-label={`Archive ${item.name}`}
+                        >
+                          <Archive className="h-4 w-4" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -555,15 +558,14 @@ export default function ShopPage() {
         />
       )}
 
-      {/* Delete confirmation */}
       <ConfirmDialog
-        open={!!deletingId}
-        title="Delete Item"
-        description="This will permanently delete this item and remove it from all inventories. This cannot be undone."
-        confirmLabel="Delete"
+        open={!!archivingId}
+        title="Archive Item"
+        description="This item will no longer be purchasable, but existing inventory and configured rewards will remain valid. You can reactivate it by editing the item."
+        confirmLabel="Archive"
         variant="danger"
-        onConfirm={handleDeleteItem}
-        onCancel={() => setDeletingId(null)}
+        onConfirm={handleArchiveItem}
+        onCancel={() => setArchivingId(null)}
       />
     </div>
   );
