@@ -2292,7 +2292,8 @@ describe('PayPal webhook — edge cases', () => {
 
     it('verifies checkout identity with the authoritative saved PayPal secret instead of a stale environment fallback', async () => {
       const savedSecret = 'saved-paypal-client-secret';
-      process.env.PAYPAL_CLIENT_SECRET = 'stale-environment-secret';
+      const staleEnvironmentSecret = 'stale-environment-secret';
+      process.env.PAYPAL_CLIENT_SECRET = staleEnvironmentSecret;
       vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
         apiBase: 'https://api-m.sandbox.paypal.com',
         clientSecret: savedSecret,
@@ -2317,8 +2318,9 @@ describe('PayPal webhook — edge cases', () => {
 
     it('verifies new checkout signatures with a stable secret across PayPal credential rotation', async () => {
       const previousStableSecret = process.env.SUPABASE_SECRET_KEY;
+      const originalPayPalSecret = 'old-paypal-client-secret';
       process.env.SUPABASE_SECRET_KEY = 'stable-checkout-signing-secret';
-      process.env.PAYPAL_CLIENT_SECRET = 'old-paypal-client-secret';
+      process.env.PAYPAL_CLIENT_SECRET = originalPayPalSecret;
       vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
         apiBase: 'https://api-m.sandbox.paypal.com',
         clientId: 'test-client-id',
@@ -2359,7 +2361,8 @@ describe('PayPal webhook — edge cases', () => {
 
     it('verifies an outstanding v1 checkout with the retained pre-rotation secret', async () => {
       const previousSecret = 'previous-paypal-client-secret';
-      process.env.PAYPAL_CLIENT_SECRET = 'rotated-environment-secret';
+      const rotatedEnvironmentSecret = 'rotated-environment-secret';
+      process.env.PAYPAL_CLIENT_SECRET = rotatedEnvironmentSecret;
       vi.mocked(getSavedInstallationRuntimeSecret).mockResolvedValue(previousSecret);
       vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
         apiBase: 'https://api-m.sandbox.paypal.com',
