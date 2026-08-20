@@ -16,7 +16,7 @@ const achSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(500).optional().default(''),
   badge_emoji: z.string().max(10).optional().default('🏆'),
-  condition_type: z.string().min(1).max(100),
+  condition_type: z.enum(['messages_sent', 'level']),
   condition_value: z.number().int().min(1),
   reward_currency: z.number().int().min(0).optional().default(0),
   reward_xp: z.number().int().min(0).optional().default(0),

@@ -336,21 +336,28 @@ const planUpdate = planCreate
 
 const promotionCreate = z.object({
   name: safeName,
-  type: z.enum(['percent', 'fixed']),
-  value: z.number().min(0),  // max validated per-type via .refine() below
-  coupon_code: z.string().min(1).max(32).optional(),
-  applies_to_product_ids: z.array(uuid).optional(),
-  applies_to_plan_ids: z.array(uuid).optional(),
+  type: z.enum(['percentage', 'fixed_amount']),
+  value: z.number().int().min(1),
+  coupon_code: z.string().trim().toUpperCase().regex(/^[A-Z0-9][A-Z0-9_-]{1,31}$/),
+  applies_to_product_ids: z.array(uuid).max(100).default([]),
+  applies_to_plan_ids: z.array(uuid).max(100).default([]),
   start_date: z.string().datetime().optional().nullable(),
   end_date: z.string().datetime().optional().nullable(),
-  max_uses: z.number().int().min(0).max(99999).optional(),
-  min_purchase_cents: z.number().int().min(0).optional(),
+  max_uses: z.number().int().min(1).max(99999).optional().nullable(),
+  min_purchase_cents: z.number().int().min(0).optional().nullable(),
   first_purchase_only: z.boolean().optional(),
   active: z.boolean().default(true),
-}).refine(
-  (data) => data.type !== 'percent' || data.value <= 100,
-  { message: 'Percent discount cannot exceed 100%', path: ['value'] },
-);
+}).strict().superRefine((data, ctx) => {
+  if (data.type === 'percentage' && data.value > 99) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Percent discount must be between 1 and 99%', path: ['value'] });
+  }
+  if (data.applies_to_plan_ids.length > 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Coupons apply to one-time products, not subscription plans', path: ['applies_to_plan_ids'] });
+  }
+  if (data.start_date && data.end_date && new Date(data.end_date) <= new Date(data.start_date)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'End date must be after the start date', path: ['end_date'] });
+  }
+});
 
 // ── Entitlement schemas ─────────────────────────────
 
@@ -422,6 +429,8 @@ const moderationRule = z.object({
   exempt_roles: snowflakeArray,
   exempt_channels: snowflakeArray,
   log_to_mod_channel: z.boolean().optional(),
+  sync_to_discord: z.boolean().optional(),
+  priority: z.number().int().min(-1000).max(1000).optional(),
 });
 
 const moderationRuleUpdate = z.object({
@@ -435,6 +444,8 @@ const moderationRuleUpdate = z.object({
   exempt_roles: z.array(snowflake).max(100).optional(),
   exempt_channels: z.array(snowflake).max(100).optional(),
   log_to_mod_channel: z.boolean().optional(),
+  sync_to_discord: z.boolean().optional(),
+  priority: z.number().int().min(-1000).max(1000).optional(),
 });
 
 const escalationConfig = z.object({
@@ -580,11 +591,31 @@ const scheduledMessageUpdate = z.object({
 
 // ── Ticket panel schemas ────────────────────────────
 
+const ticketPanelMessage = z.object({
+  title: z.string().max(256).optional(),
+  description: z.string().max(2000).optional(),
+  footer: z.string().max(2048).optional(),
+}).strict();
+
+const ticketIntakeField = z.object({
+  id: z.string().max(64).optional(),
+  label: z.string().trim().min(1).max(45),
+  placeholder: z.string().max(100).optional(),
+  style: z.enum(['short', 'paragraph']).default('short'),
+  required: z.boolean().default(true),
+  min_length: z.number().int().min(0).max(4000).optional(),
+  max_length: z.number().int().min(1).max(4000).optional(),
+}).strict().superRefine((field, ctx) => {
+  if (field.min_length != null && field.max_length != null && field.min_length > field.max_length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['max_length'], message: 'Maximum length must be at least the minimum length' });
+  }
+});
+
 const ticketPanelCreate = z.object({
   name: safeName,
   channel_id: snowflake,
-  panel_message: z.string().max(2000).optional(),
-  input_mode: z.string().max(32).optional(),
+  panel_message: ticketPanelMessage.optional(),
+  input_mode: z.enum(['buttons', 'dropdown']).optional(),
   ticket_types: z.array(z.record(z.unknown())).max(25).optional(),
   manager_roles: snowflakeArray,
   open_category_id: snowflake.optional().nullable(),
@@ -593,18 +624,61 @@ const ticketPanelCreate = z.object({
   dm_transcript_to_creator: z.boolean().optional(),
   max_open_per_user: z.number().int().min(1).max(10).default(1),
   introduction_message: z.string().max(2000).optional(),
+  inactivity_warn_hours: z.number().int().min(0).max(720).optional(),
+  inactivity_close_hours: z.number().int().min(0).max(720).optional(),
+  feedback_prompt_enabled: z.boolean().optional(),
+  intake_form_enabled: z.boolean().optional(),
+  intake_form_fields: z.array(ticketIntakeField).max(5).optional(),
 });
 
 // ── Level reward schemas ────────────────────────────
 
-const levelRewardCreate = z.object({
-  type: z.enum(['reward', 'multiplier']),
-  level: z.number().int().min(1).max(200).optional(),
-  role_id: snowflake.optional(),
-  remove_at_level: z.number().int().min(0).max(200).optional().nullable(),
+const roleLevelRewardCreate = z.object({
+  type: z.literal('reward'),
+  reward_type: z.literal('role').optional(),
+  level: z.number().int().min(1).max(200),
+  role_id: snowflake,
+  remove_role_id: snowflake.optional().nullable(),
+  remove_at_level: z.number().int().min(2).max(200).optional().nullable(),
   announce: z.boolean().optional(),
-  multiplier: z.number().min(0.1).max(10).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.remove_role_id === value.role_id) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['remove_role_id'], message: 'Replacement role must differ from reward role' });
+  }
+  if (value.remove_at_level != null && value.remove_at_level <= value.level) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['remove_at_level'], message: 'Removal level must be greater than reward level' });
+  }
 });
+
+const currencyLevelRewardCreate = z.object({
+  type: z.literal('reward'),
+  reward_type: z.literal('currency'),
+  level: z.number().int().min(1).max(200),
+  currency_amount: z.number().int().min(1).max(1_000_000_000),
+  announce: z.boolean().optional(),
+}).strict();
+
+const itemLevelRewardCreate = z.object({
+  type: z.literal('reward'),
+  reward_type: z.literal('item'),
+  level: z.number().int().min(1).max(200),
+  item_id: uuid,
+  item_quantity: z.number().int().min(1).max(1000),
+  announce: z.boolean().optional(),
+}).strict();
+
+const levelMultiplierCreate = z.object({
+  type: z.literal('multiplier'),
+  role_id: snowflake,
+  multiplier: z.number().min(0.1).max(10),
+}).strict();
+
+const levelRewardCreate = z.union([
+  roleLevelRewardCreate,
+  currencyLevelRewardCreate,
+  itemLevelRewardCreate,
+  levelMultiplierCreate,
+]);
 
 // ── Stats channel schemas ───────────────────────────
 

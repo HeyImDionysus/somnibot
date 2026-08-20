@@ -30,6 +30,12 @@ export interface AutoModRule {
     regex_patterns?: string[];
     keyword_preset?: ('profanity' | 'sexual_content' | 'slurs')[];
     mention_limit?: number;
+    words?: string[];
+    matchMode?: 'exact' | 'wildcard' | 'regex';
+    domains?: string[];
+    mode?: 'blacklist' | 'whitelist';
+    allowOwnServer?: boolean;
+    maxMentions?: number;
     alert_channel_id?: string;
     timeout_seconds?: number;
   };
@@ -49,8 +55,55 @@ const TRIGGER_TYPE_MAP: Record<string, AutoModerationRuleTriggerType> = {
   mention_spam: AutoModerationRuleTriggerType.MentionSpam,
 };
 
+const MANAGED_RULE_PREFIX = 'SB:';
+const DISCORD_INVITE_PATTERN = String.raw`(?:discord\.gg|discord(?:app)?\.com\/invite)\/[-A-Za-z0-9]+`;
+
+function hostnameRegex(domain: string): string {
+  const escaped = domain.trim().toLowerCase().replace(/^\.+|\.+$/g, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String.raw`https?:\/\/(?:[A-Za-z0-9-]+\.)*${escaped}(?::\d+)?(?:[\/?#]|$)`;
+}
+
+function managedRuleName(rule: Pick<AutoModRule, 'id' | 'name'>): string {
+  return `${MANAGED_RULE_PREFIX}${rule.id.slice(0, 8)} ${rule.name}`.slice(0, 100);
+}
+
+export function buildDiscordTriggerMetadata(
+  rule: Pick<AutoModRule, 'type' | 'config'>,
+): Record<string, unknown> | null {
+  const cfg = rule.config ?? {};
+  switch (rule.type) {
+    case 'word_filter': {
+      const words = cfg.words ?? cfg.keywords ?? [];
+      if (cfg.matchMode === 'regex') return { regexPatterns: words };
+      return { keywordFilter: words };
+    }
+    case 'link_filter': {
+      const domains = cfg.domains ?? [];
+      if (cfg.mode === 'whitelist') {
+        return null;
+      }
+      return { regexPatterns: domains.map(hostnameRegex) };
+    }
+    case 'invite_filter':
+      return cfg.allowOwnServer ? null : { regexPatterns: [DISCORD_INVITE_PATTERN] };
+    case 'mention_spam':
+      return { mentionTotalLimit: cfg.maxMentions ?? cfg.mention_limit ?? 5 };
+    case 'spam_filter':
+      return {};
+    case 'duplicate_filter':
+    case 'caps_filter':
+    case 'newline_spam':
+      return null;
+  }
+}
+
 export class AutoModSync {
   private syncInterval: NodeJS.Timeout | null = null;
+  private started = false;
+  private readonly handleConfigChanged = (event: { data: { section: string } }): void => {
+    if (event.data.section !== 'moderation') return;
+    this.syncRules().catch((error: unknown) => log.error('Sync failed:', { error: String(error) }));
+  };
 
   constructor(
     private guild: Guild,
@@ -62,14 +115,9 @@ export class AutoModSync {
    * Start listening for moderation config changes and sync to Discord.
    */
   start(): void {
-    // Listen for config reload events targeting moderation
-    this.eventBus.on('config.changed', (event) => {
-      if (event.data.section === 'moderation') {
-        this.syncRules().catch((err) =>
-          log.error('Sync failed:', { error: String(err) }),
-        );
-      }
-    });
+    if (this.started) return;
+    this.started = true;
+    this.eventBus.on('config.changed', this.handleConfigChanged);
 
     // Initial sync on startup
     this.syncRules().catch((err) =>
@@ -85,6 +133,9 @@ export class AutoModSync {
   }
 
   stop(): void {
+    if (!this.started) return;
+    this.started = false;
+    this.eventBus.off('config.changed', this.handleConfigChanged);
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
       this.syncInterval = null;
@@ -115,6 +166,8 @@ export class AutoModSync {
       log.warn('Cannot fetch Discord AutoMod rules (missing perms?):', { error: String(err) });
       return;
     }
+
+    const desiredNames = new Set<string>();
 
     // Map DB rules to Discord format and sync
     for (const rule of dbRules as AutoModRule[]) {
@@ -147,20 +200,28 @@ export class AutoModSync {
             metadata: { channelId: cfg.alert_channel_id },
           });
         }
+        if (actions.length === 0) {
+          log.warn(`Rule "${rule.name}" cannot be mirrored because Discord has no native ${rule.action} action`);
+          continue;
+        }
 
         // Build trigger metadata from config JSONB
-        const triggerMetadata: Record<string, unknown> = {};
-        if (cfg.keywords?.length) triggerMetadata.keywordFilter = cfg.keywords;
-        if (cfg.regex_patterns?.length) triggerMetadata.regexPatterns = cfg.regex_patterns;
-        if (cfg.mention_limit) triggerMetadata.mentionTotalLimit = cfg.mention_limit;
+        const triggerMetadata = buildDiscordTriggerMetadata(rule);
+        if (triggerMetadata === null) {
+          log.warn(`Rule "${rule.name}" cannot be mirrored without changing its configured behavior`);
+          continue;
+        }
 
-        // Check if rule already exists in Discord (by name match)
-        const existingRule = existingRules.find((r) => r.name === `SB: ${rule.name}`);
+        const discordName = managedRuleName(rule);
+        desiredNames.add(discordName);
+        const existingRule = existingRules.find((candidate) =>
+          candidate.name.startsWith(`${MANAGED_RULE_PREFIX}${rule.id.slice(0, 8)} `),
+        );
 
         if (existingRule) {
           // Update existing rule
           await existingRule.edit({
-            name: `SB: ${rule.name}`,
+            name: discordName,
             enabled: rule.enabled,
             actions,
             triggerMetadata,
@@ -170,7 +231,7 @@ export class AutoModSync {
         } else if (rule.enabled) {
           // Create new rule
           await this.guild.autoModerationRules.create({
-            name: `SB: ${rule.name}`,
+            name: discordName,
             eventType: AutoModerationRuleEventType.MessageSend,
             triggerType,
             triggerMetadata,
@@ -182,6 +243,15 @@ export class AutoModSync {
         }
       } catch (err) {
         log.error(`Failed to sync rule "${rule.name}":`, err);
+      }
+    }
+
+    for (const existingRule of existingRules.values()) {
+      const managed = existingRule.name.startsWith(MANAGED_RULE_PREFIX);
+      if (managed && !desiredNames.has(existingRule.name)) {
+        await existingRule.delete('SomniBot AutoMod rule was disabled or removed').catch((error: unknown) => {
+          log.error(`Failed to remove stale Discord AutoMod rule "${existingRule.name}":`, error);
+        });
       }
     }
 

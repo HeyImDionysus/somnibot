@@ -20,9 +20,13 @@ const { replaySecret, paypalClientSecret } = vi.hoisted(() => {
 });
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/installation-runtime-secret', () => ({
+  getSavedInstallationRuntimeSecret: vi.fn().mockResolvedValue(null),
+}));
 vi.mock('@/lib/paypal', () => ({
   getPayPalRuntimeConfig: vi.fn().mockResolvedValue({
     apiBase: 'https://api-m.sandbox.paypal.com',
+    clientSecret: paypalClientSecret,
     webhookId: 'test-webhook-id',
   }),
   getPayPalToken: vi.fn().mockResolvedValue('test-token'),
@@ -51,6 +55,7 @@ import {
   handleSubscriptionSuspended as handleSubscriptionSuspendedWithChronology,
 } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { getSavedInstallationRuntimeSecret } from '@/lib/installation-runtime-secret';
 import {
   getPayPalRuntimeConfig,
   getPayPalToken,
@@ -1193,8 +1198,10 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
     apiBase: 'https://api-m.sandbox.paypal.com',
+    clientSecret: paypalClientSecret,
     webhookId: 'test-webhook-id',
   } as never);
+  vi.mocked(getSavedInstallationRuntimeSecret).mockResolvedValue(null);
   vi.mocked(getPayPalToken).mockResolvedValue('test-token');
   vi.mocked(getPayPalTokenResult).mockResolvedValue({
     ok: true,
@@ -2280,6 +2287,102 @@ describe('PayPal webhook — edge cases', () => {
       expect(state.order.status).toBe('completed');
       expect(state.queue.payload.discord_id).toBe(state.customer.discord_id);
       expect(state.licenseKey.bound_discord_id).toBe(state.customer.discord_id);
+      expect(state.providerIncidents).toEqual([]);
+    });
+
+    it('verifies checkout identity with the authoritative saved PayPal secret instead of a stale environment fallback', async () => {
+      const savedSecret = 'saved-paypal-client-secret';
+      const staleEnvironmentSecret = 'stale-environment-secret';
+      process.env.PAYPAL_CLIENT_SECRET = staleEnvironmentSecret;
+      vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
+        apiBase: 'https://api-m.sandbox.paypal.com',
+        clientSecret: savedSecret,
+        webhookId: 'test-webhook-id',
+      } as never);
+      const { supabase, state } = createCaptureRecoveryHarness({
+        withLicense: true,
+        signedCheckout: true,
+      });
+      const signature = createHmac('sha256', savedSecret)
+        .update(`somnibot-checkout:v1:${state.checkoutIntent.token}`)
+        .digest('hex');
+
+      await handlePaymentCaptured(supabase, {
+        ...captureResource,
+        custom_id: `v1:${state.checkoutIntent.token}.${signature}`,
+      });
+
+      expect(state.order.status).toBe('completed');
+      expect(state.providerIncidents).toEqual([]);
+    });
+
+    it('verifies new checkout signatures with a stable secret across PayPal credential rotation', async () => {
+      const previousStableSecret = process.env.SUPABASE_SECRET_KEY;
+      const originalPayPalSecret = 'old-paypal-client-secret';
+      process.env.SUPABASE_SECRET_KEY = 'stable-checkout-signing-secret';
+      process.env.PAYPAL_CLIENT_SECRET = originalPayPalSecret;
+      vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
+        apiBase: 'https://api-m.sandbox.paypal.com',
+        clientId: 'test-client-id',
+        clientSecret: 'rotated-paypal-client-secret',
+        webhookId: 'test-webhook-id',
+        webhookUrl: 'https://example.com/api/paypal/webhook',
+        sandbox: true,
+        sources: {
+          apiBase: 'env',
+          clientId: 'env',
+          clientSecret: 'saved',
+          webhookId: 'env',
+          webhookUrl: 'env',
+          sandbox: 'env',
+        },
+      });
+      const { supabase, state } = createCaptureRecoveryHarness({
+        withLicense: true,
+        signedCheckout: true,
+      });
+      const signature = createHmac('sha256', process.env.SUPABASE_SECRET_KEY)
+        .update(`somnibot-checkout:v2:${state.checkoutIntent.token}`)
+        .digest('hex');
+
+      try {
+        await handlePaymentCaptured(supabase, {
+          ...captureResource,
+          custom_id: `v2:${state.checkoutIntent.token}.${signature}`,
+        });
+
+        expect(state.order.status).toBe('completed');
+        expect(state.providerIncidents).toEqual([]);
+      } finally {
+        if (previousStableSecret === undefined) delete process.env.SUPABASE_SECRET_KEY;
+        else process.env.SUPABASE_SECRET_KEY = previousStableSecret;
+      }
+    });
+
+    it('verifies an outstanding v1 checkout with the retained pre-rotation secret', async () => {
+      const previousSecret = 'previous-paypal-client-secret';
+      const rotatedEnvironmentSecret = 'rotated-environment-secret';
+      process.env.PAYPAL_CLIENT_SECRET = rotatedEnvironmentSecret;
+      vi.mocked(getSavedInstallationRuntimeSecret).mockResolvedValue(previousSecret);
+      vi.mocked(getPayPalRuntimeConfig).mockResolvedValue({
+        apiBase: 'https://api-m.sandbox.paypal.com',
+        clientSecret: 'rotated-saved-secret',
+        webhookId: 'test-webhook-id',
+      } as never);
+      const { supabase, state } = createCaptureRecoveryHarness({
+        withLicense: true,
+        signedCheckout: true,
+      });
+      const signature = createHmac('sha256', previousSecret)
+        .update(`somnibot-checkout:v1:${state.checkoutIntent.token}`)
+        .digest('hex');
+
+      await handlePaymentCaptured(supabase, {
+        ...captureResource,
+        custom_id: `v1:${state.checkoutIntent.token}.${signature}`,
+      });
+
+      expect(state.order.status).toBe('completed');
       expect(state.providerIncidents).toEqual([]);
     });
 

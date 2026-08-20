@@ -12,6 +12,8 @@ import { ActivityType, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../../client.js';
+import type { PlatformEventBus } from '../../services/event-bus.js';
+import type { ConfigChangedData, PlatformEvent } from '@somnibot/shared';
 
 const log = createLogger('BotPresence');
 
@@ -25,11 +27,21 @@ export class BotPresenceManager {
   private currentIndex = 0;
   private startedAt = Date.now();
   private customStatuses: string[] = [];
+  private readonly handleConfigChanged = async (
+    event: PlatformEvent<'config.changed', ConfigChangedData>,
+  ): Promise<void> => {
+    if (event.guildId !== this.guildId || (event.data.section !== 'all' && event.data.section !== 'settings')) return;
+    if (event.data.section === 'all' && !Object.prototype.hasOwnProperty.call(event.data.changes, 'custom_bot_statuses')) return;
+    await this.loadCustomStatuses();
+    this.currentIndex = 0;
+    await this.updatePresence();
+  };
 
   constructor(
     private client: Client,
     private guildId: string,
     private supabase: SupabaseClient,
+    private eventBus?: PlatformEventBus,
   ) {}
 
   start(intervalMs: number = 30_000): void {
@@ -42,6 +54,7 @@ export class BotPresenceManager {
 
     // Load custom statuses from config
     this.loadCustomStatuses();
+    this.eventBus?.on('config.changed', this.handleConfigChanged);
 
     log.info('Bot presence rotation started');
   }
@@ -51,6 +64,7 @@ export class BotPresenceManager {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.eventBus?.off('config.changed', this.handleConfigChanged);
   }
 
   private async loadCustomStatuses(): Promise<void> {
@@ -61,9 +75,9 @@ export class BotPresenceManager {
         .eq('guild_id', this.guildId)
         .maybeSingle();
 
-      if (data?.custom_bot_statuses && Array.isArray(data.custom_bot_statuses)) {
-        this.customStatuses = data.custom_bot_statuses;
-      }
+      this.customStatuses = data?.custom_bot_statuses && Array.isArray(data.custom_bot_statuses)
+        ? data.custom_bot_statuses.filter((status): status is string => typeof status === 'string')
+        : [];
     } catch {
       // Non-fatal
     }

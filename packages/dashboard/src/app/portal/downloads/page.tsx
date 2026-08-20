@@ -4,6 +4,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { clearPortalToken, getPortalToken, portalLoginUrl } from '@/lib/portal-session-storage';
 
 interface Download {
   entitlement_id: string;
@@ -25,17 +26,17 @@ export default function PortalDownloads() {
 
   useEffect(() => {
     async function load() {
-      const token = localStorage.getItem('portal_token');
+      const token = getPortalToken();
       // V11 Re-Audit UX-1: Redirect to portal login if no token.
       if (!token) {
-        window.location.href = '/portal';
+        window.location.href = portalLoginUrl();
         return;
       }
       try {
         const res = await fetch('/api/portal/downloads', { headers: { 'x-portal-token': token } });
         if (res.status === 401) {
-          localStorage.removeItem('portal_token');
-          window.location.href = '/portal';
+          clearPortalToken();
+          window.location.href = portalLoginUrl();
           return;
         }
         const json = await res.json();

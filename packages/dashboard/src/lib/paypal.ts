@@ -97,28 +97,29 @@ export function mergeSavedPayPalConfig(
 ): PayPalRuntimeConfig {
   const saved = savedMap(settings);
   const savedSandbox = parseSandbox(saved.get('paypal_sandbox'));
-  const sandbox = config.sources.sandbox === 'env'
-    ? config.sandbox
-    : savedSandbox ?? config.sandbox;
+  const sandbox = savedSandbox ?? config.sandbox;
   const savedApiBase = saved.get('paypal_api_base') || '';
-  const apiBase = config.sources.apiBase === 'env'
-    ? config.apiBase
-    : savedApiBase || baseForSandbox(sandbox);
+  const apiBase = savedApiBase
+    || (savedSandbox === null ? config.apiBase : baseForSandbox(sandbox));
+  const savedClientId = saved.get('paypal_client_id') || '';
+  const savedClientSecret = saved.get('paypal_client_secret') || '';
+  const savedWebhookId = saved.get('paypal_webhook_id') || '';
+  const savedWebhookUrl = saved.get('paypal_webhook_url') || '';
 
   return {
     apiBase,
-    clientId: config.clientId || saved.get('paypal_client_id') || '',
-    clientSecret: config.clientSecret || saved.get('paypal_client_secret') || '',
-    webhookId: config.webhookId || saved.get('paypal_webhook_id') || '',
-    webhookUrl: config.webhookUrl || saved.get('paypal_webhook_url') || '',
+    clientId: savedClientId || config.clientId,
+    clientSecret: savedClientSecret || config.clientSecret,
+    webhookId: savedWebhookId || config.webhookId,
+    webhookUrl: savedWebhookUrl || config.webhookUrl,
     sandbox,
     sources: {
-      apiBase: config.sources.apiBase === 'env' ? 'env' : savedApiBase ? 'saved' : 'derived',
-      clientId: config.clientId ? config.sources.clientId : saved.get('paypal_client_id') ? 'saved' : 'missing',
-      clientSecret: config.clientSecret ? config.sources.clientSecret : saved.get('paypal_client_secret') ? 'saved' : 'missing',
-      webhookId: config.webhookId ? config.sources.webhookId : saved.get('paypal_webhook_id') ? 'saved' : 'missing',
-      webhookUrl: config.webhookUrl ? config.sources.webhookUrl : saved.get('paypal_webhook_url') ? 'saved' : 'missing',
-      sandbox: config.sources.sandbox === 'env' ? 'env' : savedSandbox === null ? 'derived' : 'saved',
+      apiBase: savedApiBase || savedSandbox !== null ? 'saved' : config.sources.apiBase,
+      clientId: savedClientId ? 'saved' : config.sources.clientId,
+      clientSecret: savedClientSecret ? 'saved' : config.sources.clientSecret,
+      webhookId: savedWebhookId ? 'saved' : config.sources.webhookId,
+      webhookUrl: savedWebhookUrl ? 'saved' : config.sources.webhookUrl,
+      sandbox: savedSandbox === null ? config.sources.sandbox : 'saved',
     },
   };
 }
@@ -159,10 +160,13 @@ async function readSavedPayPalSettings(): Promise<SavedPayPalSetting[]> {
     const projectOrigin = supabaseUrl ? new URL(supabaseUrl).origin : '';
     return data.flatMap((row) => {
       if (!row.key.endsWith('_encrypted')) return [row];
-      if (!secretKey || !projectOrigin || !row.value) return [];
+      if (!secretKey || !projectOrigin || !row.value) {
+        throw new Error(`saved PayPal setting ${row.key} cannot be decrypted`);
+      }
       const baseKey = row.key.slice(0, -'_encrypted'.length);
       const value = decryptCloudCredential(row.value, baseKey, secretKey, projectOrigin);
-      return value ? [{ key: baseKey, value }] : [];
+      if (!value) throw new Error(`saved PayPal setting ${row.key} failed authentication`);
+      return [{ key: baseKey, value }];
     });
   } catch (err) {
     throw new Error(
@@ -176,17 +180,6 @@ async function readSavedPayPalSettings(): Promise<SavedPayPalSetting[]> {
 
 export async function getPayPalRuntimeConfig(): Promise<PayPalRuntimeConfig> {
   const envConfig = readEnvPayPalConfig();
-  if (
-    envConfig.clientId
-    && envConfig.clientSecret
-    && envConfig.webhookId
-    && envConfig.webhookUrl
-    && envConfig.sources.sandbox === 'env'
-    && envConfig.sources.apiBase === 'env'
-  ) {
-    return envConfig;
-  }
-
   return mergeSavedPayPalConfig(envConfig, await readSavedPayPalSettings());
 }
 
@@ -315,10 +308,11 @@ export async function getPayPalTokenResult(
   try {
     runtimeConfig = config ?? await getPayPalRuntimeConfig();
   } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      retriable: true,
-      reason: `PayPal config load failed: ${err instanceof Error ? err.message : String(err)}`,
+      retriable: !/(failed authentication|cannot be decrypted)/i.test(reason),
+      reason: `PayPal config load failed: ${reason}`,
     };
   }
 

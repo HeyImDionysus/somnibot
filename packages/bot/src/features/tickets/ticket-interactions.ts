@@ -29,7 +29,7 @@ import { createTicket, claimTicket, closeTicket, reopenTicket, deleteTicket } fr
 import { canMemberManageTicket, emitTicketDenied, ticketDeniedMessage } from './ticket-authz.js';
 import { generateTranscript } from './transcript-generator.js';
 import { createLogger } from '@somnibot/shared';
-import { applyBrand, resolveBrandKit, voice } from '../branding/index.js';
+import { applyBrand, resolveBrandKit, voice, type BrandKit } from '../branding/index.js';
 
 const log = createLogger('TicketInteractions');
 
@@ -62,6 +62,52 @@ interface IntakeFormField {
   required?: boolean;
   min_length?: number;
   max_length?: number;
+}
+
+type IntakeResponse = {
+  readonly label: string;
+  readonly value: string;
+};
+
+export function buildIntakeResponseEmbeds(
+  responses: readonly IntakeResponse[],
+  brandKit: BrandKit,
+  submittedBy: string,
+): EmbedBuilder[] {
+  return responses.map(({ label, value }, index) => applyBrand(
+    new EmbedBuilder()
+      .setColor(brandKit.accentColor)
+      .setTitle(index === 0 ? 'Intake form responses' : `Intake response ${index + 1}`)
+      .setDescription(value)
+      .setTimestamp()
+      .setFooter({ text: `${label} · Submitted by ${submittedBy}` }),
+    brandKit,
+    { intent: 'info' },
+  ));
+}
+
+export function batchIntakeResponseEmbeds(embeds: readonly EmbedBuilder[]): EmbedBuilder[][] {
+  const batches: EmbedBuilder[][] = [];
+  let batch: EmbedBuilder[] = [];
+  let characters = 0;
+
+  for (const embed of embeds) {
+    const data = embed.toJSON();
+    const nextCharacters = (data.title?.length ?? 0)
+      + (data.description?.length ?? 0)
+      + (data.footer?.text.length ?? 0)
+      + (data.author?.name.length ?? 0)
+      + (data.fields ?? []).reduce((total, field) => total + field.name.length + field.value.length, 0);
+    if (batch.length > 0 && (batch.length === 10 || characters + nextCharacters > 6_000)) {
+      batches.push(batch);
+      batch = [];
+      characters = 0;
+    }
+    batch.push(embed);
+    characters += nextCharacters;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
 }
 
 // ── Main Router ──────────────────────────────────────────
@@ -609,27 +655,22 @@ async function handleIntakeModalSubmit(
 
   // Post the intake form responses into the ticket channel
   const intakeFields = (panel.intake_form_fields || []) as IntakeFormField[];
-  const responses: string[] = [];
+  const responses: IntakeResponse[] = [];
 
   for (let i = 0; i < intakeFields.length; i++) {
     const field = intakeFields[i]!;
     const value = interaction.fields.getTextInputValue(`field_${i}`).trim();
     if (value) {
-      responses.push(`**${field.label}:**\n${value}`);
+      responses.push({ label: field.label, value });
     }
   }
 
   if (responses.length > 0) {
     const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });
-    const intakeEmbed = new EmbedBuilder()
-      .setColor(brandKit.accentColor)
-      .setTitle('📝 Intake Form Responses')
-      .setDescription(responses.join('\n\n'))
-      .setTimestamp()
-      .setFooter({ text: `Submitted by ${interaction.user.tag}` });
-    applyBrand(intakeEmbed, brandKit, { intent: 'info' });
-
-    await result.channel.send({ embeds: [intakeEmbed] });
+    const embeds = buildIntakeResponseEmbeds(responses, brandKit, interaction.user.tag);
+    for (const batch of batchIntakeResponseEmbeds(embeds)) {
+      await result.channel.send({ embeds: batch });
+    }
   }
 
   const brandKit = await resolveBrandKit(client.supabase, guild.id, { fallbackName: guild.name });

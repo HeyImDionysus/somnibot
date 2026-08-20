@@ -47,7 +47,7 @@ const BLANK_ACH: Omit<AchievementDef, 'id'> & { id?: string } = {
   name: '',
   description: '',
   badge_emoji: '🏆',
-  condition_type: 'generic',
+  condition_type: 'messages_sent',
   condition_value: 1,
   reward_currency: 0,
   reward_xp: 0,
@@ -250,9 +250,13 @@ export default function AchievementsPage() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-xs text-discord-text-secondary">Condition Type</label>
-                <input value={editing.condition_type}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, condition_type: e.target.value })}
-                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2" />
+                <select value={editing.condition_type}
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, condition_type: e.target.value })}
+                  className="w-full bg-discord-bg-tertiary text-discord-text-primary rounded px-3 py-2">
+                  <option value="messages_sent">Messages sent</option>
+                  <option value="level">Level reached</option>
+                </select>
+                <p className="mt-1 text-xs text-discord-text-muted">The bot evaluates this milestone automatically as members chat and level up.</p>
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Condition Value</label>

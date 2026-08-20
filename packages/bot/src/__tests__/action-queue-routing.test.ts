@@ -643,6 +643,7 @@ function makeNonCommerceRelinkSupa(
 function makeGuild() {
   const mockRole = {
     id: 'role-1', name: 'TestRole', managed: false, editable: true, position: 1,
+    color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n },
     edit: vi.fn().mockResolvedValue({}),
     setPosition: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),
@@ -1660,6 +1661,29 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
     const role = guild.roles.cache.get('role-1');
     expect(role.edit).toHaveBeenCalled();
+  });
+
+  it('adopts an existing Discord role when an owner assigns its first tier', async () => {
+    const actions = [{
+      id: 'act-tier-1', guild_id: 'guild-1', action: 'update_role', status: 'pending',
+      payload: { roleId: 'role-1', tier: 'moderator' },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+
+    await startActionQueueListener(guild, supa);
+
+    expect(supa.from).toHaveBeenCalledWith('discord_id_map');
+    expect(supa.rpc).toHaveBeenCalledWith('desired_state_upsert_role', {
+      p_guild_id: 'guild-1',
+      p_role: expect.objectContaining({
+        key: 'custom-role-1',
+        name: 'TestRole',
+        tier: 'moderator',
+      }),
+    });
+    expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({ status: 'completed' }));
   });
 
   it('startActionQueueListener processes pending delete_role action', async () => {

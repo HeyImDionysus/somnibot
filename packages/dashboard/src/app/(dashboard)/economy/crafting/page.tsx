@@ -20,6 +20,7 @@ import { ValidatedNumberInput } from '../_components/validated-number-input';
 // ── Types ─────────────────────────────────────────────────
 
 interface RecipeInput {
+  item_id?: string;
   item_name: string;
   qty: number;
 }
@@ -38,6 +39,13 @@ interface Recipe {
   active: boolean;
 }
 
+interface CraftingItem {
+  id: string;
+  name: string;
+  emoji: string;
+  active: boolean;
+}
+
 interface CraftingSettings {
   economy_crafting_enabled: boolean;
   economy_crafting_cooldown_seconds: number;
@@ -49,7 +57,7 @@ const BLANK_RECIPE: Partial<Recipe> = {
   name: '',
   emoji: '🔨',
   description: '',
-  inputs: [{ item_name: '', qty: 1 }],
+  inputs: [{ item_id: '', item_name: '', qty: 1 }],
   output_item_id: null,
   output_qty: 1,
   cooldown_seconds: 60,
@@ -64,17 +72,19 @@ function RecipeFormModal({
   onSave,
   onClose,
   saving,
+  items,
 }: {
   recipe: Partial<Recipe>;
   onSave: (recipe: Partial<Recipe>) => void;
   onClose: () => void;
   saving: boolean;
+  items: CraftingItem[];
 }) {
   const [form, setForm] = useState<Partial<Recipe>>({
     ...recipe,
     inputs: recipe.inputs && recipe.inputs.length > 0
       ? [...recipe.inputs]
-      : [{ item_name: '', qty: 1 }],
+      : [{ item_id: '', item_name: '', qty: 1 }],
   });
 
   const updateInputs = (idx: number, field: keyof RecipeInput, value: string | number) => {
@@ -86,7 +96,7 @@ function RecipeFormModal({
   const addInput = () => {
     setForm((prev) => ({
       ...prev,
-      inputs: [...(prev.inputs ?? []), { item_name: '', qty: 1 }],
+      inputs: [...(prev.inputs ?? []), { item_id: '', item_name: '', qty: 1 }],
     }));
   };
 
@@ -161,13 +171,19 @@ function RecipeFormModal({
           <span className="text-xs text-discord-text-secondary">Input Materials</span>
           {(form.inputs ?? []).map((input, idx) => (
             <div key={idx} className="flex gap-2 items-center">
-              <input
-                type="text"
+              <select
                 className="flex-1 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-                placeholder="Item name"
-                value={input.item_name}
-                onChange={(e) => updateInputs(idx, 'item_name', e.target.value)}
-              />
+                value={input.item_id ?? items.find((item) => item.name.toLowerCase() === input.item_name.toLowerCase())?.id ?? ''}
+                onChange={(event) => {
+                  const item = items.find((candidate) => candidate.id === event.target.value);
+                  const newInputs = [...(form.inputs ?? [])];
+                  newInputs[idx] = { ...input, item_id: item?.id ?? '', item_name: item?.name ?? '' };
+                  setForm((previous) => ({ ...previous, inputs: newInputs }));
+                }}
+              >
+                <option value="">Select an inventory item</option>
+                {items.map((item) => <option key={item.id} value={item.id}>{item.emoji} {item.name}{item.active ? '' : ' (inactive)'}</option>)}
+              </select>
               <input
                 type="number"
                 className="w-20 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
@@ -196,6 +212,19 @@ function RecipeFormModal({
             + Add material
           </button>
         </div>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-discord-text-secondary">Crafted Output</span>
+          <select
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
+            value={form.output_item_id ?? ''}
+            onChange={(event) => setForm((previous) => ({ ...previous, output_item_id: event.target.value || null }))}
+          >
+            <option value="">Select the item this recipe creates</option>
+            {items.map((item) => <option key={item.id} value={item.id}>{item.emoji} {item.name}{item.active ? '' : ' (inactive)'}</option>)}
+          </select>
+          <span className="text-xs text-discord-text-muted">Items and their actual behavior are configured in Economy → Shop.</span>
+        </label>
 
         {/* Output qty + Cooldown */}
         <div className="grid grid-cols-2 gap-3">
@@ -248,7 +277,7 @@ function RecipeFormModal({
             type="button"
             className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
             onClick={() => onSave(form)}
-            disabled={saving || !form.name?.trim()}
+            disabled={saving || !form.name?.trim() || !form.output_item_id || !(form.inputs ?? []).every((input) => input.item_id)}
           >
             {saving ? 'Saving…' : 'Save'}
           </button>
@@ -262,6 +291,7 @@ function RecipeFormModal({
 
 export default function CraftingPage() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [items, setItems] = useState<CraftingItem[]>([]);
   const [settings, setSettings] = useState<CraftingSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -272,9 +302,10 @@ export default function CraftingPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [recipesRes, settingsRes] = await Promise.all([
+      const [recipesRes, settingsRes, itemsRes] = await Promise.all([
         fetch('/api/economy/crafting'),
         fetch('/api/guild'),
+        fetch('/api/economy/shop'),
       ]);
       if (recipesRes.ok) {
         const data = await recipesRes.json();
@@ -287,6 +318,10 @@ export default function CraftingPage() {
           economy_crafting_enabled: gc.economy_crafting_enabled ?? true,
           economy_crafting_cooldown_seconds: gc.economy_crafting_cooldown_seconds ?? 60,
         });
+      }
+      if (itemsRes.ok) {
+        const data = await itemsRes.json();
+        setItems(Array.isArray(data.data) ? data.data : []);
       }
     } catch {
       toast({ title: 'Failed to load crafting data', variant: 'error' });
@@ -433,7 +468,7 @@ export default function CraftingPage() {
                   )}
                 </div>
                 <p className="text-xs text-discord-text-secondary mt-1">
-                  {recipe.inputs.map((i) => `${i.qty}x ${i.item_name}`).join(' + ')} → {recipe.output_qty}x output
+                  {recipe.inputs.map((i) => `${i.qty}x ${i.item_name}`).join(' + ')} → {recipe.output_qty}x {items.find((item) => item.id === recipe.output_item_id)?.name ?? 'unlinked output'}
                 </p>
               </div>
               <div className="flex items-center justify-end gap-1 sm:ml-2 sm:shrink-0">
@@ -464,6 +499,7 @@ export default function CraftingPage() {
           onSave={saveRecipe}
           onClose={() => setEditRecipe(null)}
           saving={saving}
+          items={items}
         />
       )}
       <ConfirmDialog

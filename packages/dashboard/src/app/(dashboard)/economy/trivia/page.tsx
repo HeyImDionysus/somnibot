@@ -35,6 +35,7 @@ interface TriviaConfig {
   economy_trivia_base_payout: number;
   economy_trivia_streak_multiplier_pct: number;
   economy_trivia_hard_multiplier: number;
+  economy_trivia_question_source: 'mixed' | 'open-trivia-db' | 'local';
   // Hosted / scheduled cadence
   economy_trivia_schedule_enabled: boolean;
   economy_trivia_schedule_interval_minutes: number;
@@ -49,6 +50,7 @@ const DEFAULT_CONFIG: TriviaConfig = {
   economy_trivia_base_payout: 50,
   economy_trivia_streak_multiplier_pct: 10,
   economy_trivia_hard_multiplier: 2,
+  economy_trivia_question_source: 'mixed',
   economy_trivia_schedule_enabled: false,
   economy_trivia_schedule_interval_minutes: 60,
   economy_trivia_schedule_channel_id: null,
@@ -158,6 +160,7 @@ export default function TriviaPage() {
           economy_trivia_base_payout: gc.economy_trivia_base_payout ?? 50,
           economy_trivia_streak_multiplier_pct: gc.economy_trivia_streak_multiplier_pct ?? 10,
           economy_trivia_hard_multiplier: gc.economy_trivia_hard_multiplier ?? 2,
+          economy_trivia_question_source: gc.economy_trivia_question_source ?? 'mixed',
           economy_trivia_schedule_enabled: gc.economy_trivia_schedule_enabled ?? false,
           economy_trivia_schedule_interval_minutes: gc.economy_trivia_schedule_interval_minutes ?? 60,
           economy_trivia_schedule_channel_id: gc.economy_trivia_schedule_channel_id ?? null,
@@ -332,6 +335,26 @@ export default function TriviaPage() {
             max={10}
             step={0.1}
           />
+        </div>
+        <div>
+          <label htmlFor="trivia-question-source" className="block text-sm text-discord-text-secondary mb-1">
+            Question source
+          </label>
+          <select
+            id="trivia-question-source"
+            className="w-full rounded-md bg-discord-bg-tertiary border border-discord-border-subtle px-3 py-2 text-sm text-discord-text-primary"
+            value={config.economy_trivia_question_source}
+            onChange={(event) => saveConfig({
+              economy_trivia_question_source: event.target.value as TriviaConfig['economy_trivia_question_source'],
+            })}
+          >
+            <option value="mixed">Open Trivia DB with local fallback</option>
+            <option value="open-trivia-db">Open Trivia DB only</option>
+            <option value="local">Custom and built-in questions only</option>
+          </select>
+          <p className="mt-1 text-xs text-discord-text-muted">
+            Open Trivia DB supplies fresh public questions. Mixed mode keeps rounds available if that provider is temporarily unreachable.
+          </p>
         </div>
       </div>
 

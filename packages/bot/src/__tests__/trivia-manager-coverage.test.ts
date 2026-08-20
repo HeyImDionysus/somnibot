@@ -169,6 +169,7 @@ describe('TriviaManager', () => {
 
   afterEach(() => {
     mgr.stopAll();
+    vi.unstubAllGlobals();
   });
 
   describe('startRound', () => {
@@ -204,6 +205,52 @@ describe('TriviaManager', () => {
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ embeds: expect.any(Array), components: expect.any(Array) }),
       );
+    });
+
+    it('loads and decodes fresh questions from Open Trivia DB when selected', async () => {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({
+            data: {
+              economy_trivia_enabled: true,
+              economy_trivia_question_source: 'open-trivia-db',
+            },
+            error: null,
+          });
+        }
+        if (table === 'economy_trivia_questions') return chainBuilder({ data: [], error: null });
+        return chainBuilder();
+      });
+      const providerFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          response_code: 0,
+          results: [{
+            category: 'Science &amp; Nature',
+            type: 'multiple',
+            difficulty: 'medium',
+            question: 'Which gas is written as O&#8322;?',
+            correct_answer: 'Oxygen',
+            incorrect_answers: ['Nitrogen', 'Hydrogen', 'Helium'],
+          }],
+        }),
+      });
+      vi.stubGlobal('fetch', providerFetch);
+      const interaction = makeInteraction({ channelId: 'provider' });
+
+      await mgr.startRound(
+        interaction as unknown as Parameters<TriviaManager['startRound']>[0],
+      );
+
+      expect(providerFetch).toHaveBeenCalledWith(
+        expect.stringContaining('https://opentdb.com/api.php?'),
+        expect.objectContaining({ headers: { Accept: 'application/json' } }),
+      );
+      const payload = interaction.reply.mock.calls[0]?.[0] as {
+        embeds: Array<{ data: { description: string } }>;
+      };
+      expect(payload.embeds[0]?.data.description).toContain('Which gas is written as O₂?');
+      expect(payload.embeds[0]?.data.description).toContain('Science & Nature');
     });
 
     it('uses uniform plain A/B/C/D markers for buttons and the question embed', async () => {

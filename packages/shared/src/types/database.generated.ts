@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 286 migration files in packages/supabase/migrations/
+ * Source: 297 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -489,6 +489,14 @@ export interface DbGuildConfig {
   rbac_max_permissions_per_role: number;
   rbac_priority_escalation_guard: boolean;
   rbac_unknown_route_access: string;
+  brand_logo_url: string | null;
+  brand_logo_storage_path: string | null;
+  brand_header_url: string | null;
+  brand_header_storage_path: string | null;
+  brand_background_url: string | null;
+  brand_background_storage_path: string | null;
+  economy_pet_type_config: Json;
+  economy_trivia_question_source: string;
 }
 
 export interface DbInstanceSettings {
@@ -835,10 +843,16 @@ export interface DbLevelReward {
   id: string;
   guild_id: string;
   level: number;
-  role_id: string;
+  role_id: string | null;
   remove_at_level: number | null;
   announce: boolean;
   created_at: string;
+  reward_type: string;
+  remove_role_id: string | null;
+  currency_amount: number | null;
+  item_id: string | null;
+  item_quantity: number | null;
+  active: boolean;
 }
 
 export interface DbXpMultiplier {
@@ -1682,6 +1696,10 @@ export interface DbCommerceCheckoutIntents {
   cancel_reason: string | null;
   approval_exposed_at: string | null;
   provider_binding: string | null;
+  promotion_id: string | null;
+  promotion_code: string | null;
+  discount_cents: number;
+  final_amount_cents: number | null;
 }
 
 export interface DbCommerceDownloadDeliveries {
@@ -2039,6 +2057,7 @@ export interface DbEconomyAdventureSessions {
   ended_at: string | null;
   loot_failed: boolean;
   scenes_traversed: number;
+  health_remaining: number;
 }
 
 export interface DbEconomyAdventures {
@@ -2176,6 +2195,16 @@ export interface DbEconomyInventory {
   durability_remaining: number | null;
   acquired_at: string;
   updated_at: string;
+}
+
+export interface DbEconomyItemUseOperations {
+  guild_id: string;
+  user_id: string;
+  request_id: string;
+  requested_item: string;
+  item_id: string;
+  result: Json;
+  created_at: string;
 }
 
 export interface DbEconomyItems {
@@ -2518,6 +2547,26 @@ export interface DbHealthMetrics {
   metric_type: string;
   value_ms: number;
   recorded_at: string;
+}
+
+export interface DbInstanceSettingsWriteLeases {
+  scope: string;
+  operation_id: string;
+  leased_until: string;
+  updated_at: string;
+}
+
+export interface DbLevelRewardDeliveries {
+  id: string;
+  guild_id: string;
+  member_id: string;
+  reward_id: string;
+  delivery_kind: 'award' | 'expiry';
+  reached_level: number;
+  status: 'queued' | 'completed';
+  action_id: string | null;
+  created_at: string;
+  completed_at: string | null;
 }
 
 export interface DbLevelUnlockConfigs {

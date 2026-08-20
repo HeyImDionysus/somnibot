@@ -154,10 +154,10 @@ export function applyBrand(
   const existing = embed.data?.footer;
   if (existing?.text) {
     if (!existing.text.includes(attribution)) {
-      embed.setFooter({ text: `${existing.text} • ${attribution}`, iconURL: existing.icon_url });
+      embed.setFooter({ text: `${existing.text} • ${attribution}`, iconURL: existing.icon_url ?? kit.logoUrl ?? undefined });
     }
   } else {
-    embed.setFooter({ text: attribution });
+    embed.setFooter({ text: attribution, iconURL: kit.logoUrl ?? undefined });
   }
   return embed;
 }

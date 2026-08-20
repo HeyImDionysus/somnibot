@@ -141,6 +141,8 @@ interface PendingCheckoutOrder {
   paypal_order_id: string | null;
   paypal_subscription_id: string | null;
   amount_cents: number;
+  discount_cents: number;
+  promotion_id: string | null;
   currency: string;
   status: string;
   checkout_active: boolean;
@@ -161,8 +163,10 @@ const CHECKOUT_DELIVERY_TYPES = new Set([
 ]);
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 function signCheckoutToken(token: string): string | null {
-  const secret = process.env.PAYPAL_RECONCILE_SECRET || process.env.PAYPAL_CLIENT_SECRET;
-  return secret ? createHmac('sha256', secret).update(`somnibot-checkout:v1:${token}`).digest('hex') : null;
+  const secret = process.env.PAYPAL_RECONCILE_SECRET?.trim()
+    || process.env.SUPABASE_SECRET_KEY?.trim()
+    || process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  return secret ? createHmac('sha256', secret).update(`somnibot-checkout:v2:${token}`).digest('hex') : null;
 }
 
 /** Claim a free product through the dedicated idempotent $0 RPC. */
@@ -314,6 +318,8 @@ function isExactPendingCheckoutOrder(
     | 'paypal_order_id'
     | 'paypal_subscription_id'
     | 'amount_cents'
+    | 'discount_cents'
+    | 'promotion_id'
     | 'currency'
     | 'checkout_active'
     | 'checkout_approval_url'
@@ -334,6 +340,8 @@ function isExactPendingCheckoutOrder(
     && (order.paypal_order_id ?? null) === expected.paypal_order_id
     && (order.paypal_subscription_id ?? null) === expected.paypal_subscription_id
     && order.amount_cents === expected.amount_cents
+    && order.discount_cents === expected.discount_cents
+    && (order.promotion_id ?? null) === expected.promotion_id
     && order.currency === expected.currency
     && order.checkout_active === expected.checkout_active
     && order.checkout_approval_url === expected.checkout_approval_url
@@ -930,9 +938,11 @@ export async function handleBuyButton(
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
-  const productId = interaction.customId.startsWith('store:gift-buy:')
-    ? (interaction.customId.split(':')[2] ?? '')
-    : interaction.customId.replace('store:buy:', '');
+  const checkoutParts = interaction.customId.split(':');
+  const productId = checkoutParts[2] ?? '';
+  const requestedCoupon = interaction.customId.startsWith('store:buy:')
+    ? checkoutParts[3]?.trim().toUpperCase() ?? null
+    : null;
   const discordId = interaction.user.id;
   const discordUsername = interaction.user.username;
 
@@ -1247,6 +1257,26 @@ export async function handleBuyButton(
         && inFlight.orderId
         && inFlight.approvalUrl
       ) {
+        if (requestedCoupon) {
+          const { data: reservedPricing, error: reservedPricingError } = await supabase
+            .from('commerce_checkout_intents')
+            .select('promotion_code')
+            .eq('order_id', inFlight.orderId)
+            .eq('guild_id', guildId)
+            .eq('customer_id', existingCustomer.id)
+            .eq('product_id', productId)
+            .maybeSingle();
+          if (reservedPricingError) {
+            await replyCheckoutUnavailable(interaction, supabase, guildId);
+            return;
+          }
+          if (reservedPricing?.promotion_code !== requestedCoupon) {
+            await interaction.editReply({
+              content: '⚠️ You already have a PayPal checkout open for this product with different pricing. Finish or let that checkout expire before using this coupon; SomniBot will not create a second charge.',
+            });
+            return;
+          }
+        }
         const resumeToken = await requirePayPalToken();
         if (!resumeToken) {
           await replyCheckoutUnavailable(interaction, supabase, guildId);
@@ -1503,7 +1533,46 @@ export async function handleBuyButton(
     if (error) log.error('Failed to mark checkout approval as exposed:', error.message);
     return !error;
   };
-  const price = (product.price_cents / 100).toFixed(2);
+  let oneTimePricing: {
+    amountCents: number;
+    discountCents: number;
+    promotionId: string | null;
+    couponCode: string | null;
+  } | null = null;
+  if (product.type === 'one_time') {
+    const pricingResponse = await supabase.rpc('commerce_reserve_checkout_pricing', {
+      p_checkout_token: checkoutToken,
+      p_coupon_code: requestedCoupon,
+    });
+    const pricing = pricingResponse.data;
+    const validPricing = isUnknownRecord(pricing)
+      && Number.isSafeInteger(pricing.amount_cents)
+      && Number(pricing.amount_cents) >= 1
+      && Number.isSafeInteger(pricing.discount_cents)
+      && Number(pricing.discount_cents) >= 0
+      && (pricing.promotion_id === null || typeof pricing.promotion_id === 'string')
+      && (pricing.coupon_code === null || typeof pricing.coupon_code === 'string');
+    if (pricingResponse.error || !validPricing) {
+      await cancelCheckoutIntent(requestedCoupon ? 'coupon validation failed' : 'checkout pricing validation failed');
+      await interaction.editReply({
+        content: requestedCoupon
+          ? '❌ That coupon is invalid, expired, exhausted, or not eligible for this purchase.'
+          : '❌ Checkout pricing could not be verified. Please try again.',
+      });
+      return;
+    }
+    oneTimePricing = {
+      amountCents: Number(pricing.amount_cents),
+      discountCents: Number(pricing.discount_cents),
+      promotionId: pricing.promotion_id as string | null,
+      couponCode: pricing.coupon_code as string | null,
+    };
+  } else if (requestedCoupon) {
+    await cancelCheckoutIntent('coupon supplied for subscription product');
+    await interaction.editReply({ content: '❌ Coupons apply to one-time products. Subscription pricing is controlled by its PayPal plan.' });
+    return;
+  }
+  const price = ((oneTimePricing?.amountCents ?? product.price_cents) / 100).toFixed(2);
   // Post-checkout destinations MUST be publicly reachable: the buyer is a
   // Discord customer, not a dashboard admin. `/store` lives under
   // app/(dashboard) and is not in the middleware's public-route list, so the
@@ -1542,7 +1611,7 @@ export async function handleBuyButton(
             value: price,
           },
           description: product.name,
-          custom_id: `v1:${checkoutToken}.${checkoutSignature}`,
+          custom_id: `v2:${checkoutToken}.${checkoutSignature}`,
         },
       ],
       application_context: {
@@ -1647,7 +1716,9 @@ export async function handleBuyButton(
       plan_id: null,
       paypal_order_id: orderData.id,
       paypal_subscription_id: null,
-      amount_cents: product.price_cents,
+      amount_cents: oneTimePricing?.amountCents ?? product.price_cents,
+      discount_cents: oneTimePricing?.discountCents ?? 0,
+      promotion_id: oneTimePricing?.promotionId ?? null,
       currency: productCurrency,
       checkout_active: true,
       checkout_approval_url: approvalLink.href,
@@ -1668,7 +1739,7 @@ export async function handleBuyButton(
         p_provider_kind: 'capture',
         p_provider_id: orderData.id,
         p_approval_url: approvalLink.href,
-        p_amount_cents: product.price_cents,
+        p_amount_cents: oneTimePricing?.amountCents ?? product.price_cents,
         p_currency: productCurrency,
       });
       pendingOrder = response.data;
@@ -1752,8 +1823,9 @@ export async function handleBuyButton(
         brandedEmbed(brandKit, {
           intent: 'primary',
           title: `🛒 Purchase: ${product.name}`,
-          description:
-            `**Price:** $${price} ${productCurrency}\n\nClick the button below to complete your purchase via PayPal.`,
+          description: oneTimePricing?.couponCode
+            ? `**Price:** $${price} ${productCurrency}\n**Coupon:** ${oneTimePricing.couponCode} (-$${(oneTimePricing.discountCents / 100).toFixed(2)})\n\nClick the button below to complete your purchase via PayPal.`
+            : `**Price:** $${price} ${productCurrency}\n\nClick the button below to complete your purchase via PayPal.`,
         }),
       ],
       components: [
@@ -1824,7 +1896,7 @@ export async function handleBuyButton(
     // Create PayPal subscription
     const subPayload = {
       plan_id: plan.paypal_plan_id,
-      custom_id: `v1:${checkoutToken}.${checkoutSignature}`,
+      custom_id: `v2:${checkoutToken}.${checkoutSignature}`,
       application_context: {
         brand_name: brandName,
         locale: 'en-US',
@@ -1931,6 +2003,8 @@ export async function handleBuyButton(
       paypal_order_id: null,
       paypal_subscription_id: subData.id,
       amount_cents: plan.price_cents,
+      discount_cents: 0,
+      promotion_id: null,
       currency: planCurrency,
       checkout_active: true,
       checkout_approval_url: approvalLink.href,

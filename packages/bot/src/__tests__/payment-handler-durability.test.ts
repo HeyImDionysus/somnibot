@@ -45,6 +45,12 @@ function makeSupabase(opts: {
         error: null,
       };
     }
+    if (name === 'commerce_reserve_checkout_pricing') {
+      return {
+        data: { amount_cents: checkoutProduct.price_cents, discount_cents: 0, promotion_id: null, coupon_code: null },
+        error: null,
+      };
+    }
     if (name === 'commerce_select_checkout_plan') return { data: [plan], error: null };
     if (name === 'generate_order_number') return { data: 'ORD-1', error: null };
     if (name === 'commerce_create_and_bind_active_paid_checkout') {
@@ -64,6 +70,7 @@ function makeSupabase(opts: {
           plan_id: args?.p_plan_id, paypal_order_id: null, paypal_subscription_id: args?.p_provider_id,
           amount_cents: args?.p_amount_cents, currency: args?.p_currency, status: 'pending', checkout_active: true,
           checkout_approval_url: args?.p_approval_url, delivery_type_snapshot: 'access_pass',
+          promotion_id: null, discount_cents: 0,
           granted_role_ids_snapshot: [], granted_channel_ids_snapshot: [], temporary_role_grants_snapshot: [],
           grant_snapshot_frozen_at: '2026-07-11T00:00:00.000Z',
         }, error: null,
@@ -118,8 +125,15 @@ function paypalFetch(mode: 'subscription' | 'one-time', fail?: 'timeout') {
   });
 }
 
-beforeEach(() => { process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret'; });
-afterEach(() => { delete process.env.PAYPAL_CLIENT_SECRET; vi.restoreAllMocks(); });
+beforeEach(() => {
+  process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret';
+  process.env['PAYPAL_RECONCILE_SECRET'] = 'test-signing-secret';
+});
+afterEach(() => {
+  delete process.env.PAYPAL_CLIENT_SECRET;
+  delete process.env.PAYPAL_RECONCILE_SECRET;
+  vi.restoreAllMocks();
+});
 
 describe('payment checkout durability regressions', () => {
   it('ships an atomic gift-checkout expiry cleanup RPC that never reopens captured rows', () => {

@@ -26,6 +26,9 @@ const BRANDING_COLUMNS = [
   'brand_primary_color',
   'brand_accent_color',
   'brand_voice_preset',
+  'brand_logo_url',
+  'brand_header_url',
+  'brand_background_url',
 ] as const;
 
 /**
@@ -43,6 +46,9 @@ const brandingUpdate = z.object({
   brand_primary_color: z.number().int().min(0).max(16777215).nullable().optional(),
   brand_accent_color: z.number().int().min(0).max(16777215).nullable().optional(),
   brand_voice_preset: z.enum(['default', 'professional', 'friendly', 'playful']).optional(),
+  brand_logo_url: z.string().url().max(2048).nullable().optional(),
+  brand_header_url: z.string().url().max(2048).nullable().optional(),
+  brand_background_url: z.string().url().max(2048).nullable().optional(),
 }).strict().refine((obj) => Object.keys(obj).length > 0, 'At least one field required');
 
 export async function GET() {

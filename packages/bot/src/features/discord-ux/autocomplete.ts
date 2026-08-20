@@ -33,12 +33,49 @@ export async function handleAutocomplete(
       case 'remove':
         await handleQueueAutocomplete(interaction, focused.value);
         break;
+      case 'pet':
+        await handlePetAutocomplete(interaction, supabase, guildId, focused.value);
+        break;
       default:
         await interaction.respond([]);
     }
   } catch {
     await interaction.respond([]).catch(() => { /* interaction may have expired */ });
   }
+}
+
+async function handlePetAutocomplete(
+  interaction: AutocompleteInteraction,
+  supabase: SupabaseClient,
+  guildId: string,
+  query: string,
+): Promise<void> {
+  if (interaction.options.getSubcommand(false) !== 'buy') {
+    await interaction.respond([]);
+    return;
+  }
+  const { data } = await supabase
+    .from('guild_config')
+    .select('economy_pet_type_config')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  const configured = data?.economy_pet_type_config;
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) {
+    await interaction.respond([]);
+    return;
+  }
+  const normalizedQuery = query.trim().toLowerCase();
+  const choices = Object.entries(configured)
+    .flatMap(([key, value]) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const definition = value as Record<string, unknown>;
+      if (typeof definition.name !== 'string' || typeof definition.emoji !== 'string') return [];
+      const label = `${definition.emoji} ${definition.name}`;
+      if (normalizedQuery && !label.toLowerCase().includes(normalizedQuery) && !key.includes(normalizedQuery)) return [];
+      return [{ name: label.slice(0, 100), value: key.slice(0, 100) }];
+    })
+    .slice(0, 25);
+  await interaction.respond(choices);
 }
 
 async function handlePlayAutocomplete(

@@ -16,7 +16,11 @@ const questSchema = z.object({
   quest_type: z.enum(['daily', 'weekly']),
   title: z.string().min(1).max(200),
   description: z.string().max(500).optional().default(''),
-  action_type: z.string().min(1).max(100),
+  action_type: z.enum([
+    'work', 'crime', 'fish', 'gather', 'craft', 'farm', 'adventure', 'market_trade',
+    'shop_buy', 'chat', 'gamble', 'heist', 'lottery', 'poll_vote', 'pet_feed',
+    'pet_train', 'trivia',
+  ]),
   target_count: z.number().int().min(1),
   reward_currency: z.number().int().min(0),
   reward_xp: z.number().int().min(0),

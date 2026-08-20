@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const embedInstances: any[] = [];
+const buttonCustomIds: string[] = [];
 
 vi.mock('discord.js', () => {
   class EmbedBuilder {
@@ -23,7 +24,7 @@ vi.mock('discord.js', () => {
   }
   class ActionRowBuilder { components: any[] = []; addComponents(...c: any[]) { this.components.push(...c); return this; } }
   class ButtonBuilder {
-    setCustomId() { return this; }
+    setCustomId(id: string) { buttonCustomIds.push(id); return this; }
     setLabel() { return this; }
     setStyle() { return this; }
     setEmoji() { return this; }
@@ -76,11 +77,12 @@ function makeSupabase(products: any[], guildConfig: any, productError: { code: s
   } as any;
 }
 
-function makeInteraction(guildName?: string) {
+function makeInteraction(guildName?: string, coupon?: string) {
   return {
     id: 'interaction-1',
     user: { id: 'member-1' },
     guild: guildName ? { name: guildName } : null,
+    options: { getString: vi.fn(() => coupon ?? null) },
     deferReply: vi.fn().mockResolvedValue({}),
     editReply: vi.fn().mockResolvedValue({}),
   } as any;
@@ -89,6 +91,7 @@ function makeInteraction(guildName?: string) {
 describe('handleStoreCommand — white-label branding', () => {
   beforeEach(() => {
     embedInstances.length = 0;
+    buttonCustomIds.length = 0;
     // Every case below resolves guild 'g1' with a DIFFERENT brand row. The kit
     // resolver caches per guild (30s TTL), so without this the first case's kit
     // would answer the rest.
@@ -132,6 +135,16 @@ describe('handleStoreCommand — white-label branding', () => {
     const header = embedInstances[0];
     expect(header.data.title).toBe('Acme Emporium');
     expect(header.data.footer).toBeUndefined();
+  });
+
+  it('carries a normalized coupon into one-time checkout buttons', async () => {
+    const interaction = makeInteraction('Cool Server', 'save_25');
+    const supabase = makeSupabase([sampleProduct], { store_brand_name: null, store_show_powered_by: true });
+
+    await handleStoreCommand(interaction, supabase, 'g1', 'https://api.paypal.example');
+
+    expect(buttonCustomIds).toContain('store:buy:prod-1:SAVE_25');
+    expect(embedInstances[0].data.description).toContain('SAVE_25');
   });
 
   it('audits an actual products-query failure once without calling an empty store a failure', async () => {

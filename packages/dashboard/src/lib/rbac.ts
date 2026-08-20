@@ -13,6 +13,7 @@ import { createServerSupabase } from '@/lib/supabase/server';
 import { resolveLauncherLocalAuth } from '@/lib/api/launcher-local-auth';
 import { auditDashboardAuthorizationDenial } from '@/lib/rbac-audit';
 import type { DashboardPermission } from '@somnibot/shared';
+import { verifiedDiscordId } from '@/lib/verified-discord-identity';
 
 export interface AuthContext {
   userId: string;
@@ -44,15 +45,6 @@ export function authErrorResponse(err: unknown): NextResponse {
     return NextResponse.json({ error: err.message }, { status: err.status });
   }
   return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
-}
-
-/**
- * Extract Discord ID from Supabase auth user metadata.
- */
-function getDiscordId(user: { user_metadata?: Record<string, unknown> }): string | null {
-  const meta = user.user_metadata;
-  if (!meta) return null;
-  return (meta.provider_id as string) || (meta.sub as string) || null;
 }
 
 interface GuildRow {
@@ -102,7 +94,7 @@ export async function getAuthContext(): Promise<AuthContext | null> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
 
-  const discordId = getDiscordId(user);
+  const discordId = verifiedDiscordId(user);
   if (!discordId) return null;
 
   const admin = createAdminSupabase();

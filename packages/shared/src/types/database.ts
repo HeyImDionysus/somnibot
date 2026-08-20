@@ -373,6 +373,7 @@ export interface DbGuildConfig {
   economy_trivia_base_payout: number;
   economy_trivia_streak_multiplier_pct: number;
   economy_trivia_hard_multiplier: number;
+  economy_trivia_question_source: 'mixed' | 'open-trivia-db' | 'local';
   // Scheduled / hosted trivia cadence
   economy_trivia_schedule_enabled: boolean;
   economy_trivia_schedule_interval_minutes: number;
@@ -405,6 +406,12 @@ export interface DbGuildConfig {
   economy_pet_prestige_enabled: boolean;
   economy_pet_feed_cost: number;
   economy_pet_train_cost: number;
+  economy_pet_type_config: Record<string, {
+    name: string;
+    emoji: string;
+    description: string;
+    price: number;
+  }>;
   economy_quests_enabled: boolean;
   economy_daily_quest_count: number;
   economy_weekly_quest_count: number;
@@ -845,8 +852,14 @@ export interface DbLevelReward {
   id: string;
   guild_id: string | null;
   level: number;
-  role_id: string;
+  reward_type: 'role' | 'currency' | 'item';
+  role_id: string | null;
+  remove_role_id: string | null;
   remove_at_level: number | null;
+  currency_amount: number | null;
+  item_id: string | null;
+  item_quantity: number | null;
+  active: boolean;
   announce: boolean;
   created_at: string;
 }
@@ -1807,11 +1820,10 @@ export type EconomyItemCategory =
   | 'Lootboxes';
 
 export interface EconomyItemUseEffect {
-  type: 'xp_boost' | 'coin_boost' | 'padlock' | 'alarm' | 'adventure_ticket' | 'role_grant' | 'custom';
-  duration_minutes?: number;
-  multiplier?: number;
+  type: 'padlock' | 'shovel' | 'pickaxe' | 'hunting_rifle' | 'wallet_credit' | 'xp_credit' | 'role_grant';
+  amount?: number;
   role_id?: string;
-  custom_data?: Record<string, unknown>;
+  tier?: number;
 }
 
 export interface DbEconomyItem {
@@ -2011,13 +2023,14 @@ export interface AdventureChoice {
   label: string;
   emoji: string;
   next_scene_index: number | null;
-  loot: { item_name: string; qty: number; chance_pct: number }[];
+  loot: { item_id?: string; item_name: string; qty: number; chance_pct: number }[];
   currency: number;
   damage_pct: number;
   requires_item: string | null;
 }
 
 export interface AdventureSceneLoot {
+  item_id?: string;
   item_name: string;
   qty: number;
   chance_pct: number;
@@ -2059,8 +2072,9 @@ export interface DbAdventureSession {
   adventure_id: string;
   current_scene_id: string | null;
   status: AdventureSessionStatus;
-  loot_collected: { item_name: string; qty: number }[];
+  loot_collected: { item_id?: string; item_name: string; qty: number }[];
   currency_collected: number;
+  health_remaining: number;
   items_brought: { item_name: string; qty: number }[];
   message_id: string | null;
   channel_id: string | null;

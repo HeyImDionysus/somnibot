@@ -7,6 +7,7 @@ import { apiError, apiServerError, dbError } from '@/lib/api/response';
 import { sendExternalWebhookDiscordMessage } from '@/lib/external-webhook-discord';
 import { hashExternalWebhookValue, renderExternalWebhookMessage } from '@/lib/external-webhook-relay';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { getDiscordBotRuntimeConfig } from '@/lib/discord-runtime-config';
 
 export async function POST(
   request: NextRequest,
@@ -37,8 +38,9 @@ export async function POST(
       event: 'relay.test',
       content: 'SomniBot test delivery succeeded.',
     });
+    const discord = await getDiscordBotRuntimeConfig();
     const result = await sendExternalWebhookDiscordMessage({
-      token: process.env.DISCORD_TOKEN ?? '',
+      token: discord.botToken,
       channelId: relay.data.channel_id,
       content,
     });

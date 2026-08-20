@@ -1,60 +1,44 @@
 /**
- * /api/store/promotions — Promotion/Coupon read + cleanup.
+ * /api/store/promotions — Promotion/Coupon CRUD.
  *
  * GET: List all promotions
- * POST: REFUSED (501) — see PROMOTIONS_DISABLED_MESSAGE
- * PUT: REFUSED (501) — see PROMOTIONS_DISABLED_MESSAGE
- * DELETE: Delete a promotion
+ * POST: Create an enforceable one-time-product coupon
+ * PUT: Update an enforceable one-time-product coupon
+ * DELETE: Delete an unused promotion or archive one with order history
  *
- * ── Why writes are refused (Finding 8) ──────────────────────────────────────
- * There is NO redemption path for a promotion anywhere in the codebase.
- * `promotions` is read only by this route and by `api/analytics` (display).
- * Checkout (`packages/bot/src/features/commerce/payment-handler.ts`) prices the
- * PayPal order straight from `product.price_cents`, never consults
- * `promotions`, and never writes `orders.discount_cents`. A coupon code created
- * here would be advertised to customers and then silently ignored — every buyer
- * charged full price.
- *
- * The write path was also dead on arrival and has never created a row: the DB
- * CHECK is `type IN ('percentage','fixed_amount')` while `schemas.promotion.create`
- * is `z.enum(['percent','fixed'])`, so a request that satisfies one violates the
- * other. The dashboard form additionally posted `discount_value`/`starts_at`/
- * `ends_at` against a schema expecting `value`/`start_date`/`end_date`, and
- * ignored the resulting 400 while toasting success.
- *
- * Refusing here — not just hiding the form — is what makes the promise
- * impossible to make: a stale tab, a bookmarked page, or a direct API call
- * cannot create a coupon that will not be honoured. Reads and deletes stay open
- * so existing rows remain visible and removable.
- *
- * Reinstating writes means shipping redemption with it: integer-cents
- * arithmetic only (`promotions.value` is the codebase's one NUMERIC money-ish
- * column and must become integer columns), a unique index on `coupon_code`,
- * validity/expiry/usage enforced server-side under the same lock that freezes
- * the order price, and the discount recorded in `orders.discount_cents`.
+ * Checkout reserves and freezes the authoritative discounted integer-cent
+ * amount before contacting PayPal. The order records promotion_id and
+ * discount_cents in the same transaction that binds the provider checkout.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { apiError, dbError } from '@/lib/api/response';
+import { dbConflictOr500, dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-// NOT exported. A Next.js App Router route module may only export the HTTP
-// method handlers and Next's own route config keys (`dynamic`, `revalidate`,
-// `runtime`, `maxDuration`, …); any other export fails the route-type check that
-// `next build` generates. Nothing outside this file needs it, and `type-check`
-// does NOT catch this — only a full build does.
-const PROMOTIONS_DISABLED_MESSAGE =
-  'Coupons and promotions are disabled: nothing in checkout redeems them, so a '
-  + 'discount code created here would never be applied and every customer would '
-  + 'still be charged the full price. Existing promotions can be viewed and '
-  + 'deleted.';
+const promotionUpdateSchema = z.object({
+  id: z.string().uuid(),
+  promotion: schemas.promotion.create,
+}).strict();
 
-/** 501 Not Implemented — the feature is absent, not the request malformed. */
-function promotionsDisabled() {
-  return apiError(PROMOTIONS_DISABLED_MESSAGE, 501);
+async function productsBelongToGuild(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  productIds: readonly string[],
+): Promise<boolean> {
+  if (productIds.length === 0) return true;
+  const { data, error } = await supabase
+    .from('products')
+    .select('id, type')
+    .eq('guild_id', guildId)
+    .in('id', [...productIds])
+    .limit(100);
+  return !error
+    && (data ?? []).length === new Set(productIds).size
+    && (data ?? []).every((product) => product.type === 'one_time');
 }
 
 export async function GET() {
@@ -85,9 +69,33 @@ export async function POST(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
 
-  // Refused before any write: a coupon that checkout will not redeem must not
-  // be creatable from a stale tab, a bookmark, or a direct API call.
-  return promotionsDisabled();
+  const { guildId, discordId } = auth.ctx;
+  const parsed = await parseBody(req, schemas.promotion.create);
+  if (!parsed.ok) return parsed.response;
+  const supabase = createAdminSupabase();
+  if (!await productsBelongToGuild(supabase, guildId, parsed.data.applies_to_product_ids ?? [])) {
+    return NextResponse.json({ success: false, error: 'Selected products must be one-time products from this server.' }, { status: 400 });
+  }
+
+  const { data, error } = await supabase
+    .from('promotions')
+    .insert({ ...parsed.data, guild_id: guildId, current_uses: 0 })
+    .select('*')
+    .single();
+  if (error) return dbConflictOr500(error, 'store/promotions', 'promotions_guild_coupon_code_key', 'That coupon code is already in use.');
+
+  await recordCrudChange({
+    guildId,
+    actorId: discordId,
+    operation: 'created',
+    action: 'store.promotion_created',
+    table: 'promotions',
+    targetType: 'promotion',
+    targetId: data.id,
+    label: data.name,
+    after: data as Record<string, unknown>,
+  }, supabase);
+  return NextResponse.json({ success: true, data }, { status: 201 });
 }
 
 export async function PUT(req: NextRequest) {
@@ -97,7 +105,39 @@ export async function PUT(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
 
-  return promotionsDisabled();
+  const { guildId, discordId } = auth.ctx;
+  const parsed = await parseBody(req, promotionUpdateSchema);
+  if (!parsed.ok) return parsed.response;
+  const supabase = createAdminSupabase();
+  if (!await productsBelongToGuild(supabase, guildId, parsed.data.promotion.applies_to_product_ids ?? [])) {
+    return NextResponse.json({ success: false, error: 'Selected products must be one-time products from this server.' }, { status: 400 });
+  }
+  const before = await readRowBefore(supabase, 'promotions', { id: parsed.data.id, guild_id: guildId });
+  if (!before) return NextResponse.json({ success: false, error: 'Promotion not found.' }, { status: 404 });
+
+  const { data, error } = await supabase
+    .from('promotions')
+    .update(parsed.data.promotion)
+    .eq('id', parsed.data.id)
+    .eq('guild_id', guildId)
+    .select('*')
+    .single();
+  if (error) return dbConflictOr500(error, 'store/promotions', 'promotions_guild_coupon_code_key', 'That coupon code is already in use.');
+
+  await recordCrudChange({
+    guildId,
+    actorId: discordId,
+    operation: 'updated',
+    action: 'store.promotion_updated',
+    table: 'promotions',
+    targetType: 'promotion',
+    targetId: parsed.data.id,
+    label: data.name,
+    before,
+    after: data as Record<string, unknown>,
+    match: { id: parsed.data.id, guild_id: guildId },
+  }, supabase);
+  return NextResponse.json({ success: true, data });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -123,6 +163,7 @@ export async function DELETE(req: NextRequest) {
   }
 
   const before = await readRowBefore(supabase, 'promotions', { id: id, guild_id: auth.ctx.guildId });
+  if (!before) return NextResponse.json({ success: false, error: 'Promotion not found.' }, { status: 404 });
 
   const { error } = await supabase
     .from('promotions')
@@ -130,11 +171,36 @@ export async function DELETE(req: NextRequest) {
     .eq('id', id)
     .eq('guild_id', guildId);
 
-  if (error) {
+  let archived = false;
+  if (error?.code === '23503') {
+    const { data, error: archiveError } = await supabase
+      .from('promotions')
+      .update({ active: false })
+      .eq('id', id)
+      .eq('guild_id', guildId)
+      .select('*')
+      .single();
+    if (archiveError) return dbError(archiveError, 'store/promotions');
+    archived = true;
+    await recordCrudChange({
+      guildId,
+      actorId: auth.ctx.discordId,
+      operation: 'updated',
+      action: 'store.promotion_archived',
+      table: 'promotions',
+      targetType: 'promotion',
+      targetId: id,
+      label: data.name,
+      before,
+      after: data as Record<string, unknown>,
+      match: { id, guild_id: guildId },
+      blastRadius: 'medium',
+    }, supabase);
+  } else if (error) {
     return dbError(error, 'store/promotions');
   }
 
-  await recordCrudChange({
+  if (!archived) await recordCrudChange({
     guildId: auth.ctx.guildId,
     actorId: auth.ctx.discordId,
     operation: 'deleted',
@@ -142,11 +208,11 @@ export async function DELETE(req: NextRequest) {
     table: 'promotions',
     targetType: 'promotion',
     targetId: id,
-    label: before?.code as string | undefined,
+    label: before?.coupon_code as string | undefined,
 
     before,
     blastRadius: 'medium',
   }, supabase);
 
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, archived });
 }

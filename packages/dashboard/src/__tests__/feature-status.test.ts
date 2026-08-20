@@ -4,8 +4,21 @@ import { deriveFeatureReadiness, featureForPath } from '@/lib/dashboard/feature-
 describe('feature status', () => {
   it('maps nested pages to their owning runtime', () => {
     expect(featureForPath('/economy/trivia')).toEqual({
-      label: 'Economy',
-      configKey: 'economy_enabled',
+      label: 'Trivia',
+      configKey: 'economy_trivia_enabled',
+      requiredConfigKeys: ['economy_enabled'],
+    });
+  });
+
+  it('does not claim a child feature can run while the economy is disabled', () => {
+    expect(deriveFeatureReadiness({
+      feature: featureForPath('/economy/trivia')!,
+      config: { economy_enabled: false, economy_trivia_enabled: true },
+      botOnline: true,
+      staleSecs: 10,
+    })).toMatchObject({
+      state: 'disabled',
+      detail: 'Its parent system is disabled, so this feature cannot run even though its own settings are saved.',
     });
   });
 

@@ -25,6 +25,8 @@ export interface LevelConfig {
   level_up_channel_id: string | null;
   level_up_message: string | null;
   no_xp_role_id: string | null;
+  currency_name: string;
+  currency_emoji: string;
   level_curve: LevelCurve;
 }
 
@@ -36,8 +38,14 @@ interface XpMultiplier {
 interface LevelReward {
   id: string;
   level: number;
-  role_id: string;
+  reward_type: 'role' | 'currency' | 'item';
+  role_id: string | null;
+  remove_role_id: string | null;
   remove_at_level: number | null;
+  currency_amount: number | null;
+  item_id: string | null;
+  item_quantity: number | null;
+  economy_items: { name: string; emoji: string } | null;
   announce: boolean;
 }
 
@@ -82,6 +90,8 @@ function disabledLevelConfig(): LevelConfig {
     level_up_channel_id: null,
     level_up_message: null,
     no_xp_role_id: null,
+    currency_name: 'Coins',
+    currency_emoji: '🪙',
     level_curve: DEFAULT_LEVEL_CURVE,
   };
 }
@@ -112,7 +122,7 @@ export async function loadLevelConfig(
   const { data, error } = await supabase
     .from('guild_config')
     .select(
-      'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, no_xp_role_id, level_curve',
+      'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, no_xp_role_id, currency_name, currency_emoji, level_curve',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -146,6 +156,8 @@ export async function loadLevelConfig(
     level_up_channel_id: data?.level_up_channel_id ?? null,
     level_up_message: data?.level_up_message ?? null,
     no_xp_role_id: data?.no_xp_role_id ?? null,
+    currency_name: data?.currency_name ?? 'Coins',
+    currency_emoji: data?.currency_emoji ?? '🪙',
     level_curve: (data?.level_curve && typeof data.level_curve === 'object' ? data.level_curve : DEFAULT_LEVEL_CURVE) as LevelCurve,
   };
   _levelConfigCache.set(guildId, { data: config, time: now });
@@ -187,8 +199,9 @@ export async function loadRewards(
 
   const { data } = await supabase
     .from('level_rewards')
-    .select('*')
+    .select('*, economy_items(name, emoji)')
     .eq('guild_id', guildId)
+    .eq('active', true)
     .order('level', { ascending: true })
     .limit(1000);
 

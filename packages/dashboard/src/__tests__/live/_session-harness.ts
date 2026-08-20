@@ -131,13 +131,12 @@ export async function createOwnerSession(discordId: string): Promise<OwnerSessio
   const email = `e2e-owner-${discordId}@somnibot.local`.toLowerCase();
   const password = `E2e!${discordId}!pw`;
 
-  // Create the auth user (GoTrue admin). provider_id in user_metadata is what
-  // requireGuildOwner reads for the Discord identity. Tolerate "already exists".
   const created = await admin.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
-    user_metadata: { provider_id: discordId, sub: discordId, full_name: `E2E Owner ${discordId}` },
+    app_metadata: { discord_id: discordId },
+    user_metadata: { full_name: `E2E Owner ${discordId}` },
   });
   if (created.error && !/already been registered|already exists/i.test(created.error.message)) {
     throw new Error(`_session-harness: createUser failed: ${created.error.message}`);
@@ -150,6 +149,12 @@ export async function createOwnerSession(discordId: string): Promise<OwnerSessio
   const signIn = await anon.auth.signInWithPassword({ email, password });
   if (signIn.error || !signIn.data.session) {
     throw new Error(`_session-harness: signIn failed: ${signIn.error?.message ?? 'no session'}`);
+  }
+  const identityUpdate = await admin.auth.admin.updateUserById(signIn.data.user.id, {
+    app_metadata: { ...signIn.data.user.app_metadata, discord_id: discordId },
+  });
+  if (identityUpdate.error) {
+    throw new Error(`_session-harness: identity update failed: ${identityUpdate.error.message}`);
   }
   const session = signIn.data.session;
 

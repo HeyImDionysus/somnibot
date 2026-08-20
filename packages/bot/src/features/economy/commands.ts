@@ -609,7 +609,10 @@ async function handleInventory(interaction: ChatInputCommandInteraction, mgr: Ec
 }
 
 async function handleUse(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
-  await interaction.reply({ content: '🔧 Item usage will be implemented with specific item effects in PR #43+.', ephemeral: true });
+  await interaction.deferReply({ ephemeral: true });
+  const item = interaction.options.getString('item', true);
+  const result = await mgr.useItem(interaction.user.id, item, interaction.id);
+  await interaction.editReply({ content: result.message });
 }
 
 async function handleEconLeaderboard(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {

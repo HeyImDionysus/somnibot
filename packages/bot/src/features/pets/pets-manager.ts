@@ -49,16 +49,44 @@ export function invalidatePetsCache(guildId?: string): void {
 
 const PET_PLAY_COOLDOWN_SECS = 30; // 30-second cooldown on /pet play
 
-const PET_TYPES: Record<string, { emoji: string; desc: string }> = {
-  hunting: { emoji: '🐺', desc: 'Boosts hunt loot' },
-  guard: { emoji: '🐕', desc: 'Reduces rob success against you' },
-  foraging: { emoji: '🐿️', desc: 'Passive item finds' },
-  lucky: { emoji: '🐈', desc: 'Slight gambling boost' },
+interface PetTypeDefinition {
+  name: string;
+  emoji: string;
+  description: string;
+  price: number;
+}
+
+const DEFAULT_PET_TYPES: Record<string, PetTypeDefinition> = {
+  hunting: { name: 'Hunting', emoji: '🐺', description: 'Boosts hunt loot', price: 5000 },
+  guard: { name: 'Guard', emoji: '🐕', description: 'Reduces rob success against you', price: 5000 },
+  foraging: { name: 'Foraging', emoji: '🐿️', description: 'Passive item finds', price: 5000 },
+  lucky: { name: 'Lucky', emoji: '🐈', description: 'Slight gambling boost', price: 7500 },
 };
 
-const PET_PRICES: Record<string, number> = {
-  hunting: 5000, guard: 5000, foraging: 5000, lucky: 7500,
-};
+function petTypeDefinition(config: DbGuildConfig | null, key: string): PetTypeDefinition {
+  const fallback = DEFAULT_PET_TYPES[key] ?? { name: 'Pet', emoji: '🐾', description: 'Unknown', price: 5000 };
+  const configured = config?.economy_pet_type_config;
+  if (configured === null || typeof configured !== 'object' || Array.isArray(configured)) return fallback;
+  const value = Reflect.get(configured, key);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return fallback;
+  const name = Reflect.get(value, 'name');
+  const emoji = Reflect.get(value, 'emoji');
+  const description = Reflect.get(value, 'description');
+  const price = Reflect.get(value, 'price');
+  return {
+    name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 32) : fallback.name,
+    emoji: typeof emoji === 'string' && emoji.trim() ? emoji.trim().slice(0, 64) : fallback.emoji,
+    description: typeof description === 'string' && description.trim() ? description.trim().slice(0, 128) : fallback.description,
+    price: typeof price === 'number' && Number.isInteger(price) && price >= 0 ? price : fallback.price,
+  };
+}
+
+function hasPetType(config: DbGuildConfig | null, key: string): boolean {
+  const configured = config?.economy_pet_type_config;
+  return configured !== null && typeof configured === 'object' && !Array.isArray(configured)
+    ? Object.prototype.hasOwnProperty.call(configured, key)
+    : Object.prototype.hasOwnProperty.call(DEFAULT_PET_TYPES, key);
+}
 
 const XP_PER_LEVEL = 100;
 const MAX_LEVEL = 50;
@@ -389,15 +417,16 @@ export class PetsManager {
       return;
     }
 
-    const info = PET_TYPES[pet.pet_type] ?? { emoji: '🐾', desc: 'Unknown' };
+    const config = await this.getConfig(interaction.guildId!);
+    const info = petTypeDefinition(config, pet.pet_type);
     const statusEmoji = pet.status === 'happy' ? '😊' : pet.status === 'sad' ? '😢' : '😐';
-    const kit = brandKitFromConfig(await this.getConfig(interaction.guildId!), interaction.guild?.name);
+    const kit = brandKitFromConfig(config, interaction.guild?.name);
 
     await interaction.reply({
       embeds: [applyBrand(
         new EmbedBuilder()
           .setTitle(`${info.emoji} ${pet.name}`)
-          .setDescription(`*${info.desc}*`)
+          .setDescription(`*${info.description}*`)
           .addFields(
             { name: 'Level', value: `${pet.level}/${MAX_LEVEL} (${pet.xp} XP)`, inline: true },
             { name: 'Prestige', value: `⭐ ${pet.prestige}`, inline: true },
@@ -430,8 +459,13 @@ export class PetsManager {
       await this.replyPetsUnavailable(interaction, ' Nothing was charged.');
       return;
     }
-    const price = PET_PRICES[petType] ?? 5000;
-    const info = PET_TYPES[petType] ?? { emoji: '🐾', desc: '' };
+    const config = await this.getConfig(guildId);
+    if (!hasPetType(config, petType)) {
+      await interaction.reply({ content: 'That pet type is not available in this server.', ephemeral: true });
+      return;
+    }
+    const info = petTypeDefinition(config, petType);
+    const price = info.price;
     // Atomic + idempotent purchase: wallet debit and pet insert commit as one
     // operation keyed by the Discord interaction id.
     const { data: buyResult, error: buyError } = await this.supabase.rpc('economy_pet_buy_atomic', {
@@ -471,7 +505,7 @@ export class PetsManager {
       embeds: [brandedEmbed(brandKitFromConfig(await this.getConfig(guildId), interaction.guild?.name), {
         intent: 'primary',
         title: `${info.emoji} New Pet!`,
-        description: `You bought a **${petType}** pet for **${price.toLocaleString()}** coins!\nUse \`/pet rename\` to name it.`,
+        description: `You bought a **${info.name}** pet for **${price.toLocaleString()}** coins!\nUse \`/pet rename\` to name it.`,
       })],
     });
   }

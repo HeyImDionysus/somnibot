@@ -6,6 +6,15 @@
 
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/shared/button';
+import { PortalLink } from '@/components/portal/portal-link';
+import {
+  allowPortalAutoLogin,
+  clearPortalToken,
+  getPortalToken,
+  isPortalAutoLoginSuppressed,
+  portalGuildId,
+  setPortalToken,
+} from '@/lib/portal-session-storage';
 
 interface PortalData {
   licenses: number;
@@ -28,21 +37,12 @@ interface PortalData {
  * the post-login URL cleanup. The portal MUST be per-guild: a Discord identity can
  * be a customer in many guilds, so the session is scoped to exactly one.
  */
-function currentGuildId(): string {
-  const fromUrl = new URLSearchParams(window.location.search).get('guild');
-  if (fromUrl) {
-    sessionStorage.setItem('portal_guild', fromUrl);
-    return fromUrl;
-  }
-  return sessionStorage.getItem('portal_guild') || '';
-}
-
 function getDiscordOAuthUrl(clientId: string): string {
   const redirectUri = encodeURIComponent(`${window.location.origin}/portal`);
   // CSRF nonce + the target guild, both echoed back by Discord in `state` so the
   // guild survives the round-trip (query params are dropped on the redirect).
   const nonce = crypto.randomUUID();
-  const state = `${nonce}.${currentGuildId()}`;
+  const state = `${nonce}.${portalGuildId()}`;
   sessionStorage.setItem('portal_oauth_state', state);
   return `https://discord.com/oauth2/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&scope=identify&state=${encodeURIComponent(state)}`;
 }
@@ -138,7 +138,7 @@ export default function PortalDashboard() {
 
           const json = await res.json();
           if (json.success && json.data?.token) {
-            localStorage.setItem('portal_token', json.data.token);
+            setPortalToken(guildId, json.data.token);
             // Clean the URL (remove ?code=…)
             window.history.replaceState({}, '', '/portal');
           } else {
@@ -153,27 +153,77 @@ export default function PortalDashboard() {
         }
       }
 
-      const token = localStorage.getItem('portal_token');
+      const guildId = portalGuildId();
+
+      async function issueDashboardToken(): Promise<string | null> {
+        if (!guildId || isPortalAutoLoginSuppressed(guildId)) return null;
+        try {
+          const response = await fetch('/api/portal/auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'dashboard_session',
+              guild_id: guildId,
+            }),
+          });
+          const json = await response.json();
+          const issuedToken = typeof json.data?.token === 'string'
+            ? json.data.token
+            : null;
+          if (response.ok && json.success && issuedToken) {
+            setPortalToken(guildId, issuedToken);
+            return issuedToken;
+          }
+          if (response.status === 401 || response.status === 404) return null;
+          throw new Error(typeof json.error === 'string' ? json.error : 'Portal sign-in failed');
+        } catch (bootstrapError) {
+          if (bootstrapError instanceof Error) throw bootstrapError;
+          throw new Error('Portal sign-in could not be checked. Please try again.');
+        }
+      }
+
+      let token = getPortalToken(guildId);
+      if (!token) {
+        try {
+          token = await issueDashboardToken();
+        } catch (bootstrapError) {
+          setError(bootstrapError instanceof Error ? bootstrapError.message : 'Portal sign-in failed');
+          setLoading(false);
+          return;
+        }
+      }
+
       if (!token) {
         setError('not_authenticated');
         setLoading(false);
         return;
       }
 
-      const headers = { 'x-portal-token': token };
-
       try {
-        const [licensesRes, ordersRes, downloadsRes] = await Promise.all([
-          fetch('/api/portal/licenses', { headers }),
-          fetch('/api/portal/orders', { headers }),
-          fetch('/api/portal/downloads', { headers }),
-        ]);
+        async function fetchPortalData(activeToken: string) {
+          const headers = { 'x-portal-token': activeToken };
+          return Promise.all([
+            fetch('/api/portal/licenses', { headers }),
+            fetch('/api/portal/orders', { headers }),
+            fetch('/api/portal/downloads', { headers }),
+          ]);
+        }
 
-        // V11 Re-Audit UX-2: Include downloadsRes in 401 check for consistency.
+        let [licensesRes, ordersRes, downloadsRes] = await fetchPortalData(token);
+
         if (licensesRes.status === 401 || ordersRes.status === 401 || downloadsRes.status === 401) {
-          setError('not_authenticated');
-          localStorage.removeItem('portal_token');
-          return;
+          clearPortalToken(guildId);
+          const refreshedToken = await issueDashboardToken();
+          if (!refreshedToken) {
+            setError('not_authenticated');
+            return;
+          }
+          [licensesRes, ordersRes, downloadsRes] = await fetchPortalData(refreshedToken);
+          if (licensesRes.status === 401 || ordersRes.status === 401 || downloadsRes.status === 401) {
+            clearPortalToken(guildId);
+            setError('not_authenticated');
+            return;
+          }
         }
 
         const [licensesJson, ordersJson, downloadsJson] = await Promise.all([
@@ -207,10 +257,12 @@ export default function PortalDashboard() {
 
   function startDiscordLogin() {
     if (!discordApplicationId) return;
-    if (!currentGuildId()) {
+    const guildId = portalGuildId();
+    if (!guildId) {
       setError("This portal link is missing its server. Please use your server's portal link (it looks like /portal?guild=…).");
       return;
     }
+    allowPortalAutoLogin(guildId);
     window.location.assign(getDiscordOAuthUrl(discordApplicationId));
   }
 
@@ -279,21 +331,21 @@ export default function PortalDashboard() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <a href="/portal/licenses" className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-[#FF1493]/50 transition-colors">
+        <PortalLink href="/portal/licenses" className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-[#FF1493]/50 transition-colors">
           <p className="text-xs text-discord-text-muted uppercase tracking-wide">License Keys</p>
           <p className="mt-1 text-2xl font-bold text-discord-text-primary">{data.licenses}</p>
           <p className="mt-1 text-xs text-discord-success">{data.activeSessions} active sessions</p>
-        </a>
-        <a href="/portal/downloads" className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-[#FF1493]/50 transition-colors">
+        </PortalLink>
+        <PortalLink href="/portal/downloads" className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-[#FF1493]/50 transition-colors">
           <p className="text-xs text-discord-text-muted uppercase tracking-wide">Downloads</p>
           <p className="mt-1 text-2xl font-bold text-discord-text-primary">{data.downloads}</p>
           <p className="mt-1 text-xs text-discord-text-muted">Available products</p>
-        </a>
-        <a href="/portal/orders" className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-[#FF1493]/50 transition-colors">
+        </PortalLink>
+        <PortalLink href="/portal/orders" className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 hover:border-[#FF1493]/50 transition-colors">
           <p className="text-xs text-discord-text-muted uppercase tracking-wide">Orders</p>
           <p className="mt-1 text-2xl font-bold text-discord-text-primary">{data.recentOrders}</p>
           <p className="mt-1 text-xs text-discord-text-muted">All time</p>
-        </a>
+        </PortalLink>
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
           <p className="text-xs text-discord-text-muted uppercase tracking-wide">Support</p>
           <p className="mt-2 text-sm text-discord-text-secondary">Need help? Open a ticket in Discord.</p>

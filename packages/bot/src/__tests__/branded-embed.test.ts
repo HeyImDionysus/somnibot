@@ -61,6 +61,7 @@ function customKit(overrides: Partial<BrandKit> = {}): BrandKit {
     poweredByAttribution: 'Powered by SomniBot',
     currencyName: 'Coins',
     currencyEmoji: '🪙',
+    logoUrl: null,
     ...overrides,
   };
 }

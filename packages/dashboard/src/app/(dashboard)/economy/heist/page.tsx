@@ -142,8 +142,8 @@ export default function HeistPage() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Minimum Participants" help="Fewest members required before a heist can start." value={config.economy_heist_min_participants} onCommit={(value) => saveConfig({ economy_heist_min_participants: value })} min={2} max={10} /></div>
-            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Maximum Participants" help="Largest heist group allowed." value={config.economy_heist_max_participants} onCommit={(value) => saveConfig({ economy_heist_max_participants: value })} min={2} max={20} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Minimum Participants" help="Fewest members required before a heist can start. Raising this also raises the maximum when needed." value={config.economy_heist_min_participants} onCommit={(value) => saveConfig({ economy_heist_min_participants: value, economy_heist_max_participants: Math.max(value, config.economy_heist_max_participants) })} min={2} max={20} /></div>
+            <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Maximum Participants" help="Largest heist group allowed. Lowering this also lowers the minimum when needed." value={config.economy_heist_max_participants} onCommit={(value) => saveConfig({ economy_heist_max_participants: value, economy_heist_min_participants: Math.min(value, config.economy_heist_min_participants) })} min={2} max={20} /></div>
             <div className="bg-discord-bg-secondary rounded-lg p-4"><ValidatedNumberInput label="Join Window (seconds)" help="Time members have to join after a heist starts." value={config.economy_heist_join_window_secs} onCommit={(value) => saveConfig({ economy_heist_join_window_secs: value })} min={15} max={300} /></div>
           </div>
 

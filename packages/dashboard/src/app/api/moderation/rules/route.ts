@@ -15,6 +15,15 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+
+const DISCORD_NATIVE_RULE_TYPES = new Set(['word_filter', 'link_filter', 'invite_filter', 'spam_filter', 'mention_spam']);
+const DISCORD_NATIVE_ACTIONS = new Set(['delete', 'warn', 'mute']);
+
+function supportsDiscordNativeRule(type: unknown, action: unknown): boolean {
+  return typeof type === 'string' && typeof action === 'string'
+    && DISCORD_NATIVE_RULE_TYPES.has(type) && DISCORD_NATIVE_ACTIONS.has(action);
+}
+
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -49,7 +58,7 @@ export async function POST(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const { name, type, config, action, mute_duration_minutes, exempt_roles, exempt_channels, log_to_mod_channel } = body;
+  const { name, type, config, action, mute_duration_minutes, exempt_roles, exempt_channels, log_to_mod_channel, sync_to_discord, priority, enabled } = body;
 
   if (!name || !type || !action) {
     return NextResponse.json({ success: false, error: 'Missing required fields: name, type, action' }, { status: 400 });
@@ -64,6 +73,9 @@ export async function POST(req: NextRequest) {
   if (!validActions.includes(action)) {
     return NextResponse.json({ success: false, error: `Invalid action. Must be one of: ${validActions.join(', ')}` }, { status: 400 });
   }
+  if (sync_to_discord === true && !supportsDiscordNativeRule(type, action)) {
+    return NextResponse.json({ success: false, error: 'This rule type and action cannot be mirrored by Discord AutoMod.' }, { status: 400 });
+  }
 
   const { data, error } = await supabase
     .from('automod_rules')
@@ -71,13 +83,15 @@ export async function POST(req: NextRequest) {
       guild_id: guildId,
       name,
       type,
-      enabled: true,
+      enabled,
       config: config ?? {},
       action,
       mute_duration_minutes: action === 'mute' ? (mute_duration_minutes ?? 5) : null,
       exempt_roles: exempt_roles ?? [],
       exempt_channels: exempt_channels ?? [],
       log_to_mod_channel: log_to_mod_channel ?? true,
+      sync_to_discord: sync_to_discord ?? false,
+      priority: priority ?? 0,
     })
     .select()
     .single();
@@ -122,11 +136,17 @@ export async function PUT(req: NextRequest) {
   }
 
   // Only allow updating specific fields
-  const updates = typedPick(body, ['name', 'type', 'enabled', 'config', 'action', 'mute_duration_minutes', 'exempt_roles', 'exempt_channels', 'log_to_mod_channel']);
+  const updates = typedPick(body, ['name', 'type', 'enabled', 'config', 'action', 'mute_duration_minutes', 'exempt_roles', 'exempt_channels', 'log_to_mod_channel', 'sync_to_discord', 'priority']);
 
   updates.updated_at = new Date().toISOString();
 
   const before = await readRowBefore(supabase, 'automod_rules', { id: body.id, guild_id: guildId });
+  const effectiveType = updates.type ?? before?.type;
+  const effectiveAction = updates.action ?? before?.action;
+  const effectiveSync = updates.sync_to_discord ?? before?.sync_to_discord;
+  if (effectiveSync === true && !supportsDiscordNativeRule(effectiveType, effectiveAction)) {
+    return NextResponse.json({ success: false, error: 'This rule type and action cannot be mirrored by Discord AutoMod.' }, { status: 400 });
+  }
 
   const { data, error } = await supabase
     .from('automod_rules')

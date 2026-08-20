@@ -80,11 +80,25 @@ interface Session {
   adventure_id: string;
   current_scene_id: string | null;
   status: string;
-  loot_collected: { item_name: string; qty: number }[];
+  loot_collected: { item_id?: string; item_name: string; qty: number }[];
   currency_collected: number;
+  health_remaining?: number;
   message_id: string | null;
   channel_id: string | null;
   scenes_traversed?: number;
+}
+
+type ScenePresentation = {
+  readonly adventure: Adventure;
+  readonly scene: Scene;
+  readonly sessionId: string | null;
+  readonly lootCount: number;
+  readonly healthRemaining: number;
+  readonly kit: BrandKit;
+};
+
+export function applyAdventureDamage(healthRemaining: number, damagePct: number): number {
+  return Math.max(0, Math.min(100, healthRemaining) - Math.max(0, Math.min(100, damagePct)));
 }
 
 // ── Difficulty Multipliers ────────────────────────────────
@@ -873,7 +887,14 @@ export class AdventureManager {
     });
 
     // Build embed + buttons
-    const { embed, row } = this.buildSceneEmbed(adventure, scene, sessionId, 0, config.brandKit);
+    const { embed, row } = this.buildSceneEmbed({
+      adventure,
+      scene,
+      sessionId,
+      lootCount: 0,
+      healthRemaining: 100,
+      kit: config.brandKit,
+    });
     return { embed, row, sessionId };
   }
 
@@ -925,6 +946,18 @@ export class AdventureManager {
     // Process choice rewards
     const lootCollected = [...sess.loot_collected];
     let currencyCollected = sess.currency_collected;
+    const healthRemaining = applyAdventureDamage(sess.health_remaining ?? 100, choice.damage_pct ?? 0);
+
+    if (healthRemaining === 0) {
+      await this.endSession({ ...sess, health_remaining: 0 }, 'failed', [], 0);
+      const embed = brandedEmbed(kit, {
+        intent: 'danger',
+        title: 'Adventure failed',
+        description: `That choice dealt ${choice.damage_pct ?? 0}% damage and reduced your health to 0. No rewards were awarded.`,
+      });
+      await interaction.update({ embeds: [embed], components: [] });
+      return;
+    }
 
     // Add currency from choice
     if (choice.currency > 0) {
@@ -934,20 +967,20 @@ export class AdventureManager {
     // Roll loot from choice
     for (const loot of choice.loot) {
       if (randomChance(loot.chance_pct)) {
-        const existing = lootCollected.find((l) => l.item_name === loot.item_name);
+        const existing = lootCollected.find((entry) => loot.item_id ? entry.item_id === loot.item_id : entry.item_name === loot.item_name);
         if (existing) existing.qty += loot.qty;
-        else lootCollected.push({ item_name: loot.item_name, qty: loot.qty });
+        else lootCollected.push({ item_id: loot.item_id, item_name: loot.item_name, qty: loot.qty });
       }
     }
 
     // Navigate to next scene
     if (choice.next_scene_index === null) {
       // End adventure — same as ending scene
-      await this.endSession(sess, 'completed', lootCollected, currencyCollected);
+      const delivered = await this.endSession({ ...sess, health_remaining: healthRemaining }, 'completed', lootCollected, currencyCollected);
       const embed = brandedEmbed(kit, {
         intent: 'primary',
         title: '🏁 Adventure Complete!',
-        description: this.buildRewardsSummary(lootCollected, currencyCollected),
+        description: this.buildRewardsSummary(delivered.loot, delivered.currency),
       });
       await interaction.update({ embeds: [embed], components: [] });
       return;
@@ -961,11 +994,11 @@ export class AdventureManager {
       .single();
 
     if (!nextScene) {
-      await this.endSession(sess, 'completed', lootCollected, currencyCollected);
+      const delivered = await this.endSession({ ...sess, health_remaining: healthRemaining }, 'completed', lootCollected, currencyCollected);
       const embed = brandedEmbed(kit, {
         intent: 'primary',
         title: '🏁 Adventure Complete!',
-        description: this.buildRewardsSummary(lootCollected, currencyCollected),
+        description: this.buildRewardsSummary(delivered.loot, delivered.currency),
       });
       await interaction.update({ embeds: [embed], components: [] });
       return;
@@ -976,9 +1009,9 @@ export class AdventureManager {
     // Roll scene loot
     for (const loot of next.loot) {
       if (randomChance(loot.chance_pct)) {
-        const existing = lootCollected.find((l) => l.item_name === loot.item_name);
+        const existing = lootCollected.find((entry) => loot.item_id ? entry.item_id === loot.item_id : entry.item_name === loot.item_name);
         if (existing) existing.qty += loot.qty;
-        else lootCollected.push({ item_name: loot.item_name, qty: loot.qty });
+        else lootCollected.push({ item_id: loot.item_id, item_name: loot.item_name, qty: loot.qty });
       }
     }
 
@@ -998,6 +1031,7 @@ export class AdventureManager {
         current_scene_id: next.id,
         loot_collected: lootCollected,
         currency_collected: currencyCollected,
+        health_remaining: healthRemaining,
         scenes_traversed: scenesTraversed,
       })
       .eq('id', sessionId);
@@ -1010,7 +1044,12 @@ export class AdventureManager {
       const finalLoot = endType === 'death' ? [] : endType === 'partial' ? lootCollected.slice(0, Math.ceil(lootCollected.length / 2)) : lootCollected;
       const finalCurrency = endType === 'death' ? 0 : endType === 'partial' ? Math.floor(currencyCollected / 2) : currencyCollected;
 
-      await this.endSession(sess, endType === 'death' ? 'failed' : 'completed', finalLoot, finalCurrency);
+      const delivered = await this.endSession(
+        { ...sess, health_remaining: endType === 'death' ? 0 : healthRemaining },
+        endType === 'death' ? 'failed' : 'completed',
+        finalLoot,
+        finalCurrency,
+      );
 
       const color = endType === 'success' ? 0x4caf50 : endType === 'death' ? 0xf44336 : 0xff9800;
       const title = next.is_ending
@@ -1020,7 +1059,7 @@ export class AdventureManager {
 
       const embed = new EmbedBuilder()
         .setTitle(title)
-        .setDescription(next.text + capNote + '\n\n' + this.buildRewardsSummary(finalLoot, finalCurrency))
+        .setDescription(next.text + capNote + '\n\n' + this.buildRewardsSummary(delivered.loot, delivered.currency))
         .setColor(color);
 
       await interaction.update({ embeds: [embed], components: [] });
@@ -1035,7 +1074,14 @@ export class AdventureManager {
       .single();
 
     const adv = advData as Adventure;
-    const { embed, row } = this.buildSceneEmbed(adv, next, sessionId, lootCollected.length, kit);
+    const { embed, row } = this.buildSceneEmbed({
+      adventure: adv,
+      scene: next,
+      sessionId,
+      lootCount: lootCollected.length,
+      healthRemaining,
+      kit,
+    });
 
     const updatePayload: { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } = { embeds: [embed], components: [] };
     if (row) updatePayload.components = [row];
@@ -1044,18 +1090,19 @@ export class AdventureManager {
 
   // ── Helpers ─────────────────────────────────────────────
 
-  private buildSceneEmbed(
-    adventure: Adventure,
-    scene: Scene,
-    sessionId: string | null,
-    lootCount: number,
-    kit: BrandKit,
-  ): { embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder> | null } {
+  private buildSceneEmbed({
+    adventure,
+    scene,
+    sessionId,
+    lootCount,
+    healthRemaining,
+    kit,
+  }: ScenePresentation): { embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder> | null } {
     const embed = applyBrand(
       new EmbedBuilder()
         .setTitle(`${adventure.emoji} ${adventure.name}`)
         .setDescription(scene.text)
-        .setFooter({ text: `Scene ${scene.scene_index + 1} • Items collected: ${lootCount}` }),
+        .setFooter({ text: `Scene ${scene.scene_index + 1} • Health: ${healthRemaining}/100 • Items collected: ${lootCount}` }),
       kit,
       { intent: 'primary' },
     );
@@ -1078,7 +1125,7 @@ export class AdventureManager {
     return { embed, row };
   }
 
-  private buildRewardsSummary(loot: { item_name: string; qty: number }[], currency: number): string {
+  private buildRewardsSummary(loot: { item_id?: string; item_name: string; qty: number }[], currency: number): string {
     const lines: string[] = [];
     if (currency > 0) lines.push(`💰 **${currency.toLocaleString()}** coins`);
     for (const item of loot) {
@@ -1090,9 +1137,9 @@ export class AdventureManager {
   private async endSession(
     session: Session,
     status: string,
-    loot: { item_name: string; qty: number }[],
+    loot: { item_id?: string; item_name: string; qty: number }[],
     currency: number,
-  ): Promise<void> {
+  ): Promise<{ loot: { item_id?: string; item_name: string; qty: number }[]; currency: number }> {
     // Update session
     await this.supabase
       .from('economy_adventure_sessions')
@@ -1100,12 +1147,14 @@ export class AdventureManager {
         status,
         loot_collected: loot,
         currency_collected: currency,
+        health_remaining: session.health_remaining ?? 100,
         ended_at: new Date().toISOString(),
       })
       .eq('id', session.id);
 
     // V49-C7: Pay currency — check error and mark session as payout_failed
     // instead of silently swallowing. A failed payout should not disappear.
+    let currencyDelivered = currency;
     if (currency > 0) {
       const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: this.guild.id,
@@ -1128,18 +1177,20 @@ export class AdventureManager {
           sessionId: session.id,
           amount: currency,
         });
+        currencyDelivered = 0;
       }
     }
 
     // V53-C7: Add loot items — track failures and mark session accordingly
     let lootFailed = false;
+    const deliveredLoot: { item_id?: string; item_name: string; qty: number }[] = [];
     for (const item of loot) {
-      const { data: found } = await this.supabase
+      let itemQuery = this.supabase
         .from('economy_items')
         .select('id')
-        .eq('guild_id', this.guild.id)
-        .ilike('name', item.item_name)
-        .limit(1);
+        .eq('guild_id', this.guild.id);
+      itemQuery = item.item_id ? itemQuery.eq('id', item.item_id) : itemQuery.ilike('name', item.item_name);
+      const { data: found } = await itemQuery.limit(1);
 
       if (found && found.length > 0) {
         const { error: lootErr } = await this.supabase.rpc('economy_upsert_inventory', {
@@ -1151,7 +1202,11 @@ export class AdventureManager {
         if (lootErr) {
           log.error('loot upsert failed:', lootErr.message);
           lootFailed = true;
+        } else {
+          deliveredLoot.push(item);
         }
+      } else {
+        lootFailed = true;
       }
     }
 
@@ -1172,9 +1227,10 @@ export class AdventureManager {
       userId: session.user_id,
       sessionId: session.id,
       status,
-      currency,
-      lootCount: loot.length,
+      currency: currencyDelivered,
+      lootCount: deliveredLoot.length,
     });
+    return { loot: deliveredLoot, currency: currencyDelivered };
   }
 
   /**

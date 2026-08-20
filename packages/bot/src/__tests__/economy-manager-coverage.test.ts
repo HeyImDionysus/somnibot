@@ -33,6 +33,9 @@ vi.mock('../quests/quests-manager.js', () => ({
   }),
 }));
 
+const handleLevelUp = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../features/levels/level-announcer.js', () => ({ handleLevelUp }));
+
 vi.mock('node:crypto', () => ({
   randomInt: vi.fn((min: number, max: number) => min), // deterministic
 }));
@@ -1119,6 +1122,84 @@ describe('EconomyManager', () => {
       const inv = await em.getInventory('u1');
       expect(inv[0].item_name).toBe('Unknown');
       expect(inv[0].item_emoji).toBe('📦');
+    });
+  });
+
+  describe('useItem', () => {
+    it('returns the authoritative wallet consumable result', async () => {
+      supabase.rpc.mockResolvedValueOnce({
+        data: {
+          status: 'applied',
+          replayed: false,
+          item_name: 'Coin Pouch',
+          item_emoji: '🪙',
+          effect_type: 'wallet_credit',
+          amount: 250,
+        },
+        error: null,
+      });
+
+      const result = await em.useItem('u1', 'Coin Pouch', 'interaction-1');
+
+      expect(result).toMatchObject({ success: true, replayed: false });
+      expect(result.message).toContain('250 Coins');
+      expect(supabase.rpc).toHaveBeenCalledWith('economy_use_item_atomic', {
+        p_guild_id: 'g1',
+        p_user_id: 'u1',
+        p_item_selector: 'Coin Pouch',
+        p_request_id: 'interaction-1',
+      });
+    });
+
+    it('passes through an authoritative item-use rejection without mutating locally', async () => {
+      supabase.rpc.mockResolvedValueOnce({
+        data: {
+          status: 'rejected',
+          code: 'not_consumable',
+          message: 'That item works automatically and cannot be used manually.',
+        },
+        error: null,
+      });
+
+      const result = await em.useItem('u1', 'Padlock', 'interaction-2');
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('works automatically');
+    });
+
+    it('reports an indeterminate outcome only after retry and readback both fail', async () => {
+      supabase.rpc.mockResolvedValue({ data: null, error: { message: 'connection lost' } });
+
+      const result = await em.useItem('u1', 'XP Tome', 'interaction-3');
+
+      expect(result).toMatchObject({ success: false, indeterminate: true });
+      expect(supabase.rpc).toHaveBeenCalledTimes(2);
+      expect(supabase.from).toHaveBeenCalledWith('economy_item_use_operations');
+    });
+
+    it('does not repeat level-up side effects when an XP consumable result is replayed', async () => {
+      supabase.rpc.mockResolvedValueOnce({
+        data: {
+          status: 'applied',
+          replayed: true,
+          item_name: 'XP Tome',
+          item_emoji: '📘',
+          effect_type: 'xp_credit',
+          amount: 500,
+          xp_result: {
+            old_level: 4,
+            new_level: 5,
+            new_xp: 2500,
+            leveled_up: true,
+          },
+        },
+        error: null,
+      });
+
+      const result = await em.useItem('u1', 'XP Tome', 'interaction-replay');
+
+      expect(result).toMatchObject({ success: true, replayed: true });
+      expect(handleLevelUp).not.toHaveBeenCalled();
     });
   });
 

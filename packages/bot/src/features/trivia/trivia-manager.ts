@@ -58,6 +58,69 @@ type TriviaQuestion = TriviaQuestionContent;
 
 const DIFFICULTY_MULTIPLIERS: Record<TriviaDifficulty, number> = { easy: 1, medium: 1.5, hard: 2 };
 
+type TriviaQuestionSource = 'mixed' | 'open-trivia-db' | 'local';
+
+const OPEN_TRIVIA_CATEGORY_IDS: Readonly<Record<string, number>> = {
+  general: 9,
+  literature: 10,
+  science: 17,
+  technology: 18,
+  math: 19,
+  geography: 22,
+  history: 23,
+  art: 25,
+};
+
+function decodeTriviaText(value: string): string {
+  const named: Readonly<Record<string, string>> = {
+    amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ',
+  };
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
+    if (entity.startsWith('#x')) {
+      const codePoint = Number.parseInt(entity.slice(2), 16);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+    }
+    if (entity.startsWith('#')) {
+      const codePoint = Number.parseInt(entity.slice(1), 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+    }
+    return named[entity.toLowerCase()] ?? match;
+  });
+}
+
+function parseOpenTriviaResponse(value: unknown): TriviaQuestion[] | null {
+  if (value === null || typeof value !== 'object') return null;
+  const responseCode = Reflect.get(value, 'response_code');
+  const results = Reflect.get(value, 'results');
+  if (responseCode !== 0 || !Array.isArray(results)) return null;
+
+  const questions: TriviaQuestion[] = [];
+  for (const result of results) {
+    if (result === null || typeof result !== 'object') return null;
+    const category = Reflect.get(result, 'category');
+    const difficulty = Reflect.get(result, 'difficulty');
+    const question = Reflect.get(result, 'question');
+    const correct = Reflect.get(result, 'correct_answer');
+    const wrong = Reflect.get(result, 'incorrect_answers');
+    if (
+      typeof category !== 'string'
+      || (difficulty !== 'easy' && difficulty !== 'medium' && difficulty !== 'hard')
+      || typeof question !== 'string'
+      || typeof correct !== 'string'
+      || !Array.isArray(wrong)
+      || wrong.some((answer) => typeof answer !== 'string')
+    ) return null;
+    questions.push({
+      category: decodeTriviaText(category),
+      difficulty,
+      question: decodeTriviaText(question),
+      correct: decodeTriviaText(correct),
+      wrong: wrong.map(decodeTriviaText),
+    });
+  }
+  return questions;
+}
+
 // ── Active rounds tracking ────────────────────────────────
 
 /**
@@ -96,6 +159,7 @@ export class TriviaManager {
   private valkey: Redis;
   private configCache = new Map<string, DbGuildConfig>();
   private customQuestionCache = new Map<string, TriviaQuestion[]>();
+  private providerQuestionCache = new Map<string, { expiresAt: number; questions: TriviaQuestion[] }>();
   private activeRounds = new Map<string, ActiveRound>(); // channelId → round
 
   constructor(supabase: SupabaseClient, valkey?: Redis) {
@@ -114,6 +178,7 @@ export class TriviaManager {
   clearCache(): void {
     this.configCache.clear();
     this.customQuestionCache.clear();
+    this.providerQuestionCache.clear();
   }
 
   /**
@@ -204,13 +269,16 @@ export class TriviaManager {
     guildId: string,
     category?: string,
     difficulty?: TriviaDifficulty,
+    source: TriviaQuestionSource = 'mixed',
   ): Promise<TriviaQuestion | null> {
     const { questions: customQuestions, degraded } = await this.getCustomQuestions(guildId);
     // A failed pack read means the pool cannot honestly be built (the owner's
     // custom questions are unreadable, not absent) — callers degrade, never
     // silently serve a built-ins-only round during an outage.
     if (degraded) return null;
-    let pool = [...BUILT_IN_TRIVIA_QUESTIONS, ...customQuestions];
+    const localPool = [...BUILT_IN_TRIVIA_QUESTIONS, ...customQuestions];
+    let pool = source === 'local' ? localPool : await this.getProviderQuestions(category, difficulty);
+    if (pool.length === 0 && source === 'mixed') pool = localPool;
 
     if (category) {
       const filtered = pool.filter((q) => q.category.toLowerCase() === category.toLowerCase());
@@ -221,7 +289,36 @@ export class TriviaManager {
       if (filtered.length > 0) pool = filtered;
     }
 
-    return randomPick(pool);
+    return pool.length > 0 ? randomPick(pool) : null;
+  }
+
+  private async getProviderQuestions(
+    category?: string,
+    difficulty?: TriviaDifficulty,
+  ): Promise<TriviaQuestion[]> {
+    const cacheKey = `${category?.toLowerCase() ?? 'any'}:${difficulty ?? 'any'}`;
+    const cached = this.providerQuestionCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.questions;
+
+    const query = new URLSearchParams({ amount: '10', type: 'multiple' });
+    const categoryId = category ? OPEN_TRIVIA_CATEGORY_IDS[category.toLowerCase()] : undefined;
+    if (categoryId) query.set('category', String(categoryId));
+    if (difficulty) query.set('difficulty', difficulty);
+
+    try {
+      const response = await fetch(`https://opentdb.com/api.php?${query.toString()}`, {
+        signal: AbortSignal.timeout(5_000),
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) return [];
+      const questions = parseOpenTriviaResponse(await response.json());
+      if (!questions?.length) return [];
+      this.providerQuestionCache.set(cacheKey, { expiresAt: Date.now() + 10 * 60_000, questions });
+      return questions;
+    } catch (error: unknown) {
+      log.warn('Open Trivia DB question fetch failed:', error instanceof Error ? error.message : String(error));
+      return [];
+    }
   }
 
   /**
@@ -308,7 +405,12 @@ export class TriviaManager {
       return;
     }
 
-    const question = await this.selectQuestion(guildId, category, difficulty);
+    const question = await this.selectQuestion(
+      guildId,
+      category,
+      difficulty,
+      config.economy_trivia_question_source ?? 'local',
+    );
     // The pool could not be read (outage) — no question embed posts.
     if (!question) {
       await this.replyTriviaUnavailable(interaction);
@@ -360,7 +462,12 @@ export class TriviaManager {
     const remaining = await this.cooldownRemaining(guildId, channelId, cooldownSeconds);
     if (remaining > 0) return { started: false, reason: 'cooldown' };
 
-    const question = await this.selectQuestion(guildId, category, difficulty);
+    const question = await this.selectQuestion(
+      guildId,
+      category,
+      difficulty,
+      config.economy_trivia_question_source ?? 'local',
+    );
     // The pool could not be read (outage) — skip this hosted tick; the next
     // scheduled tick retries against a healthy database.
     if (!question) return { started: false, reason: 'question_pool_unavailable' };

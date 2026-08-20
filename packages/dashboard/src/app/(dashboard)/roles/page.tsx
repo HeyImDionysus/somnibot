@@ -305,6 +305,7 @@ function PermissionEditor({
 // ============================================================
 
 export default function RolesPage() {
+  const { toast } = useToast();
   const [roles, setRoles] = useState<LiveRoleData[]>([]);
   const [botRoleId, setBotRoleId] = useState<string | null>(null);
   const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
@@ -387,9 +388,30 @@ export default function RolesPage() {
     if (!editingRole) return;
     setActionPending(true);
     try {
-      await rolesApi.update(roleUpdatePayload(editingRole));
+      const requested = roleUpdatePayload(editingRole);
+      await rolesApi.update(requested);
+      let confirmed: LiveRoleData | undefined;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const response = await rolesApi.list();
+        setRoles(response.data);
+        confirmed = response.data.find((role) => role.id === editingRole.id);
+        if (
+          confirmed
+          && confirmed.name === requested.name
+          && confirmed.color === requested.color
+          && confirmed.hoist === requested.hoist
+          && confirmed.mentionable === requested.mentionable
+          && confirmed.permissions === requested.permissions
+          && (requested.tier === undefined || confirmed.tier === requested.tier)
+        ) break;
+        confirmed = undefined;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (!confirmed) {
+        throw new Error('The bot accepted this role change but did not publish the updated role and tier within 10 seconds. Check the Action Queue for the exact failure.');
+      }
       setEditingRole(null);
-      setTimeout(loadRoles, 2000);
+      toast({ title: `Saved ${confirmed.name} and confirmed its ${confirmed.tier ?? 'unassigned'} tier`, variant: 'success' });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update role');
     } finally {

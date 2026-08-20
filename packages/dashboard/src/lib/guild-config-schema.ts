@@ -196,6 +196,7 @@ export const guildConfigPatchSchema = z.object({
   economy_trivia_base_payout: z.number().int().min(0).max(1000000).optional(),
   economy_trivia_streak_multiplier_pct: z.number().int().min(0).max(100).optional(),
   economy_trivia_hard_multiplier: z.number().min(1).max(10).optional(),
+  economy_trivia_question_source: z.enum(['mixed', 'open-trivia-db', 'local']).optional(),
   // Scheduled / hosted trivia cadence
   economy_trivia_schedule_enabled: z.boolean().optional(),
   economy_trivia_schedule_interval_minutes: z.number().int().min(5).max(10080).optional(),
@@ -237,6 +238,14 @@ export const guildConfigPatchSchema = z.object({
   economy_pet_decay_interval_hours: z.number().int().min(1).max(168).optional(),
   economy_pet_low_stat_threshold: z.number().int().min(0).max(100).optional(),
   economy_pet_notify_owner: z.boolean().optional(),
+  economy_pet_type_config: z.record(z.enum(['hunting', 'guard', 'foraging', 'lucky']), z.object({
+    name: z.string().trim().min(1).max(32),
+    emoji: z.string().trim().min(1).max(64),
+    description: z.string().trim().min(1).max(128),
+    price: z.number().int().min(0).max(1_000_000_000),
+  }).strict()).refine((value) => ['hunting', 'guard', 'foraging', 'lucky'].every((key) => key in value), {
+    message: 'All four pet types are required',
+  }).optional(),
   economy_quests_enabled: z.boolean().optional(),
   economy_daily_quest_count: z.number().int().min(1).max(10).optional(),
   economy_weekly_quest_count: z.number().int().min(1).max(5).optional(),

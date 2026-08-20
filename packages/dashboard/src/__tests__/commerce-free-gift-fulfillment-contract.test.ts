@@ -37,11 +37,11 @@ describe('free claim and gift fulfillment rails', () => {
     expect(checkout).toContain('giftIntentId');
     expect(checkout).toContain('gift_checkout_token: giftIntentId');
     expect(checkout).toContain("createHmac('sha256'");
-    expect(checkout).toContain('custom_id: `v1:${checkoutToken}.${checkoutSignature}`');
+    expect(checkout).toContain('custom_id: `v2:${checkoutToken}.${checkoutSignature}`');
     expect(checkout).not.toContain('gi: giftIntentId');
     expect(checkout).not.toContain('recipient_discord_id: recipientId');
-    expect(webhook).toContain("customId.match(/^v1:([0-9a-f-]{36})\\.([a-f0-9]{64})$/i)");
-    expect(webhook).toContain('verifyCheckoutSignature(checkoutToken, checkoutSignature)');
+    expect(webhook).toContain("customId.match(/^(v1|v2):([0-9a-f-]{36})\\.([a-f0-9]{64})$/i)");
+    expect(webhook).toContain('verifyCheckoutSignature(checkoutSignatureVersion, checkoutToken, checkoutSignature)');
     expect(webhook).toContain("giftLookup.eq('checkout_token', token)");
     expect(webhook).toContain('commerce_claim_gift_fulfillment');
     expect(webhook).toContain('gift_intent_invalid_or_replayed');

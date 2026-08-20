@@ -316,6 +316,7 @@ describe('brandKitFromConfig projection + currency columns', () => {
         brand_voice_preset: 'playful',
         currency_name: 'Credits',
         currency_emoji: '🎫',
+        brand_logo_url: 'https://cdn.example.com/acme.png',
       },
       'Guild Name',
     );
@@ -328,6 +329,7 @@ describe('brandKitFromConfig projection + currency columns', () => {
       poweredByAttribution: null,
       currencyName: 'Credits',
       currencyEmoji: '🎫',
+      logoUrl: 'https://cdn.example.com/acme.png',
     });
   });
 

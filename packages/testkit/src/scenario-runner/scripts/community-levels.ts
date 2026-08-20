@@ -84,6 +84,23 @@ interface LevelRewardRow {
   announce: boolean;
 }
 
+async function seedRoleReward(
+  handle: LiveClientHandle,
+  level: number,
+  roleId: string,
+): Promise<void> {
+  const { error } = await handle.supabase.from('level_rewards').insert({
+    guild_id: handle.guildId,
+    level,
+    reward_type: 'role',
+    role_id: roleId,
+    announce: true,
+  });
+  if (error) {
+    throw new Error(`Unable to seed the level-${level} role reward: ${error.message}`);
+  }
+}
+
 // ── Small live-stack helpers ──────────────────────────────────────────────
 
 function declaredDefault(domain: DomainContract, controlId: string): JsonValue | undefined {
@@ -116,7 +133,7 @@ async function seedMemberLevel(
   memberId: string,
   fields: { xp: number; level: number; totalMessages?: number; voiceMinutes?: number },
 ): Promise<void> {
-  await handle.supabase.from('member_levels').upsert(
+  const { error } = await handle.supabase.from('member_levels').upsert(
     {
       guild_id: handle.guildId,
       member_id: memberId,
@@ -128,6 +145,9 @@ async function seedMemberLevel(
     },
     { onConflict: 'guild_id,member_id' },
   );
+  if (error) {
+    throw new Error(`Unable to seed member level for ${memberId}: ${error.message}`);
+  }
 }
 
 async function countGuildRows(handle: LiveClientHandle, table: string): Promise<number> {
@@ -632,7 +652,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 /** SET-A — dashboard config takes live effect: XP pinned to 50/msg @ 5s, a
  *  run-prefixed reward role bound at level 2. */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
-  const rewardRole = `${ctx.runPrefix}reward-lvl2`;
+  const rewardRole = ctx.snowflake('reward-lvl2');
   const handle = await ctx.bootGuild({
     label: 'a',
     guildConfigOverrides: {
@@ -643,12 +663,10 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
       voice_xp_enabled: true,
     },
   });
-  const userA = ctx.userId('a');
+  const userA = ctx.snowflake('member-a');
 
   // Bind a reward role at level 2 (the real level_rewards binding the announcer reads).
-  await handle.supabase
-    .from('level_rewards')
-    .insert({ guild_id: handle.guildId, level: 2, role_id: rewardRole, announce: true });
+  await seedRoleReward(handle, 2, rewardRole);
 
   // Config round-trips into the exact guild_config row the bot's loadLevelConfig reads.
   const cfg = await readLevelsConfig(handle);
@@ -1177,7 +1195,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', guildConfigOverrides: { levels_enabled: true } });
   const userA = ctx.userId('a');
   const userB = ctx.userId('b');
-  const rewardRole = `${ctx.runPrefix}cleanup-reward`;
+  const rewardRole = ctx.snowflake('cleanup-reward');
 
   // Create run-prefixed operational rows across the levels tables.
   await seedMemberLevel(handle, userA, { xp: 500, level: 5, totalMessages: 25 });
@@ -1188,9 +1206,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
       { guild_id: handle.guildId, member_id: userA, accent_color: 0xff1493, overlay_opacity: 0.5 },
       { onConflict: 'guild_id,member_id' },
     );
-  await handle.supabase
-    .from('level_rewards')
-    .insert({ guild_id: handle.guildId, level: 5, role_id: rewardRole, announce: true });
+  await seedRoleReward(handle, 5, rewardRole);
 
   const levelsBefore = await countGuildRows(handle, 'member_levels');
   const rankBefore = await countGuildRows(handle, 'member_rank_settings');
@@ -1239,13 +1255,15 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
 /**
  * The community-levels domain proof: the guild_id-scoped tables the sweep must
  * clear (child→parent so FK-constrained rows go before the guild row) plus the
- * 12 scenario scripts. All levels tables reference guild(id) directly (no
- * inter-table FKs), and `alerts` is included so the owner-notification proof’s
- * guild is swept clean.
+ * 12 scenario scripts. Reward deliveries precede their queue and reward
+ * parents, and `alerts` is included so the owner-notification proof’s guild is
+ * swept clean.
  */
 export const communityLevelsProof: DomainProof = {
   domainId: 'community-levels',
   guildScopedTables: [
+    'level_reward_deliveries',
+    'bot_action_queue',
     'member_rank_settings',
     'member_levels',
     'level_rewards',

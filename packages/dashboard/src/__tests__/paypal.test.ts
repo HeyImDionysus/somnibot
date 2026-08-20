@@ -99,6 +99,46 @@ describe('getPayPalToken', () => {
     );
   });
 
+  it('uses a saved PayPal override instead of a deployment fallback', async () => {
+    const savedSecret = encryptCloudCredential(
+      'saved-client-secret', 'paypal_client_secret',
+      process.env.SUPABASE_SECRET_KEY!, new URL(process.env.SUPABASE_URL!).origin,
+    );
+    mockSavedPayPalSettings([
+      { key: 'paypal_client_id', value: 'saved-client-id' },
+      savedSecret,
+    ]);
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ access_token: 'tok_saved_override' }),
+    });
+
+    const { getPayPalToken } = await import('@/lib/paypal');
+    await expect(getPayPalToken()).resolves.toBe('tok_saved_override');
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://api-m.sandbox.paypal.com/v1/oauth2/token',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Basic ${Buffer.from('saved-client-id:saved-client-secret').toString('base64')}`,
+        }),
+      }),
+    );
+  });
+
+  it('fails closed when a saved encrypted secret cannot be authenticated', async () => {
+    mockSavedPayPalSettings([
+      { key: 'paypal_client_id', value: 'saved-client-id' },
+      { key: 'paypal_client_secret_encrypted', value: 'not-valid-ciphertext' },
+    ]);
+    const { getPayPalTokenResult } = await import('@/lib/paypal');
+    await expect(getPayPalTokenResult()).resolves.toEqual({
+      ok: false,
+      retriable: false,
+      reason: expect.stringContaining('failed authentication'),
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('returns null when response is not ok', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,

@@ -33,6 +33,9 @@ interface BrandingConfig {
   brand_primary_color: number | null;
   brand_accent_color: number | null;
   brand_voice_preset: VoicePreset;
+  brand_logo_url: string | null;
+  brand_header_url: string | null;
+  brand_background_url: string | null;
 }
 
 const DEFAULT_CONFIG: BrandingConfig = {
@@ -41,6 +44,9 @@ const DEFAULT_CONFIG: BrandingConfig = {
   brand_primary_color: null,
   brand_accent_color: null,
   brand_voice_preset: 'default',
+  brand_logo_url: null,
+  brand_header_url: null,
+  brand_background_url: null,
 };
 
 /** One-line description per voice preset (mirrors the bot's voice table). */
@@ -83,6 +89,7 @@ export default function BrandingPage() {
   const [dirty, setDirty] = useState(false);
   const [savedEmbeds, setSavedEmbeds] = useState<SavedEmbed[]>([]);
   const [selectedEmbedId, setSelectedEmbedId] = useState<string>('');
+  const [uploadingAsset, setUploadingAsset] = useState<string | null>(null);
   useUnsavedWarning(dirty);
 
   const fetchConfig = useCallback(async () => {
@@ -157,6 +164,60 @@ export default function BrandingPage() {
     }
   };
 
+  const uploadAsset = async (
+    slot: 'logo' | 'header' | 'background',
+    file: File,
+  ) => {
+    setUploadingAsset(slot);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.set('slot', slot);
+      form.set('file', file);
+      const response = await fetch('/api/branding/assets', { method: 'POST', body: form });
+      const result: unknown = await response.json();
+      if (!response.ok || !result || typeof result !== 'object' || typeof (result as Record<string, unknown>).url !== 'string') {
+        const message = result && typeof result === 'object' && typeof (result as Record<string, unknown>).error === 'string'
+          ? String((result as Record<string, unknown>).error)
+          : `Failed to upload ${slot}`;
+        throw new Error(message);
+      }
+      const key = `brand_${slot}_url` as const;
+      setConfig((current) => ({ ...current, [key]: String((result as Record<string, unknown>).url) }));
+      toast({ title: `${slot[0].toUpperCase()}${slot.slice(1)} uploaded and applied`, variant: 'success' });
+    } catch (uploadError) {
+      const message = uploadError instanceof Error ? uploadError.message : `Failed to upload ${slot}`;
+      setError(message);
+      toast({ title: message, variant: 'error' });
+    } finally {
+      setUploadingAsset(null);
+    }
+  };
+
+  const removeAsset = async (slot: 'logo' | 'header' | 'background') => {
+    setUploadingAsset(slot);
+    setError(null);
+    try {
+      const response = await fetch(`/api/branding/assets?slot=${slot}`, { method: 'DELETE' });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        const message = result && typeof result === 'object' && typeof (result as Record<string, unknown>).error === 'string'
+          ? String((result as Record<string, unknown>).error)
+          : `Failed to remove ${slot}`;
+        throw new Error(message);
+      }
+      const key = `brand_${slot}_url` as const;
+      setConfig((current) => ({ ...current, [key]: null }));
+      toast({ title: `${slot[0].toUpperCase()}${slot.slice(1)} removed`, variant: 'success' });
+    } catch (removeError) {
+      const message = removeError instanceof Error ? removeError.message : `Failed to remove ${slot}`;
+      setError(message);
+      toast({ title: message, variant: 'error' });
+    } finally {
+      setUploadingAsset(null);
+    }
+  };
+
   if (loading) {
     return <ConfigSkeleton />;
   }
@@ -211,6 +272,45 @@ export default function BrandingPage() {
           placeholder="Falls back to your server name"
           className="mt-3 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
         />
+      </div>
+
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-discord-text-primary">Brand Images</h2>
+          <p className="mt-1 text-sm text-discord-text-muted">Upload the assets shared by the customer portal and member-facing bot surfaces. PNG, JPEG, WebP, or GIF, up to 5 MB.</p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-3">
+          {([
+            ['logo', 'Logo', config.brand_logo_url, 'Square mark used beside your name and on embeds'],
+            ['header', 'Header image', config.brand_header_url, 'Wide image used across the customer portal header'],
+            ['background', 'Background', config.brand_background_url, 'Portal background image with a readability overlay'],
+          ] as const).map(([slot, label, url, description]) => (
+            <section key={slot} className="rounded-card border border-discord-border-subtle bg-discord-bg-primary/30 p-3">
+              <div className="mb-3 flex aspect-video items-center justify-center overflow-hidden rounded-input bg-discord-bg-tertiary">
+                {url ? <img src={url} alt={`${label} preview`} className="h-full w-full object-cover" /> : <span className="text-xs text-discord-text-muted">No {label.toLowerCase()}</span>}
+              </div>
+              <h3 className="text-sm font-medium text-discord-text-primary">{label}</h3>
+              <p className="mt-1 min-h-10 text-xs text-discord-text-muted">{description}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <label className="cursor-pointer rounded-input bg-discord-accent px-3 py-2 text-xs font-medium text-white hover:bg-discord-accent/80">
+                  {uploadingAsset === slot ? 'Uploading…' : url ? 'Replace' : 'Upload'}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    className="sr-only"
+                    disabled={uploadingAsset !== null}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void uploadAsset(slot, file);
+                      event.target.value = '';
+                    }}
+                  />
+                </label>
+                {url && <button type="button" disabled={uploadingAsset !== null} onClick={() => void removeAsset(slot)} className="rounded-input bg-discord-bg-tertiary px-3 py-2 text-xs text-discord-danger disabled:opacity-50">Remove</button>}
+              </div>
+            </section>
+          ))}
+        </div>
       </div>
 
       {/* Brand Colors */}

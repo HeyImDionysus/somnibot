@@ -17,6 +17,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = REPO_ROOT / "packages" / "supabase" / "migrations"
 LICENSE_OWNER_MIGRATION = MIGRATIONS / "20260804138000_license_owner_controls.sql"
+LEVEL_REWARD_MIGRATION = MIGRATIONS / "20260819201000_level_reward_orchestration.sql"
+LEVEL_REWARD_CLEANUP_MIGRATION = MIGRATIONS / "20260819212000_level_reward_delivery_cleanup_fks.sql"
 
 _UPSERT_RETURN = re.compile(
     r"(?ims)^\s*ON\s+CONFLICT\b(?P<body>.{0,2000}?)\bRETURN\b(?!ING)"
@@ -135,6 +137,29 @@ class MigrationSqlSyntaxTests(unittest.TestCase):
             self.assertRegex(valid, grammar)
         for invalid in ("aB", "A", "ABCDEFGHI", "AB-1", ""):
             self.assertNotRegex(invalid, grammar)
+
+    def test_level_reward_cleanup_fk_change_is_forward_only(self) -> None:
+        original = LEVEL_REWARD_MIGRATION.read_text(encoding="utf-8")
+        upgrade = LEVEL_REWARD_CLEANUP_MIGRATION.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "reward_id UUID NOT NULL REFERENCES public.level_rewards(id) ON DELETE RESTRICT",
+            original,
+        )
+        self.assertIn(
+            "action_id UUID REFERENCES public.bot_action_queue(id) ON DELETE RESTRICT",
+            original,
+        )
+        self.assertIn(
+            "DROP CONSTRAINT IF EXISTS level_reward_deliveries_reward_id_fkey",
+            upgrade,
+        )
+        self.assertIn(
+            "DROP CONSTRAINT IF EXISTS level_reward_deliveries_action_id_fkey",
+            upgrade,
+        )
+        self.assertIn("ON DELETE CASCADE", upgrade)
+        self.assertIn("ON DELETE SET NULL", upgrade)
 
 
 if __name__ == "__main__":

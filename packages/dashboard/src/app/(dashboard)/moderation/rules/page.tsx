@@ -12,6 +12,8 @@ import { isApiRecord, requireApiArray, requireApiSuccess, requireReadback } from
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
 
 interface AutoModRule {
   id: string;
@@ -24,6 +26,8 @@ interface AutoModRule {
   exempt_roles: string[];
   exempt_channels: string[];
   log_to_mod_channel: boolean;
+  sync_to_discord: boolean;
+  priority: number;
   created_at: string;
 }
 
@@ -40,6 +44,8 @@ function isAutoModRule(value: unknown): value is AutoModRule {
     && Array.isArray(rule.exempt_roles) && rule.exempt_roles.every((role) => typeof role === 'string')
     && Array.isArray(rule.exempt_channels) && rule.exempt_channels.every((channel) => typeof channel === 'string')
     && typeof rule.log_to_mod_channel === 'boolean'
+    && typeof rule.sync_to_discord === 'boolean'
+    && typeof rule.priority === 'number'
     && typeof rule.created_at === 'string';
 }
 
@@ -53,6 +59,15 @@ const RULE_TYPES = [
   { value: 'mention_spam', label: 'Mention Spam', icon: '📢', desc: 'Detect excessive @mentions' },
   { value: 'newline_spam', label: 'Newline Spam', icon: '📜', desc: 'Detect excessive newlines (wall of text)' },
 ];
+
+const DISCORD_NATIVE_RULE_TYPES = new Set(['word_filter', 'link_filter', 'invite_filter', 'spam_filter', 'mention_spam']);
+const DISCORD_NATIVE_ACTIONS = new Set(['delete', 'warn', 'mute']);
+
+function supportsDiscordNativeMirror(rule: Partial<AutoModRule>): boolean {
+  return DISCORD_NATIVE_RULE_TYPES.has(rule.type ?? 'word_filter')
+    && DISCORD_NATIVE_ACTIONS.has(rule.action ?? 'warn')
+    && !(rule.type === 'invite_filter' && rule.config?.allowOwnServer === true);
+}
 
 const ACTIONS = [
   { value: 'delete', label: 'Delete Only', color: 'text-blue-400' },
@@ -122,6 +137,8 @@ export default function AutoModRulesPage() {
       exempt_roles: [],
       exempt_channels: [],
       log_to_mod_channel: true,
+      sync_to_discord: false,
+      priority: 0,
     });
   };
 
@@ -156,6 +173,10 @@ export default function AutoModRulesPage() {
           && savedRule.type === editingRule.type
           && savedRule.enabled === editingRule.enabled
           && savedRule.action === editingRule.action
+          && savedRule.priority === editingRule.priority
+          && savedRule.sync_to_discord === editingRule.sync_to_discord
+          && JSON.stringify(savedRule.exempt_roles) === JSON.stringify(editingRule.exempt_roles)
+          && JSON.stringify(savedRule.exempt_channels) === JSON.stringify(editingRule.exempt_channels)
           && JSON.stringify(savedRule.config) === JSON.stringify(editingRule.config),
         'The rule mutation was accepted, but the authoritative readback is stale. Your rule fields are still here; reload before retrying.',
       );
@@ -421,6 +442,7 @@ function RuleEditor({
   onCancel: () => void;
   nameError: string | null;
 }) {
+  const supportsNativeMirror = supportsDiscordNativeMirror(rule);
   return (
     <div className="rounded-lg border-2 border-discord-accent/30 bg-discord-bg-secondary p-6">
       <h3 className="text-lg font-medium text-discord-text-primary">
@@ -451,7 +473,14 @@ function RuleEditor({
             value={rule.type ?? 'word_filter'}
             onChange={(e) => {
               const newType = e.target.value;
-              onChange({ ...rule, type: newType, config: getDefaultConfig(newType) });
+              onChange({
+                ...rule,
+                type: newType,
+                config: getDefaultConfig(newType),
+                sync_to_discord: DISCORD_NATIVE_RULE_TYPES.has(newType) && DISCORD_NATIVE_ACTIONS.has(rule.action ?? 'warn')
+                  ? rule.sync_to_discord
+                  : false,
+              });
             }}
             disabled={!isCreating}
             className="rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary disabled:opacity-50"
@@ -463,14 +492,30 @@ function RuleEditor({
         </div>
 
         {/* Type-specific config */}
-        <RuleConfig type={rule.type ?? 'word_filter'} config={rule.config ?? {}} onChange={(config) => onChange({ ...rule, config })} />
+        <RuleConfig
+          type={rule.type ?? 'word_filter'}
+          config={rule.config ?? {}}
+          onChange={(config) => {
+            const nextRule = { ...rule, config };
+            onChange({
+              ...nextRule,
+              sync_to_discord: supportsDiscordNativeMirror(nextRule) ? rule.sync_to_discord : false,
+            });
+          }}
+        />
 
         {/* Action */}
         <div>
           <label className="block text-sm font-medium text-discord-text-primary mb-1">Action</label>
           <select
             value={rule.action ?? 'warn'}
-            onChange={(e) => onChange({ ...rule, action: e.target.value })}
+            onChange={(e) => onChange({
+              ...rule,
+              action: e.target.value,
+              sync_to_discord: DISCORD_NATIVE_RULE_TYPES.has(rule.type ?? 'word_filter') && DISCORD_NATIVE_ACTIONS.has(e.target.value)
+                ? rule.sync_to_discord
+                : false,
+            })}
             className="rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
           >
             {ACTIONS.map((a) => (
@@ -492,6 +537,52 @@ function RuleEditor({
             />
           </div>
         )}
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <RolePicker
+            label="Exempt Roles"
+            hint="Members with any selected role bypass this rule. Discord administrators and members with Manage Messages are always exempt."
+            value={rule.exempt_roles ?? []}
+            onChange={(value) => onChange({ ...rule, exempt_roles: (value as string[]) ?? [] })}
+            multi
+            placeholder="No role exemptions"
+          />
+          <ChannelPicker
+            label="Exempt Channels"
+            hint="Messages in these channels bypass this rule."
+            value={rule.exempt_channels ?? []}
+            onChange={(value) => onChange({ ...rule, exempt_channels: (value as string[]) ?? [] })}
+            multi
+            placeholder="No channel exemptions"
+            channelTypes={['text', 'announcement', 'forum']}
+          />
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <label className="text-sm text-discord-text-primary">
+            Priority
+            <input
+              type="number"
+              min={-1000}
+              max={1000}
+              value={rule.priority ?? 0}
+              onChange={(event) => onChange({ ...rule, priority: Number(event.target.value) || 0 })}
+              className="mt-1 block w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary"
+            />
+            <span className="mt-1 block text-xs text-discord-text-muted">Higher-priority rules are evaluated first.</span>
+          </label>
+          <label className="flex items-start gap-2 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary p-3 text-sm text-discord-text-primary">
+            <input type="checkbox" checked={supportsNativeMirror && (rule.sync_to_discord ?? false)} disabled={!supportsNativeMirror} onChange={(event) => onChange({ ...rule, sync_to_discord: event.target.checked })} className="mt-1 rounded disabled:opacity-50" />
+            <span>
+              <strong className="block">Mirror to Discord AutoMod</strong>
+              <span className="text-xs text-discord-text-muted">
+                {supportsNativeMirror
+                  ? 'SomniBot remains authoritative and removes the native copy if this option or the rule is deleted.'
+                  : 'Discord does not provide a matching native trigger/action for this rule; SomniBot will enforce it directly.'}
+              </span>
+            </span>
+          </label>
+        </div>
 
         {/* Log to mod channel */}
         <div className="flex items-center gap-2">

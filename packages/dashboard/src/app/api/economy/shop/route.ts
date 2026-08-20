@@ -4,7 +4,7 @@
  * GET    — List all items (active + inactive)
  * POST   — Create a new item
  * PATCH  — Update an existing item
- * DELETE — Delete an item (removes from inventory too via CASCADE)
+ * DELETE — Archive an item while preserving inventory and configured references
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -16,8 +16,30 @@ import { parseBody } from '@/lib/api/validation';
 import { dbError, dbConflictOr500, apiServerError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 import { discordSnowflakeSchema } from '@/lib/api/discord-values';
+import { ECONOMY_AUTOMATIC_ITEM_EFFECT_TYPES } from '@somnibot/shared/constants/economy';
 
-const itemSchema = z.object({
+const automaticEffectSchema = z.object({
+  type: z.enum(ECONOMY_AUTOMATIC_ITEM_EFFECT_TYPES),
+  tier: z.number().int().min(1).max(10).optional(),
+});
+
+const amountEffectSchema = z.object({
+  type: z.enum(['wallet_credit', 'xp_credit']),
+  amount: z.number().int().min(1).max(1_000_000_000),
+});
+
+const roleEffectSchema = z.object({
+  type: z.literal('role_grant'),
+  role_id: discordSnowflakeSchema,
+});
+
+const itemEffectSchema = z.union([
+  automaticEffectSchema,
+  amountEffectSchema,
+  roleEffectSchema,
+]);
+
+const itemSchemaBase = z.object({
   name: z.string().min(1).max(64),
   description: z.string().max(256).nullable().optional(),
   emoji: z.string().min(1).max(64).optional(),
@@ -29,18 +51,36 @@ const itemSchema = z.object({
   require_role_id: discordSnowflakeSchema.nullable().optional(),
   grant_role_id: discordSnowflakeSchema.nullable().optional(),
   usable: z.boolean().optional(),
-  use_effect: z.object({
-    type: z.string(),
-    duration_minutes: z.number().optional(),
-    multiplier: z.number().optional(),
-    role_id: discordSnowflakeSchema.optional(),
-    custom_data: z.record(z.unknown()).optional(),
-  }).nullable().optional(),
+  use_effect: itemEffectSchema.nullable().optional(),
   durability: z.number().int().min(1).nullable().optional(),
   tradeable: z.boolean().optional(),
   active: z.boolean().optional(),
   sort_order: z.number().int().optional(),
 });
+
+function validateItemBehavior(
+  item: Partial<z.infer<typeof itemSchemaBase>>,
+  ctx: z.RefinementCtx,
+): void {
+  const effect = item.use_effect;
+  const manual = effect != null && ['wallet_credit', 'xp_credit', 'role_grant'].includes(effect.type);
+  if (manual && item.usable !== true) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['usable'],
+      message: 'Consumable effects must be usable',
+    });
+  }
+  if (!manual && item.usable === true) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['usable'],
+      message: 'Only consumable effects can be manually used',
+    });
+  }
+}
+
+const itemSchema = itemSchemaBase.superRefine(validateItemBehavior);
 
 export async function GET() {
   try {
@@ -126,13 +166,24 @@ export async function PATCH(request: NextRequest) {
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const patchSchema = z.object({ id: z.string().uuid() }).merge(itemSchema.partial());
+    const patchSchema = z.object({ id: z.string().uuid() }).merge(itemSchemaBase.partial());
     const result = await parseBody(request, patchSchema);
     if (!result.ok) return result.response;
     const { id, ...parsed } = result.data;
     const admin = createAdminSupabase();
 
     const before = await readRowBefore(admin, 'economy_items', { id, guild_id: ctx.guildId });
+    if (!before) {
+      return NextResponse.json({ success: false, error: 'Shop item not found.' }, { status: 404 });
+    }
+
+    const completeItem = itemSchema.safeParse({ ...before, ...parsed });
+    if (!completeItem.success) {
+      return NextResponse.json({
+        success: false,
+        error: completeItem.error.issues[0]?.message ?? 'Invalid item behavior.',
+      }, { status: 400 });
+    }
 
     const { data, error } = await admin
       .from('economy_items')
@@ -185,13 +236,16 @@ export async function DELETE(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
-    // Capture the whole row first — once it is gone this record is the only
-    // remaining copy of what the item was.
     const before = await readRowBefore(admin, 'economy_items', { id, guild_id: ctx.guildId });
+    if (!before) {
+      return NextResponse.json({ success: false, error: 'Item not found' }, { status: 404 });
+    }
+
+    const updatedAt = new Date().toISOString();
 
     const { error } = await admin
       .from('economy_items')
-      .delete()
+      .update({ active: false, updated_at: updatedAt })
       .eq('id', id)
       .eq('guild_id', ctx.guildId);
 
@@ -204,17 +258,19 @@ export async function DELETE(request: NextRequest) {
     await recordCrudChange({
       guildId: ctx.guildId,
       actorId: ctx.discordId,
-      operation: 'deleted',
-      action: 'shop.item_deleted',
+      operation: 'updated',
+      action: 'shop.item_archived',
       table: 'economy_items',
       targetType: 'shop item',
       targetId: id,
-      label: before?.name as string | undefined,
+      label: typeof before.name === 'string' ? before.name : undefined,
       before,
+      after: { ...before, active: false, updated_at: updatedAt },
+      match: { id, guild_id: ctx.guildId },
       blastRadius: 'medium',
     }, admin);
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, archived: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     return apiServerError(err, 'economy/shop');

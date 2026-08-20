@@ -150,7 +150,7 @@ describe('getAuthContext', () => {
 
   it('returns null when no guild is found', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', user_metadata: { provider_id: 'discord_123' } } },
+      data: { user: { id: 'u1', identities: [{ provider: 'discord', identity_data: { sub: 'discord_123' } }] } },
       error: null,
     });
 
@@ -164,7 +164,7 @@ describe('getAuthContext', () => {
 
   it('returns full access for guild owner', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', user_metadata: { provider_id: 'discord_owner' } } },
+      data: { user: { id: 'u1', identities: [{ provider: 'discord', identity_data: { sub: 'discord_owner' } }] } },
       error: null,
     });
 
@@ -184,7 +184,7 @@ describe('getAuthContext', () => {
 
   it('uses active_guild_id cookie when owner has multiple guilds', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', user_metadata: { provider_id: 'discord_owner' } } },
+      data: { user: { id: 'u1', identities: [{ provider: 'discord', identity_data: { sub: 'discord_owner' } }] } },
       error: null,
     });
     mockCookieGet.mockImplementation((name: string) =>
@@ -211,7 +211,7 @@ describe('getAuthContext', () => {
 
   it('denies an inaccessible requested guild instead of falling back', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', user_metadata: { provider_id: 'discord_owner' } } },
+      data: { user: { id: 'u1', identities: [{ provider: 'discord', identity_data: { sub: 'discord_owner' } }] } },
       error: null,
     });
     mockHeaderGet.mockImplementation((name: string) =>
@@ -235,9 +235,9 @@ describe('getAuthContext', () => {
     } satisfies Partial<InstanceType<typeof AuthError>>);
   });
 
-  it('extracts discordId from sub when provider_id is missing', async () => {
+  it('extracts discordId from the immutable provider subject', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u2', user_metadata: { sub: 'discord_sub_id' } } },
+      data: { user: { id: 'u2', identities: [{ provider: 'discord', identity_data: { sub: 'discord_sub_id' } }] } },
       error: null,
     });
 
@@ -272,7 +272,7 @@ describe('requirePermission', () => {
 
   it('returns context for owner with null permission check', async () => {
     mockGetUser.mockResolvedValue({
-      data: { user: { id: 'u1', user_metadata: { provider_id: 'discord_owner' } } },
+      data: { user: { id: 'u1', identities: [{ provider: 'discord', identity_data: { sub: 'discord_owner' } }] } },
       error: null,
     });
 

@@ -27,6 +27,16 @@ interface TicketType {
   introMessageOverride?: string;
 }
 
+interface IntakeFormField {
+  id?: string;
+  label: string;
+  placeholder?: string;
+  style: 'short' | 'paragraph';
+  required: boolean;
+  min_length?: number;
+  max_length?: number;
+}
+
 interface TicketPanel {
   id: string;
   guild_id: string;
@@ -48,6 +58,8 @@ interface TicketPanel {
   inactivity_close_hours: number;
   /** Ask the member to rate their experience when the ticket closes. */
   feedback_prompt_enabled: boolean;
+  intake_form_enabled: boolean;
+  intake_form_fields: IntakeFormField[];
   introduction_message: string | null;
   active: boolean;
   created_at: string;
@@ -259,6 +271,8 @@ export default function TicketsPage() {
       inactivity_warn_hours: 0,
       inactivity_close_hours: 0,
       feedback_prompt_enabled: false,
+      intake_form_enabled: false,
+      intake_form_fields: [],
       introduction_message: null,
       active: true,
       created_at: '',
@@ -267,7 +281,11 @@ export default function TicketsPage() {
   };
 
   const editPanel = (panel: TicketPanel) => {
-    setEditingPanel({ ...panel });
+    setEditingPanel({
+      ...panel,
+      intake_form_enabled: panel.intake_form_enabled ?? false,
+      intake_form_fields: panel.intake_form_fields ?? [],
+    });
     setShowEditor(true);
   };
 
@@ -283,6 +301,10 @@ export default function TicketsPage() {
     const closeHours = editingPanel.inactivity_close_hours ?? 0;
     if (warnHours > 0 && closeHours > 0 && closeHours <= warnHours) {
       setError('Auto-close must be later than the warning, or the ticket closes before anyone is nudged.');
+      return;
+    }
+    if (editingPanel.intake_form_enabled && editingPanel.intake_form_fields.length === 0) {
+      setError('Add at least one intake question, or disable the intake form.');
       return;
     }
 
@@ -378,6 +400,32 @@ export default function TicketsPage() {
     setEditingPanel({ ...editingPanel, ticket_types: types });
   };
 
+  const addIntakeField = () => {
+    if (!editingPanel || editingPanel.intake_form_fields.length >= 5) return;
+    setEditingPanel({
+      ...editingPanel,
+      intake_form_fields: [
+        ...editingPanel.intake_form_fields,
+        { id: generateId(), label: '', placeholder: '', style: 'paragraph', required: true, max_length: 1000 },
+      ],
+    });
+  };
+
+  const updateIntakeField = (index: number, updates: Partial<IntakeFormField>) => {
+    if (!editingPanel) return;
+    const fields = [...editingPanel.intake_form_fields];
+    fields[index] = { ...fields[index], ...updates };
+    setEditingPanel({ ...editingPanel, intake_form_fields: fields });
+  };
+
+  const removeIntakeField = (index: number) => {
+    if (!editingPanel) return;
+    setEditingPanel({
+      ...editingPanel,
+      intake_form_fields: editingPanel.intake_form_fields.filter((_, fieldIndex) => fieldIndex !== index),
+    });
+  };
+
   if (loading) {
     return <CardListSkeleton />;
   }
@@ -414,7 +462,7 @@ export default function TicketsPage() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div>
               <ChannelPicker
                 label="Panel Channel"
@@ -437,7 +485,7 @@ export default function TicketsPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <div>
               <ChannelPicker
                 label="Closed Tickets Category"
@@ -462,7 +510,7 @@ export default function TicketsPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <div>
               <label className="block text-sm font-medium text-discord-text-primary mb-1">Input Mode</label>
               <select
@@ -582,6 +630,108 @@ export default function TicketsPage() {
           </div>
         </section>
 
+        <section className="space-y-4 rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 sm:p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-lg font-medium text-discord-text-primary">Ticket Intake Form</h2>
+              <p className="text-sm text-discord-text-muted">Ask up to five questions before the ticket channel is created. Answers are posted privately inside the new ticket.</p>
+            </div>
+            <label className="flex shrink-0 items-center gap-2 text-sm text-discord-text-primary">
+              <input
+                type="checkbox"
+                checked={editingPanel.intake_form_enabled}
+                onChange={(event) => setEditingPanel({ ...editingPanel, intake_form_enabled: event.target.checked })}
+                className="rounded"
+              />
+              Require intake form
+            </label>
+          </div>
+
+          {editingPanel.intake_form_enabled && (
+            <div className="space-y-3">
+              {editingPanel.intake_form_fields.map((field, index) => (
+                <div key={field.id ?? index} className="space-y-3 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium text-discord-text-primary">Question {index + 1}</span>
+                    <button type="button" onClick={() => removeIntakeField(index)} className="text-sm text-discord-text-muted hover:text-red-400">Remove</button>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <label className="text-sm text-discord-text-primary">
+                      Question
+                      <input
+                        type="text"
+                        maxLength={45}
+                        value={field.label}
+                        onChange={(event) => updateIntakeField(index, { label: event.target.value })}
+                        placeholder="What do you need help with?"
+                        className="mt-1 w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-discord-text-primary"
+                      />
+                    </label>
+                    <label className="text-sm text-discord-text-primary">
+                      Answer style
+                      <select
+                        value={field.style}
+                        onChange={(event) => updateIntakeField(index, { style: event.target.value as IntakeFormField['style'] })}
+                        className="mt-1 w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-discord-text-primary"
+                      >
+                        <option value="short">Short answer</option>
+                        <option value="paragraph">Paragraph</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label className="block text-sm text-discord-text-primary">
+                    Placeholder guidance
+                    <input
+                      type="text"
+                      maxLength={100}
+                      value={field.placeholder ?? ''}
+                      onChange={(event) => updateIntakeField(index, { placeholder: event.target.value || undefined })}
+                      placeholder="Tell the member what information belongs here"
+                      className="mt-1 w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-discord-text-primary"
+                    />
+                  </label>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <label className="text-sm text-discord-text-primary">
+                      Minimum length
+                      <input
+                        type="number"
+                        min={0}
+                        max={4000}
+                        value={field.min_length ?? ''}
+                        onChange={(event) => updateIntakeField(index, { min_length: event.target.value ? Number(event.target.value) : undefined })}
+                        className="mt-1 w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-discord-text-primary"
+                      />
+                    </label>
+                    <label className="text-sm text-discord-text-primary">
+                      Maximum length
+                      <input
+                        type="number"
+                        min={1}
+                        max={4000}
+                        value={field.max_length ?? ''}
+                        onChange={(event) => updateIntakeField(index, { max_length: event.target.value ? Number(event.target.value) : undefined })}
+                        className="mt-1 w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-discord-text-primary"
+                      />
+                    </label>
+                    <label className="flex items-end gap-2 pb-2 text-sm text-discord-text-primary">
+                      <input type="checkbox" checked={field.required} onChange={(event) => updateIntakeField(index, { required: event.target.checked })} className="rounded" />
+                      Required
+                    </label>
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={addIntakeField}
+                disabled={editingPanel.intake_form_fields.length >= 5}
+                className="w-full rounded-lg border border-dashed border-discord-border-subtle p-3 text-sm text-discord-text-muted hover:border-discord-accent/50 hover:text-discord-text-primary disabled:opacity-50"
+              >
+                {editingPanel.intake_form_fields.length >= 5 ? 'Discord allows five intake questions' : '+ Add Intake Question'}
+              </button>
+            </div>
+          )}
+        </section>
+
         {/* Panel Message (Embed) */}
         <section className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
           <h2 className="text-lg font-medium text-discord-text-primary">Panel Message</h2>
@@ -685,14 +835,35 @@ export default function TicketsPage() {
                   />
                 )}
 
-                {/* Category override */}
-                <input
-                  type="text"
-                  value={tt.categoryOverride || ''}
-                  onChange={(e) => updateTicketType(idx, { categoryOverride: e.target.value || undefined })}
-                  placeholder="Category override ID (optional — uses panel default if empty)"
-                  className="w-full rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-1.5 text-xs text-discord-text-secondary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
-                />
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <ChannelPicker
+                    label="Category override"
+                    hint="Optional. New tickets of this type use this Discord category instead of the panel default."
+                    value={tt.categoryOverride ?? null}
+                    onChange={(value) => updateTicketType(idx, { categoryOverride: (value as string) || undefined })}
+                    placeholder="Use panel category"
+                    channelTypes={['category']}
+                    allowNone
+                  />
+                  <RolePicker
+                    label="Manager role override"
+                    hint="Optional. These roles manage this ticket type instead of the panel manager roles."
+                    value={tt.managerRoleOverride ?? []}
+                    onChange={(value) => updateTicketType(idx, { managerRoleOverride: (value as string[]) ?? [] })}
+                    multi
+                    placeholder="Use panel manager roles"
+                  />
+                </div>
+                <label className="block text-sm text-discord-text-primary">
+                  Opening message override
+                  <textarea
+                    value={tt.introMessageOverride ?? ''}
+                    onChange={(event) => updateTicketType(idx, { introMessageOverride: event.target.value || undefined })}
+                    placeholder="Optional message shown only for this ticket type"
+                    rows={2}
+                    className="mt-1 w-full resize-none rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none"
+                  />
+                </label>
               </div>
             ))}
 

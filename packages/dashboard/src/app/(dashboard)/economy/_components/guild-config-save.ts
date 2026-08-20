@@ -1,6 +1,4 @@
-export type GuildConfigValue = boolean | number | string | null;
-
-export type GuildConfigPatch = Readonly<Record<string, GuildConfigValue>>;
+export type GuildConfigPatch = Readonly<Record<string, unknown>>;
 export type GuildConfigReadback = Readonly<Record<string, unknown>>;
 
 type SaveGuildConfig = (patch: GuildConfigPatch) => Promise<GuildConfigReadback>;
@@ -19,6 +17,14 @@ export class GuildConfigSaveError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (!isRecord(value)) return false;
+  return Object.values(value).every(isJsonValue);
 }
 
 export function readConfirmedBoolean(config: GuildConfigReadback, key: string): boolean {
@@ -55,6 +61,10 @@ async function readGuildConfig(): Promise<GuildConfigReadback> {
 }
 
 export async function saveGuildConfigWithReadback(patch: GuildConfigPatch): Promise<GuildConfigReadback> {
+  if (!isJsonValue(patch)) {
+    throw new GuildConfigSaveError('The settings change contains a value that cannot be saved.');
+  }
+
   const response = await fetch('/api/guild', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

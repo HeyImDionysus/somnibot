@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { writeCommerceAudit } from '@/lib/commerce-audit';
+import { getDiscordOAuthRuntimeConfig } from '@/lib/discord-runtime-config';
 
 const DiscordTokenSchema = z.object({
   access_token: z.string().min(1),
@@ -33,11 +34,9 @@ export async function exchangeCodeForUser(
   code: string,
   redirectUri: string,
 ): Promise<DiscordIdentityResult> {
-  const clientId = process.env.DISCORD_APPLICATION_ID;
-  const clientSecret = process.env.DISCORD_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return { kind: 'unavailable' };
-
   try {
+    const { applicationId: clientId, clientSecret } = await getDiscordOAuthRuntimeConfig();
+    if (!clientId || !clientSecret) return { kind: 'unavailable' };
     const tokenRes = await fetch(`${DISCORD_API}/oauth2/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -91,6 +90,7 @@ type LoginDependencyFailure = {
   readonly code: string;
   readonly cause: LoginDependencyCause;
   readonly actorId?: string;
+  readonly occurrenceId?: string;
 };
 
 export async function loginDependencyFailure(
@@ -104,7 +104,8 @@ export async function loginDependencyFailure(
     action: 'portal.login_failed',
     targetType: 'portal_session',
     details: { cause: failure.cause },
-    occurrenceKey: `portal.login_failed:${failure.cause}:${hashOccurrenceSecret(failure.code)}`,
+    correlationId: `portal.login:${hashOccurrenceSecret(failure.code)}`,
+    occurrenceKey: `portal.login_failed:${failure.cause}:${failure.occurrenceId ?? hashOccurrenceSecret(failure.code)}`,
     success: false,
   });
   return NextResponse.json(

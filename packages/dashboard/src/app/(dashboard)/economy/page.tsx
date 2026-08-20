@@ -433,7 +433,7 @@ export default function EconomyPage() {
             )}
             <Toggle
               label="Allow Heists"
-              description="Group heist events (coming in a future update)."
+              description="Members can recruit a crew and run configured group heists. Use the Heists page to set entry fees, crew limits, timing, payouts, and success chance."
               checked={config.economy_heist_enabled}
               onChange={(v) => updateField('economy_heist_enabled', v)}
             />

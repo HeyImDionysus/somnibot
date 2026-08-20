@@ -22,6 +22,10 @@
       "types": "./dist/constants/brand.d.ts",
       "import": "./dist/constants/brand.js"
     },
+    "./constants/economy": {
+      "types": "./dist/constants/economy.d.ts",
+      "import": "./dist/constants/economy.js"
+    },
     "./validators": {
       "types": "./dist/validators/index.d.ts",
       "import": "./dist/validators/index.js"

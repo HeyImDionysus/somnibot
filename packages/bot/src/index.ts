@@ -80,12 +80,7 @@ async function main(): Promise<void> {
   const migrationResult = await runMigrations();
   requireSuccessfulMigrations(migrationResult.errors);
 
-  // 0.5. Load missing config from instance_settings DB table
-  try {
-    await loadConfigFromDatabase();
-  } catch (err) {
-    log.warn('Config DB fallback failed (non-fatal)', { error: String(err) });
-  }
+  await loadConfigFromDatabase();
 
   // 0.75. Sync current env vars → instance_settings (so dashboard can see them)
   try {
@@ -182,7 +177,8 @@ async function main(): Promise<void> {
       try {
         await loadConfigFromDatabase();
       } catch (err) {
-        log.warn('Config reload after credentials arrived failed (non-fatal)', { error: String(err) });
+        log.error('Config reload after credentials arrived failed; configured boot remains stopped', { error: String(err) });
+        return;
       }
       // Re-evaluate the gate now that the token is loaded so the configured boot
       // picks the right action (verification vs full) for the freshly-arrived
@@ -537,7 +533,8 @@ function startSetupCompletionWatcher(
     try {
       await loadConfigFromDatabase();
     } catch (err) {
-      log.warn('Config reload before full-boot transition failed (non-fatal)', { error: String(err) });
+      log.error('Config reload before full-boot transition failed; full boot remains stopped', { error: String(err) });
+      return;
     }
 
     // Re-resolve the primary guild from the FINALIZED config (codex round-3
@@ -679,7 +676,7 @@ async function runFullBoot(
 
       // V10 Audit L-4: BotPresenceManager sets client-wide presence.
       // Create once at bot level (using primary guild for config/member count).
-      const botPresence = new BotPresenceManager(client, client.guildId, client.supabase);
+      const botPresence = new BotPresenceManager(client, client.guildId, client.supabase, client.eventBus);
       botPresence.start();
       botLevelServices.presence = botPresence;
       log.info('Bot-level presence rotation started');

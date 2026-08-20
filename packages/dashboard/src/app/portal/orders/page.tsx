@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CircleHelp, ReceiptText } from 'lucide-react';
 import { Button } from '@/components/shared/button';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { clearPortalToken, getPortalToken, portalLoginUrl } from '@/lib/portal-session-storage';
 
 interface Payment {
   id: string;
@@ -105,9 +106,9 @@ export default function PortalOrders() {
 
   useEffect(() => {
     async function load() {
-      const token = localStorage.getItem('portal_token');
+      const token = getPortalToken();
       if (!token) {
-        window.location.href = '/portal';
+        window.location.href = portalLoginUrl();
         return;
       }
       try {
@@ -115,8 +116,8 @@ export default function PortalOrders() {
           headers: { 'x-portal-token': token },
         });
         if (res.status === 401) {
-          localStorage.removeItem('portal_token');
-          window.location.href = '/portal';
+          clearPortalToken();
+          window.location.href = portalLoginUrl();
           return;
         }
         const json = await res.json();
@@ -157,7 +158,7 @@ export default function PortalOrders() {
     ?? controls?.cancellation_timing;
 
   const scheduleCancellation = async () => {
-    const token = localStorage.getItem('portal_token');
+    const token = getPortalToken();
     if (!token || !cancelTarget || !cancelEntitlement || !cancelTiming) return;
     setCancelling(true);
     setNotice(null);
@@ -222,7 +223,7 @@ export default function PortalOrders() {
   };
 
   const submitRequest = async () => {
-    const token = localStorage.getItem('portal_token');
+    const token = getPortalToken();
     if (!token || !requestTarget) return;
     setRequesting(true);
     setNotice(null);
