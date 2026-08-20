@@ -7,6 +7,7 @@
 
 import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 
 interface TutorialConfig {
   enabled: boolean;
@@ -157,6 +158,14 @@ export default function TutorialPage() {
         >
           {saving ? 'Saving...' : 'Save Changes'}
         </button>
+      </div>
+
+      <div className="rounded-lg border border-discord-accent/30 bg-discord-accent/10 p-4 text-sm text-discord-text-secondary">
+        <p className="font-semibold text-discord-text-primary">Command tutorial, not Discord onboarding</p>
+        <p className="mt-1">
+          These steps teach existing members how to use SomniBot after they join. Discord&apos;s native membership questions, rules, and role choices are configured on the{' '}
+          <Link href="/onboarding" className="font-medium text-discord-accent hover:underline">Onboarding page</Link>.
+        </p>
       </div>
 
       {error && (

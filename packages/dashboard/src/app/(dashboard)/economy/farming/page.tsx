@@ -34,6 +34,13 @@ interface Crop {
   active: boolean;
 }
 
+interface EconomyItem {
+  id: string;
+  name: string;
+  emoji: string;
+  active: boolean;
+}
+
 interface FarmingSettings {
   economy_farming_enabled: boolean;
   economy_farm_grid_size: number;
@@ -72,11 +79,13 @@ function CropFormModal({
   onSave,
   onClose,
   saving,
+  items,
 }: {
   crop: Partial<Crop>;
   onSave: (crop: Partial<Crop>) => void;
   onClose: () => void;
   saving: boolean;
+  items: EconomyItem[];
 }) {
   const [form, setForm] = useState<Partial<Crop>>(crop);
 
@@ -111,6 +120,26 @@ function CropFormModal({
             />
           </label>
         </div>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-discord-text-secondary">Seed item</span>
+          <select
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
+            value={form.seed_item_id ?? ''}
+            onChange={(event) => setForm((current) => ({
+              ...current,
+              seed_item_id: event.target.value || null,
+            }))}
+          >
+            <option value="">No seed item required</option>
+            {items.filter((item) => item.active).map((item) => (
+              <option key={item.id} value={item.id}>{item.emoji} {item.name}</option>
+            ))}
+          </select>
+          <span className="text-xs text-discord-text-muted">
+            Planting consumes one selected Shop item. Harvesting returns the configured number of that same item.
+          </span>
+        </label>
 
         {/* Category */}
         <label className="flex flex-col gap-1">
@@ -232,6 +261,7 @@ function CropFormModal({
 
 export default function FarmingPage() {
   const [crops, setCrops] = useState<Crop[]>([]);
+  const [items, setItems] = useState<EconomyItem[]>([]);
   const [settings, setSettings] = useState<FarmingSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -242,9 +272,10 @@ export default function FarmingPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [cropsRes, settingsRes] = await Promise.all([
+      const [cropsRes, settingsRes, itemsRes] = await Promise.all([
         fetch('/api/economy/farming'),
         fetch('/api/guild'),
+        fetch('/api/economy/shop'),
       ]);
       if (cropsRes.ok) {
         const data = await cropsRes.json();
@@ -259,6 +290,10 @@ export default function FarmingPage() {
           economy_farming_wilt_enabled: gc.economy_farming_wilt_enabled ?? true,
           economy_fertilizer_time_reduction_pct: gc.economy_fertilizer_time_reduction_pct ?? 50,
         });
+      }
+      if (itemsRes.ok) {
+        const data = await itemsRes.json();
+        setItems(Array.isArray(data.data) ? data.data : []);
       }
     } catch {
       toast({ title: 'Failed to load farming data', variant: 'error' });
@@ -451,6 +486,7 @@ export default function FarmingPage() {
           onSave={saveCrop}
           onClose={() => setEditCrop(null)}
           saving={saving}
+          items={items}
         />
       )}
       <ConfirmDialog

@@ -26,7 +26,7 @@ const recipeSchema = z.object({
   emoji: z.string().min(1).max(64).optional(),
   description: z.string().max(256).nullable().optional(),
   inputs: z.array(recipeInputSchema).min(1).max(10),
-  output_item_id: z.string().uuid().nullable().optional(),
+  output_item_id: z.string().uuid(),
   output_qty: z.number().int().min(1).max(100).optional(),
   cooldown_seconds: z.number().int().min(0).max(86400).optional(),
   category: z.string().min(1).max(32).optional(),

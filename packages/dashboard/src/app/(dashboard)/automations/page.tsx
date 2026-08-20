@@ -11,6 +11,9 @@ import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { useToast } from '@/components/shared/toast';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { MemberPicker } from '@/components/shared/member-picker';
+import { RolePicker } from '@/components/shared/role-picker';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -105,33 +108,33 @@ const TRIGGER_META: Record<string, { label: string; icon: string; description: s
 };
 
 const CONDITION_META: Record<string, { label: string; paramType: string; paramLabel: string }> = {
-  'has_role': { label: 'User Has Role', paramType: 'text', paramLabel: 'Role ID' },
-  'missing_role': { label: 'User Missing Role', paramType: 'text', paramLabel: 'Role ID' },
+  'has_role': { label: 'User Has Role', paramType: 'role', paramLabel: 'Role' },
+  'missing_role': { label: 'User Missing Role', paramType: 'role', paramLabel: 'Role' },
   'min_level': { label: 'Minimum Level', paramType: 'number', paramLabel: 'Level' },
   'max_level': { label: 'Maximum Level', paramType: 'number', paramLabel: 'Level' },
-  'in_channel': { label: 'In Channel', paramType: 'text', paramLabel: 'Channel ID' },
-  'not_in_channel': { label: 'Not In Channel', paramType: 'text', paramLabel: 'Channel ID' },
+  'in_channel': { label: 'In Channel', paramType: 'channel', paramLabel: 'Channel' },
+  'not_in_channel': { label: 'Not In Channel', paramType: 'channel', paramLabel: 'Channel' },
   'has_entitlement': { label: 'Has Entitlement', paramType: 'text', paramLabel: 'Product ID' },
   'missing_entitlement': { label: 'Missing Entitlement', paramType: 'text', paramLabel: 'Product ID' },
   'message_contains': { label: 'Message Contains', paramType: 'text', paramLabel: 'Text' },
   'message_matches_regex': { label: 'Message Matches Regex', paramType: 'text', paramLabel: 'Pattern' },
   'is_returning_member': { label: 'Is Returning Member', paramType: 'none', paramLabel: '' },
   'is_new_member': { label: 'Is New Member', paramType: 'none', paramLabel: '' },
-  'user_is': { label: 'User Is', paramType: 'text', paramLabel: 'User ID' },
+  'user_is': { label: 'User Is', paramType: 'member', paramLabel: 'Member' },
 };
 
 const ACTION_META: Record<string, { label: string; icon: string; params: { key: string; label: string; type: string; required: boolean; placeholder?: string }[] }> = {
-  'send_message': { label: 'Send Message in Channel', icon: '💬', params: [{ key: 'channel_id', label: 'Channel ID', type: 'text', required: true }, { key: 'message', label: 'Message', type: 'textarea', required: true, placeholder: 'Hello {user}!' }] },
+  'send_message': { label: 'Send Message in Channel', icon: '💬', params: [{ key: 'channel_id', label: 'Channel', type: 'channel', required: true }, { key: 'message', label: 'Message', type: 'textarea', required: true, placeholder: 'Hello {user}!' }] },
   'send_dm': { label: 'Send DM', icon: '📩', params: [{ key: 'message', label: 'Message', type: 'textarea', required: true, placeholder: 'Hey {user.name}!' }] },
   'reply_to_message': { label: 'Reply to Message', icon: '↩️', params: [{ key: 'message', label: 'Message', type: 'textarea', required: true, placeholder: 'Thanks!' }] },
-  'give_role': { label: 'Give Role', icon: '🏷️', params: [{ key: 'role_id', label: 'Role ID', type: 'text', required: true }] },
-  'remove_role': { label: 'Remove Role', icon: '🏷️', params: [{ key: 'role_id', label: 'Role ID', type: 'text', required: true }] },
+  'give_role': { label: 'Give Role', icon: '🏷️', params: [{ key: 'role_id', label: 'Role', type: 'role', required: true }] },
+  'remove_role': { label: 'Remove Role', icon: '🏷️', params: [{ key: 'role_id', label: 'Role', type: 'role', required: true }] },
   'add_reaction': { label: 'Add Reaction', icon: '😀', params: [{ key: 'emoji', label: 'Emoji', type: 'text', required: true, placeholder: '⭐' }] },
   'delete_message': { label: 'Delete Message', icon: '🗑️', params: [] },
   'create_thread': { label: 'Create Thread', icon: '🧵', params: [{ key: 'name', label: 'Thread Name', type: 'text', required: true }, { key: 'auto_archive_minutes', label: 'Auto-Archive (min)', type: 'number', required: false, placeholder: '1440' }] },
   'wait_delay': { label: 'Wait / Delay', icon: '⏳', params: [{ key: 'seconds', label: 'Seconds', type: 'number', required: true, placeholder: '5' }] },
   'grant_entitlement': { label: 'Grant Entitlement', icon: '🎁', params: [{ key: 'product_id', label: 'Product ID', type: 'text', required: true }] },
-  'log_to_channel': { label: 'Log to Channel', icon: '📋', params: [{ key: 'channel_id', label: 'Channel ID', type: 'text', required: true }, { key: 'message', label: 'Message', type: 'textarea', required: true, placeholder: '⚠️ Event: {user}' }] },
+  'log_to_channel': { label: 'Log to Channel', icon: '📋', params: [{ key: 'channel_id', label: 'Channel', type: 'channel', required: true }, { key: 'message', label: 'Message', type: 'textarea', required: true, placeholder: '⚠️ Event: {user}' }] },
   'create_ticket': { label: 'Create Ticket', icon: '🎫', params: [] },
   'ban_member': { label: 'Ban Member', icon: '🔨', params: [{ key: 'reason', label: 'Reason', type: 'text', required: false }] },
   'kick_member': { label: 'Kick Member', icon: '👢', params: [{ key: 'reason', label: 'Reason', type: 'text', required: false }] },
@@ -1003,48 +1006,12 @@ function AutomationEditor({
             Scope (optional)
           </button>
           {showScope && (
-            <div className="mt-3 grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-discord-text-muted mb-1">Target User IDs</label>
-                <input
-                  type="text"
-                  value={draft.target_user_ids.join(', ')}
-                  onChange={(e) => setDraft({ ...draft, target_user_ids: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-                  placeholder="Leave empty for all users"
-                  className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:outline-none focus:ring-2 focus:ring-discord-accent"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-discord-text-muted mb-1">Exclude User IDs</label>
-                <input
-                  type="text"
-                  value={draft.exclude_user_ids.join(', ')}
-                  onChange={(e) => setDraft({ ...draft, exclude_user_ids: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-                  placeholder="None"
-                  className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:outline-none focus:ring-2 focus:ring-discord-accent"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-discord-text-muted mb-1">Target Channel IDs</label>
-                <input
-                  type="text"
-                  value={draft.target_channel_ids.join(', ')}
-                  onChange={(e) => setDraft({ ...draft, target_channel_ids: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-                  placeholder="Leave empty for all channels"
-                  className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:outline-none focus:ring-2 focus:ring-discord-accent"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-discord-text-muted mb-1">Exclude Channel IDs</label>
-                <input
-                  type="text"
-                  value={draft.exclude_channel_ids.join(', ')}
-                  onChange={(e) => setDraft({ ...draft, exclude_channel_ids: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-                  placeholder="None"
-                  className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:outline-none focus:ring-2 focus:ring-discord-accent"
-                />
-              </div>
-              <p className="col-span-2 text-xs text-discord-text-muted">ℹ️ Leave empty for full server scope.</p>
+            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+              <MemberPicker label="Only these members" hint="Leave empty for every member." value={draft.target_user_ids} onChange={(value) => setDraft({ ...draft, target_user_ids: (value as string[]) ?? [] })} multi placeholder="All members" hideBots />
+              <MemberPicker label="Exclude members" value={draft.exclude_user_ids} onChange={(value) => setDraft({ ...draft, exclude_user_ids: (value as string[]) ?? [] })} multi placeholder="No member exclusions" hideBots />
+              <ChannelPicker label="Only these channels" hint="Leave empty for every channel." value={draft.target_channel_ids} onChange={(value) => setDraft({ ...draft, target_channel_ids: (value as string[]) ?? [] })} multi placeholder="All channels" />
+              <ChannelPicker label="Exclude channels" value={draft.exclude_channel_ids} onChange={(value) => setDraft({ ...draft, exclude_channel_ids: (value as string[]) ?? [] })} multi placeholder="No channel exclusions" />
+              <p className="text-xs text-discord-text-muted md:col-span-2">Leave every target empty for full-server scope. Exclusions always win.</p>
             </div>
           )}
         </div>
@@ -1073,7 +1040,7 @@ function AutomationEditor({
             {draft.conditions.map((cond, idx) => {
               const meta = CONDITION_META[cond.type];
               return (
-                <div key={idx} className="flex items-center gap-3 rounded-md bg-discord-bg-primary p-3">
+                <div key={idx} className="flex flex-col gap-3 rounded-md bg-discord-bg-primary p-3 md:flex-row md:items-center">
                   <select
                     value={cond.type}
                     onChange={(e) => updateCondition(idx, { type: e.target.value, config: { value: '' } })}
@@ -1083,7 +1050,16 @@ function AutomationEditor({
                       <option key={key} value={key}>{m.label}</option>
                     ))}
                   </select>
-                  {meta && meta.paramType !== 'none' && (
+                  {meta?.paramType === 'role' && (
+                    <RolePicker value={(cond.config.value as string) || null} onChange={(value) => updateCondition(idx, { config: { value } })} placeholder="Select role" requireAssignable={false} className="flex-1" />
+                  )}
+                  {meta?.paramType === 'channel' && (
+                    <ChannelPicker value={(cond.config.value as string) || null} onChange={(value) => updateCondition(idx, { config: { value } })} placeholder="Select channel" className="flex-1" />
+                  )}
+                  {meta?.paramType === 'member' && (
+                    <MemberPicker value={(cond.config.value as string) || null} onChange={(value) => updateCondition(idx, { config: { value } })} placeholder="Select member" hideBots className="flex-1" />
+                  )}
+                  {meta && !['none', 'role', 'channel', 'member'].includes(meta.paramType) && (
                     <input
                       type={meta.paramType === 'number' ? 'number' : 'text'}
                       value={(cond.config.value as string) ?? ''}
@@ -1178,7 +1154,22 @@ function AutomationEditor({
                       {meta.params.map((param) => (
                         <div key={param.key} className="flex items-center gap-2">
                           <label className="text-xs text-discord-text-muted w-28 shrink-0">{param.label}</label>
-                          {param.type === 'textarea' ? (
+                          {param.type === 'channel' ? (
+                            <ChannelPicker
+                              value={(action.config[param.key] as string) || null}
+                              onChange={(value) => updateAction(idx, { config: { ...action.config, [param.key]: value } })}
+                              placeholder="Select channel"
+                              className="flex-1"
+                            />
+                          ) : param.type === 'role' ? (
+                            <RolePicker
+                              value={(action.config[param.key] as string) || null}
+                              onChange={(value) => updateAction(idx, { config: { ...action.config, [param.key]: value } })}
+                              placeholder="Select role"
+                              requireAssignable={param.key === 'role_id' && action.type === 'give_role'}
+                              className="flex-1"
+                            />
+                          ) : param.type === 'textarea' ? (
                             <textarea
                               value={(action.config[param.key] as string) ?? ''}
                               onChange={(e) => updateAction(idx, { config: { ...action.config, [param.key]: e.target.value } })}

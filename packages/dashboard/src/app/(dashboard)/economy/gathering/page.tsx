@@ -37,6 +37,13 @@ interface LootEntry {
   active: boolean;
 }
 
+interface EconomyItem {
+  id: string;
+  name: string;
+  emoji: string;
+  active: boolean;
+}
+
 interface GatheringSettings {
   economy_gathering_enabled: boolean;
   economy_gathering_cooldown_seconds: number;
@@ -77,11 +84,13 @@ function LootFormModal({
   onSave,
   onClose,
   saving,
+  items,
 }: {
   entry: Partial<LootEntry>;
   onSave: (entry: Partial<LootEntry>) => void;
   onClose: () => void;
   saving: boolean;
+  items: EconomyItem[];
 }) {
   const [form, setForm] = useState<Partial<LootEntry>>({ ...entry });
 
@@ -130,6 +139,26 @@ function LootFormModal({
             />
           </label>
         </div>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-discord-text-secondary">Drop behavior</span>
+          <select
+            className="rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
+            value={form.gives_item_id ?? ''}
+            onChange={(event) => setForm((current) => ({
+              ...current,
+              gives_item_id: event.target.value || null,
+            }))}
+          >
+            <option value="">Sell immediately for the configured coin value</option>
+            {items.filter((item) => item.active).map((item) => (
+              <option key={item.id} value={item.id}>{item.emoji} Add {item.name} to inventory</option>
+            ))}
+          </select>
+          <span className="text-xs text-discord-text-muted">
+            Inventory drops use the selected Shop item&apos;s configured behavior when the member uses it. Coin drops skip inventory.
+          </span>
+        </label>
 
         {/* Rarity */}
         <label className="flex flex-col gap-1">
@@ -247,6 +276,7 @@ function LootFormModal({
 
 export default function GatheringPage() {
   const [entries, setEntries] = useState<LootEntry[]>([]);
+  const [items, setItems] = useState<EconomyItem[]>([]);
   const [settings, setSettings] = useState<GatheringSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -258,9 +288,10 @@ export default function GatheringPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [entriesRes, settingsRes] = await Promise.all([
+      const [entriesRes, settingsRes, itemsRes] = await Promise.all([
         fetch('/api/economy/gathering'),
         fetch('/api/guild'),
+        fetch('/api/economy/shop'),
       ]);
       if (entriesRes.ok) {
         const data = await entriesRes.json();
@@ -273,6 +304,10 @@ export default function GatheringPage() {
           economy_gathering_enabled: gc.economy_gathering_enabled ?? true,
           economy_gathering_cooldown_seconds: gc.economy_gathering_cooldown_seconds ?? 30,
         });
+      }
+      if (itemsRes.ok) {
+        const data = await itemsRes.json();
+        setItems(Array.isArray(data.data) ? data.data : []);
       }
     } catch {
       toast({ title: 'Failed to load gathering data', variant: 'error' });
@@ -499,6 +534,7 @@ export default function GatheringPage() {
           onSave={saveEntry}
           onClose={() => setEditEntry(null)}
           saving={saving}
+          items={items}
         />
       )}
       <ConfirmDialog

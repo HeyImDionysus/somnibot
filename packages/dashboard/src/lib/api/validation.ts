@@ -422,6 +422,8 @@ const moderationRule = z.object({
   exempt_roles: snowflakeArray,
   exempt_channels: snowflakeArray,
   log_to_mod_channel: z.boolean().optional(),
+  sync_to_discord: z.boolean().optional(),
+  priority: z.number().int().min(-1000).max(1000).optional(),
 });
 
 const moderationRuleUpdate = z.object({
@@ -435,6 +437,8 @@ const moderationRuleUpdate = z.object({
   exempt_roles: z.array(snowflake).max(100).optional(),
   exempt_channels: z.array(snowflake).max(100).optional(),
   log_to_mod_channel: z.boolean().optional(),
+  sync_to_discord: z.boolean().optional(),
+  priority: z.number().int().min(-1000).max(1000).optional(),
 });
 
 const escalationConfig = z.object({

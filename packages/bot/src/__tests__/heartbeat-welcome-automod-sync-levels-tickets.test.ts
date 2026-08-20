@@ -292,6 +292,76 @@ describe('AutoModSync', () => {
     const sync = new AutoModSync(guild(), supa, eb());
     await sync.syncRules();
   });
+
+  it('updates the matching managed rule and removes stale SomniBot rules', async () => {
+    const { AutoModSync } = await import('../features/discord-native/automod-sync.js');
+    const matching = {
+      name: 'SB:12345678 Old name',
+      edit: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const stale = {
+      name: 'SB:87654321 Removed rule',
+      edit: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const external = {
+      name: 'Server-owned rule',
+      edit: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const g = guild();
+    g.autoModerationRules.fetch.mockResolvedValue(new Collection([
+      ['matching', matching],
+      ['stale', stale],
+      ['external', external],
+    ]));
+    const rules = [{
+      id: '12345678-0000-4000-8000-000000000000',
+      name: 'No Spam',
+      enabled: true,
+      type: 'spam_filter',
+      config: {},
+      action: 'delete',
+      exempt_roles: [],
+      exempt_channels: [],
+      sync_to_discord: true,
+    }];
+    const supa = { from: vi.fn(() => chainAsync(rules)) };
+    const sync = new AutoModSync(
+      g,
+      supa as unknown as ConstructorParameters<typeof AutoModSync>[1],
+      eb(),
+    );
+
+    await sync.syncRules();
+
+    expect(matching.edit).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'SB:12345678 No Spam',
+      enabled: true,
+    }));
+    expect(stale.delete).toHaveBeenCalledOnce();
+    expect(external.delete).not.toHaveBeenCalled();
+  });
+
+  it('registers and removes one config listener across repeated lifecycle calls', async () => {
+    const { AutoModSync } = await import('../features/discord-native/automod-sync.js');
+    const bus = eb();
+    const supa = { from: vi.fn(() => chainAsync([])) };
+    const sync = new AutoModSync(
+      guild(),
+      supa as unknown as ConstructorParameters<typeof AutoModSync>[1],
+      bus,
+    );
+
+    sync.start();
+    sync.start();
+    sync.stop();
+    sync.stop();
+
+    expect(bus.on).toHaveBeenCalledTimes(1);
+    expect(bus.off).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ═══════════════════════════════════════════════
@@ -302,6 +372,7 @@ describe('LevelAnnouncer', () => {
     const { handleLevelUp } = await import('../features/levels/level-announcer.js');
     const g = guild();
     const supa = {
+      rpc: vi.fn(async () => ({ data: { outcome: 'applied' }, error: null })),
       from: vi.fn((t: string) => {
         if (t === 'guild_config') return chain({
           level_announce_enabled: true,

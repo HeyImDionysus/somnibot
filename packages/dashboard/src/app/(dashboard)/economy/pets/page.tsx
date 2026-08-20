@@ -12,6 +12,37 @@ import { PawPrint } from 'lucide-react';
 import { GuildConfigSaveCoordinator, readConfirmedBoolean, readConfirmedNumber } from '../_components/guild-config-save';
 import { ValidatedNumberInput } from '../_components/validated-number-input';
 
+type PetTypeKey = 'hunting' | 'guard' | 'foraging' | 'lucky';
+interface PetTypeDefinition { name: string; emoji: string; description: string; price: number }
+type PetTypeConfig = Record<PetTypeKey, PetTypeDefinition>;
+
+const DEFAULT_PET_TYPES: PetTypeConfig = {
+  hunting: { name: 'Hunting', emoji: '🐺', description: 'Boosts hunt loot', price: 5000 },
+  guard: { name: 'Guard', emoji: '🐕', description: 'Reduces rob success against you', price: 5000 },
+  foraging: { name: 'Foraging', emoji: '🐿️', description: 'Passive item finds', price: 5000 },
+  lucky: { name: 'Lucky', emoji: '🐈', description: 'Slight gambling boost', price: 7500 },
+};
+const PET_TYPE_KEYS = Object.keys(DEFAULT_PET_TYPES) as PetTypeKey[];
+
+function normalizePetTypes(value: unknown): PetTypeConfig {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return DEFAULT_PET_TYPES;
+  return Object.fromEntries(PET_TYPE_KEYS.map((key) => {
+    const fallback = DEFAULT_PET_TYPES[key];
+    const candidate = Reflect.get(value, key);
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return [key, fallback];
+    const name = Reflect.get(candidate, 'name');
+    const emoji = Reflect.get(candidate, 'emoji');
+    const description = Reflect.get(candidate, 'description');
+    const price = Reflect.get(candidate, 'price');
+    return [key, {
+      name: typeof name === 'string' ? name : fallback.name,
+      emoji: typeof emoji === 'string' ? emoji : fallback.emoji,
+      description: typeof description === 'string' ? description : fallback.description,
+      price: typeof price === 'number' ? price : fallback.price,
+    }];
+  })) as PetTypeConfig;
+}
+
 interface PetsConfig {
   economy_pets_enabled: boolean;
   economy_pet_decay_rate: number;
@@ -22,6 +53,7 @@ interface PetsConfig {
   economy_pet_prestige_enabled: boolean;
   economy_pet_feed_cost: number;
   economy_pet_train_cost: number;
+  economy_pet_type_config: PetTypeConfig;
 }
 
 const DEFAULT_CONFIG: PetsConfig = {
@@ -34,6 +66,7 @@ const DEFAULT_CONFIG: PetsConfig = {
   economy_pet_prestige_enabled: true,
   economy_pet_feed_cost: 50,
   economy_pet_train_cost: 100,
+  economy_pet_type_config: DEFAULT_PET_TYPES,
 };
 
 export default function PetsPage() {
@@ -48,7 +81,7 @@ export default function PetsPage() {
       if (res.ok) {
         const json = await res.json();
         const gc = json.config ?? {};
-        setConfig({ ...DEFAULT_CONFIG, ...gc });
+        setConfig({ ...DEFAULT_CONFIG, ...gc, economy_pet_type_config: normalizePetTypes(gc.economy_pet_type_config) });
       }
     } catch {
       toast({ title: 'Failed to load pet settings', variant: 'error' });
@@ -73,6 +106,7 @@ export default function PetsPage() {
         economy_pet_prestige_enabled: readConfirmedBoolean(result.config, 'economy_pet_prestige_enabled'),
         economy_pet_feed_cost: readConfirmedNumber(result.config, 'economy_pet_feed_cost'),
         economy_pet_train_cost: readConfirmedNumber(result.config, 'economy_pet_train_cost'),
+        economy_pet_type_config: normalizePetTypes(result.config.economy_pet_type_config),
       });
       if (result.status === 'failed') {
         toast({ title: 'Failed to save settings', variant: 'error' });
@@ -139,13 +173,36 @@ export default function PetsPage() {
                 className="rounded" />
               <span className="text-sm text-discord-text-primary">DM Owner When Pet Is Sad/Sick</span>
             </label>
-            <div className="mt-4 p-3 bg-discord-bg-tertiary rounded text-sm text-discord-text-secondary">
-              <strong>Pet Types:</strong><br />
-              🐺 Hunting — Boosts /hunt loot<br />
-              🐕 Guard — Reduces rob success against owner<br />
-              🐿️ Foraging — Passive item finds<br />
-              🐈 Lucky — Slight gambling boost
+          </div>
+
+          <div className="space-y-4 rounded-lg bg-discord-bg-secondary p-4 md:col-span-2">
+            <div>
+              <h3 className="font-semibold text-discord-text-primary">Pet Types</h3>
+              <p className="text-sm text-discord-text-secondary">Customize the names, Unicode or Discord custom emoji, descriptions, and purchase prices members see. The four behavior types remain stable so existing pets keep working.</p>
             </div>
+            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              {PET_TYPE_KEYS.map((key) => {
+                const definition = config.economy_pet_type_config[key];
+                const update = (patch: Partial<PetTypeDefinition>) => setConfig((current) => ({
+                  ...current,
+                  economy_pet_type_config: {
+                    ...current.economy_pet_type_config,
+                    [key]: { ...current.economy_pet_type_config[key], ...patch },
+                  },
+                }));
+                return (
+                  <div key={key} className="space-y-3 rounded-lg border border-discord-border-subtle bg-discord-bg-tertiary p-4">
+                    <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-3">
+                      <label className="text-xs text-discord-text-secondary">Display name<input value={definition.name} maxLength={32} onChange={(event) => update({ name: event.target.value })} className="mt-1 w-full rounded bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
+                      <label className="text-xs text-discord-text-secondary">Emoji<input value={definition.emoji} maxLength={64} onChange={(event) => update({ emoji: event.target.value })} className="mt-1 w-full rounded bg-discord-bg-primary px-3 py-2 text-center text-sm text-discord-text-primary" /></label>
+                    </div>
+                    <label className="block text-xs text-discord-text-secondary">Description<input value={definition.description} maxLength={128} onChange={(event) => update({ description: event.target.value })} className="mt-1 w-full rounded bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
+                    <label className="block text-xs text-discord-text-secondary">Purchase price<input type="number" min={0} max={1_000_000_000} value={definition.price} onChange={(event) => update({ price: Math.max(0, Number(event.target.value) || 0) })} className="mt-1 w-full rounded bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary" /></label>
+                  </div>
+                );
+              })}
+            </div>
+            <button type="button" onClick={() => saveConfig({ economy_pet_type_config: config.economy_pet_type_config })} className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent-hover">Save Pet Types</button>
           </div>
         </div>
       )}

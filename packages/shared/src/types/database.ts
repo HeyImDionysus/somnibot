@@ -373,6 +373,7 @@ export interface DbGuildConfig {
   economy_trivia_base_payout: number;
   economy_trivia_streak_multiplier_pct: number;
   economy_trivia_hard_multiplier: number;
+  economy_trivia_question_source: 'mixed' | 'open-trivia-db' | 'local';
   // Scheduled / hosted trivia cadence
   economy_trivia_schedule_enabled: boolean;
   economy_trivia_schedule_interval_minutes: number;
@@ -405,6 +406,12 @@ export interface DbGuildConfig {
   economy_pet_prestige_enabled: boolean;
   economy_pet_feed_cost: number;
   economy_pet_train_cost: number;
+  economy_pet_type_config: Record<string, {
+    name: string;
+    emoji: string;
+    description: string;
+    price: number;
+  }>;
   economy_quests_enabled: boolean;
   economy_daily_quest_count: number;
   economy_weekly_quest_count: number;

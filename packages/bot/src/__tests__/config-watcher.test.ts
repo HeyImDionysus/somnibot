@@ -128,6 +128,7 @@ describe('ConfigWatcher', () => {
   let eventBus: any;
   let configHandler: any;
   let onboardingReload: ReturnType<typeof vi.fn>;
+  let valkey: ReturnType<typeof makeValkey>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -138,11 +139,12 @@ describe('ConfigWatcher', () => {
       emit: vi.fn(),
     };
     onboardingReload = vi.fn().mockResolvedValue(undefined);
+    valkey = makeValkey();
     watcher = new ConfigWatcher(
       makeGuild(),
       makeSupa() as never,
       eventBus,
-      makeValkey(),
+      valkey,
       undefined,
       undefined,
       undefined,
@@ -197,6 +199,13 @@ describe('ConfigWatcher', () => {
     expect(mocks.invalidateBrandKitCache).toHaveBeenCalledWith('guild-1');
     // branding is a targeted invalidation — not an economy-wide sweep
     expect(mocks.invalidateEconomyCache).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the current guild automod rule cache on moderation changes', async () => {
+    await configHandler({ guildId: 'guild-1', data: { section: 'moderation', changedBy: 'owner' } });
+
+    expect(valkey.del).toHaveBeenCalledWith('automod:rules:guild-1');
+    expect(valkey.del).not.toHaveBeenCalledWith('automod:rules');
   });
 
   it('reloads the active music manager when music config changes', async () => {

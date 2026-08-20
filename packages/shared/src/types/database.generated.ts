@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 291 migration files in packages/supabase/migrations/
+ * Source: 294 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -495,6 +495,8 @@ export interface DbGuildConfig {
   brand_header_storage_path: string | null;
   brand_background_url: string | null;
   brand_background_storage_path: string | null;
+  economy_pet_type_config: Json;
+  economy_trivia_question_source: string;
 }
 
 export interface DbInstanceSettings {
