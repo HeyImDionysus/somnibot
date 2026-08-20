@@ -149,9 +149,22 @@ describe('economy_use_item_atomic', () => {
       },
     });
 
-    const failed = await supa.from('bot_action_queue')
-      .update({ status: 'failed', error_message: 'role no longer exists' })
-      .eq('id', roleUse.data!.action_id);
+    const claimed = await supa.rpc('bot_action_queue_claim', {
+      p_action_id: roleUse.data!.action_id,
+      p_protocol_version: 2,
+    });
+    expect(claimed.error).toBeNull();
+    const claimRows = Array.isArray(claimed.data) ? claimed.data : [];
+    expect(claimRows).toHaveLength(1);
+    const claimToken = claimRows[0]!.claim_token;
+
+    const failed = await supa.rpc('bot_action_queue_finish_claim', {
+      p_action_id: roleUse.data!.action_id,
+      p_claim_token: claimToken,
+      p_success: false,
+      p_result: null,
+      p_error: 'role no longer exists',
+    });
     expect(failed.error).toBeNull();
     expect(await inventoryQuantity(itemIds.role)).toBe(2);
 
@@ -164,9 +177,13 @@ describe('economy_use_item_atomic', () => {
       replayed: true,
     });
 
-    const repeatedFailure = await supa.from('bot_action_queue')
-      .update({ status: 'failed', error_message: 'role still unavailable' })
-      .eq('id', roleUse.data!.action_id);
+    const repeatedFailure = await supa.rpc('bot_action_queue_finish_claim', {
+      p_action_id: roleUse.data!.action_id,
+      p_claim_token: claimToken,
+      p_success: false,
+      p_result: null,
+      p_error: 'role still unavailable',
+    });
     expect(repeatedFailure.error).toBeNull();
     expect(await inventoryQuantity(itemIds.role)).toBe(2);
 
