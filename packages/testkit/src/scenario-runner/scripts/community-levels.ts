@@ -133,7 +133,7 @@ async function seedMemberLevel(
   memberId: string,
   fields: { xp: number; level: number; totalMessages?: number; voiceMinutes?: number },
 ): Promise<void> {
-  await handle.supabase.from('member_levels').upsert(
+  const { error } = await handle.supabase.from('member_levels').upsert(
     {
       guild_id: handle.guildId,
       member_id: memberId,
@@ -145,6 +145,9 @@ async function seedMemberLevel(
     },
     { onConflict: 'guild_id,member_id' },
   );
+  if (error) {
+    throw new Error(`Unable to seed member level for ${memberId}: ${error.message}`);
+  }
 }
 
 async function countGuildRows(handle: LiveClientHandle, table: string): Promise<number> {
@@ -660,7 +663,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
       voice_xp_enabled: true,
     },
   });
-  const userA = ctx.userId('a');
+  const userA = ctx.snowflake('member-a');
 
   // Bind a reward role at level 2 (the real level_rewards binding the announcer reads).
   await seedRoleReward(handle, 2, rewardRole);
