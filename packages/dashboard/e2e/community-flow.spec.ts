@@ -409,6 +409,15 @@ test.describe('Community self-service browser flow', () => {
     let saved = false;
     await page.route('**/api/onboarding', async (route) => {
       if (route.request().method() === 'PUT') {
+        const payload = route.request().postDataJSON() as {
+          onboarding_config: {
+            default_channel_ids: string[];
+            prompts: Array<{ options: Array<{ role_ids?: string[]; channel_ids?: string[] }> }>;
+          };
+        };
+        expect(payload.onboarding_config.default_channel_ids).toEqual([CHANNEL_ID]);
+        expect(payload.onboarding_config.prompts[0].options[0].role_ids).toEqual([ROLE_ID]);
+        expect(payload.onboarding_config.prompts[0].options[0].channel_ids).toEqual([CHANNEL_ID]);
         saved = true;
         await fulfillJson(route, {
           success: true,
@@ -479,11 +488,19 @@ test.describe('Community self-service browser flow', () => {
 
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto('/onboarding');
+    await page.getByRole('combobox', { name: 'Default channels' }).click();
+    await page.getByText('#welcome', { exact: true }).click();
+    await page.getByRole('button', { name: 'Roles granted' }).click();
+    await expect(page.getByText('Member', { exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page.getByRole('combobox', { name: 'Channels added' }).click();
+    await page.getByText('#welcome', { exact: true }).click();
     await page.getByRole('checkbox', { name: 'Skip welcome DM for returning members' }).uncheck();
     await page.getByRole('button', { name: 'Save Changes' }).click();
 
-    await expect(page.getByRole('alert')).toContainText('Discord differs from the saved request');
-    await expect(page.getByRole('alert')).toContainText('1 live prompts and 1 live default channels');
+    const driftReceipt = page.getByRole('alert').filter({ hasText: 'Discord differs from the saved request' });
+    await expect(driftReceipt).toContainText('Discord differs from the saved request');
+    await expect(driftReceipt).toContainText('1 live prompts and 1 live default channels');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await testInfo.attach('onboarding-authoritative-drift-mobile', {
       body: await page.screenshot({ fullPage: true }),

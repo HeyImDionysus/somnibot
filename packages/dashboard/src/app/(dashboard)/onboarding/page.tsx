@@ -180,7 +180,14 @@ export default function OnboardingPage() {
         return;
       }
 
-      toast({ title: 'Settings saved; Discord synchronization is still pending', variant: 'success' });
+      const timeoutMessage = 'Settings were saved, but Discord did not confirm synchronization within 15 seconds.';
+      const timeoutState: OnboardingSyncState = {
+        status: 'failed',
+        request_id: requestId,
+        error: timeoutMessage,
+      };
+      setSyncState(timeoutState);
+      toast({ title: timeoutMessage, variant: 'error' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save';
       setError(msg);

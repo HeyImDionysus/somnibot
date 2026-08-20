@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { notifyBotForGuildWithResult } from '@/lib/notify-bot';
 import {
   validateUndoPayload,
   isDiscordUndo,
@@ -89,6 +90,7 @@ export async function POST(request: NextRequest) {
     // and never trust the payload's own table/column names. A present-but-off-
     // list payload is rejected here, before any DB write.
     const undo = change.undo_payload;
+    let onboardingSync: Record<string, unknown> | null = null;
 
     // Discord-side undo. The row-update path below reverses a database edit; it
     // cannot delete a role or recreate a channel, so changes the BOT made to
@@ -156,6 +158,37 @@ export async function POST(request: NextRequest) {
         .match(validation.match);
 
       if (undoError) return dbError(undoError, 'admin-changes');
+
+      if (change.action === 'onboarding.updated' && validation.table === 'guild_config') {
+        const pendingState = {
+          status: 'pending',
+          request_id: crypto.randomUUID(),
+          requested_at: new Date().toISOString(),
+        };
+        const { error: receiptError } = await admin
+          .from('guild_config')
+          .update({ onboarding_sync_state: pendingState })
+          .eq('guild_id', ctx.guildId);
+        if (receiptError) return dbError(receiptError, 'admin-changes');
+
+        const queued = await notifyBotForGuildWithResult(ctx.guildId, 'onboarding', validation.data);
+        if (queued) {
+          onboardingSync = pendingState;
+        } else {
+          const failedState = {
+            ...pendingState,
+            status: 'failed',
+            observed_at: new Date().toISOString(),
+            error: 'The bot notification could not be queued after undo.',
+          };
+          await admin
+            .from('guild_config')
+            .update({ onboarding_sync_state: failedState })
+            .eq('guild_id', ctx.guildId)
+            .contains('onboarding_sync_state', { request_id: pendingState.request_id });
+          onboardingSync = failedState;
+        }
+      }
     }
 
     // Mark as undone
@@ -201,7 +234,10 @@ export async function POST(request: NextRequest) {
         .eq('guild_id', ctx.guildId);
     }
 
-    return NextResponse.json({ success: true, data: { undone: change, undoRecord } });
+    return NextResponse.json({
+      success: true,
+      data: { undone: change, undoRecord, ...(onboardingSync ? { onboardingSync } : {}) },
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: msg === 'Unauthorized' ? 401 : 403 });

@@ -9,7 +9,7 @@
  */
 'use client';
 
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo, useId } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { ChevronDown, Search, X, Shield } from 'lucide-react';
 
@@ -184,6 +184,7 @@ export function RolePicker({
   requireAssignable = false,
   className,
 }: RolePickerProps) {
+  const labelId = useId();
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [rolesAuthoritative, setRolesAuthoritative] = useState(false);
@@ -314,7 +315,7 @@ export function RolePicker({
   return (
     <div className={cn('space-y-1', className)} ref={containerRef}>
       {label && (
-        <label className="mb-1 block text-xs font-medium text-discord-text-muted">
+        <label id={labelId} className="mb-1 block text-xs font-medium text-discord-text-muted">
           {label}
         </label>
       )}
@@ -325,6 +326,8 @@ export function RolePicker({
       {/* Trigger */}
       <div
         role="button"
+        aria-labelledby={label ? labelId : undefined}
+        aria-label={label ? undefined : placeholder}
         tabIndex={disabled ? -1 : 0}
         aria-disabled={disabled}
         aria-expanded={open}

@@ -210,6 +210,10 @@ describe('GuildOnboardingSync', () => {
     const supa = { from: vi.fn(() => chain({
       onboarding_enabled: true,
       onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
+      onboarding_sync_state: {
+        status: 'pending',
+        request_id: '00000000-0000-4000-8000-000000000001',
+      },
     })) } as unknown as SupabaseClient;
     const g = guild();
     g.editOnboarding = vi.fn(async () => ({
@@ -260,7 +264,7 @@ describe('GuildOnboardingSync', () => {
               required: true,
               single_select: false,
               options: [
-                { title: 'Gaming', role_ids: ['r1'] },
+                { title: 'Gaming', role_ids: ['r1'], emoji: '🎮' },
                 { title: 'Art', channel_ids: ['ch1'] },
               ],
             },
@@ -280,7 +284,7 @@ describe('GuildOnboardingSync', () => {
         singleSelect: false,
         options: new Collection([
           ['option1', {
-            title: 'Gaming', description: null, emoji: null,
+            title: 'Gaming', description: null, emoji: { identifier: '%F0%9F%8E%AE' },
             roles: new Collection([['r1', { id: 'r1' }]]), channels: new Collection(),
           }],
           ['option2', {
@@ -302,7 +306,7 @@ describe('GuildOnboardingSync', () => {
         required: true,
         singleSelect: false,
         options: [
-          { title: 'Gaming', description: null, emoji: undefined, roles: ['r1'], channels: [] },
+          { title: 'Gaming', description: null, emoji: '🎮', roles: ['r1'], channels: [] },
           { title: 'Art', description: null, emoji: undefined, roles: [], channels: ['ch1'] },
         ],
       }],
@@ -355,6 +359,52 @@ describe('GuildOnboardingSync', () => {
     });
   });
 
+  it('reports a configuration read failure without touching Discord', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const supa = {
+      from: vi.fn(() => chain(null, { message: 'database unavailable' })),
+    } as unknown as SupabaseClient;
+    const g = guild();
+    g.editOnboarding = vi.fn();
+    const eventBus = eb();
+
+    await new GuildOnboardingSync(g, supa, eventBus).syncOnboarding();
+
+    expect(g.fetchOnboarding).not.toHaveBeenCalled();
+    expect(g.editOnboarding).not.toHaveBeenCalled();
+    expect(eventBus.emit).toHaveBeenCalledWith('sync.failed', 'g1', {
+      stage: 'discord-native-onboarding',
+      error: 'Onboarding configuration read failed: database unavailable',
+    });
+  });
+
+  it('adopts live onboarding on first startup without mutating legacy defaults', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const db = chain({
+      onboarding_enabled: true,
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
+      onboarding_sync_state: { status: 'idle' },
+    });
+    const supa = { from: vi.fn(() => db) } as unknown as SupabaseClient;
+    const g = guild();
+    g.editOnboarding = vi.fn();
+    g.fetchOnboarding.mockResolvedValueOnce({
+      enabled: true,
+      prompts: new Collection(),
+      defaultChannels: new Collection([['legacy', { id: 'legacy' }]]),
+    });
+
+    await new GuildOnboardingSync(g, supa, eb()).syncOnboarding();
+
+    expect(g.editOnboarding).not.toHaveBeenCalled();
+    expect(db.update).toHaveBeenCalledWith({
+      onboarding_sync_state: expect.objectContaining({
+        status: 'drifted',
+        live_config: expect.objectContaining({ default_channel_ids: ['legacy'] }),
+      }),
+    });
+  });
+
   it('disables Discord onboarding and records the authoritative state', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
     const db = chain({
@@ -381,6 +431,85 @@ describe('GuildOnboardingSync', () => {
         request_id: '33333333-3333-4333-8333-333333333333',
         live_config: expect.objectContaining({ enabled: false }),
       }),
+    });
+  });
+
+  it('records drift when Discord remains enabled after a disable request', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const db = chain({
+      onboarding_enabled: false,
+      onboarding_sync_state: {
+        status: 'pending',
+        request_id: '44444444-4444-4444-8444-444444444444',
+      },
+    });
+    const supa = { from: vi.fn(() => db) } as unknown as SupabaseClient;
+    const g = guild();
+    g.editOnboarding = vi.fn(async () => ({
+      enabled: true,
+      prompts: new Collection(),
+      defaultChannels: new Collection(),
+    }));
+
+    await new GuildOnboardingSync(g, supa, eb()).syncOnboarding();
+
+    expect(db.update).toHaveBeenCalledWith({
+      onboarding_sync_state: expect.objectContaining({
+        status: 'drifted',
+        live_config: expect.objectContaining({ enabled: true }),
+      }),
+    });
+  });
+
+  it('serializes overlapping changes so the newest request is the final Discord edit', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const firstRead = chain({
+      onboarding_enabled: true,
+      onboarding_sync_state: { status: 'pending', request_id: '55555555-5555-4555-8555-555555555555' },
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: ['first'] },
+    });
+    const secondRead = chain({
+      onboarding_enabled: true,
+      onboarding_sync_state: { status: 'pending', request_id: '66666666-6666-4666-8666-666666666666' },
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: ['second'] },
+    });
+    const firstWrite = chain({ guild_id: 'g1' });
+    const secondWrite = chain({ guild_id: 'g1' });
+    const queries = [firstRead, firstWrite, secondRead, secondWrite];
+    const supa = {
+      from: vi.fn(() => {
+        const query = queries.shift();
+        if (!query) throw new Error('Unexpected database query');
+        return query;
+      }),
+    } as unknown as SupabaseClient;
+    const g = guild();
+    let finishFirst: ((value: unknown) => void) | undefined;
+    const firstEdit = new Promise((resolve) => { finishFirst = resolve; });
+    g.editOnboarding = vi.fn()
+      .mockImplementationOnce(() => firstEdit)
+      .mockResolvedValueOnce({
+        enabled: true,
+        prompts: new Collection(),
+        defaultChannels: new Collection([['second', { id: 'second' }]]),
+      });
+    const sync = new GuildOnboardingSync(g, supa, eb());
+
+    const older = sync.syncOnboarding();
+    const newer = sync.syncOnboarding();
+    await vi.waitFor(() => expect(g.editOnboarding).toHaveBeenCalledTimes(1));
+    expect(g.editOnboarding).toHaveBeenLastCalledWith(expect.objectContaining({ defaultChannels: ['first'] }));
+    finishFirst?.({
+      enabled: true,
+      prompts: new Collection(),
+      defaultChannels: new Collection([['first', { id: 'first' }]]),
+    });
+    await Promise.all([older, newer]);
+
+    expect(g.editOnboarding).toHaveBeenCalledTimes(2);
+    expect(g.editOnboarding).toHaveBeenLastCalledWith(expect.objectContaining({ defaultChannels: ['second'] }));
+    expect(secondWrite.contains).toHaveBeenCalledWith('onboarding_sync_state', {
+      request_id: '66666666-6666-4666-8666-666666666666',
     });
   });
 
