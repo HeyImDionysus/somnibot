@@ -158,22 +158,20 @@ describe('loadConfigFromDatabase', () => {
     expect(result).toBe(0);
   });
 
-  it('handles other DB errors', async () => {
+  it('rejects other DB errors instead of booting with deployment fallbacks', async () => {
     mockFrom.mockReturnValue(
       chainBuilder({ data: null, error: { code: '500', message: 'server error' } }),
     );
 
-    const result = await loadConfigFromDatabase();
-    expect(result).toBe(0);
+    await expect(loadConfigFromDatabase()).rejects.toThrow('Failed to read authoritative instance_settings');
   });
 
-  it('handles exception during load', async () => {
+  it('rejects connection exceptions instead of booting with deployment fallbacks', async () => {
     mockFrom.mockImplementation(() => {
       throw new Error('connection failed');
     });
 
-    const result = await loadConfigFromDatabase();
-    expect(result).toBe(0);
+    await expect(loadConfigFromDatabase()).rejects.toThrow('connection failed');
   });
 
   it('skips rows with empty values', async () => {

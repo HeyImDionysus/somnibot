@@ -7,6 +7,7 @@
 
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { getSavedInstallationRuntimeSecret } from '@/lib/installation-runtime-secret';
 import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
 import { applyPayPalPolicyEnvironment, loadPayPalPolicy, type PayPalEnvironment } from '@/lib/paypal-policy';
 import { isCanonicalPayPalResourceId } from '@/lib/paypal-resource-id';
@@ -546,12 +547,14 @@ async function verifyCheckoutSignature(
     process.env.PAYPAL_CLIENT_SECRET?.trim(),
   ])) return true;
 
-  return matchesCheckoutSignature(
-    version,
-    token,
-    signature,
-    [(await getPayPalRuntimeConfig()).clientSecret],
-  );
+  const [runtimeConfig, previousSecret] = await Promise.all([
+    getPayPalRuntimeConfig(),
+    getSavedInstallationRuntimeSecret('paypal_client_secret_v1_previous'),
+  ]);
+  return matchesCheckoutSignature(version, token, signature, [
+    runtimeConfig.clientSecret,
+    previousSecret ?? undefined,
+  ]);
 }
 
 function parseDeliveryTypeSnapshot(value: unknown): DeliveryType | null {

@@ -26,6 +26,7 @@ import {
 
 type AdminSupabase = ReturnType<typeof createAdminSupabase>;
 const DISCORD_SETTINGS_LEASE_SCOPE = 'discord-auth-settings';
+const DISCORD_MANAGEMENT_TIMEOUT_MS = 30_000;
 
 async function withDiscordSettingsWriteLease(
   admin: AdminSupabase,
@@ -166,6 +167,25 @@ export async function PUT(request: NextRequest) {
       const encrypted = encryptCloudCredential(value, key, bootstrapSecret, projectOrigin);
       return { ...encrypted, section, updated_at: now };
     });
+    const nextPayPalSecret = writableEntries.find(([key]) => key === 'paypal_client_secret')?.[1];
+    if (nextPayPalSecret && bootstrapSecret && projectOrigin) {
+      const previousPayPalSecret = await getInstallationRuntimeSecret(
+        'paypal_client_secret',
+        ['PAYPAL_CLIENT_SECRET'],
+      );
+      if (previousPayPalSecret && previousPayPalSecret !== nextPayPalSecret) {
+        upsertRows.push({
+          ...encryptCloudCredential(
+            previousPayPalSecret,
+            'paypal_client_secret_v1_previous',
+            bootstrapSecret,
+            projectOrigin,
+          ),
+          section: 'paypal',
+          updated_at: now,
+        });
+      }
+    }
 
     if (upsertRows.length === 0) {
       return NextResponse.json(
@@ -200,6 +220,7 @@ export async function PUT(request: NextRequest) {
           discordClientId: nextApplicationId,
           discordClientSecret: nextClientSecret,
           forceCredentialUpdate: true,
+          timeoutMs: DISCORD_MANAGEMENT_TIMEOUT_MS,
         });
         if (!providerUpdate.success) {
           const rollback = await ensureDiscordAuthProvider({
@@ -207,6 +228,7 @@ export async function PUT(request: NextRequest) {
             discordClientId: previousDiscordConfig.applicationId,
             discordClientSecret: previousDiscordConfig.clientSecret,
             forceCredentialUpdate: true,
+            timeoutMs: DISCORD_MANAGEMENT_TIMEOUT_MS,
           });
           if (!rollback.success) {
             console.error('[Settings] Discord Auth rollback could not be verified after provider verification failed');
@@ -228,6 +250,7 @@ export async function PUT(request: NextRequest) {
             discordClientId: previousDiscordConfig.applicationId,
             discordClientSecret: previousDiscordConfig.clientSecret,
             forceCredentialUpdate: true,
+            timeoutMs: DISCORD_MANAGEMENT_TIMEOUT_MS,
           });
           if (!rollback.success) {
             console.error('[Settings] Discord Auth rollback could not be verified after the settings write failed');
@@ -362,6 +385,7 @@ export async function DELETE(request: NextRequest) {
           discordClientId: applicationIdValidation.value,
           discordClientSecret: nextClientSecret,
           forceCredentialUpdate: true,
+          timeoutMs: DISCORD_MANAGEMENT_TIMEOUT_MS,
         });
         if (!providerUpdate.success) {
           const rollback = await ensureDiscordAuthProvider({
@@ -369,6 +393,7 @@ export async function DELETE(request: NextRequest) {
             discordClientId: previousDiscordConfig.applicationId,
             discordClientSecret: previousDiscordConfig.clientSecret,
             forceCredentialUpdate: true,
+            timeoutMs: DISCORD_MANAGEMENT_TIMEOUT_MS,
           });
           if (!rollback.success) {
             console.error('[Settings] Discord Auth rollback could not be verified after reset verification failed');
@@ -390,6 +415,7 @@ export async function DELETE(request: NextRequest) {
             discordClientId: previousDiscordConfig.applicationId,
             discordClientSecret: previousDiscordConfig.clientSecret,
             forceCredentialUpdate: true,
+            timeoutMs: DISCORD_MANAGEMENT_TIMEOUT_MS,
           });
           if (!rollback.success) {
             console.error('[Settings] Discord Auth rollback could not be verified after reset storage failed');

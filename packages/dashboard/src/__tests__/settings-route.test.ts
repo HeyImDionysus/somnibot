@@ -129,6 +129,25 @@ describe('GET /api/settings', () => {
     });
   });
 
+  it('never exposes the retained legacy checkout secret row', async () => {
+    registerTable(mock, 'instance_settings').limit.mockResolvedValue({
+      data: [{
+        key: 'paypal_client_secret_v1_previous_encrypted',
+        value: 'somnibot-cloud-v1:encrypted-history',
+        section: 'paypal',
+      }],
+      error: null,
+    });
+    registerTable(mock, 'guild').single.mockResolvedValue({ data: null, error: null });
+
+    const res = await GET();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.values.paypal_client_secret_v1_previous_encrypted).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain('encrypted-history');
+  });
+
   it('fails closed when authoritative saved settings cannot be loaded', async () => {
     registerTable(mock, 'instance_settings').limit.mockResolvedValue({
       data: null,
@@ -209,6 +228,7 @@ describe('PUT /api/settings', () => {
       discordClientId: '444444444444444444',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
+      timeoutMs: 30_000,
     });
   });
 
@@ -229,6 +249,7 @@ describe('PUT /api/settings', () => {
       discordClientId: '111111111111111111',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
+      timeoutMs: 30_000,
     });
   });
 
@@ -295,6 +316,9 @@ describe('PUT /api/settings', () => {
   it('stores submitted secrets only as project-bound encrypted rows', async () => {
     vi.stubEnv('SUPABASE_URL', 'https://project.supabase.co');
     vi.stubEnv('SUPABASE_SECRET_KEY', 'service-role-test-key');
+    vi.mocked(getInstallationRuntimeSecret).mockImplementation(async (key) => (
+      key === 'paypal_client_secret' ? 'previous-paypal-secret' : 'management-access-token'
+    ));
     mock._query.upsert.mockResolvedValue({ error: null });
 
     const res = await putSettings({
@@ -306,7 +330,10 @@ describe('PUT /api/settings', () => {
     const rows = mock._query.upsert.mock.calls[0][0];
     expect(rows[0].key).toBe('paypal_client_secret_encrypted');
     expect(rows[0].value).toMatch(/^somnibot-cloud-v1:/);
+    expect(rows[1].key).toBe('paypal_client_secret_v1_previous_encrypted');
+    expect(rows[1].value).toMatch(/^somnibot-cloud-v1:/);
     expect(JSON.stringify(rows)).not.toContain('replacement-secret');
+    expect(JSON.stringify(rows)).not.toContain('previous-paypal-secret');
   });
 
   it('filters out masked values (••••) — does not overwrite secrets with mask', async () => {
@@ -418,6 +445,7 @@ describe('DELETE /api/settings', () => {
       discordClientId: '666666666666666666',
       discordClientSecret: 'environment-client-secret',
       forceCredentialUpdate: true,
+      timeoutMs: 30_000,
     });
     expect(settings.delete).toHaveBeenCalledTimes(1);
   });
@@ -441,6 +469,7 @@ describe('DELETE /api/settings', () => {
       discordClientId: '111111111111111111',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
+      timeoutMs: 30_000,
     });
   });
 
@@ -462,6 +491,7 @@ describe('DELETE /api/settings', () => {
       discordClientId: '111111111111111111',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
+      timeoutMs: 30_000,
     });
   });
 

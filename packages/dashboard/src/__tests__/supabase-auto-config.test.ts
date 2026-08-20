@@ -117,6 +117,27 @@ describe('Supabase Discord auth auto-config', () => {
     );
   });
 
+  it('does not patch credentials when the authoritative auth config read fails', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => 'temporarily unavailable',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider({
+      accessToken: 'management-token',
+      discordClientId: 'replacement-client-id',
+      discordClientSecret: 'replacement-client-secret',
+      forceCredentialUpdate: true,
+    });
+
+    expect(result).toEqual({ success: false, error: 'Supabase Management API error (503)' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+  });
+
   it('uses ephemeral submitted Discord credentials without a plaintext database fallback', async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
     delete process.env.DISCORD_APPLICATION_ID;

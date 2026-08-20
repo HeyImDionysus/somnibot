@@ -195,6 +195,10 @@ export async function readInstallationSettings(admin: AdminSupabase) {
       ? row.key.slice(0, -'_encrypted'.length)
       : null;
     if (
+      !ALLOWED_SETTING_KEYS.has(row.key)
+      && !(encryptedBaseKey && SECRET_FIELDS.has(encryptedBaseKey))
+    ) continue;
+    if (
       encryptedBaseKey
       && SECRET_FIELDS.has(encryptedBaseKey)
       && !BOOTSTRAP_ONLY_FIELDS.has(encryptedBaseKey)

@@ -10,9 +10,9 @@ const recoveryRoute = readFileSync(resolve(root, 'packages/dashboard/src/app/api
 
 describe('commerce free/gift rails', () => {
   it('uses bounded opaque PayPal custom ids for every checkout type', () => {
-    expect(payment).toContain('custom_id: `v1:${checkoutToken}.${checkoutSignature}`');
+    expect(payment).toContain('custom_id: `v2:${checkoutToken}.${checkoutSignature}`');
     expect(payment).not.toContain('custom_id: JSON.stringify');
-    expect(`v1:${'00000000-0000-4000-8000-000000000000'}.${'a'.repeat(64)}`.length).toBeLessThanOrEqual(127);
+    expect(`v2:${'00000000-0000-4000-8000-000000000000'}.${'a'.repeat(64)}`.length).toBeLessThanOrEqual(127);
   });
 
   it('routes free claims and explicit gift checkout buttons', () => {
@@ -20,8 +20,8 @@ describe('commerce free/gift rails', () => {
     expect(interaction).toContain("startsWith('store:gift:')");
     expect(interaction).toContain("startsWith('store:gift-buy:')");
     expect(interaction).toContain('handleFreeClaimButton');
-    expect(payment).toContain("interaction.customId.startsWith('store:gift-buy:')");
-    expect(payment).toContain("interaction.customId.split(':')[2]");
+    expect(payment).toContain('giftCheckoutToken?: string');
+    expect(interaction).toContain('dashboardUrl, checkoutToken)');
   });
 
   it('keeps free fulfillment out of the paid contract and rejects subscription gifts', () => {

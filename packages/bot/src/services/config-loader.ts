@@ -127,8 +127,7 @@ export async function loadConfigFromDatabase(): Promise<number> {
         log.info('instance_settings table not found — skipping');
         return 0;
       }
-      log.warn('Failed to read instance_settings:', error.message);
-      return 0;
+      throw new Error(`Failed to read authoritative instance_settings: ${error.message}`);
     }
 
     let loaded = 0;
@@ -160,8 +159,8 @@ export async function loadConfigFromDatabase(): Promise<number> {
 
     return loaded;
   } catch (err) {
-    log.warn('Error loading config from database (non-fatal):', { error: String(err) });
-    return 0;
+    log.error('Error loading authoritative config from database:', { error: String(err) });
+    throw err;
   }
 }
 

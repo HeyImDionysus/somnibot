@@ -354,13 +354,16 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     const callbackUrls = getRequiredCallbackUrls(options);
     const siteUrl = getDashboardBaseUrl();
     const current = await fetchAuthConfig(projectRef, accessToken, options);
-    const currentConfig = current.ok ? current.config : {};
-    const providerEnabled = current.ok && (
+    if (!current.ok) {
+      return { success: false, error: current.error };
+    }
+    const currentConfig = current.config;
+    const providerEnabled = (
       currentConfig.external_discord_enabled === true
       || currentConfig.EXTERNAL_DISCORD_ENABLED === true
     );
-    const allowListReady = current.ok && getMissingCallbackUrls(currentConfig, callbackUrls).length === 0;
-    const siteUrlReady = current.ok && isSiteUrlReady(currentConfig, siteUrl);
+    const allowListReady = getMissingCallbackUrls(currentConfig, callbackUrls).length === 0;
+    const siteUrlReady = isSiteUrlReady(currentConfig, siteUrl);
 
     if (providerEnabled && allowListReady && siteUrlReady && !options?.forceCredentialUpdate) {
       return { success: true, alreadyConfigured: true };
