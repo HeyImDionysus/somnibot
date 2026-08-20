@@ -149,6 +149,43 @@ describe('Supabase Discord auth auto-config', () => {
     expect(patchBody.external_discord_secret).toBe('submitted-client-secret');
   });
 
+  it('updates Discord provider credentials even when the provider is already enabled', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED = 'true';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          site_url: 'http://localhost:3000',
+          uri_allow_list: 'http://localhost:3000/api/auth/callback',
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          external_discord_enabled: true,
+          external_discord_client_id: 'replacement-client-id',
+          site_url: 'http://localhost:3000',
+          uri_allow_list: 'http://localhost:3000/api/auth/callback',
+        }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider({
+      accessToken: 'management-token',
+      discordClientId: 'replacement-client-id',
+      discordClientSecret: 'replacement-client-secret',
+      forceCredentialUpdate: true,
+    });
+
+    expect(result.success).toBe(true);
+    const body = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(body.external_discord_client_id).toBe('replacement-client-id');
+    expect(body.external_discord_secret).toBe('replacement-client-secret');
+  });
+
   it('uses the server Supabase URL project ref when public Supabase env is stale', async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://oldpublicproject.supabase.co';
     process.env.SUPABASE_URL = 'https://newserverproject.supabase.co';

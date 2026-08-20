@@ -60,7 +60,10 @@ function makeSupabase() {
 
     const resolve = () => {
       const resolver = resolvers[`${table}.${op.op}`] ?? resolvers[table];
-      return resolver ? resolver(op) : { data: null, error: null };
+      if (resolver) return resolver(op);
+      return table === 'instance_settings'
+        ? { data: [], error: null }
+        : { data: null, error: null };
     };
 
     const chain: Record<string, unknown> = {};

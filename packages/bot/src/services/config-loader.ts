@@ -1,11 +1,11 @@
 /**
  * Config loader with two-way instance_settings sync.
  *
- * 1. On boot: reads missing env vars from instance_settings (DB → process.env)
- * 2. After boot: writes current env vars back to instance_settings (process.env → DB)
+ * 1. On boot: reads saved overrides and missing fallbacks from instance_settings
+ * 2. After boot: records configured markers for deployment-owned secrets
  *
- * This keeps the dashboard Settings page in sync with the bot's actual config,
- * so operators can see connection statuses at a glance.
+ * Saved values are authoritative over deployment fallbacks. Supabase remains
+ * deployment-owned because it is required before this table can be queried.
  *
  * Bootstrap requirement: SUPABASE_URL + SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY)
  * must be in env vars (needed to connect to DB at all).
@@ -19,7 +19,7 @@ const log = createLogger('ConfigLoader');
 
 /**
  * Map of instance_settings keys → env var names.
- * Used for both directions: DB → env and env → DB.
+ * Used to load saved values into the runtime environment.
  */
 const SETTINGS_TO_ENV: Record<string, string> = {
   // Discord (collected by launcher)
@@ -63,8 +63,32 @@ const SECRET_KEYS = new Set([
   'valkey_url',
 ]);
 
+function normalizeSavedSetting(key: string, value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (key === 'paypal_sandbox') {
+    const normalized = trimmed.toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return 'true';
+    if (['false', '0', 'no', 'off'].includes(normalized)) return 'false';
+    log.warn('Ignored invalid saved PayPal sandbox mode; deployment fallback remains active');
+    return null;
+  }
+
+  if (key === 'lavalink_port') {
+    const port = Number(trimmed);
+    if (!/^\d+$/.test(trimmed) || port < 1 || port > 65_535) {
+      log.warn('Ignored invalid saved Lavalink port; deployment fallback remains active');
+      return null;
+    }
+    return String(port);
+  }
+
+  return trimmed;
+}
+
 /**
- * Load missing config values from instance_settings into process.env.
+ * Load saved config values from instance_settings into process.env.
  * Call this BEFORE loadConfig() in the boot sequence.
  *
  * Returns the number of values loaded from the database.
@@ -87,27 +111,14 @@ export async function loadConfigFromDatabase(): Promise<number> {
       auth: { autoRefreshToken: false, persistSession: false },
     });
 
-    // Determine which env vars are missing
-    const missingKeys: string[] = [];
-    for (const [settingsKey, envVar] of Object.entries(SETTINGS_TO_ENV)) {
-      // Secret values are runtime/launcher-owned. Configured markers may be
-      // displayed by the dashboard but raw database rows are never trusted as
-      // credentials, including legacy rows left by older releases.
-      if (!process.env[envVar]) {
-        missingKeys.push(SECRET_KEYS.has(settingsKey) ? encryptedCredentialSettingKey(settingsKey) : settingsKey);
-      }
-    }
+    const settingKeys = Object.keys(SETTINGS_TO_ENV).map((settingsKey) => (
+      SECRET_KEYS.has(settingsKey) ? encryptedCredentialSettingKey(settingsKey) : settingsKey
+    ));
 
-    if (missingKeys.length === 0) {
-      log.info('All config values present in env vars — no DB fallback needed');
-      return 0;
-    }
-
-    // Query only the missing keys from instance_settings
     const { data: settings, error } = await supabase
       .from('instance_settings')
-      .select('key, value')
-      .in('key', missingKeys)
+      .select('key, value, section')
+      .in('key', settingKeys)
       .limit(1000);
 
     if (error) {
@@ -128,9 +139,10 @@ export async function loadConfigFromDatabase(): Promise<number> {
         const envVar = SETTINGS_TO_ENV[baseKey];
         if (SECRET_KEYS.has(baseKey) && !encrypted) continue;
         if (row.value && envVar) {
-          const value = encrypted
+          const decryptedValue = encrypted
             ? decryptCloudCredential(row.value, baseKey, serviceKey, new URL(supabaseUrl).origin)
             : row.value;
+          const value = decryptedValue ? normalizeSavedSetting(baseKey, decryptedValue) : null;
           if (!value) continue;
           process.env[envVar] = value;
           loaded++;
@@ -176,10 +188,11 @@ const KEY_TO_SECTION: Record<string, string> = {
 };
 
 /**
- * Write current env vars back to instance_settings so the dashboard can display them.
+ * Record configured markers for deployment-owned secrets.
  *
  * Call this AFTER loadConfig() / loadConfigFromDatabase() — once all env vars are final.
- * Only writes values that are actually set; never overwrites with empty strings.
+ * Non-secret values are already visible to the dashboard from its environment.
+ * Writing them here would turn a deployment fallback into a persistent override.
  *
  * Returns the number of values synced to the database.
  */
@@ -205,22 +218,10 @@ export async function syncConfigToDatabase(): Promise<number> {
 
     for (const [settingsKey, envVar] of Object.entries(SETTINGS_TO_ENV)) {
       const value = process.env[envVar];
-      if (value) {
-        // V11 Audit C-1: Never write secret values to the database.
-        // Store a boolean flag so the dashboard can show "configured" status
-        // without exposing the actual credential.
-        if (SECRET_KEYS.has(settingsKey)) {
-          rows.push({
-            key: `${settingsKey}_configured`,
-            value: 'true',
-            section: KEY_TO_SECTION[settingsKey] ?? 'other',
-            updated_at: new Date().toISOString(),
-          });
-          continue;
-        }
+      if (value && SECRET_KEYS.has(settingsKey)) {
         rows.push({
-          key: settingsKey,
-          value,
+          key: `${settingsKey}_configured`,
+          value: 'true',
           section: KEY_TO_SECTION[settingsKey] ?? 'other',
           updated_at: new Date().toISOString(),
         });

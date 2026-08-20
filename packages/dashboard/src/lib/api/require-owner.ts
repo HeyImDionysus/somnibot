@@ -14,6 +14,7 @@ import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { resolveLauncherLocalAuth } from '@/lib/api/launcher-local-auth';
 import { auditDashboardAuthorizationDenial } from '@/lib/rbac-audit';
+import { verifiedDiscordId } from '@/lib/verified-discord-identity';
 
 export interface OwnerContext {
   userId: string;       // Supabase auth user ID
@@ -87,12 +88,10 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
     };
   }
 
-  // Step 2: Extract Discord ID from OAuth metadata
-  const meta = user.user_metadata;
-  const discordId =
-    (meta?.provider_id as string) ||
-    (meta?.sub as string) ||
-    null;
+  // Step 2: Extract Discord ID from the immutable provider identity. Supabase
+  // users may edit user_metadata themselves, so it is never authorization
+  // evidence.
+  const discordId = verifiedDiscordId(user);
 
   if (!discordId) {
     await auditOwnerDenial({ guildId: null, actorId: user.id, reason: 'missing_discord_identity', status: 401 });
@@ -199,11 +198,7 @@ export async function requireAuth(): Promise<
     };
   }
 
-  const meta = user.user_metadata;
-  const discordId =
-    (meta?.provider_id as string) ||
-    (meta?.sub as string) ||
-    null;
+  const discordId = verifiedDiscordId(user);
 
   return { ok: true, userId: user.id, discordId };
 }

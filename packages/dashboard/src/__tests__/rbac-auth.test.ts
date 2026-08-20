@@ -197,9 +197,13 @@ describe('requireGuildOwner — 401/403 responses', () => {
     }
   });
 
-  it('returns 401 when user has no Discord ID', async () => {
+  it('returns 401 when editable metadata claims a Discord ID without a provider identity', async () => {
     const mockServerSupabase = {
-      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: 'u1', user_metadata: {} } } }) },
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: 'u1', user_metadata: { provider_id: 'victim-discord-id' }, identities: [] } },
+        }),
+      },
     };
     (createServerSupabase as ReturnType<typeof vi.fn>).mockResolvedValue(mockServerSupabase);
 
@@ -216,7 +220,7 @@ describe('requireGuildOwner — 401/403 responses', () => {
     const mockServerSupabase = {
       auth: {
         getUser: vi.fn().mockResolvedValue({
-          data: { user: { id: 'u1', user_metadata: { provider_id: 'discord-123' } } },
+          data: { user: { id: 'u1', identities: [{ provider: 'discord', identity_data: { sub: 'discord-123' } }] } },
         }),
       },
     };
@@ -248,7 +252,7 @@ describe('requireGuildOwner — 401/403 responses', () => {
     const mockServerSupabase = {
       auth: {
         getUser: vi.fn().mockResolvedValue({
-          data: { user: { id: 'u1', user_metadata: { provider_id: 'discord-123' } } },
+          data: { user: { id: 'u1', identities: [{ provider: 'discord', identity_data: { sub: 'discord-123' } }] } },
         }),
       },
     };

@@ -508,12 +508,50 @@ export async function sweepProviderMoneyRecovery(
   return results;
 }
 
-function verifyCheckoutSignature(token: string, signature: string): boolean {
-  const secret = process.env.PAYPAL_RECONCILE_SECRET || process.env.PAYPAL_CLIENT_SECRET;
-  if (!secret || !/^[a-f0-9]{64}$/.test(signature)) return false;
-  const expected = Buffer.from(createHmac('sha256', secret).update(`somnibot-checkout:v1:${token}`).digest('hex'), 'utf8');
+type CheckoutSignatureVersion = 'v1' | 'v2';
+
+function matchesCheckoutSignature(
+  version: CheckoutSignatureVersion,
+  token: string,
+  signature: string,
+  secrets: Array<string | undefined>,
+): boolean {
   const provided = Buffer.from(signature, 'utf8');
-  return expected.length === provided.length && timingSafeEqual(expected, provided);
+  for (const secret of new Set(secrets.filter((candidate): candidate is string => Boolean(candidate)))) {
+    const expected = Buffer.from(
+      createHmac('sha256', secret).update(`somnibot-checkout:${version}:${token}`).digest('hex'),
+      'utf8',
+    );
+    if (expected.length === provided.length && timingSafeEqual(expected, provided)) return true;
+  }
+  return false;
+}
+
+async function verifyCheckoutSignature(
+  version: CheckoutSignatureVersion,
+  token: string,
+  signature: string,
+): Promise<boolean> {
+  if (!/^[a-f0-9]{64}$/.test(signature)) return false;
+  const reconcileSecret = process.env.PAYPAL_RECONCILE_SECRET?.trim();
+  if (version === 'v2') {
+    const stableSecret = reconcileSecret
+      || process.env.SUPABASE_SECRET_KEY?.trim()
+      || process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+    return matchesCheckoutSignature(version, token, signature, [stableSecret]);
+  }
+
+  if (matchesCheckoutSignature(version, token, signature, [
+    reconcileSecret,
+    process.env.PAYPAL_CLIENT_SECRET?.trim(),
+  ])) return true;
+
+  return matchesCheckoutSignature(
+    version,
+    token,
+    signature,
+    [(await getPayPalRuntimeConfig()).clientSecret],
+  );
 }
 
 function parseDeliveryTypeSnapshot(value: unknown): DeliveryType | null {
@@ -1745,12 +1783,14 @@ export async function handlePaymentCaptured(
   let observedGuildId: string | null = null;
   let checkoutToken: string | null = null;
   let checkoutSignature: string | null = null;
+  let checkoutSignatureVersion: CheckoutSignatureVersion | null = null;
 
   if (customId) {
-    const signed = customId.match(/^v1:([0-9a-f-]{36})\.([a-f0-9]{64})$/i);
+    const signed = customId.match(/^(v1|v2):([0-9a-f-]{36})\.([a-f0-9]{64})$/i);
     if (signed) {
-      checkoutToken = signed[1]!;
-      checkoutSignature = signed[2]!;
+      checkoutSignatureVersion = signed[1]!.toLowerCase() as CheckoutSignatureVersion;
+      checkoutToken = signed[2]!;
+      checkoutSignature = signed[3]!;
     } else try {
       const raw = JSON.parse(customId) as unknown;
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -1821,7 +1861,11 @@ export async function handlePaymentCaptured(
   }
 
   if (checkoutToken) {
-    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+    if (
+      !checkoutSignatureVersion
+      || !checkoutSignature
+      || !(await verifyCheckoutSignature(checkoutSignatureVersion, checkoutToken, checkoutSignature))
+    ) {
       await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId, parentId: paypalOrderId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
       return;
     }
@@ -2287,11 +2331,15 @@ export async function handleSubscriptionActivated(
   let observedGuildId: string | null = null;
   let checkoutToken: string | null = null;
   let checkoutSignature: string | null = null;
+  let checkoutSignatureVersion: CheckoutSignatureVersion | null = null;
   try {
-    const signed = typeof customId === 'string' ? customId.match(/^v1:([0-9a-f-]{36})\.([a-f0-9]{64})$/i) : null;
+    const signed = typeof customId === 'string'
+      ? customId.match(/^(v1|v2):([0-9a-f-]{36})\.([a-f0-9]{64})$/i)
+      : null;
     if (signed) {
-      checkoutToken = signed[1]!;
-      checkoutSignature = signed[2]!;
+      checkoutSignatureVersion = signed[1]!.toLowerCase() as CheckoutSignatureVersion;
+      checkoutToken = signed[2]!;
+      checkoutSignature = signed[3]!;
     }
     const raw = checkoutToken ? null : JSON.parse(customId ?? '') as unknown;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -2338,7 +2386,11 @@ export async function handleSubscriptionActivated(
   }
 
   if (checkoutToken) {
-    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+    if (
+      !checkoutSignatureVersion
+      || !checkoutSignature
+      || !(await verifyCheckoutSignature(checkoutSignatureVersion, checkoutToken, checkoutSignature))
+    ) {
       await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'BILLING.SUBSCRIPTION.ACTIVATED', resourceId: subscriptionId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
       return;
     }

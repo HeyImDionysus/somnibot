@@ -114,7 +114,7 @@ describe('dashboard authorization denial auditing', () => {
     mockCreateServer.mockResolvedValue({
       auth: {
         getUser: async () => ({
-          data: { user: { id: 'user-1', user_metadata: { provider_id: 'member-1' } } },
+          data: { user: { id: 'user-1', identities: [{ provider: 'discord', identity_data: { sub: 'member-1' } }] } },
         }),
       },
     });
