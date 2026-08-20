@@ -36,9 +36,11 @@ import { invalidateBrandKitCache } from '../features/branding/brand-kit.js';
 // uses; otherwise the handler correctly stops at "signing unavailable".
 beforeEach(() => {
   process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret';
+  process.env['PAYPAL_RECONCILE_SECRET'] = 'test-signing-secret';
 });
 afterEach(() => {
   delete process.env.PAYPAL_CLIENT_SECRET;
+  delete process.env.PAYPAL_RECONCILE_SECRET;
 });
 
 function makeChain(data: any = null) {
@@ -688,7 +690,7 @@ describe('handleBuyButton — cross-guild plan injection (subscription checkout)
     // PayPal now receives only the opaque signed checkout handle; plan/guild
     // identity stays in the service-role ledger.  The selected plan is proven
     // by the provider plan id and the atomic order snapshot below.
-    expect(payload.custom_id).toMatch(/^v1:[^.]+\.[^.]+$/);
+    expect(payload.custom_id).toMatch(/^v2:[^.]+\.[^.]+$/);
 
     // The pending order must reference the guild-owned plan too.
     expect(inserts.orders).toHaveLength(1);

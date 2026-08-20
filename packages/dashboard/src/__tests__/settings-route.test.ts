@@ -53,12 +53,16 @@ beforeEach(() => {
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
   vi.mocked(isSoleInstanceOperator).mockResolvedValue(true);
   vi.mocked(getDiscordOAuthRuntimeConfig).mockResolvedValue({
-    applicationId: 'existing-application-id',
+    applicationId: '111111111111111111',
     clientSecret: 'existing-client-secret',
     sources: { applicationId: 'saved', clientSecret: 'saved' },
   });
   vi.mocked(getInstallationRuntimeSecret).mockResolvedValue('management-access-token');
   vi.mocked(ensureDiscordAuthProvider).mockResolvedValue({ success: true });
+  mock.rpc.mockImplementation(async (name: string) => ({
+    data: name === 'claim_instance_settings_write_lease' || name === 'release_instance_settings_write_lease',
+    error: null,
+  }));
 });
 
 function putSettings(body: unknown) {
@@ -71,10 +75,10 @@ function resetSettings(body: unknown) {
 
 describe('GET /api/settings', () => {
   it('returns a saved connection value as the authoritative override while retaining the env fallback', async () => {
-    vi.stubEnv('DISCORD_APPLICATION_ID', 'env-application-id');
+    vi.stubEnv('DISCORD_APPLICATION_ID', '222222222222222222');
     const settings = registerTable(mock, 'instance_settings');
     settings.limit.mockResolvedValue({
-      data: [{ key: 'discord_application_id', value: 'saved-application-id', section: 'discord' }],
+      data: [{ key: 'discord_application_id', value: '333333333333333333', section: 'discord' }],
       error: null,
     });
     registerTable(mock, 'guild').single.mockResolvedValue({ data: null, error: null });
@@ -83,7 +87,7 @@ describe('GET /api/settings', () => {
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({
-      values: { discord_application_id: 'saved-application-id' },
+      values: { discord_application_id: '333333333333333333' },
       sources: { discord_application_id: 'db' },
       environmentFallbacks: { discord_application_id: true },
     });
@@ -123,6 +127,21 @@ describe('GET /api/settings', () => {
       sources: { discord_bot_token: 'db' },
       environmentFallbacks: { discord_bot_token: true },
     });
+  });
+
+  it('fails closed when authoritative saved settings cannot be loaded', async () => {
+    registerTable(mock, 'instance_settings').limit.mockResolvedValue({
+      data: null,
+      error: { message: 'read failed' },
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await GET();
+
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toMatchObject({ error: expect.any(String) });
+    expect(registerTable(mock, 'guild').single).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
 
@@ -170,7 +189,7 @@ describe('PUT /api/settings', () => {
       section: 'discord',
       values: {
         discord_guild_id: '111222333',
-        discord_application_id: '444555666',
+        discord_application_id: '444444444444444444',
       },
     });
 
@@ -184,10 +203,10 @@ describe('PUT /api/settings', () => {
     const upsertArg = mock._query.upsert.mock.calls[0][0];
     expect(upsertArg).toHaveLength(2);
     expect(upsertArg[0]).toMatchObject({ key: 'discord_guild_id', value: '111222333', section: 'discord' });
-    expect(upsertArg[1]).toMatchObject({ key: 'discord_application_id', value: '444555666', section: 'discord' });
+    expect(upsertArg[1]).toMatchObject({ key: 'discord_application_id', value: '444444444444444444', section: 'discord' });
     expect(ensureDiscordAuthProvider).toHaveBeenCalledWith({
       accessToken: 'management-access-token',
-      discordClientId: '444555666',
+      discordClientId: '444444444444444444',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
     });
@@ -200,14 +219,14 @@ describe('PUT /api/settings', () => {
 
     const res = await putSettings({
       section: 'discord',
-      values: { discord_application_id: 'replacement-application-id' },
+      values: { discord_application_id: '555555555555555555' },
     });
 
     expect(res.status).toBe(409);
     expect(mock._query.upsert).not.toHaveBeenCalled();
     expect(ensureDiscordAuthProvider).toHaveBeenNthCalledWith(2, {
       accessToken: 'management-access-token',
-      discordClientId: 'existing-application-id',
+      discordClientId: '111111111111111111',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
     });
@@ -226,6 +245,33 @@ describe('PUT /api/settings', () => {
     expect(invalidPort.status).toBe(400);
   });
 
+  it('rejects a malformed Discord application ID before touching Supabase Auth', async () => {
+    const res = await putSettings({
+      section: 'discord',
+      values: { discord_application_id: 'not-a-discord-id' },
+    });
+
+    expect(res.status).toBe(400);
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
+
+  it('returns a conflict while another Discord settings write owns the lease', async () => {
+    mock.rpc.mockImplementation(async (name: string) => ({
+      data: name === 'release_instance_settings_write_lease',
+      error: null,
+    }));
+
+    const res = await putSettings({
+      section: 'discord',
+      values: { discord_application_id: '555555555555555555' },
+    });
+
+    expect(res.status).toBe(409);
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
+
   it('rejects launcher-only or unknown secret keys instead of writing them as plaintext', async () => {
     const res = await putSettings({
       section: 'deployment',
@@ -239,7 +285,7 @@ describe('PUT /api/settings', () => {
   it('rejects a valid setting submitted under the wrong section', async () => {
     const res = await putSettings({
       section: 'paypal',
-      values: { discord_application_id: '444555666' },
+      values: { discord_application_id: '444444444444444444' },
     });
 
     expect(res.status).toBe(400);
@@ -356,7 +402,7 @@ describe('DELETE /api/settings', () => {
   });
 
   it('updates and verifies Supabase Auth with deployment defaults before removing saved Discord OAuth settings', async () => {
-    vi.stubEnv('DISCORD_APPLICATION_ID', 'environment-application-id');
+    vi.stubEnv('DISCORD_APPLICATION_ID', '666666666666666666');
     vi.stubEnv('DISCORD_CLIENT_SECRET', 'environment-client-secret');
     const settings = registerTable(mock, 'instance_settings');
     settings.in.mockResolvedValue({ error: null });
@@ -369,7 +415,7 @@ describe('DELETE /api/settings', () => {
     expect(res.status).toBe(200);
     expect(ensureDiscordAuthProvider).toHaveBeenCalledWith({
       accessToken: 'management-access-token',
-      discordClientId: 'environment-application-id',
+      discordClientId: '666666666666666666',
       discordClientSecret: 'environment-client-secret',
       forceCredentialUpdate: true,
     });
@@ -377,7 +423,7 @@ describe('DELETE /api/settings', () => {
   });
 
   it('rolls Supabase Auth back and retains saved settings when reset verification fails', async () => {
-    vi.stubEnv('DISCORD_APPLICATION_ID', 'environment-application-id');
+    vi.stubEnv('DISCORD_APPLICATION_ID', '666666666666666666');
     vi.stubEnv('DISCORD_CLIENT_SECRET', 'environment-client-secret');
     vi.mocked(ensureDiscordAuthProvider)
       .mockResolvedValueOnce({ success: false, error: 'verification mismatch' })
@@ -392,14 +438,14 @@ describe('DELETE /api/settings', () => {
     expect(mock._query.delete).not.toHaveBeenCalled();
     expect(ensureDiscordAuthProvider).toHaveBeenNthCalledWith(2, {
       accessToken: 'management-access-token',
-      discordClientId: 'existing-application-id',
+      discordClientId: '111111111111111111',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
     });
   });
 
   it('rolls Supabase Auth back when saved-setting deletion fails', async () => {
-    vi.stubEnv('DISCORD_APPLICATION_ID', 'environment-application-id');
+    vi.stubEnv('DISCORD_APPLICATION_ID', '666666666666666666');
     vi.stubEnv('DISCORD_CLIENT_SECRET', 'environment-client-secret');
     registerTable(mock, 'instance_settings').in.mockResolvedValue({
       error: { message: 'delete failed' },
@@ -413,7 +459,7 @@ describe('DELETE /api/settings', () => {
     expect(res.status).toBe(500);
     expect(ensureDiscordAuthProvider).toHaveBeenNthCalledWith(2, {
       accessToken: 'management-access-token',
-      discordClientId: 'existing-application-id',
+      discordClientId: '111111111111111111',
       discordClientSecret: 'existing-client-secret',
       forceCredentialUpdate: true,
     });

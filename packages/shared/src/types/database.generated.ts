@@ -2560,6 +2560,13 @@ export interface DbLevelRewardDeliveries {
   completed_at: string | null;
 }
 
+export interface DbInstanceSettingsWriteLeases {
+  scope: string;
+  operation_id: string;
+  leased_until: string;
+  updated_at: string;
+}
+
 export interface DbLevelUnlockConfigs {
   guild_id: string;
   feature_key: string;

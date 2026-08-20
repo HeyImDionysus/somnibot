@@ -125,8 +125,15 @@ function paypalFetch(mode: 'subscription' | 'one-time', fail?: 'timeout') {
   });
 }
 
-beforeEach(() => { process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret'; });
-afterEach(() => { delete process.env.PAYPAL_CLIENT_SECRET; vi.restoreAllMocks(); });
+beforeEach(() => {
+  process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret';
+  process.env['PAYPAL_RECONCILE_SECRET'] = 'test-signing-secret';
+});
+afterEach(() => {
+  delete process.env.PAYPAL_CLIENT_SECRET;
+  delete process.env.PAYPAL_RECONCILE_SECRET;
+  vi.restoreAllMocks();
+});
 
 describe('payment checkout durability regressions', () => {
   it('ships an atomic gift-checkout expiry cleanup RPC that never reopens captured rows', () => {

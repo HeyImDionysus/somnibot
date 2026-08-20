@@ -163,8 +163,10 @@ const CHECKOUT_DELIVERY_TYPES = new Set([
 ]);
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 function signCheckoutToken(token: string): string | null {
-  const secret = process.env.PAYPAL_RECONCILE_SECRET || process.env.PAYPAL_CLIENT_SECRET;
-  return secret ? createHmac('sha256', secret).update(`somnibot-checkout:v1:${token}`).digest('hex') : null;
+  const secret = process.env.PAYPAL_RECONCILE_SECRET?.trim()
+    || process.env.SUPABASE_SECRET_KEY?.trim()
+    || process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  return secret ? createHmac('sha256', secret).update(`somnibot-checkout:v2:${token}`).digest('hex') : null;
 }
 
 /** Claim a free product through the dedicated idempotent $0 RPC. */
@@ -1609,7 +1611,7 @@ export async function handleBuyButton(
             value: price,
           },
           description: product.name,
-          custom_id: `v1:${checkoutToken}.${checkoutSignature}`,
+          custom_id: `v2:${checkoutToken}.${checkoutSignature}`,
         },
       ],
       application_context: {
@@ -1894,7 +1896,7 @@ export async function handleBuyButton(
     // Create PayPal subscription
     const subPayload = {
       plan_id: plan.paypal_plan_id,
-      custom_id: `v1:${checkoutToken}.${checkoutSignature}`,
+      custom_id: `v2:${checkoutToken}.${checkoutSignature}`,
       application_context: {
         brand_name: brandName,
         locale: 'en-US',
