@@ -55,11 +55,11 @@ CREATE TABLE IF NOT EXISTS public.level_reward_deliveries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT NOT NULL REFERENCES public.guild(id) ON DELETE CASCADE,
   member_id TEXT NOT NULL CHECK (member_id ~ '^[0-9]{17,20}$'),
-  reward_id UUID NOT NULL REFERENCES public.level_rewards(id) ON DELETE CASCADE,
+  reward_id UUID NOT NULL REFERENCES public.level_rewards(id) ON DELETE RESTRICT,
   delivery_kind TEXT NOT NULL CHECK (delivery_kind IN ('award', 'expiry')),
   reached_level INTEGER NOT NULL CHECK (reached_level BETWEEN 1 AND 1000000),
   status TEXT NOT NULL CHECK (status IN ('queued', 'completed')),
-  action_id UUID REFERENCES public.bot_action_queue(id) ON DELETE SET NULL,
+  action_id UUID REFERENCES public.bot_action_queue(id) ON DELETE RESTRICT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ,
   UNIQUE (guild_id, member_id, reward_id, delivery_kind)
