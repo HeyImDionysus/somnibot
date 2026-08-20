@@ -103,6 +103,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  const restored = await supa.from('license_keys').update({ status: 'active' }).eq('id', licenseKeyId);
+  if (restored.error) throw new Error(`Licence-key reset failed: ${restored.error.message}`);
   const cleared = await supa.from('license_sessions').delete().eq('license_key_id', licenseKeyId);
   if (cleared.error) throw new Error(`Session cleanup failed: ${cleared.error.message}`);
 });
@@ -159,6 +161,20 @@ async function validateDevice(
   });
 }
 
+async function validatePendingDevice(fingerprint: string) {
+  return supa.rpc('license_validate_device_atomic', {
+    p_license_key_id: licenseKeyId,
+    p_product_id: productId,
+    p_activate_pending: true,
+    p_device_fingerprint: fingerprint,
+    p_device_name: `${fingerprint}-new-name`,
+    p_app_version: '2.0.0',
+    p_ip_address: '203.0.113.99',
+    p_max_devices: 3,
+    p_device_policy: 'reject',
+  });
+}
+
 async function deactivateDevice(sessionId: string, client: SupabaseClient = supa) {
   return client.rpc('license_deactivate_device', {
     p_license_key_id: licenseKeyId,
@@ -176,6 +192,95 @@ async function sessionSnapshot() {
 }
 
 describe('license_validate_device session reuse', () => {
+  it('activates a pending key in the same transaction that grants its first session', async () => {
+    const pending = await supa.from('license_keys')
+      .update({ status: 'pending_activation', activated_at: null })
+      .eq('id', licenseKeyId);
+    expect(pending.error).toBeNull();
+
+    const result = await validatePendingDevice('first-project-device');
+
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'created',
+      activated: true,
+      active_devices: 1,
+      session_id: expect.any(String),
+    });
+    const key = await supa.from('license_keys').select('status,activated_at').eq('id', licenseKeyId).single();
+    expect(key.error).toBeNull();
+    expect(key.data).toMatchObject({ status: 'active', activated_at: expect.any(String) });
+    expect(await sessionSnapshot()).toEqual([
+      expect.objectContaining({
+        id: result.data.session_id,
+        device_fingerprint: 'first-project-device',
+        active: true,
+      }),
+    ]);
+  });
+
+  it('repairs a pending key that already has an active matching session', async () => {
+    const sessionId = await seedSession('existing-first-project-device');
+    await sql.begin(async (tx) => {
+      await tx`SET LOCAL session_replication_role = replica`;
+      await tx`
+        UPDATE public.license_keys
+           SET status = 'pending_activation', activated_at = NULL
+         WHERE id = ${licenseKeyId}::UUID
+      `;
+    });
+
+    const result = await validatePendingDevice('existing-first-project-device');
+
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'existing',
+      activated: true,
+      active_devices: 1,
+      session_id: sessionId,
+    });
+    const key = await supa.from('license_keys').select('status,activated_at').eq('id', licenseKeyId).single();
+    expect(key.error).toBeNull();
+    expect(key.data).toMatchObject({ status: 'active', activated_at: expect.any(String) });
+    expect(await sessionSnapshot()).toEqual([
+      expect.objectContaining({
+        id: sessionId,
+        device_fingerprint: 'existing-first-project-device',
+        active: true,
+      }),
+    ]);
+  });
+
+  it('leaves a pending key unchanged when its device is administrator-revoked', async () => {
+    const sessionId = await seedSession('revoked-first-project-device', {
+      active: false,
+      reason: 'admin_revoked',
+    });
+    const pending = await supa.from('license_keys')
+      .update({ status: 'pending_activation', activated_at: null })
+      .eq('id', licenseKeyId);
+    expect(pending.error).toBeNull();
+
+    const result = await validatePendingDevice('revoked-first-project-device');
+
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'session_invalidated',
+      activated: false,
+      session_id: null,
+    });
+    const key = await supa.from('license_keys').select('status,activated_at').eq('id', licenseKeyId).single();
+    expect(key.error).toBeNull();
+    expect(key.data).toEqual({ status: 'pending_activation', activated_at: null });
+    expect(await sessionSnapshot()).toEqual([
+      expect.objectContaining({
+        id: sessionId,
+        active: false,
+        deactivation_reason: 'admin_revoked',
+      }),
+    ]);
+  });
+
   it.each(POLICIES)(
     'preserves an administrator-revoked fingerprint under the %s policy without evicting another seat',
     async (policy) => {
