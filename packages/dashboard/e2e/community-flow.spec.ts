@@ -490,11 +490,13 @@ test.describe('Community self-service browser flow', () => {
     await page.goto('/onboarding');
     await page.getByRole('combobox', { name: 'Default channels' }).click();
     await page.getByText('#welcome', { exact: true }).click();
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Roles granted' }).click();
     await expect(page.getByText('Member', { exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
     await page.getByRole('combobox', { name: 'Channels added' }).click();
     await page.getByText('#welcome', { exact: true }).click();
+    await page.keyboard.press('Escape');
     await page.getByRole('checkbox', { name: 'Skip welcome DM for returning members' }).uncheck();
     await page.getByRole('button', { name: 'Save Changes' }).click();
 

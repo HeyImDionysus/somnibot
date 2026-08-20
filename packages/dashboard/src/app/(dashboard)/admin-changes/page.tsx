@@ -109,13 +109,16 @@ export default function AdminChangesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'undo', id: confirmUndo.id }),
       });
-      await requireApiSuccess(res, 'Could not undo this change. The recorded state is unchanged.');
+      const result = await requireApiSuccess(res, 'Could not undo this change. The recorded state is unchanged.');
       const nextChanges = await load();
       requireReadback(
         nextChanges?.some((change) => change.id === confirmUndo.id && change.is_undone && !change.is_undoable) === true,
         'The undo was accepted, but the targeted change still has its previous state in the authoritative readback. Keep this dialog open and reload before retrying.',
       );
-      toast({ title: 'Change undone', variant: 'success' });
+      const warning = typeof result.warning === 'string' ? result.warning : null;
+      toast(warning
+        ? { title: 'Change undone with a synchronization warning', description: warning, variant: 'warning' }
+        : { title: 'Change undone', variant: 'success' });
       setConfirmUndo(null);
     } catch (undoError) {
       const message = undoError instanceof Error ? undoError.message : 'Could not undo this change. The recorded state is unchanged.';

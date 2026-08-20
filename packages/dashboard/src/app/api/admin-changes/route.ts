@@ -152,25 +152,24 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      const isOnboardingUndo = change.action === 'onboarding.updated' && validation.table === 'guild_config';
+      const pendingState = isOnboardingUndo ? {
+        status: 'pending',
+        managed: true,
+        request_id: crypto.randomUUID(),
+        requested_at: new Date().toISOString(),
+      } : null;
+      const undoData = pendingState
+        ? { ...validation.data, onboarding_sync_state: pendingState }
+        : validation.data;
       const { error: undoError } = await admin
         .from(validation.table)
-        .update(validation.data)
+        .update(undoData)
         .match(validation.match);
 
       if (undoError) return dbError(undoError, 'admin-changes');
 
-      if (change.action === 'onboarding.updated' && validation.table === 'guild_config') {
-        const pendingState = {
-          status: 'pending',
-          request_id: crypto.randomUUID(),
-          requested_at: new Date().toISOString(),
-        };
-        const { error: receiptError } = await admin
-          .from('guild_config')
-          .update({ onboarding_sync_state: pendingState })
-          .eq('guild_id', ctx.guildId);
-        if (receiptError) return dbError(receiptError, 'admin-changes');
-
+      if (pendingState) {
         const queued = await notifyBotForGuildWithResult(ctx.guildId, 'onboarding', validation.data);
         if (queued) {
           onboardingSync = pendingState;
@@ -237,6 +236,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       data: { undone: change, undoRecord, ...(onboardingSync ? { onboardingSync } : {}) },
+      ...(onboardingSync?.status === 'failed'
+        ? { warning: 'Change undone, but Discord synchronization could not be queued.' }
+        : {}),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

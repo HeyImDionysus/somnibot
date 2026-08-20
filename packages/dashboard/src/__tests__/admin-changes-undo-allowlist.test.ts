@@ -874,12 +874,47 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
     const json = await res.json();
 
     expect(res.status).toBe(200);
-    expect(targetUpdate).toHaveBeenCalledWith({ onboarding_enabled: false });
-    expect(targetUpdate).toHaveBeenCalledWith({
-      onboarding_sync_state: expect.objectContaining({ status: 'pending', request_id: expect.any(String) }),
-    });
+    expect(targetUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      onboarding_enabled: false,
+      onboarding_sync_state: expect.objectContaining({
+        status: 'pending',
+        managed: true,
+        request_id: expect.any(String),
+      }),
+    }));
     expect(mockNotifyBot).toHaveBeenCalledWith('guild-1', 'onboarding', { onboarding_enabled: false });
     expect(json.data.onboardingSync).toEqual(expect.objectContaining({ status: 'pending' }));
+  });
+
+  it('returns an explicit warning when onboarding undo cannot notify the bot', async () => {
+    okAuth('guild-1', 'admin-42');
+    mockNotifyBot.mockResolvedValue(false);
+    wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: { onboarding_enabled: true },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+
+    const res = await POST(buildRequest(validUndoBody));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(json.warning).toBe('Change undone, but Discord synchronization could not be queued.');
+    expect(json.data.onboardingSync).toEqual(expect.objectContaining({ status: 'failed' }));
   });
 
   it('is a no-op (no target write) when undo_payload is null but still marks undone', async () => {

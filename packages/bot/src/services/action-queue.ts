@@ -1307,14 +1307,18 @@ async function handleConfigReload(
       ? payload.occurrence_id
       : undefined;
 
-  // Emit config.changed so the bot reloads
-  eventBus.emit('config.changed', guild.id, {
+  const configEvent = {
     section: section ?? 'unknown',
     changes: changes ?? {},
     changedBy: changedBy ?? 'dashboard',
     ...(beforeValues ? { before: beforeValues } : {}),
     ...(occurrenceId ? { occurrenceId } : {}),
-  });
+  };
+  if (section === 'onboarding') {
+    await eventBus.emitAndWait('config.changed', guild.id, configEvent);
+  } else {
+    eventBus.emit('config.changed', guild.id, configEvent);
+  }
 
   // If the dashboard attached an audit event, emit it on the event bus
   // so AuditService can log automation/webhook CRUD operations (Finding #4).

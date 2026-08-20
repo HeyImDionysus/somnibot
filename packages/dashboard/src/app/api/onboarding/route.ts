@@ -48,7 +48,7 @@ export async function PUT(req: NextRequest) {
   const body = parsed.data;
 
   // Whitelist allowed fields
-  const allowed = typedPick(body, [
+  const picked = typedPick(body, [
     'member_role_id',
     'onboarding_enabled',
     'interest_role_mapping',
@@ -59,10 +59,17 @@ export async function PUT(req: NextRequest) {
     'fallback_mode',
     'fallback_timeout_minutes',
   ]);
+  const allowed = {
+    ...picked,
+    onboarding_config: picked.onboarding_config
+      ? { ...picked.onboarding_config, enabled: picked.onboarding_enabled }
+      : null,
+  };
 
   const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));
   const syncState = {
     status: 'pending',
+    managed: true,
     request_id: crypto.randomUUID(),
     requested_at: new Date().toISOString(),
   };

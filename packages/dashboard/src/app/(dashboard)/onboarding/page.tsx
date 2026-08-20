@@ -182,7 +182,7 @@ export default function OnboardingPage() {
 
       const timeoutMessage = 'Settings were saved, but Discord did not confirm synchronization within 15 seconds.';
       const timeoutState: OnboardingSyncState = {
-        status: 'failed',
+        status: 'pending',
         request_id: requestId,
         error: timeoutMessage,
       };

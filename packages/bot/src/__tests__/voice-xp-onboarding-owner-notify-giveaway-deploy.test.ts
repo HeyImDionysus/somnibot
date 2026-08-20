@@ -265,7 +265,7 @@ describe('GuildOnboardingSync', () => {
               single_select: false,
               options: [
                 { title: 'Gaming', role_ids: ['r1'], emoji: '🎮' },
-                { title: 'Art', channel_ids: ['ch1'] },
+                { title: 'Art', channel_ids: ['ch1'], emoji: '<:palette:123456789012345678>' },
               ],
             },
           ],
@@ -288,7 +288,7 @@ describe('GuildOnboardingSync', () => {
             roles: new Collection([['r1', { id: 'r1' }]]), channels: new Collection(),
           }],
           ['option2', {
-            title: 'Art', description: null, emoji: null,
+            title: 'Art', description: null, emoji: { identifier: 'palette:123456789012345678' },
             roles: new Collection(), channels: new Collection([['ch1', { id: 'ch1' }]]),
           }],
         ]),
@@ -307,7 +307,7 @@ describe('GuildOnboardingSync', () => {
         singleSelect: false,
         options: [
           { title: 'Gaming', description: null, emoji: '🎮', roles: ['r1'], channels: [] },
-          { title: 'Art', description: null, emoji: undefined, roles: [], channels: ['ch1'] },
+          { title: 'Art', description: null, emoji: 'palette:123456789012345678', roles: [], channels: ['ch1'] },
         ],
       }],
       defaultChannels: ['ch1'],
@@ -361,14 +361,17 @@ describe('GuildOnboardingSync', () => {
 
   it('reports a configuration read failure without touching Discord', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const rpc = vi.fn(async () => ({ data: null, error: null }));
     const supa = {
       from: vi.fn(() => chain(null, { message: 'database unavailable' })),
+      rpc,
     } as unknown as SupabaseClient;
     const g = guild();
     g.editOnboarding = vi.fn();
     const eventBus = eb();
 
-    await new GuildOnboardingSync(g, supa, eventBus).syncOnboarding();
+    await expect(new GuildOnboardingSync(g, supa, eventBus).syncOnboarding())
+      .rejects.toThrow('Onboarding configuration read failed: database unavailable');
 
     expect(g.fetchOnboarding).not.toHaveBeenCalled();
     expect(g.editOnboarding).not.toHaveBeenCalled();
@@ -376,16 +379,28 @@ describe('GuildOnboardingSync', () => {
       stage: 'discord-native-onboarding',
       error: 'Onboarding configuration read failed: database unavailable',
     });
+    expect(rpc).toHaveBeenCalledWith('fail_pending_onboarding_sync', {
+      p_guild_id: 'g1',
+      p_error: 'Onboarding configuration read failed: database unavailable',
+    });
   });
 
   it('adopts live onboarding on first startup without mutating legacy defaults', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
-    const db = chain({
+    const config = {
       onboarding_enabled: true,
       onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
-      onboarding_sync_state: { status: 'idle' },
-    });
-    const supa = { from: vi.fn(() => db) } as unknown as SupabaseClient;
+    };
+    const firstRead = chain({ ...config, onboarding_sync_state: { status: 'idle' } });
+    const firstWrite = chain({ guild_id: 'g1' });
+    const secondRead = chain({ ...config, onboarding_sync_state: { status: 'drifted', managed: false } });
+    const secondWrite = chain({ guild_id: 'g1' });
+    const queries = [firstRead, firstWrite, secondRead, secondWrite];
+    const supa = { from: vi.fn(() => {
+      const query = queries.shift();
+      if (!query) throw new Error('Unexpected database query');
+      return query;
+    }) } as unknown as SupabaseClient;
     const g = guild();
     g.editOnboarding = vi.fn();
     g.fetchOnboarding.mockResolvedValueOnce({
@@ -394,14 +409,20 @@ describe('GuildOnboardingSync', () => {
       defaultChannels: new Collection([['legacy', { id: 'legacy' }]]),
     });
 
-    await new GuildOnboardingSync(g, supa, eb()).syncOnboarding();
+    const sync = new GuildOnboardingSync(g, supa, eb());
+    await sync.syncOnboarding();
+    await sync.syncOnboarding();
 
     expect(g.editOnboarding).not.toHaveBeenCalled();
-    expect(db.update).toHaveBeenCalledWith({
+    expect(firstWrite.update).toHaveBeenCalledWith({
       onboarding_sync_state: expect.objectContaining({
         status: 'drifted',
+        managed: false,
         live_config: expect.objectContaining({ default_channel_ids: ['legacy'] }),
       }),
+    });
+    expect(secondWrite.update).toHaveBeenCalledWith({
+      onboarding_sync_state: expect.objectContaining({ managed: false }),
     });
   });
 

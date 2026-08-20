@@ -42,6 +42,7 @@ type OnboardingSyncStatus = 'idle' | 'pending' | 'synced' | 'drifted' | 'failed'
 
 interface OnboardingSyncState {
   status: OnboardingSyncStatus;
+  managed?: boolean;
   request_id?: string;
   requested_at?: string;
   observed_at?: string;
@@ -60,6 +61,7 @@ function readSyncState(value: unknown): OnboardingSyncState {
   }
   return {
     status: status as OnboardingSyncStatus,
+    ...(typeof state.managed === 'boolean' ? { managed: state.managed } : {}),
     ...(typeof state.request_id === 'string' ? { request_id: state.request_id } : {}),
     ...(typeof state.requested_at === 'string' ? { requested_at: state.requested_at } : {}),
   };
@@ -77,7 +79,7 @@ function serializeOnboarding(onboarding: GuildOnboarding): OnboardingConfig {
       options: [...prompt.options.values()].map((option) => ({
         title: option.title,
         ...(option.description ? { description: option.description } : {}),
-        ...(option.emoji ? { emoji: decodeEmojiIdentifier(option.emoji.identifier) } : {}),
+        ...(option.emoji ? { emoji: normalizeEmojiIdentifier(option.emoji.identifier) } : {}),
         role_ids: [...option.roles.keys()].sort(),
         channel_ids: [...option.channels.keys()].sort(),
       })),
@@ -85,12 +87,16 @@ function serializeOnboarding(onboarding: GuildOnboarding): OnboardingConfig {
   };
 }
 
-function decodeEmojiIdentifier(identifier: string): string {
+function normalizeEmojiIdentifier(identifier: string): string {
+  let decoded = identifier;
   try {
-    return decodeURIComponent(identifier);
+    decoded = decodeURIComponent(identifier);
   } catch {
-    return identifier;
+    decoded = identifier;
   }
+  const customMention = decoded.match(/^<(a?):([^:>]+):(\d+)>$/);
+  if (!customMention) return decoded;
+  return `${customMention[1] ? 'a:' : ''}${customMention[2]}:${customMention[3]}`;
 }
 
 function requestedConfig(
@@ -107,7 +113,7 @@ function requestedConfig(
         return {
           title: option.title,
           ...(option.description ? { description: option.description } : {}),
-          ...(option.emoji ? { emoji: option.emoji } : {}),
+          ...(option.emoji ? { emoji: normalizeEmojiIdentifier(option.emoji) } : {}),
           role_ids: [...new Set([...(option.role_ids ?? []), ...(mappedRole ? [mappedRole] : [])])].sort(),
           channel_ids: [...(option.channel_ids ?? [])].sort(),
         };
@@ -131,11 +137,9 @@ export class GuildOnboardingSync {
     this.started = true;
 
     // Listen for onboarding config changes
-    this.eventBus.on('config.changed', (event: PlatformEvent<'config.changed', ConfigChangedData>) => {
+    this.eventBus.on('config.changed', async (event: PlatformEvent<'config.changed', ConfigChangedData>) => {
       if (event.data.section === 'onboarding' || event.data.section === 'welcome') {
-        this.syncOnboarding().catch((err) =>
-          log.error('Sync failed:', { error: String(err) }),
-        );
+        await this.syncOnboarding();
       }
     });
 
@@ -165,11 +169,18 @@ export class GuildOnboardingSync {
     if (configError) {
       const error = `Onboarding configuration read failed: ${configError.message}`;
       log.error(error);
+      const { error: receiptError } = await this.supabase.rpc('fail_pending_onboarding_sync', {
+        p_guild_id: this.guild.id,
+        p_error: error,
+      });
       this.eventBus.emit('sync.failed', this.guild.id, {
         stage: 'discord-native-onboarding',
         error,
       });
-      return;
+      if (receiptError) {
+        throw new Error(`${error}; receipt write failed: ${receiptError.message}`);
+      }
+      throw new Error(error);
     }
 
     if (!config) {
@@ -187,7 +198,7 @@ export class GuildOnboardingSync {
       // This also proves the edit is targeting a real Discord onboarding object.
       observed = await this.guild.fetchOnboarding();
 
-      if (syncState.status === 'idle') {
+      if (syncState.status === 'idle' || syncState.managed === false) {
         const liveConfig = serializeOnboarding(observed);
         const requested = config.onboarding_enabled && onboardingConfig
           ? requestedConfig(onboardingConfig, interestRoleMapping)
@@ -197,6 +208,7 @@ export class GuildOnboardingSync {
           : !liveConfig.enabled;
         await this.persistSyncState(syncState, {
           status: matchesSaved ? 'synced' : 'drifted',
+          managed: false,
           observed_at: new Date().toISOString(),
           live_config: liveConfig,
         });
@@ -224,7 +236,10 @@ export class GuildOnboardingSync {
         throw new Error('Discord onboarding is enabled without an onboarding configuration');
       }
 
-      const normalizedRequest = requestedConfig(onboardingConfig, interestRoleMapping);
+      const normalizedRequest = requestedConfig({
+        ...onboardingConfig,
+        enabled: config.onboarding_enabled,
+      }, interestRoleMapping);
 
       // Build prompts for Discord API
       const prompts: NonNullable<GuildOnboardingEditOptions['prompts']> = normalizedRequest.prompts.map((prompt) => ({
