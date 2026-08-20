@@ -32,4 +32,11 @@ describe('Discord AutoMod config translation', () => {
     expect(regex.test('https://notevil.example/path')).toBe(false);
     expect(regex.test('https://evil.example.attacker.test/path')).toBe(false);
   });
+
+  it('keeps whitelist enforcement in the internal URL parser', () => {
+    expect(buildDiscordTriggerMetadata({
+      type: 'link_filter',
+      config: { domains: ['allowed.example'], mode: 'whitelist' },
+    })).toBeNull();
+  });
 });

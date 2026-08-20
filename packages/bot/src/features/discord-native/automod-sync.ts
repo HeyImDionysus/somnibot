@@ -80,7 +80,7 @@ export function buildDiscordTriggerMetadata(
     case 'link_filter': {
       const domains = cfg.domains ?? [];
       if (cfg.mode === 'whitelist') {
-        return { regexPatterns: [String.raw`https?:\/\/[^\s]+`], allowList: domains };
+        return null;
       }
       return { regexPatterns: domains.map(hostnameRegex) };
     }
