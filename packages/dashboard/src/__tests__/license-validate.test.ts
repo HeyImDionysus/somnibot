@@ -3,6 +3,7 @@
  * V5 Audit §13.3: Core payment/licensing path.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/rate-limit', () => ({
@@ -29,6 +30,7 @@ function mockTable(resolveValue: unknown) {
     single: vi.fn().mockResolvedValue(resolveValue),
     update: vi.fn().mockReturnThis(),
     insert: vi.fn().mockResolvedValue({ error: null }),
+    upsert: vi.fn().mockResolvedValue({ error: null }),
     limit: vi.fn().mockReturnThis(),
     order: vi.fn().mockReturnThis(),
   };
@@ -45,7 +47,7 @@ function mockLookup(data: Record<string, unknown> | null) {
 }
 
 function makeReq(body: Record<string, unknown> = {}) {
-  return new Request('http://localhost/api/license/validate', {
+  return new NextRequest('http://localhost/api/license/validate', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -87,14 +89,14 @@ describe('POST /api/license/validate', () => {
       limited: true, remaining: 0, retryAfterMs: 30000,
     });
 
-    const res = await POST(makeReq() as any);
+    const res = await POST(makeReq());
     expect(res.status).toBe(429);
   });
 
   it('returns invalid for non-existent key', async () => {
     mockLookup({ found: false });
 
-    const res = await POST(makeReq() as any);
+    const res = await POST(makeReq());
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.valid).toBe(false);
@@ -111,7 +113,7 @@ describe('POST /api/license/validate', () => {
       key_failed_attempts: 0,
     });
 
-    const res = await POST(makeReq() as any);
+    const res = await POST(makeReq());
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.valid).toBe(false);
@@ -120,17 +122,19 @@ describe('POST /api/license/validate', () => {
   });
 
   it('returns invalid when the key is for a different product', async () => {
+    const tables = mockTable({ data: null, error: null });
     mockLookup({
       found: true,
       key_id: 'key-1',
-      key_status: 'active',
+      key_status: 'pending_activation',
       key_product_id: '00000000-0000-4000-a000-0000000000ff',
       key_failed_attempts: 0,
     });
 
-    const body = await (await POST(makeReq() as any)).json();
+    const body = await (await POST(makeReq())).json();
     expect(body.valid).toBe(false);
     expect(body.error).toMatch(/not valid for this product/i);
+    expect(tables.update).not.toHaveBeenCalled();
   });
 
   it('returns invalid when the entitlement is not active', async () => {
@@ -144,7 +148,7 @@ describe('POST /api/license/validate', () => {
       entitlement_status: 'cancelled',
     });
 
-    const body = await (await POST(makeReq() as any)).json();
+    const body = await (await POST(makeReq())).json();
     expect(body.valid).toBe(false);
     expect(body.status).toBe('cancelled');
   });
@@ -164,10 +168,153 @@ describe('POST /api/license/validate', () => {
       config_heartbeat_interval_seconds: 300,
     });
 
-    const body = await (await POST(makeReq() as any)).json();
+    const body = await (await POST(makeReq())).json();
     expect(body.valid).toBe(true);
     expect(body.status).toBe('active');
     expect(body.features).toEqual(['pro-mode']);
     expect(body.tier).toBe('pro');
+  });
+
+  it('activates a purchased key on its first project validation', async () => {
+    mockLookup({
+      found: true,
+      key_id: 'key-pending',
+      key_status: 'pending_activation',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-1',
+      entitlement_status: 'active',
+      entitlement_expires_at: null,
+      product_guild_id: 'guild-1',
+      config_feature_flags: ['pro-mode'],
+      config_heartbeat_interval_seconds: 300,
+    });
+
+    const activation = {
+      update: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'key-pending' }, error: null }),
+    };
+    const audit = {
+      upsert: vi.fn().mockResolvedValue({ error: null }),
+      insert: vi.fn().mockResolvedValue({ error: null }),
+    };
+    const validationLog = {
+      insert: vi.fn().mockResolvedValue({ error: null }),
+    };
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'license_keys') return activation;
+      if (table === 'audit_logs') return audit;
+      return validationLog;
+    });
+
+    const response = await POST(makeReq());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ valid: true, status: 'active' });
+    expect(activation.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'active',
+      activated_at: expect.any(String),
+    }));
+    expect(audit.upsert).toHaveBeenCalledWith(
+      [expect.objectContaining({
+        action: 'license.key_activated',
+        actor_id: 'license-validator',
+        target_id: 'key-pending',
+      })],
+      expect.objectContaining({ ignoreDuplicates: true }),
+    );
+  });
+
+  it('accepts a concurrent first validation that already activated the key', async () => {
+    mockLookup({
+      found: true,
+      key_id: 'key-pending',
+      key_status: 'pending_activation',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-1',
+      entitlement_status: 'active',
+      entitlement_expires_at: null,
+    });
+
+    const activation = {
+      update: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn()
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValueOnce({ data: { status: 'active' }, error: null }),
+    };
+    const validationLog = { insert: vi.fn().mockResolvedValue({ error: null }) };
+    mockFrom.mockImplementation((table: string) => (
+      table === 'license_keys' ? activation : validationLog
+    ));
+
+    const response = await POST(makeReq());
+    expect(await response.json()).toMatchObject({ valid: true, status: 'active' });
+    expect(activation.maybeSingle).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a first-use activation write failure as retryable', async () => {
+    mockLookup({
+      found: true,
+      key_id: 'key-pending',
+      key_status: 'pending_activation',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-1',
+      entitlement_status: 'active',
+      entitlement_expires_at: null,
+    });
+
+    const activation = {
+      update: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({
+        data: null,
+        error: { message: 'database unavailable' },
+      }),
+    };
+    const validationLog = {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+      insert: vi.fn().mockResolvedValue({ error: null }),
+      upsert: vi.fn().mockResolvedValue({ error: null }),
+    };
+    mockFrom.mockImplementation((table: string) => (
+      table === 'license_keys' ? activation : validationLog
+    ));
+
+    const response = await POST(makeReq());
+    const body = await response.json();
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({ valid: false, status: 'service_unavailable', retryable: true });
+  });
+
+  it('keeps a pending key unchanged when device validation cannot start', async () => {
+    mockLookup({
+      found: true,
+      key_id: 'key-pending',
+      key_status: 'pending_activation',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-1',
+      entitlement_status: 'active',
+      entitlement_expires_at: null,
+      config_max_devices: 3,
+    });
+    const tables = mockTable({ data: null, error: null });
+
+    const response = await POST(makeReq());
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.status).toBe('device_fingerprint_required');
+    expect(tables.update).not.toHaveBeenCalled();
   });
 });

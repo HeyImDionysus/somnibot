@@ -60,7 +60,8 @@ describe('buildReceiptEmbed', () => {
 
     const activationField = json.fields!.find(f => f.name === 'Activation');
     expect(activationField).toBeDefined();
-    expect(activationField!.value).toContain('/license activate');
+    expect(activationField!.value).toContain('Enter this key in the product');
+    expect(activationField!.value).toContain('validation activates it');
   });
 
   it('omits license fields when no key provided', () => {

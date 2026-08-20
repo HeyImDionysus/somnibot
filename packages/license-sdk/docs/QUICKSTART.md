@@ -4,16 +4,11 @@
 
 After purchasing a product through SomniBot's store, you'll receive an `SMNI-XXXX-XXXX-XXXX-XXXX` format key via DM or email.
 
-## 2. Activate Your Key
+## 2. Integrate in Your App
 
-In Discord, run:
-```
-/license activate key:SMNI-XXXX-XXXX-XXXX-XXXX
-```
-
-This binds the key to your Discord account.
-
-## 3. Integrate in Your App
+The key is already bound to the purchaser's Discord account. Its first
+successful validation from the product activates it; no separate Discord
+command is required.
 
 ### TypeScript / JavaScript
 
@@ -60,11 +55,11 @@ var response = await client.PostAsJsonAsync($"{apiBase}/license/validate", new {
 var result = await response.Content.ReadFromJsonAsync<ValidationResult>();
 ```
 
-## 4. Implement Heartbeat (Optional)
+## 3. Implement Heartbeat (Optional)
 
 If the product requires periodic validation, the validate response will include `heartbeat_interval_seconds`. The TypeScript SDK handles this automatically. For other languages, send a POST to `/api/license/heartbeat` at the specified interval.
 
-## 5. Clean Up on Shutdown
+## 4. Clean Up on Shutdown
 
 Always deactivate your session when your app closes to free device slots:
 
