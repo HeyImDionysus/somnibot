@@ -114,6 +114,10 @@ export function normalizeInstallationSettingValue(
 ): InstallationSettingValidation {
   const value = rawValue.trim();
 
+  if (key === 'discord_application_id' && !/^\d{17,20}$/.test(value)) {
+    return { ok: false, error: 'discord_application_id must be a 17-20 digit Discord application ID' };
+  }
+
   if (key === 'paypal_sandbox') {
     const normalized = value.toLowerCase();
     if (['true', '1', 'yes', 'on'].includes(normalized)) return { ok: true, value: 'true' };
@@ -179,10 +183,13 @@ export async function readInstallationSettings(admin: AdminSupabase) {
     sources[key] = 'none';
   }
 
-  const { data: settings } = await admin
+  const { data: settings, error: settingsError } = await admin
     .from('instance_settings')
     .select('key, value, section')
     .limit(1000);
+  if (settingsError) {
+    throw new Error('Failed to load authoritative installation settings');
+  }
   for (const row of settings ?? []) {
     const encryptedBaseKey = row.key.endsWith('_encrypted')
       ? row.key.slice(0, -'_encrypted'.length)
@@ -231,4 +238,30 @@ export async function readInstallationSettings(admin: AdminSupabase) {
     environmentFallbacks,
     lockedFields: [...BOOTSTRAP_ONLY_FIELDS],
   };
+}
+
+export async function claimInstallationSettingsWriteLease(
+  admin: AdminSupabase,
+  scope: string,
+  operationId: string,
+): Promise<boolean> {
+  const { data, error } = await admin.rpc('claim_instance_settings_write_lease', {
+    p_scope: scope,
+    p_operation_id: operationId,
+    p_lease_seconds: 300,
+  });
+  if (error) throw new Error('Failed to claim the installation settings write lease');
+  return data === true;
+}
+
+export async function releaseInstallationSettingsWriteLease(
+  admin: AdminSupabase,
+  scope: string,
+  operationId: string,
+): Promise<void> {
+  const { error } = await admin.rpc('release_instance_settings_write_lease', {
+    p_scope: scope,
+    p_operation_id: operationId,
+  });
+  if (error) throw new Error('Failed to release the installation settings write lease');
 }

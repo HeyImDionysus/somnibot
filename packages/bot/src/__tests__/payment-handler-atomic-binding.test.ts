@@ -140,9 +140,14 @@ function paypalFetch() {
 
 beforeEach(() => {
   process.env['PAYPAL_CLIENT_SECRET'] = 'test-signing-secret';
+  process.env['PAYPAL_RECONCILE_SECRET'] = 'test-signing-secret';
   observedAuditRows.length = 0;
 });
-afterEach(() => { delete process.env.PAYPAL_CLIENT_SECRET; vi.restoreAllMocks(); });
+afterEach(() => {
+  delete process.env.PAYPAL_CLIENT_SECRET;
+  delete process.env.PAYPAL_RECONCILE_SECRET;
+  vi.restoreAllMocks();
+});
 
 describe('atomic paid checkout intent binding', () => {
   it('uses the atomic RPC and replays a committed response loss for one-time and subscription paths', async () => {

@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 287 migration files in packages/supabase/migrations/
+ * Source: 288 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2518,6 +2518,13 @@ export interface DbHealthMetrics {
   metric_type: string;
   value_ms: number;
   recorded_at: string;
+}
+
+export interface DbInstanceSettingsWriteLeases {
+  scope: string;
+  operation_id: string;
+  leased_until: string;
+  updated_at: string;
 }
 
 export interface DbLevelUnlockConfigs {
