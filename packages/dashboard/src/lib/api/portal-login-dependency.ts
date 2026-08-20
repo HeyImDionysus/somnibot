@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { writeCommerceAudit } from '@/lib/commerce-audit';
-import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getDiscordOAuthRuntimeConfig } from '@/lib/discord-runtime-config';
 
 const DiscordTokenSchema = z.object({
   access_token: z.string().min(1),
@@ -35,7 +35,7 @@ export async function exchangeCodeForUser(
   redirectUri: string,
 ): Promise<DiscordIdentityResult> {
   try {
-    const { applicationId: clientId, clientSecret } = await getDiscordRuntimeConfig();
+    const { applicationId: clientId, clientSecret } = await getDiscordOAuthRuntimeConfig();
     if (!clientId || !clientSecret) return { kind: 'unavailable' };
     const tokenRes = await fetch(`${DISCORD_API}/oauth2/token`, {
       method: 'POST',

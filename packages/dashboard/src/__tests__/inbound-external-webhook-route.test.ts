@@ -6,14 +6,14 @@ const createAdminSupabaseMock = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/api/client-ip', () => ({ getClientIp: vi.fn(() => '203.0.113.8') }));
 vi.mock('@/lib/api/rate-limit', () => ({ checkRateLimit: vi.fn() }));
 vi.mock('@/lib/external-webhook-discord', () => ({ sendExternalWebhookDiscordMessage: vi.fn() }));
-vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordRuntimeConfig: vi.fn() }));
+vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordBotRuntimeConfig: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: createAdminSupabaseMock }));
 
 import { POST } from '@/app/api/inbound-webhooks/[token]/route';
 import { checkRateLimit } from '@/lib/api/rate-limit';
 import { sendExternalWebhookDiscordMessage } from '@/lib/external-webhook-discord';
 import { hashExternalWebhookValue } from '@/lib/external-webhook-relay';
-import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getDiscordBotRuntimeConfig } from '@/lib/discord-runtime-config';
 
 const token = 'a'.repeat(43);
 const endpoint = `http://localhost/api/inbound-webhooks/${token}`;
@@ -55,11 +55,9 @@ beforeEach(() => {
     status: 'delivered',
     messageId: '555555555555555555',
   });
-  vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
-    applicationId: 'application-id',
+  vi.mocked(getDiscordBotRuntimeConfig).mockResolvedValue({
     botToken: 'test-token',
-    clientSecret: 'client-secret',
-    sources: { applicationId: 'env', botToken: 'saved', clientSecret: 'env' },
+    sources: { botToken: 'saved' },
   });
 });
 

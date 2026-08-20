@@ -508,8 +508,9 @@ export async function sweepProviderMoneyRecovery(
   return results;
 }
 
-function verifyCheckoutSignature(token: string, signature: string): boolean {
-  const secret = process.env.PAYPAL_RECONCILE_SECRET || process.env.PAYPAL_CLIENT_SECRET;
+async function verifyCheckoutSignature(token: string, signature: string): Promise<boolean> {
+  const reconcileSecret = process.env.PAYPAL_RECONCILE_SECRET?.trim();
+  const secret = reconcileSecret || (await getPayPalRuntimeConfig()).clientSecret;
   if (!secret || !/^[a-f0-9]{64}$/.test(signature)) return false;
   const expected = Buffer.from(createHmac('sha256', secret).update(`somnibot-checkout:v1:${token}`).digest('hex'), 'utf8');
   const provided = Buffer.from(signature, 'utf8');
@@ -1821,7 +1822,7 @@ export async function handlePaymentCaptured(
   }
 
   if (checkoutToken) {
-    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+    if (!checkoutSignature || !(await verifyCheckoutSignature(checkoutToken, checkoutSignature))) {
       await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'PAYMENT.CAPTURE.COMPLETED', resourceId: paypalCaptureId, parentId: paypalOrderId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
       return;
     }
@@ -2338,7 +2339,7 @@ export async function handleSubscriptionActivated(
   }
 
   if (checkoutToken) {
-    if (!checkoutSignature || !verifyCheckoutSignature(checkoutToken, checkoutSignature)) {
+    if (!checkoutSignature || !(await verifyCheckoutSignature(checkoutToken, checkoutSignature))) {
       await recordProviderMoneyIncident(supabase, { webhookEventId, eventType: 'BILLING.SUBSCRIPTION.ACTIVATED', resourceId: subscriptionId, observedGuildId, reason: 'checkout_identity_missing_or_mismatched', evidence: { checkout_token: checkoutToken } });
       return;
     }

@@ -9,7 +9,7 @@ import { apiServerError, dbError } from '@/lib/api/response';
 import { recordAdminChange, humanizeColumn } from '@/lib/admin-changes';
 import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
 import { encryptCloudCredential } from '@/lib/cloud-credential-crypto';
-import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getDiscordOAuthRuntimeConfig } from '@/lib/discord-runtime-config';
 import { getInstallationRuntimeSecret } from '@/lib/installation-runtime-secret';
 import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 import {
@@ -139,10 +139,10 @@ export async function PUT(request: NextRequest) {
     const updatesDiscordAuth = writableEntries.some(([key]) => (
       key === 'discord_application_id' || key === 'discord_client_secret'
     ));
-    let previousDiscordConfig: Awaited<ReturnType<typeof getDiscordRuntimeConfig>> | null = null;
+    let previousDiscordConfig: Awaited<ReturnType<typeof getDiscordOAuthRuntimeConfig>> | null = null;
     let managementAccessToken = '';
     if (updatesDiscordAuth) {
-      previousDiscordConfig = await getDiscordRuntimeConfig();
+      previousDiscordConfig = await getDiscordOAuthRuntimeConfig();
       const submitted = new Map(writableEntries);
       const nextApplicationId = submitted.get('discord_application_id') ?? previousDiscordConfig.applicationId;
       const nextClientSecret = submitted.get('discord_client_secret') ?? previousDiscordConfig.clientSecret;
@@ -163,6 +163,15 @@ export async function PUT(request: NextRequest) {
         forceCredentialUpdate: true,
       });
       if (!providerUpdate.success) {
+        const rollback = await ensureDiscordAuthProvider({
+          accessToken: managementAccessToken,
+          discordClientId: previousDiscordConfig.applicationId,
+          discordClientSecret: previousDiscordConfig.clientSecret,
+          forceCredentialUpdate: true,
+        });
+        if (!rollback.success) {
+          console.error('[Settings] Discord Auth rollback could not be verified after provider verification failed');
+        }
         return NextResponse.json(
           { error: `Discord login credentials were not changed: ${providerUpdate.error ?? 'Supabase Auth rejected the update.'}` },
           { status: 409 },
@@ -276,11 +285,69 @@ export async function DELETE(request: NextRequest) {
     const storageKeys = keys.map((key) => (
       ENCRYPTED_SECRET_FIELDS.has(key) ? `${key}_encrypted` : key
     ));
+    const resetsDiscordAuth = keys.some((key) => (
+      key === 'discord_application_id' || key === 'discord_client_secret'
+    ));
+    let previousDiscordConfig: Awaited<ReturnType<typeof getDiscordOAuthRuntimeConfig>> | null = null;
+    let managementAccessToken = '';
+    if (resetsDiscordAuth) {
+      previousDiscordConfig = await getDiscordOAuthRuntimeConfig();
+      const nextApplicationId = keys.includes('discord_application_id')
+        ? process.env.DISCORD_APPLICATION_ID?.trim() ?? ''
+        : previousDiscordConfig.applicationId;
+      const nextClientSecret = keys.includes('discord_client_secret')
+        ? process.env.DISCORD_CLIENT_SECRET?.trim() ?? ''
+        : previousDiscordConfig.clientSecret;
+      if (!nextApplicationId || !nextClientSecret) {
+        return NextResponse.json(
+          { error: 'Discord deployment defaults are incomplete, so dashboard login settings were not reset.' },
+          { status: 409 },
+        );
+      }
+      managementAccessToken = await getInstallationRuntimeSecret(
+        'supabase_access_token',
+        ['SUPABASE_ACCESS_TOKEN'],
+      );
+      const providerUpdate = await ensureDiscordAuthProvider({
+        accessToken: managementAccessToken,
+        discordClientId: nextApplicationId,
+        discordClientSecret: nextClientSecret,
+        forceCredentialUpdate: true,
+      });
+      if (!providerUpdate.success) {
+        const rollback = await ensureDiscordAuthProvider({
+          accessToken: managementAccessToken,
+          discordClientId: previousDiscordConfig.applicationId,
+          discordClientSecret: previousDiscordConfig.clientSecret,
+          forceCredentialUpdate: true,
+        });
+        if (!rollback.success) {
+          console.error('[Settings] Discord Auth rollback could not be verified after reset verification failed');
+        }
+        return NextResponse.json(
+          { error: `Discord login credentials were not reset: ${providerUpdate.error ?? 'Supabase Auth rejected the deployment defaults.'}` },
+          { status: 409 },
+        );
+      }
+    }
     const { error } = await admin
       .from('instance_settings')
       .delete()
       .in('key', storageKeys);
-    if (error) return dbError(error, 'settings');
+    if (error) {
+      if (previousDiscordConfig?.applicationId && previousDiscordConfig.clientSecret) {
+        const rollback = await ensureDiscordAuthProvider({
+          accessToken: managementAccessToken,
+          discordClientId: previousDiscordConfig.applicationId,
+          discordClientSecret: previousDiscordConfig.clientSecret,
+          forceCredentialUpdate: true,
+        });
+        if (!rollback.success) {
+          console.error('[Settings] Discord Auth rollback could not be verified after reset storage failed');
+        }
+      }
+      return dbError(error, 'settings');
+    }
 
     await notifyBot(auth.ctx.guildId, 'settings', { section });
     await recordAdminChange({

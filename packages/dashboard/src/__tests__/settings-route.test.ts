@@ -16,7 +16,7 @@ vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/notify-bot', () => ({ notifyBot: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordRuntimeConfig: vi.fn() }));
+vi.mock('@/lib/discord-runtime-config', () => ({ getDiscordOAuthRuntimeConfig: vi.fn() }));
 vi.mock('@/lib/installation-runtime-secret', () => ({ getInstallationRuntimeSecret: vi.fn() }));
 vi.mock('@/lib/supabase/auto-config', () => ({ ensureDiscordAuthProvider: vi.fn() }));
 vi.mock('@/app/api/webhooks/scope', () => ({
@@ -29,7 +29,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { notifyBot } from '@/lib/notify-bot';
 import { isSoleInstanceOperator } from '@/app/api/webhooks/scope';
-import { getDiscordRuntimeConfig } from '@/lib/discord-runtime-config';
+import { getDiscordOAuthRuntimeConfig } from '@/lib/discord-runtime-config';
 import { getInstallationRuntimeSecret } from '@/lib/installation-runtime-secret';
 import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 
@@ -52,11 +52,10 @@ beforeEach(() => {
   mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>);
   vi.mocked(isSoleInstanceOperator).mockResolvedValue(true);
-  vi.mocked(getDiscordRuntimeConfig).mockResolvedValue({
+  vi.mocked(getDiscordOAuthRuntimeConfig).mockResolvedValue({
     applicationId: 'existing-application-id',
-    botToken: 'existing-bot-token',
     clientSecret: 'existing-client-secret',
-    sources: { applicationId: 'saved', botToken: 'saved', clientSecret: 'saved' },
+    sources: { applicationId: 'saved', clientSecret: 'saved' },
   });
   vi.mocked(getInstallationRuntimeSecret).mockResolvedValue('management-access-token');
   vi.mocked(ensureDiscordAuthProvider).mockResolvedValue({ success: true });
@@ -195,7 +194,9 @@ describe('PUT /api/settings', () => {
   });
 
   it('does not persist Discord identity changes when Supabase Auth rejects them', async () => {
-    vi.mocked(ensureDiscordAuthProvider).mockResolvedValue({ success: false, error: 'provider update denied' });
+    vi.mocked(ensureDiscordAuthProvider)
+      .mockResolvedValueOnce({ success: false, error: 'provider update denied' })
+      .mockResolvedValueOnce({ success: true });
 
     const res = await putSettings({
       section: 'discord',
@@ -204,6 +205,12 @@ describe('PUT /api/settings', () => {
 
     expect(res.status).toBe(409);
     expect(mock._query.upsert).not.toHaveBeenCalled();
+    expect(ensureDiscordAuthProvider).toHaveBeenNthCalledWith(2, {
+      accessToken: 'management-access-token',
+      discordClientId: 'existing-application-id',
+      discordClientSecret: 'existing-client-secret',
+      forceCredentialUpdate: true,
+    });
   });
 
   it('normalizes PayPal mode and rejects invalid runtime connection values', async () => {
@@ -336,16 +343,80 @@ describe('DELETE /api/settings', () => {
 
     const res = await resetSettings({
       section: 'discord',
-      keys: ['discord_application_id', 'discord_bot_token'],
+      keys: ['discord_guild_id', 'discord_bot_token'],
     });
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({ ok: true, restartRequired: true });
     expect(settings.delete).toHaveBeenCalledTimes(1);
     expect(settings.in).toHaveBeenCalledWith('key', [
-      'discord_application_id',
+      'discord_guild_id',
       'discord_bot_token_encrypted',
     ]);
+  });
+
+  it('updates and verifies Supabase Auth with deployment defaults before removing saved Discord OAuth settings', async () => {
+    vi.stubEnv('DISCORD_APPLICATION_ID', 'environment-application-id');
+    vi.stubEnv('DISCORD_CLIENT_SECRET', 'environment-client-secret');
+    const settings = registerTable(mock, 'instance_settings');
+    settings.in.mockResolvedValue({ error: null });
+
+    const res = await resetSettings({
+      section: 'discord',
+      keys: ['discord_application_id', 'discord_client_secret'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(ensureDiscordAuthProvider).toHaveBeenCalledWith({
+      accessToken: 'management-access-token',
+      discordClientId: 'environment-application-id',
+      discordClientSecret: 'environment-client-secret',
+      forceCredentialUpdate: true,
+    });
+    expect(settings.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls Supabase Auth back and retains saved settings when reset verification fails', async () => {
+    vi.stubEnv('DISCORD_APPLICATION_ID', 'environment-application-id');
+    vi.stubEnv('DISCORD_CLIENT_SECRET', 'environment-client-secret');
+    vi.mocked(ensureDiscordAuthProvider)
+      .mockResolvedValueOnce({ success: false, error: 'verification mismatch' })
+      .mockResolvedValueOnce({ success: true });
+
+    const res = await resetSettings({
+      section: 'discord',
+      keys: ['discord_application_id', 'discord_client_secret'],
+    });
+
+    expect(res.status).toBe(409);
+    expect(mock._query.delete).not.toHaveBeenCalled();
+    expect(ensureDiscordAuthProvider).toHaveBeenNthCalledWith(2, {
+      accessToken: 'management-access-token',
+      discordClientId: 'existing-application-id',
+      discordClientSecret: 'existing-client-secret',
+      forceCredentialUpdate: true,
+    });
+  });
+
+  it('rolls Supabase Auth back when saved-setting deletion fails', async () => {
+    vi.stubEnv('DISCORD_APPLICATION_ID', 'environment-application-id');
+    vi.stubEnv('DISCORD_CLIENT_SECRET', 'environment-client-secret');
+    registerTable(mock, 'instance_settings').in.mockResolvedValue({
+      error: { message: 'delete failed' },
+    });
+
+    const res = await resetSettings({
+      section: 'discord',
+      keys: ['discord_application_id', 'discord_client_secret'],
+    });
+
+    expect(res.status).toBe(500);
+    expect(ensureDiscordAuthProvider).toHaveBeenNthCalledWith(2, {
+      accessToken: 'management-access-token',
+      discordClientId: 'existing-application-id',
+      discordClientSecret: 'existing-client-secret',
+      forceCredentialUpdate: true,
+    });
   });
 
   it('does not allow Supabase bootstrap fields to be reset from the dashboard', async () => {

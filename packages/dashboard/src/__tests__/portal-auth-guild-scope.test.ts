@@ -19,7 +19,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 }));
 vi.mock('@/lib/api/require-owner', () => ({ requireAuth: vi.fn() }));
 vi.mock('@/lib/discord-runtime-config', () => ({
-  getDiscordRuntimeConfig: vi.fn(async () => ({
+  getDiscordOAuthRuntimeConfig: vi.fn(async () => ({
     applicationId: 'app-id',
     clientSecret: 'secret',
     sources: { applicationId: 'env', clientSecret: 'env' },

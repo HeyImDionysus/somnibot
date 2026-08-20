@@ -123,6 +123,7 @@ async function ensureValkeyReady(): Promise<boolean> {
     const savedUrl = await valkeySavedUrlPromise;
     valkeyRuntimeUrl = savedUrl || process.env.VALKEY_URL || process.env.REDIS_URL || '';
   } catch {
+    valkeySavedUrlPromise = null;
     markValkeyFailed();
     return false;
   }
