@@ -1255,13 +1255,15 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
 /**
  * The community-levels domain proof: the guild_id-scoped tables the sweep must
  * clear (child→parent so FK-constrained rows go before the guild row) plus the
- * 12 scenario scripts. All levels tables reference guild(id) directly (no
- * inter-table FKs), and `alerts` is included so the owner-notification proof’s
- * guild is swept clean.
+ * 12 scenario scripts. Reward deliveries precede their queue and reward
+ * parents, and `alerts` is included so the owner-notification proof’s guild is
+ * swept clean.
  */
 export const communityLevelsProof: DomainProof = {
   domainId: 'community-levels',
   guildScopedTables: [
+    'level_reward_deliveries',
+    'bot_action_queue',
     'member_rank_settings',
     'member_levels',
     'level_rewards',
