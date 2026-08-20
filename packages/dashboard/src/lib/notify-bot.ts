@@ -103,6 +103,17 @@ export async function notifyBotForGuild(
   await notifyBot(guildId, section, changes, changedBy, auditEvent, before);
 }
 
+export async function notifyBotForGuildWithResult(
+  guildId: string,
+  section: ConfigSection,
+  changes?: Record<string, unknown>,
+  changedBy: string = 'dashboard',
+  auditEvent?: ConfigReloadAuditEvent,
+  before?: Record<string, unknown>,
+): Promise<boolean> {
+  return enqueueBotNotification(guildId, section, changes, changedBy, auditEvent, before);
+}
+
 async function enqueueBotNotification(
   guildId: string,
   section: ConfigSection,
@@ -110,11 +121,11 @@ async function enqueueBotNotification(
   changedBy: string = 'dashboard',
   auditEvent?: ConfigReloadAuditEvent,
   before?: Record<string, unknown>,
-): Promise<void> {
+): Promise<boolean> {
 
   try {
     const supabase = createAdminSupabase();
-    await supabase.from('bot_action_queue').insert({
+    const { error } = await supabase.from('bot_action_queue').insert({
       guild_id: guildId,
       action: 'config_reload',
       payload: {
@@ -131,8 +142,11 @@ async function enqueueBotNotification(
       status: 'pending',
       created_at: new Date().toISOString(),
     });
+    if (error) throw error;
+    return true;
   } catch (err) {
     // Never let notification failure break the dashboard API
     console.error(`[notifyBot] Failed to notify bot (section: ${section}):`, err);
+    return false;
   }
 }

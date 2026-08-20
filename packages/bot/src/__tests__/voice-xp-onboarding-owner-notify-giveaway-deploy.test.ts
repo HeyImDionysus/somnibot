@@ -212,7 +212,11 @@ describe('GuildOnboardingSync', () => {
       onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
     })) } as unknown as SupabaseClient;
     const g = guild();
-    g.editOnboarding = vi.fn(async () => ({}));
+    g.editOnboarding = vi.fn(async () => ({
+      enabled: true,
+      prompts: new Collection(),
+      defaultChannels: new Collection(),
+    }));
     const eventBus = eb();
     const sync = new GuildOnboardingSync(g, supa, eventBus);
 
@@ -224,7 +228,11 @@ describe('GuildOnboardingSync', () => {
     // Then: exactly one initial Discord sync and one config listener exist.
     await vi.waitFor(() => {
       expect(g.editOnboarding).toHaveBeenCalledTimes(1);
-      expect(g.editOnboarding).toHaveBeenCalledWith({ enabled: true, prompts: [] });
+      expect(g.editOnboarding).toHaveBeenCalledWith({
+        enabled: true,
+        prompts: [],
+        defaultChannels: [],
+      });
     });
     expect(eventBus.on).toHaveBeenCalledTimes(1);
 
@@ -235,10 +243,14 @@ describe('GuildOnboardingSync', () => {
 
   it('syncs native roles and channels, including a deduplicated interest-role mapping', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
-    const supa = {
-      from: vi.fn(() => chain({
+    const db = chain({
         onboarding_enabled: true,
         interest_role_mapping: { Gaming: 'r1' },
+        onboarding_sync_state: {
+          status: 'pending',
+          request_id: '11111111-1111-4111-8111-111111111111',
+          requested_at: '2026-08-20T12:00:00.000Z',
+        },
         onboarding_config: {
           enabled: true,
           prompts: [
@@ -255,10 +267,29 @@ describe('GuildOnboardingSync', () => {
           ],
           default_channel_ids: ['ch1'],
         },
-      })),
-    } as any;
+      });
+    const supa = { from: vi.fn(() => db) } as unknown as SupabaseClient;
     const g = guild();
-    g.editOnboarding = vi.fn(async () => ({}));
+    g.editOnboarding = vi.fn(async () => ({
+      enabled: true,
+      defaultChannels: new Collection([['ch1', { id: 'ch1' }]]),
+      prompts: new Collection([['prompt1', {
+        title: 'What are you interested in?',
+        type: 0,
+        required: true,
+        singleSelect: false,
+        options: new Collection([
+          ['option1', {
+            title: 'Gaming', description: null, emoji: null,
+            roles: new Collection([['r1', { id: 'r1' }]]), channels: new Collection(),
+          }],
+          ['option2', {
+            title: 'Art', description: null, emoji: null,
+            roles: new Collection(), channels: new Collection([['ch1', { id: 'ch1' }]]),
+          }],
+        ]),
+      }]]),
+    }));
     const sync = new GuildOnboardingSync(g, supa, eb());
     await sync.syncOnboarding();
 
@@ -277,14 +308,32 @@ describe('GuildOnboardingSync', () => {
       }],
       defaultChannels: ['ch1'],
     });
+    expect(db.update).toHaveBeenCalledWith({
+      onboarding_sync_state: expect.objectContaining({
+        status: 'synced',
+        request_id: '11111111-1111-4111-8111-111111111111',
+        live_config: expect.objectContaining({
+          enabled: true,
+          default_channel_ids: ['ch1'],
+        }),
+      }),
+    });
+    expect(db.contains).toHaveBeenCalledWith('onboarding_sync_state', {
+      request_id: '11111111-1111-4111-8111-111111111111',
+    });
   });
 
   it('does not attempt a native onboarding edit when the preflight readback fails', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
-    const supa = { from: vi.fn(() => chain({
+    const db = chain({
       onboarding_enabled: true,
+      onboarding_sync_state: {
+        status: 'pending',
+        request_id: '22222222-2222-4222-8222-222222222222',
+      },
       onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
-    })) } as any;
+    });
+    const supa = { from: vi.fn(() => db) } as unknown as SupabaseClient;
     const g = guild();
     g.fetchOnboarding.mockRejectedValueOnce(new Error('Community onboarding unavailable'));
     g.editOnboarding = vi.fn(async () => ({}));
@@ -297,13 +346,42 @@ describe('GuildOnboardingSync', () => {
       stage: 'discord-native-onboarding',
       error: 'Error: Community onboarding unavailable',
     });
+    expect(db.update).toHaveBeenCalledWith({
+      onboarding_sync_state: expect.objectContaining({
+        status: 'failed',
+        request_id: '22222222-2222-4222-8222-222222222222',
+        error: 'Error: Community onboarding unavailable',
+      }),
+    });
   });
 
-  it('syncOnboarding disabled', async () => {
+  it('disables Discord onboarding and records the authoritative state', async () => {
     const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
-    const supa = { from: vi.fn(() => chain({ onboarding_enabled: false })) } as any;
-    const sync = new GuildOnboardingSync(guild(), supa, eb());
+    const db = chain({
+      onboarding_enabled: false,
+      onboarding_sync_state: {
+        status: 'pending',
+        request_id: '33333333-3333-4333-8333-333333333333',
+      },
+    });
+    const supa = { from: vi.fn(() => db) } as unknown as SupabaseClient;
+    const g = guild();
+    g.editOnboarding = vi.fn(async () => ({
+      enabled: false,
+      prompts: new Collection(),
+      defaultChannels: new Collection(),
+    }));
+    const sync = new GuildOnboardingSync(g, supa, eb());
     await sync.syncOnboarding();
+
+    expect(g.editOnboarding).toHaveBeenCalledWith({ enabled: false });
+    expect(db.update).toHaveBeenCalledWith({
+      onboarding_sync_state: expect.objectContaining({
+        status: 'synced',
+        request_id: '33333333-3333-4333-8333-333333333333',
+        live_config: expect.objectContaining({ enabled: false }),
+      }),
+    });
   });
 
   it('syncOnboarding no config', async () => {

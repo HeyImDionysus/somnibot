@@ -107,4 +107,13 @@ describe('notifyBot', () => {
     expect(consoleSpy.mock.calls[0][0]).toContain('[notifyBot]');
     consoleSpy.mockRestore();
   });
+
+  it('reports a returned insert error as not queued', async () => {
+    mockInsert.mockResolvedValueOnce({ data: null, error: new Error('DB unavailable') });
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { notifyBotForGuildWithResult } = await import('@/lib/notify-bot');
+
+    await expect(notifyBotForGuildWithResult('guild_12345', 'onboarding')).resolves.toBe(false);
+    expect(consoleSpy).toHaveBeenCalledOnce();
+  });
 });

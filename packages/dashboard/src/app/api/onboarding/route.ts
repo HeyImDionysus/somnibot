@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { notifyBot } from '@/lib/notify-bot';
+import { notifyBotForGuildWithResult } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
@@ -22,7 +22,7 @@ export async function GET() {
     .select(
       'member_role_id, onboarding_enabled, interest_role_mapping, ' +
       'returning_member_skip_welcome_dm, returning_member_restore_entitlements, returning_member_restore_levels, ' +
-      'onboarding_config, fallback_mode, fallback_timeout_minutes',
+      'onboarding_config, onboarding_sync_state, fallback_mode, fallback_timeout_minutes',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -61,16 +61,23 @@ export async function PUT(req: NextRequest) {
   ]);
 
   const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));
+  const syncState = {
+    status: 'pending',
+    request_id: crypto.randomUUID(),
+    requested_at: new Date().toISOString(),
+  };
 
   const { error } = await supabase
     .from('guild_config')
-    .upsert({ guild_id: guildId, ...allowed }, { onConflict: 'guild_id' });
+    .upsert({
+      guild_id: guildId,
+      ...allowed,
+      onboarding_sync_state: syncState,
+    }, { onConflict: 'guild_id' });
 
   if (error) {
     return dbError(error, 'onboarding');
   }
-
-  await notifyBot(guildId, 'onboarding', allowed);
 
   await recordGuildConfigChange({
     guildId,
@@ -81,5 +88,27 @@ export async function PUT(req: NextRequest) {
     before,
   }, supabase);
 
-  return NextResponse.json({ success: true });
+  const queued = await notifyBotForGuildWithResult(guildId, 'onboarding', allowed);
+  if (!queued) {
+    const failedState = {
+      ...syncState,
+      status: 'failed',
+      observed_at: new Date().toISOString(),
+      error: 'The bot notification could not be queued.',
+    };
+    await supabase
+      .from('guild_config')
+      .update({ onboarding_sync_state: failedState })
+      .eq('guild_id', guildId)
+      .contains('onboarding_sync_state', { request_id: syncState.request_id });
+
+    return NextResponse.json({
+      success: false,
+      saved: true,
+      error: 'Settings were saved, but Discord synchronization could not be queued.',
+      sync: failedState,
+    }, { status: 503 });
+  }
+
+  return NextResponse.json({ success: true, sync: syncState });
 }
