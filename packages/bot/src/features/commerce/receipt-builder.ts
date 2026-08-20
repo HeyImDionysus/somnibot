@@ -68,7 +68,7 @@ export function buildReceiptEmbed(data: ReceiptData, kit: BrandKit = defaultBran
       { name: '\u200B', value: '─'.repeat(30) },
       {
         name: 'Activation',
-        value: `Use \`/license activate ${data.licenseKey}\` in the server to activate.`,
+        value: 'Enter this key in the product. Its first successful SomniBot validation activates it.',
       },
     );
   }
@@ -138,7 +138,7 @@ export function buildReceiptComponents(
         )
         .addTextDisplayComponents(
           new TextDisplayBuilder().setContent(
-            `To activate: \`/license activate ${data.licenseKey}\``,
+            'Enter this key in the product. Its first successful SomniBot validation activates it.',
           ),
         );
     }

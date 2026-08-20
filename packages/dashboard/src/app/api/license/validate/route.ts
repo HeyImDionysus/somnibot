@@ -28,7 +28,8 @@ type LicenseUnavailableAudit = {
   readonly cause:
     | 'authoritative_lookup_failed'
     | 'membership_lookup_failed'
-    | 'device_session_failed';
+    | 'device_session_failed'
+    | 'activation_failed';
   readonly guildId?: string;
 };
 
@@ -69,6 +70,66 @@ async function auditLicenseUnavailable(
     occurrenceKey: `license.validate_unavailable:${outage.cause}:${occurrence}`,
     success: false,
   });
+}
+
+interface FirstValidationActivation {
+  readonly status: string;
+  readonly activated: boolean;
+  readonly error: { message: string } | null;
+}
+
+async function activateOnFirstValidation(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  keyId: string,
+  productId: string,
+  guildId?: string,
+): Promise<FirstValidationActivation> {
+  const activatedAt = new Date().toISOString();
+  const { data: activated, error } = await supabase
+    .from('license_keys')
+    .update({ status: 'active', activated_at: activatedAt, updated_at: activatedAt })
+    .eq('id', keyId)
+    .eq('product_id', productId)
+    .eq('status', 'pending_activation')
+    .select('id')
+    .maybeSingle();
+
+  if (error) return { status: 'service_unavailable', activated: false, error };
+
+  if (activated) {
+    if (guildId) {
+      await writeCommerceAudit(supabase, {
+        guildId,
+        actorType: 'system',
+        actorId: 'license-validator',
+        action: 'license.key_activated',
+        targetType: 'license_key',
+        targetId: keyId,
+        details: { productId, activation: 'first_project_validation' },
+        occurrenceKey: `license.key_activated:${keyId}`,
+      });
+    }
+    return { status: 'active', activated: true, error: null };
+  }
+
+  // A concurrent first validation may have won the guarded transition. Read
+  // the authoritative row instead of reporting a false activation failure.
+  const { data: current, error: readError } = await supabase
+    .from('license_keys')
+    .select('status')
+    .eq('id', keyId)
+    .eq('product_id', productId)
+    .maybeSingle();
+
+  if (readError) return { status: 'service_unavailable', activated: false, error: readError };
+  if (!current) {
+    return {
+      status: 'service_unavailable',
+      activated: false,
+      error: { message: 'License key disappeared during first validation' },
+    };
+  }
+  return { status: current.status, activated: false, error: null };
 }
 
 // ── Composite lookup result shape ────────────────────────────
@@ -185,8 +246,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ valid: false, status: 'revoked', error: 'Invalid license key' });
   }
 
-  // 2. Check key status
-  if (result.key_status !== 'active') {
+  if (!['active', 'pending_activation'].includes(result.key_status ?? '')) {
     await logValidation(supabase, result.key_id!, product_id, device_fingerprint, result.key_status as string, clientIp, app_version);
     return NextResponse.json({
       valid: false,
@@ -436,6 +496,33 @@ export async function POST(req: NextRequest) {
 
     // Guaranteed non-null by the guard above.
     sessionId = deviceResult.session_id;
+  }
+
+  if (result.key_status === 'pending_activation') {
+    const activation = await activateOnFirstValidation(
+      supabase,
+      result.key_id!,
+      product_id,
+      result.product_guild_id,
+    );
+    if (activation.error) {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+      await auditLicenseUnavailable(supabase, {
+        productId: product_id,
+        keyHash,
+        cause: 'activation_failed',
+        guildId: result.product_guild_id,
+      });
+      return licenseUnavailable('License/validate first-use activation', activation.error);
+    }
+    if (activation.status !== 'active') {
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, activation.status, clientIp, app_version);
+      return NextResponse.json({
+        valid: false,
+        status: activation.status,
+        error: `License is ${activation.status}`,
+      });
+    }
   }
 
   // Fraud checks (non-blocking — fire-and-forget)
