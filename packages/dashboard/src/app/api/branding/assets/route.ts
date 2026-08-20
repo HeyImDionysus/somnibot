@@ -20,6 +20,10 @@ const acceptedTypes = new Map([
   ['image/gif', 'gif'],
 ]);
 
+function isOwnedAssetPath(path: string, guildId: string, slot: z.infer<typeof slotSchema>): boolean {
+  return path.startsWith(`${guildId}/${slot}/`);
+}
+
 function hasImageSignature(type: string, bytes: Uint8Array): boolean {
   if (type === 'image/png') return bytes.length >= 8 && bytes.slice(0, 8).every((value, index) => value === [137, 80, 78, 71, 13, 10, 26, 10][index]);
   if (type === 'image/jpeg') return bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
@@ -78,7 +82,11 @@ export async function POST(request: NextRequest) {
     await admin.storage.from('brand-assets').remove([path]);
     return dbError(updateError, 'branding/assets');
   }
-  if (typeof previousPath === 'string' && previousPath && previousPath !== path) {
+  if (
+    typeof previousPath === 'string'
+    && previousPath !== path
+    && isOwnedAssetPath(previousPath, auth.ctx.guildId, slot)
+  ) {
     const { error: cleanupError } = await admin.storage.from('brand-assets').remove([previousPath]);
     if (cleanupError) {
       console.error('[Branding] Previous asset cleanup failed after replacement:', cleanupError.message);
@@ -113,7 +121,10 @@ export async function DELETE(request: NextRequest) {
     : slotResult.data === 'header'
       ? before?.brand_header_storage_path
       : before?.brand_background_storage_path;
-  if (typeof storagePath === 'string' && storagePath) {
+  if (
+    typeof storagePath === 'string'
+    && isOwnedAssetPath(storagePath, auth.ctx.guildId, slotResult.data)
+  ) {
     const { error: removeError } = await admin.storage.from('brand-assets').remove([storagePath]);
     if (removeError) return dbError(removeError, 'branding/assets');
   }

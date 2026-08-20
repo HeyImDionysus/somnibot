@@ -859,6 +859,7 @@ export interface DbLevelReward {
   currency_amount: number | null;
   item_id: string | null;
   item_quantity: number | null;
+  active: boolean;
   announce: boolean;
   created_at: string;
 }
@@ -2022,13 +2023,14 @@ export interface AdventureChoice {
   label: string;
   emoji: string;
   next_scene_index: number | null;
-  loot: { item_name: string; qty: number; chance_pct: number }[];
+  loot: { item_id?: string; item_name: string; qty: number; chance_pct: number }[];
   currency: number;
   damage_pct: number;
   requires_item: string | null;
 }
 
 export interface AdventureSceneLoot {
+  item_id?: string;
   item_name: string;
   qty: number;
   chance_pct: number;
@@ -2070,7 +2072,7 @@ export interface DbAdventureSession {
   adventure_id: string;
   current_scene_id: string | null;
   status: AdventureSessionStatus;
-  loot_collected: { item_name: string; qty: number }[];
+  loot_collected: { item_id?: string; item_name: string; qty: number }[];
   currency_collected: number;
   health_remaining: number;
   items_brought: { item_name: string; qty: number }[];

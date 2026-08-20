@@ -852,6 +852,7 @@ export interface DbLevelReward {
   currency_amount: number | null;
   item_id: string | null;
   item_quantity: number | null;
+  active: boolean;
 }
 
 export interface DbXpMultiplier {

@@ -36,6 +36,7 @@ const exactRoleDeliveryCarrierActions = new Set([
   'fulfill_subscription',
   'reconcile_entitlement_roles',
 ]);
+const exactLevelRewardActions = new Set(['deliver_level_reward_roles']);
 
 type ExactRoleDeliveryRetryDisposition =
   | 'reopened'
@@ -288,6 +289,18 @@ export async function POST(request: NextRequest) {
     for (const item of dlqItemsById.values()) {
       if (typeof item.action !== 'string' || item.action.length === 0) {
         failed++;
+        continue;
+      }
+      if (exactLevelRewardActions.has(item.action)) {
+        const { data: retryData, error: retryError } = await (
+          supabase.rpc as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
+        )('level_reward_retry_dlq', { p_dlq_id: item.id, p_guild_id: guildId });
+        const retry = retryError ? null : parseGenericRetry(retryData);
+        if (retry && ['reopened', 'already_active', 'already_completed'].includes(retry.disposition)) {
+          retried++;
+        } else {
+          failed++;
+        }
         continue;
       }
       if (exactRoleDeliveryCarrierActions.has(item.action)) {

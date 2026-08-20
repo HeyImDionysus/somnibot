@@ -17,10 +17,47 @@ import { dbError, dbConflictOr500 } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const adventureLootSchema = z.object({
+  item_id: z.string().uuid().optional(),
   item_name: z.string().min(1).max(64),
   qty: z.number().int().min(1).max(999),
   chance_pct: z.number().int().min(0).max(100),
 });
+
+async function normalizeAdventureLoot(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  adventure: z.input<typeof adventureSchema>,
+): Promise<{ ok: true; adventure: z.input<typeof adventureSchema> } | { ok: false; response: NextResponse }> {
+  const hasLoot = adventure.scenes.some((scene) =>
+    (scene.loot?.length ?? 0) > 0 || (scene.choices ?? []).some((choice) => (choice.loot?.length ?? 0) > 0));
+  if (!hasLoot) return { ok: true, adventure };
+  const { data, error } = await supabase.from('economy_items').select('id, name').eq('guild_id', guildId).limit(1000);
+  if (error) return { ok: false, response: dbError(error, 'economy/adventures') };
+  const items = data ?? [];
+  let invalidItem: string | null = null;
+  const normalize = (loot: z.infer<typeof adventureLootSchema>[]) => loot.map((entry) => {
+    const matches = entry.item_id
+      ? items.filter((item) => item.id === entry.item_id)
+      : items.filter((item) => item.name.toLowerCase() === entry.item_name.toLowerCase());
+    if (matches.length !== 1) {
+      invalidItem = entry.item_name;
+      return entry;
+    }
+    return { ...entry, item_id: matches[0]!.id, item_name: matches[0]!.name };
+  });
+  const normalized = {
+    ...adventure,
+    scenes: adventure.scenes.map((scene) => ({
+      ...scene,
+      loot: normalize(scene.loot ?? []),
+      choices: (scene.choices ?? []).map((choice) => ({ ...choice, loot: normalize(choice.loot ?? []) })),
+    })),
+  };
+  if (invalidItem) {
+    return { ok: false, response: NextResponse.json({ error: `Adventure reward "${invalidItem}" is missing or ambiguous.` }, { status: 400 }) };
+  }
+  return { ok: true, adventure: normalized };
+}
 
 const adventureChoiceSchema = z.object({
   label: z.string().min(1).max(80),
@@ -123,9 +160,11 @@ export async function POST(request: NextRequest) {
     const parsed = result.data;
 
     const supabase = createAdminSupabase();
+    const normalized = await normalizeAdventureLoot(supabase, ctx.guildId, parsed);
+    if (!normalized.ok) return normalized.response;
     const { data: adventureId, error: writeError } = await supabase.rpc('upsert_economy_adventure_graph', {
       p_guild_id: ctx.guildId,
-      p_adventure: parsed,
+      p_adventure: normalized.adventure,
     });
     if (writeError) return dbConflictOr500(writeError, 'economy/adventures', 'uq_economy_adventures_guild_lname',
         'An adventure with that name already exists (names are case-insensitive).');
@@ -171,10 +210,12 @@ export async function PUT(request: NextRequest) {
     if (!parsed.id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 
     const supabase = createAdminSupabase();
+    const normalized = await normalizeAdventureLoot(supabase, ctx.guildId, parsed);
+    if (!normalized.ok) return normalized.response;
     const before = await readRowBefore(supabase, 'economy_adventures', { id: parsed.id, guild_id: ctx.guildId });
     const { error: writeError } = await supabase.rpc('upsert_economy_adventure_graph', {
       p_guild_id: ctx.guildId,
-      p_adventure: parsed,
+      p_adventure: normalized.adventure,
     });
     if (writeError?.code === '55006' && writeError.message.includes('adventure_has_active_sessions')) {
       return NextResponse.json({ error: 'This adventure cannot be edited while a member is actively playing it.' }, { status: 409 });

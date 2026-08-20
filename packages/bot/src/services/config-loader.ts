@@ -142,7 +142,10 @@ export async function loadConfigFromDatabase(): Promise<number> {
             ? decryptCloudCredential(row.value, baseKey, serviceKey, new URL(supabaseUrl).origin)
             : row.value;
           const value = decryptedValue ? normalizeSavedSetting(baseKey, decryptedValue) : null;
-          if (!value) continue;
+          if (!value) {
+            if (encrypted) throw new Error(`Saved encrypted setting ${row.key} failed validation`);
+            continue;
+          }
           process.env[envVar] = value;
           loaded++;
           // Don't log the actual value for security

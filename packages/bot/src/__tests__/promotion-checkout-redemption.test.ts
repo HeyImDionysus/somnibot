@@ -39,10 +39,12 @@ describe('promotion checkout redemption migration', () => {
     expect(sql).toContain('TO service_role');
   });
 
-  it('recalculates both prior and new promotion usage on order transitions', () => {
-    expect(sql).toContain("IF TG_OP <> 'INSERT' AND OLD.promotion_id IS NOT NULL THEN");
-    expect(sql).toContain("IF TG_OP <> 'DELETE'");
-    expect(sql).toContain('AFTER INSERT OR DELETE ON public.orders');
-    expect(sql).toContain('AFTER UPDATE OF status, promotion_id ON public.orders');
+  it('atomically applies usage deltas for completed order transitions', () => {
+    const refresh = sql.slice(sql.indexOf('CREATE OR REPLACE FUNCTION public.refresh_promotion_current_uses'));
+    expect(refresh).toContain('SET current_uses = pg_catalog.greatest(0, current_uses - 1)');
+    expect(refresh).toContain('SET current_uses = current_uses + 1');
+    expect(refresh).not.toContain('SELECT pg_catalog.count(*)::INTEGER');
+    expect(refresh).toContain('AFTER INSERT OR DELETE ON public.orders');
+    expect(refresh).toContain('AFTER UPDATE OF status, promotion_id ON public.orders');
   });
 });

@@ -20,6 +20,7 @@ import { ValidatedNumberInput } from '../_components/validated-number-input';
 // ── Types ─────────────────────────────────────────────────
 
 interface RecipeInput {
+  item_id?: string;
   item_name: string;
   qty: number;
 }
@@ -56,7 +57,7 @@ const BLANK_RECIPE: Partial<Recipe> = {
   name: '',
   emoji: '🔨',
   description: '',
-  inputs: [{ item_name: '', qty: 1 }],
+  inputs: [{ item_id: '', item_name: '', qty: 1 }],
   output_item_id: null,
   output_qty: 1,
   cooldown_seconds: 60,
@@ -83,7 +84,7 @@ function RecipeFormModal({
     ...recipe,
     inputs: recipe.inputs && recipe.inputs.length > 0
       ? [...recipe.inputs]
-      : [{ item_name: '', qty: 1 }],
+      : [{ item_id: '', item_name: '', qty: 1 }],
   });
 
   const updateInputs = (idx: number, field: keyof RecipeInput, value: string | number) => {
@@ -95,7 +96,7 @@ function RecipeFormModal({
   const addInput = () => {
     setForm((prev) => ({
       ...prev,
-      inputs: [...(prev.inputs ?? []), { item_name: '', qty: 1 }],
+      inputs: [...(prev.inputs ?? []), { item_id: '', item_name: '', qty: 1 }],
     }));
   };
 
@@ -172,11 +173,16 @@ function RecipeFormModal({
             <div key={idx} className="flex gap-2 items-center">
               <select
                 className="flex-1 rounded-md border border-discord-bg-tertiary bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary outline-none focus:border-discord-accent"
-                value={input.item_name}
-                onChange={(e) => updateInputs(idx, 'item_name', e.target.value)}
+                value={input.item_id ?? items.find((item) => item.name.toLowerCase() === input.item_name.toLowerCase())?.id ?? ''}
+                onChange={(event) => {
+                  const item = items.find((candidate) => candidate.id === event.target.value);
+                  const newInputs = [...(form.inputs ?? [])];
+                  newInputs[idx] = { ...input, item_id: item?.id ?? '', item_name: item?.name ?? '' };
+                  setForm((previous) => ({ ...previous, inputs: newInputs }));
+                }}
               >
                 <option value="">Select an inventory item</option>
-                {items.map((item) => <option key={item.id} value={item.name}>{item.emoji} {item.name}{item.active ? '' : ' (inactive)'}</option>)}
+                {items.map((item) => <option key={item.id} value={item.id}>{item.emoji} {item.name}{item.active ? '' : ' (inactive)'}</option>)}
               </select>
               <input
                 type="number"
@@ -271,7 +277,7 @@ function RecipeFormModal({
             type="button"
             className="rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
             onClick={() => onSave(form)}
-            disabled={saving || !form.name?.trim() || !form.output_item_id || !(form.inputs ?? []).every((input) => input.item_name.trim())}
+            disabled={saving || !form.name?.trim() || !form.output_item_id || !(form.inputs ?? []).every((input) => input.item_id)}
           >
             {saving ? 'Saving…' : 'Save'}
           </button>

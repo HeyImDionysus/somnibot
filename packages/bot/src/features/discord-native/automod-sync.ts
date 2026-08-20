@@ -58,6 +58,11 @@ const TRIGGER_TYPE_MAP: Record<string, AutoModerationRuleTriggerType> = {
 const MANAGED_RULE_PREFIX = 'SB:';
 const DISCORD_INVITE_PATTERN = String.raw`(?:discord\.gg|discord(?:app)?\.com\/invite)\/[-A-Za-z0-9]+`;
 
+function hostnameRegex(domain: string): string {
+  const escaped = domain.trim().toLowerCase().replace(/^\.+|\.+$/g, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String.raw`https?:\/\/(?:[A-Za-z0-9-]+\.)*${escaped}(?::\d+)?(?:[\/?#]|$)`;
+}
+
 function managedRuleName(rule: Pick<AutoModRule, 'id' | 'name'>): string {
   return `${MANAGED_RULE_PREFIX}${rule.id.slice(0, 8)} ${rule.name}`.slice(0, 100);
 }
@@ -77,7 +82,7 @@ export function buildDiscordTriggerMetadata(
       if (cfg.mode === 'whitelist') {
         return { regexPatterns: [String.raw`https?:\/\/[^\s]+`], allowList: domains };
       }
-      return { keywordFilter: domains.map((domain) => `*${domain}*`) };
+      return { regexPatterns: domains.map(hostnameRegex) };
     }
     case 'invite_filter':
       return cfg.allowOwnServer ? null : { regexPatterns: [DISCORD_INVITE_PATTERN] };

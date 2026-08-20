@@ -37,6 +37,7 @@ export interface CraftingConfig {
 }
 
 interface RecipeInput {
+  item_id?: string;
   item_name: string;
   qty: number;
 }
@@ -280,7 +281,9 @@ export class CraftingManager {
     const missing: string[] = [];
 
     for (const input of recipe.inputs) {
-      const owned = inventory.find((i) => i.item_name.toLowerCase() === input.item_name.toLowerCase());
+      const owned = inventory.find((item) => input.item_id
+        ? item.item_id === input.item_id
+        : item.item_name.toLowerCase() === input.item_name.toLowerCase());
       const have = owned?.quantity ?? 0;
       if (have < input.qty) {
         missing.push(`${input.item_name}: need ${input.qty}, have ${have}`);
@@ -300,7 +303,7 @@ export class CraftingManager {
     // Consume materials — check each decrement succeeds (prevents free crafts from TOCTOU)
     const consumed: { itemName: string; qty: number; itemId: string }[] = [];
     for (const input of recipe.inputs) {
-      const result = await this.removeFromInventory(userId, input.item_name, input.qty);
+      const result = await this.removeFromInventory(userId, input.item_id, input.item_name, input.qty);
       if (!result.success) {
         // Refund already-consumed materials
         for (const c of consumed) {
@@ -566,8 +569,7 @@ export class CraftingManager {
     }));
   }
 
-  private async removeFromInventory(userId: string, itemName: string, qty: number): Promise<{ success: boolean; itemId: string }> {
-    // Resolve item_id from name, then use atomic RPC to decrement
+  private async removeFromInventory(userId: string, itemId: string | undefined, itemName: string, qty: number): Promise<{ success: boolean; itemId: string }> {
     const { data: items } = await this.supabase
       .from('economy_inventory')
       .select('item_id, economy_items!inner(name)')
@@ -578,9 +580,9 @@ export class CraftingManager {
 
     if (!items) return { success: false, itemId: '' };
 
-    const match = (items as Record<string, unknown>[]).find((i) =>
-      ((joinProp(i, 'economy_items', 'name') as string) ?? '').toLowerCase() === itemName.toLowerCase()
-    );
+    const match = (items as Record<string, unknown>[]).find((item) => itemId
+      ? item.item_id === itemId
+      : ((joinProp(item, 'economy_items', 'name') as string) ?? '').toLowerCase() === itemName.toLowerCase());
     if (!match) return { success: false, itemId: '' };
 
     // Atomic decrement — prevents TOCTOU race on inventory quantity

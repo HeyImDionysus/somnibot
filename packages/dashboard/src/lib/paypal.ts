@@ -160,10 +160,13 @@ async function readSavedPayPalSettings(): Promise<SavedPayPalSetting[]> {
     const projectOrigin = supabaseUrl ? new URL(supabaseUrl).origin : '';
     return data.flatMap((row) => {
       if (!row.key.endsWith('_encrypted')) return [row];
-      if (!secretKey || !projectOrigin || !row.value) return [];
+      if (!secretKey || !projectOrigin || !row.value) {
+        throw new Error(`saved PayPal setting ${row.key} cannot be decrypted`);
+      }
       const baseKey = row.key.slice(0, -'_encrypted'.length);
       const value = decryptCloudCredential(row.value, baseKey, secretKey, projectOrigin);
-      return value ? [{ key: baseKey, value }] : [];
+      if (!value) throw new Error(`saved PayPal setting ${row.key} failed authentication`);
+      return [{ key: baseKey, value }];
     });
   } catch (err) {
     throw new Error(
@@ -305,10 +308,11 @@ export async function getPayPalTokenResult(
   try {
     runtimeConfig = config ?? await getPayPalRuntimeConfig();
   } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      retriable: true,
-      reason: `PayPal config load failed: ${err instanceof Error ? err.message : String(err)}`,
+      retriable: !/(failed authentication|cannot be decrypted)/i.test(reason),
+      reason: `PayPal config load failed: ${reason}`,
     };
   }
 

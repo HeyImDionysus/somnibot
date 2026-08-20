@@ -420,26 +420,20 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-  IF TG_OP <> 'INSERT' AND OLD.promotion_id IS NOT NULL THEN
+  IF TG_OP <> 'INSERT'
+     AND OLD.promotion_id IS NOT NULL
+     AND OLD.status = 'completed'
+     AND (TG_OP = 'DELETE' OR NEW.status <> 'completed' OR NEW.promotion_id IS DISTINCT FROM OLD.promotion_id) THEN
     UPDATE public.promotions
-       SET current_uses = (
-         SELECT pg_catalog.count(*)::INTEGER
-           FROM public.orders
-          WHERE promotion_id = OLD.promotion_id
-            AND status = 'completed'
-       )
+       SET current_uses = pg_catalog.greatest(0, current_uses - 1)
      WHERE id = OLD.promotion_id;
   END IF;
   IF TG_OP <> 'DELETE'
      AND NEW.promotion_id IS NOT NULL
-     AND (TG_OP = 'INSERT' OR NEW.promotion_id IS DISTINCT FROM OLD.promotion_id OR NEW.status IS DISTINCT FROM OLD.status) THEN
+     AND NEW.status = 'completed'
+     AND (TG_OP = 'INSERT' OR OLD.status <> 'completed' OR NEW.promotion_id IS DISTINCT FROM OLD.promotion_id) THEN
     UPDATE public.promotions
-       SET current_uses = (
-         SELECT pg_catalog.count(*)::INTEGER
-           FROM public.orders
-          WHERE promotion_id = NEW.promotion_id
-            AND status = 'completed'
-       )
+       SET current_uses = current_uses + 1
      WHERE id = NEW.promotion_id;
   END IF;
   IF TG_OP = 'DELETE' THEN

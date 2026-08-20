@@ -170,7 +170,7 @@ describe('handleLevelUp', () => {
     expect(eventBus.emit).toHaveBeenCalledWith('level.up', 'g1', expect.any(Object));
   });
 
-  it('does not announce a replayed reward twice', async () => {
+  it('announces a transactionally staged reward on the actual level-up event', async () => {
     vi.mocked(loadLevelConfig).mockResolvedValue(levelConfig({
       level_up_channel_id: 'announce-ch',
     }));
@@ -180,7 +180,7 @@ describe('handleLevelUp', () => {
     const eventBus = makeEventBus();
     const { supabase } = makeSupabase('replayed');
     await runLevelUp(guild, supabase, eventBus, 'u1', 1, 2, 200);
-    expect(sendFn).toHaveBeenCalledWith(expect.not.stringContaining('Unlocked'));
+    expect(sendFn).toHaveBeenCalledWith(expect.stringContaining('Unlocked'));
   });
 
   it('removes old reward at configured level', async () => {
@@ -276,5 +276,19 @@ describe('handleLevelUp', () => {
     const { supabase, rpc } = makeSupabase();
     await runLevelUp(guild, supabase, eventBus, 'u1', 1, 3, 300);
     expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not queue an award that also expires inside the same level jump', async () => {
+    vi.mocked(loadRewards).mockResolvedValue([
+      roleReward({ level: 2, remove_at_level: 3 }),
+    ]);
+    const guild = makeGuild();
+    const eventBus = makeEventBus();
+    const { supabase, rpc } = makeSupabase();
+    await runLevelUp(guild, supabase, eventBus, 'u1', 1, 3, 300);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith('apply_level_reward_delivery', expect.objectContaining({
+      p_delivery_kind: 'expiry',
+    }));
   });
 });

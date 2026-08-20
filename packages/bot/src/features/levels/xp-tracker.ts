@@ -201,6 +201,7 @@ export async function loadRewards(
     .from('level_rewards')
     .select('*, economy_items(name, emoji)')
     .eq('guild_id', guildId)
+    .eq('active', true)
     .order('level', { ascending: true })
     .limit(1000);
 

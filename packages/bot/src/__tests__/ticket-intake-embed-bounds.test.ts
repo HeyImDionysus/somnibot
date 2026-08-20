@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildIntakeResponseEmbeds } from '../features/tickets/ticket-interactions.js';
+import { batchIntakeResponseEmbeds, buildIntakeResponseEmbeds } from '../features/tickets/ticket-interactions.js';
 import { defaultBrandKit } from '../features/branding/brand-kit.js';
 
 describe('ticket intake response embeds', () => {
@@ -14,5 +14,8 @@ describe('ticket intake response embeds', () => {
     expect(embeds).toHaveLength(5);
     expect(embeds.every((embed) => (embed.data.description?.length ?? 0) <= 4_096)).toBe(true);
     expect(embeds.map((embed) => embed.data.description)).toEqual(responses.map(({ value }) => value));
+    const batches = batchIntakeResponseEmbeds(embeds);
+    expect(batches).toHaveLength(5);
+    expect(batches.every((batch) => batch.length === 1)).toBe(true);
   });
 });

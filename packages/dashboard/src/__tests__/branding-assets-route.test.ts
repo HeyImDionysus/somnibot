@@ -21,9 +21,12 @@ function brandingRequest(): Request {
   return new Request('http://localhost/api/branding/assets', { method: 'POST', body: form });
 }
 
-function createBrandingAdmin(updateError: { readonly message: string } | null) {
+function createBrandingAdmin(
+  updateError: { readonly message: string } | null,
+  previousPath = 'guild-1/logo/old.png',
+) {
   const maybeSingle = vi.fn().mockResolvedValue({
-    data: { brand_logo_storage_path: 'guild-1/logo/old.png' },
+    data: { brand_logo_storage_path: previousPath },
     error: null,
   });
   const upsert = vi.fn().mockResolvedValue({ error: updateError });
@@ -90,5 +93,15 @@ describe('POST /api/branding/assets', () => {
     expect(response.status).toBe(200);
     expect(fixture.upsert.mock.invocationCallOrder[0]).toBeLessThan(fixture.remove.mock.invocationCallOrder[0]);
     expect(fixture.remove).toHaveBeenCalledWith(['guild-1/logo/old.png']);
+  });
+
+  it('never removes an object outside the acting guild and slot', async () => {
+    const fixture = createBrandingAdmin(null, 'other-guild/logo/asset.png');
+    createAdminSupabaseMock.mockReturnValue(fixture.admin);
+
+    const response = await POST(brandingRequest() as never);
+
+    expect(response.status).toBe(200);
+    expect(fixture.remove).not.toHaveBeenCalled();
   });
 });

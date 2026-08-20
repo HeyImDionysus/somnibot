@@ -125,6 +125,20 @@ describe('getPayPalToken', () => {
     );
   });
 
+  it('fails closed when a saved encrypted secret cannot be authenticated', async () => {
+    mockSavedPayPalSettings([
+      { key: 'paypal_client_id', value: 'saved-client-id' },
+      { key: 'paypal_client_secret_encrypted', value: 'not-valid-ciphertext' },
+    ]);
+    const { getPayPalTokenResult } = await import('@/lib/paypal');
+    await expect(getPayPalTokenResult()).resolves.toEqual({
+      ok: false,
+      retriable: false,
+      reason: expect.stringContaining('failed authentication'),
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('returns null when response is not ok', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,

@@ -33,6 +33,7 @@ interface Adventure {
 }
 
 interface AdventureLoot {
+  item_id?: string;
   item_name: string;
   qty: number;
   chance_pct: number;
@@ -521,9 +522,10 @@ export default function AdventuresPage() {
                             className="rounded bg-discord-bg-secondary px-2 py-1.5 text-sm text-discord-text-primary"
                           />
                           <select
-                            value={choice.loot[0]?.item_name ?? ''}
+                            value={choice.loot[0]?.item_id ?? items.find((item) => item.name === choice.loot[0]?.item_name)?.id ?? ''}
                             onChange={(event) => {
-                              const loot = event.target.value ? [{ item_name: event.target.value, qty: 1, chance_pct: 100 }] : [];
+                              const selected = items.find((item) => item.id === event.target.value);
+                              const loot = selected ? [{ item_id: selected.id, item_name: selected.name, qty: 1, chance_pct: 100 }] : [];
                               const scenes = editing.scenes.map((existing, index) => index === sceneIndex ? {
                                 ...existing,
                                 choices: existing.choices.map((item, itemIndex) => itemIndex === choiceIndex ? { ...item, loot } : item),
@@ -534,7 +536,7 @@ export default function AdventuresPage() {
                           >
                             <option value="">No item reward</option>
                             {items.filter((item) => item.active).map((item) => (
-                              <option key={item.id} value={item.name}>{item.emoji} Award {item.name}</option>
+                              <option key={item.id} value={item.id}>{item.emoji} Award {item.name}</option>
                             ))}
                           </select>
                           <button

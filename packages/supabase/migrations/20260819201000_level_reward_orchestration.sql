@@ -4,7 +4,8 @@ ALTER TABLE public.level_rewards
   ADD COLUMN IF NOT EXISTS remove_role_id TEXT,
   ADD COLUMN IF NOT EXISTS currency_amount BIGINT,
   ADD COLUMN IF NOT EXISTS item_id UUID REFERENCES public.economy_items(id) ON DELETE RESTRICT,
-  ADD COLUMN IF NOT EXISTS item_quantity INTEGER;
+  ADD COLUMN IF NOT EXISTS item_quantity INTEGER,
+  ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
 
 ALTER TABLE public.level_rewards
   DROP CONSTRAINT IF EXISTS level_rewards_payload_check;
@@ -121,6 +122,7 @@ BEGIN
     FROM public.level_rewards
    WHERE id = p_reward_id
      AND guild_id = p_guild_id
+     AND active = true
    FOR SHARE;
 
   IF NOT FOUND THEN
@@ -323,4 +325,142 @@ $$;
 REVOKE ALL ON FUNCTION public.complete_level_reward_role_delivery(UUID, UUID, TEXT)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.complete_level_reward_role_delivery(UUID, UUID, TEXT)
+  TO service_role;
+
+CREATE OR REPLACE FUNCTION public.stage_crossed_level_rewards()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_old_level INTEGER := CASE WHEN TG_OP = 'INSERT' THEN 0 ELSE OLD.level END;
+  v_reward public.level_rewards%ROWTYPE;
+BEGIN
+  IF NEW.level <= v_old_level THEN RETURN NEW; END IF;
+
+  FOR v_reward IN
+    SELECT reward.*
+      FROM public.level_rewards AS reward
+     WHERE reward.guild_id = NEW.guild_id
+       AND reward.active = true
+       AND reward.level > v_old_level
+       AND reward.level <= NEW.level
+       AND NOT (
+         reward.reward_type = 'role'
+         AND reward.remove_at_level IS NOT NULL
+         AND reward.remove_at_level > v_old_level
+         AND reward.remove_at_level <= NEW.level
+       )
+     ORDER BY reward.level, reward.id
+  LOOP
+    PERFORM public.apply_level_reward_delivery(
+      NEW.guild_id, NEW.member_id, v_reward.id, 'award', NEW.level
+    );
+  END LOOP;
+
+  FOR v_reward IN
+    SELECT reward.*
+      FROM public.level_rewards AS reward
+     WHERE reward.guild_id = NEW.guild_id
+       AND reward.active = true
+       AND reward.reward_type = 'role'
+       AND reward.remove_at_level > v_old_level
+       AND reward.remove_at_level <= NEW.level
+     ORDER BY reward.remove_at_level, reward.id
+  LOOP
+    PERFORM public.apply_level_reward_delivery(
+      NEW.guild_id, NEW.member_id, v_reward.id, 'expiry', NEW.level
+    );
+  END LOOP;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS member_levels_stage_crossed_rewards ON public.member_levels;
+CREATE TRIGGER member_levels_stage_crossed_rewards
+AFTER INSERT OR UPDATE OF level ON public.member_levels
+FOR EACH ROW EXECUTE FUNCTION public.stage_crossed_level_rewards();
+
+REVOKE ALL ON FUNCTION public.stage_crossed_level_rewards()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.level_reward_retry_dlq(
+  p_dlq_id UUID,
+  p_guild_id TEXT
+)
+RETURNS TABLE (action_id UUID, action_status TEXT, disposition TEXT)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_dlq public.action_queue_dlq%ROWTYPE;
+  v_action public.bot_action_queue%ROWTYPE;
+  v_delivery public.level_reward_deliveries%ROWTYPE;
+  v_disposition TEXT;
+BEGIN
+  SELECT dlq.* INTO v_dlq
+    FROM public.action_queue_dlq AS dlq
+   WHERE dlq.id = p_dlq_id
+     AND dlq.guild_id = p_guild_id
+   FOR UPDATE;
+  IF NOT FOUND OR v_dlq.retried IS TRUE THEN
+    RETURN QUERY SELECT NULL::UUID, NULL::TEXT, 'already_retried'::TEXT;
+    RETURN;
+  END IF;
+  IF v_dlq.action <> 'deliver_level_reward_roles'
+     OR v_dlq.original_id !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' THEN
+    RETURN QUERY SELECT NULL::UUID, NULL::TEXT, 'invalid_carrier'::TEXT;
+    RETURN;
+  END IF;
+
+  SELECT queue.* INTO v_action
+    FROM public.bot_action_queue AS queue
+   WHERE queue.id = v_dlq.original_id::UUID
+   FOR UPDATE;
+  SELECT delivery.* INTO v_delivery
+    FROM public.level_reward_deliveries AS delivery
+   WHERE delivery.id = v_action.id
+   FOR UPDATE;
+  IF v_action.id IS NULL
+     OR v_action.guild_id IS DISTINCT FROM p_guild_id
+     OR v_action.action IS DISTINCT FROM v_dlq.action
+     OR v_action.payload IS DISTINCT FROM v_dlq.payload
+     OR v_action.payload ->> 'delivery_id' IS DISTINCT FROM v_action.id::TEXT
+     OR v_delivery.id IS NULL
+     OR v_delivery.guild_id IS DISTINCT FROM p_guild_id
+     OR v_delivery.action_id IS DISTINCT FROM v_action.id
+     OR v_delivery.status <> 'queued' THEN
+    RETURN QUERY SELECT NULL::UUID, NULL::TEXT, 'invalid_carrier'::TEXT;
+    RETURN;
+  END IF;
+
+  IF v_action.status IN ('failed', 'staged') THEN
+    UPDATE public.bot_action_queue AS queue
+       SET status = 'pending', claim_token = NULL, started_at = NULL,
+           completed_at = NULL, error_message = NULL, next_retry_at = NULL,
+           retry_count = queue.retry_count + 1
+     WHERE queue.id = v_action.id
+     RETURNING queue.* INTO v_action;
+    v_disposition := 'reopened';
+  ELSIF v_action.status IN ('pending', 'processing') THEN
+    v_disposition := 'already_active';
+  ELSIF v_action.status = 'completed' THEN
+    v_disposition := 'already_completed';
+  ELSE
+    RETURN QUERY SELECT NULL::UUID, NULL::TEXT, 'invalid_carrier'::TEXT;
+    RETURN;
+  END IF;
+
+  UPDATE public.action_queue_dlq
+     SET retried = true, retried_at = COALESCE(retried_at, pg_catalog.clock_timestamp())
+   WHERE id = v_dlq.id;
+  RETURN QUERY SELECT v_action.id, v_action.status, v_disposition;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.level_reward_retry_dlq(UUID, TEXT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.level_reward_retry_dlq(UUID, TEXT)
   TO service_role;

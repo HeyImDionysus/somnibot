@@ -676,7 +676,7 @@ async function runFullBoot(
 
       // V10 Audit L-4: BotPresenceManager sets client-wide presence.
       // Create once at bot level (using primary guild for config/member count).
-      const botPresence = new BotPresenceManager(client, client.guildId, client.supabase);
+      const botPresence = new BotPresenceManager(client, client.guildId, client.supabase, client.eventBus);
       botPresence.start();
       botLevelServices.presence = botPresence;
       log.info('Bot-level presence rotation started');

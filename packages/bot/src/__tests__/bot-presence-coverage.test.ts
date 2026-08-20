@@ -20,6 +20,7 @@ vi.mock('@somnibot/shared', async (importOriginal) => ({
 }));
 
 import { BotPresenceManager } from '../features/discord-ux/bot-presence.js';
+import { PlatformEventBus } from '../services/event-bus.js';
 
 function chainBuilder(resolveValue: any = { data: null, error: null }) {
   const chain: any = {};
@@ -216,6 +217,31 @@ describe('BotPresenceManager', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     // Should not crash
+    manager.stop();
+  });
+
+  it('reloads saved statuses when the dashboard publishes a settings change', async () => {
+    const client = makeClient('g1');
+    const supabase = makeSupabase({ custom_bot_statuses: ['Live status'] });
+    const eventBus = new PlatformEventBus();
+    const manager = new BotPresenceManager(
+      client as unknown as ConstructorParameters<typeof BotPresenceManager>[0],
+      'g1',
+      supabase as unknown as ConstructorParameters<typeof BotPresenceManager>[2],
+      eventBus,
+    );
+    manager.start(30_000);
+    await vi.advanceTimersByTimeAsync(100);
+    const readsBefore = supabase.from.mock.calls.filter(([table]) => table === 'guild_config').length;
+    eventBus.emit('config.changed', 'g1', {
+      section: 'all',
+      changes: { custom_bot_statuses: { before: [], after: ['Live status'] } },
+      changedBy: 'owner',
+      occurrenceId: 'presence-reload',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    const readsAfter = supabase.from.mock.calls.filter(([table]) => table === 'guild_config').length;
+    expect(readsAfter).toBeGreaterThan(readsBefore);
     manager.stop();
   });
 });

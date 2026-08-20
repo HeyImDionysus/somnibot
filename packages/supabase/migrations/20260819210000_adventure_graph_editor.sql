@@ -14,7 +14,7 @@ CREATE OR REPLACE FUNCTION public.upsert_economy_adventure_graph(
 RETURNS UUID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = ''
 AS $$
 DECLARE
   v_id UUID;

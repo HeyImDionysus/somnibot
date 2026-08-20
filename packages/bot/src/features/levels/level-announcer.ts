@@ -79,6 +79,12 @@ export async function handleLevelUp(
   for (let lvl = oldLevel + 1; lvl <= newLevel; lvl++) {
     const matchingRewards = rewards.filter((r) => r.level === lvl);
     for (const reward of matchingRewards) {
+      if (
+        reward.reward_type === 'role'
+        && reward.remove_at_level !== null
+        && reward.remove_at_level > oldLevel
+        && reward.remove_at_level <= newLevel
+      ) continue;
       const delivery = await applyRewardDelivery(
         supabase,
         guild.id,
@@ -87,7 +93,7 @@ export async function handleLevelUp(
         'award',
         newLevel,
       );
-      if (delivery?.outcome === 'applied' && reward.announce) {
+      if (delivery && reward.announce) {
         if (reward.reward_type === 'role' && reward.role_id) {
           const roleName = guild.roles.cache.get(reward.role_id)?.name ?? reward.role_id;
           unlocked.push(`🏆 Unlocked the **${roleName}** role`);

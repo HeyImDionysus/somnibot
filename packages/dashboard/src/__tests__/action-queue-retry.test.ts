@@ -60,6 +60,7 @@ function makeSupabase(input: {
   rows?: unknown[];
   recovery?: DbResult;
   genericRecovery?: DbResult;
+  levelRecovery?: DbResult;
 } = {}) {
   const fetch = thenableQuery({ data: input.rows ?? [exactDlq()], error: null });
   // A successful retry also writes one `admin_changes` row so the owner can see
@@ -92,6 +93,12 @@ function makeSupabase(input: {
           action_status: 'pending',
           disposition: 'requeued',
         }],
+        error: null,
+      };
+    }
+    if (name === 'level_reward_retry_dlq') {
+      return input.levelRecovery ?? {
+        data: [{ action_id: ACTION_ID, action_status: 'pending', disposition: 'reopened' }],
         error: null,
       };
     }
@@ -306,6 +313,19 @@ describe('POST /api/action-queue exact carrier retry', () => {
 });
 
 describe('POST /api/action-queue generic atomic retry', () => {
+  it('reopens the exact level-reward carrier instead of cloning its identity', async () => {
+    const mock = makeSupabase({ rows: [exactDlq('deliver_level_reward_roles')] });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
+    const response = await POST(request());
+    expect(response.status).toBe(200);
+    expect(mock.rpc).toHaveBeenCalledWith('level_reward_retry_dlq', {
+      p_dlq_id: DLQ_ID,
+      p_guild_id: GUILD_ID,
+    });
+    expect(mock.rpc).not.toHaveBeenCalledWith('bot_action_queue_retry_dlq', expect.anything());
+    expectNoCloning(mock);
+  });
+
   it('reports retry only after the atomic RPC creates one replacement', async () => {
     const row = exactDlq('send_notification');
     const mock = makeSupabase({ rows: [row] });

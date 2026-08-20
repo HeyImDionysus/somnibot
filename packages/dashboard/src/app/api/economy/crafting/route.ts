@@ -17,9 +17,40 @@ import { dbError, dbConflictOr500, apiServerError} from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 
 const recipeInputSchema = z.object({
+  item_id: z.string().uuid().optional(),
   item_name: z.string().min(1).max(64),
   qty: z.number().int().min(1).max(999),
 });
+
+type RecipeInput = z.infer<typeof recipeInputSchema>;
+
+async function normalizeRecipeInputs(
+  admin: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  inputs: RecipeInput[],
+): Promise<{ ok: true; inputs: Array<RecipeInput & { item_id: string }> } | { ok: false; response: NextResponse }> {
+  const { data, error } = await admin
+    .from('economy_items')
+    .select('id, name')
+    .eq('guild_id', guildId)
+    .limit(1000);
+  if (error) return { ok: false, response: dbError(error, 'economy/crafting') };
+  const items = data ?? [];
+  const normalized: Array<RecipeInput & { item_id: string }> = [];
+  for (const input of inputs) {
+    const matches = input.item_id
+      ? items.filter((item) => item.id === input.item_id)
+      : items.filter((item) => item.name.toLowerCase() === input.item_name.toLowerCase());
+    if (matches.length !== 1) {
+      return {
+        ok: false,
+        response: NextResponse.json({ success: false, error: `Recipe material "${input.item_name}" is missing or ambiguous.` }, { status: 400 }),
+      };
+    }
+    normalized.push({ item_id: matches[0]!.id, item_name: matches[0]!.name, qty: input.qty });
+  }
+  return { ok: true, inputs: normalized };
+}
 
 const recipeSchema = z.object({
   name: z.string().min(1).max(64),
@@ -68,6 +99,8 @@ export async function POST(request: NextRequest) {
     const parsed = result.data;
 
     const admin = createAdminSupabase();
+    const normalizedInputs = await normalizeRecipeInputs(admin, ctx.guildId, parsed.inputs);
+    if (!normalizedInputs.ok) return normalizedInputs.response;
 
     // Limit: max 50 recipes per guild
     const { count } = await admin
@@ -83,7 +116,7 @@ export async function POST(request: NextRequest) {
       .from('economy_recipes')
       .insert({
         ...parsed,
-        inputs: parsed.inputs,
+        inputs: normalizedInputs.inputs,
         guild_id: ctx.guildId,
       })
       .select('*')
@@ -131,7 +164,9 @@ export async function PUT(request: NextRequest) {
       updated_at: new Date().toISOString(),
     };
     if (parsed.inputs) {
-      updateData.inputs = parsed.inputs;
+      const normalizedInputs = await normalizeRecipeInputs(admin, ctx.guildId, parsed.inputs);
+      if (!normalizedInputs.ok) return normalizedInputs.response;
+      updateData.inputs = normalizedInputs.inputs;
     }
 
     const before = await readRowBefore(admin, 'economy_recipes', { id: id, guild_id: ctx.guildId });

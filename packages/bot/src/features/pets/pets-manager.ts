@@ -81,6 +81,13 @@ function petTypeDefinition(config: DbGuildConfig | null, key: string): PetTypeDe
   };
 }
 
+function hasPetType(config: DbGuildConfig | null, key: string): boolean {
+  const configured = config?.economy_pet_type_config;
+  return configured !== null && typeof configured === 'object' && !Array.isArray(configured)
+    ? Object.prototype.hasOwnProperty.call(configured, key)
+    : Object.prototype.hasOwnProperty.call(DEFAULT_PET_TYPES, key);
+}
+
 const XP_PER_LEVEL = 100;
 const MAX_LEVEL = 50;
 
@@ -453,6 +460,10 @@ export class PetsManager {
       return;
     }
     const config = await this.getConfig(guildId);
+    if (!hasPetType(config, petType)) {
+      await interaction.reply({ content: 'That pet type is not available in this server.', ephemeral: true });
+      return;
+    }
     const info = petTypeDefinition(config, petType);
     const price = info.price;
     // Atomic + idempotent purchase: wallet debit and pet insert commit as one

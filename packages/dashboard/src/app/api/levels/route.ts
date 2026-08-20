@@ -87,6 +87,7 @@ export async function GET(req: NextRequest) {
       .from('level_rewards')
       .select('*, economy_items(name, emoji)')
       .eq('guild_id', guildId)
+      .eq('active', true)
       .order('level', { ascending: true })
       .limit(1000),
     supabase
@@ -309,13 +310,9 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Invalid type' }, { status: 400 });
   }
 
-  const table = type === 'reward' ? 'level_rewards' : 'xp_multipliers';
-
-  const { error } = await supabase
-    .from(table)
-    .delete()
-    .eq('id', id)
-    .eq('guild_id', guildId);
+  const { error } = type === 'reward'
+    ? await supabase.from('level_rewards').update({ active: false }).eq('id', id).eq('guild_id', guildId)
+    : await supabase.from('xp_multipliers').delete().eq('id', id).eq('guild_id', guildId);
 
   if (error) {
     return dbError(error, 'levels');

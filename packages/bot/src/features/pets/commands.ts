@@ -9,12 +9,7 @@ export function buildPetCommands(): Record<string, SlashCommandBuilder> {
       .addUserOption((o) => o.setName('user').setDescription('User to view').setRequired(false)))
     .addSubcommand((s) => s.setName('buy').setDescription('Buy a new pet')
       .addStringOption((o) => o.setName('type').setDescription('Pet type').setRequired(true)
-        .addChoices(
-          { name: '🐺 Hunting', value: 'hunting' },
-          { name: '🐕 Guard', value: 'guard' },
-          { name: '🐿️ Foraging', value: 'foraging' },
-          { name: '🐈 Lucky', value: 'lucky' },
-        )))
+        .setAutocomplete(true)))
     .addSubcommand((s) => s.setName('feed').setDescription('Feed your pet (costs coins)'))
     .addSubcommand((s) => s.setName('play').setDescription('Play with your pet'))
     .addSubcommand((s) => s.setName('train').setDescription('Train your pet for XP (costs coins + energy)'))

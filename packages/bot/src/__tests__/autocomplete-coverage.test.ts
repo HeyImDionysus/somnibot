@@ -11,7 +11,7 @@ import { handleAutocomplete } from '../features/discord-ux/autocomplete.js';
 
 function chainBuilder(resolveValue: Record<string, unknown> = { data: null, error: null }) {
   const chain: Record<string, unknown> = {};
-  for (const m of ['select', 'eq', 'ilike', 'limit', 'order']) {
+  for (const m of ['select', 'eq', 'ilike', 'limit', 'order', 'maybeSingle']) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
   chain.then = (res: (v: unknown) => void, rej?: (e: unknown) => void) =>
@@ -24,6 +24,7 @@ function makeInteraction(command: string, focusedValue: string) {
     commandName: command,
     options: {
       getFocused: vi.fn().mockReturnValue({ name: 'query', value: focusedValue }),
+      getSubcommand: vi.fn().mockReturnValue(command === 'pet' ? 'buy' : null),
     },
     respond: vi.fn().mockResolvedValue(undefined),
   };
@@ -129,6 +130,31 @@ describe('handleAutocomplete', () => {
       expect.objectContaining({ value: 'p1' }),
       expect.objectContaining({ value: 'p2' }),
     ]);
+  });
+
+  it('uses saved pet labels while preserving stable pet type keys', async () => {
+    const interaction = makeInteraction('pet', 'wolf');
+    const supabase = makeSupabase([{
+      economy_pet_type_config: {
+        hunting: { name: 'Wolf Scout', emoji: '🐺', description: 'Scout', price: 5000 },
+      },
+    }]);
+    const chain = chainBuilder({
+      data: {
+        economy_pet_type_config: {
+          hunting: { name: 'Wolf Scout', emoji: '🐺', description: 'Scout', price: 5000 },
+        },
+      },
+      error: null,
+    });
+    supabase.from.mockReturnValue(chain);
+    await handleAutocomplete(
+      interaction as unknown as Parameters<typeof handleAutocomplete>[0],
+      supabase as unknown as Parameters<typeof handleAutocomplete>[1],
+      makeShoukaku() as unknown as Parameters<typeof handleAutocomplete>[2],
+      'g1',
+    );
+    expect(interaction.respond).toHaveBeenCalledWith([{ name: '🐺 Wolf Scout', value: 'hunting' }]);
   });
 
   // ── remove autocomplete ──────────────────────────────

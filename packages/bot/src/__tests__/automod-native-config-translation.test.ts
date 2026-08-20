@@ -10,7 +10,7 @@ describe('Discord AutoMod config translation', () => {
     expect(buildDiscordTriggerMetadata({
       type: 'link_filter',
       config: { domains: ['blocked.test'], mode: 'blacklist' },
-    })).toEqual({ keywordFilter: ['*blocked.test*'] });
+    })).toEqual({ regexPatterns: [String.raw`https?:\/\/(?:[A-Za-z0-9-]+\.)*blocked\.test(?::\d+)?(?:[\/?#]|$)`] });
     expect(buildDiscordTriggerMetadata({
       type: 'mention_spam',
       config: { maxMentions: 7 },
@@ -19,5 +19,17 @@ describe('Discord AutoMod config translation', () => {
       type: 'invite_filter',
       config: { allowOwnServer: true },
     })).toBeNull();
+  });
+
+  it('matches only the configured hostname and its subdomains', () => {
+    const metadata = buildDiscordTriggerMetadata({
+      type: 'link_filter',
+      config: { domains: ['evil.example'], mode: 'blacklist' },
+    });
+    const regex = new RegExp((metadata?.regexPatterns as string[])[0]!, 'i');
+    expect(regex.test('https://evil.example/path')).toBe(true);
+    expect(regex.test('https://cdn.evil.example/path')).toBe(true);
+    expect(regex.test('https://notevil.example/path')).toBe(false);
+    expect(regex.test('https://evil.example.attacker.test/path')).toBe(false);
   });
 });
