@@ -336,21 +336,28 @@ const planUpdate = planCreate
 
 const promotionCreate = z.object({
   name: safeName,
-  type: z.enum(['percent', 'fixed']),
-  value: z.number().min(0),  // max validated per-type via .refine() below
-  coupon_code: z.string().min(1).max(32).optional(),
-  applies_to_product_ids: z.array(uuid).optional(),
-  applies_to_plan_ids: z.array(uuid).optional(),
+  type: z.enum(['percentage', 'fixed_amount']),
+  value: z.number().int().min(1),
+  coupon_code: z.string().trim().toUpperCase().regex(/^[A-Z0-9][A-Z0-9_-]{1,31}$/),
+  applies_to_product_ids: z.array(uuid).max(100).default([]),
+  applies_to_plan_ids: z.array(uuid).max(100).default([]),
   start_date: z.string().datetime().optional().nullable(),
   end_date: z.string().datetime().optional().nullable(),
-  max_uses: z.number().int().min(0).max(99999).optional(),
-  min_purchase_cents: z.number().int().min(0).optional(),
+  max_uses: z.number().int().min(1).max(99999).optional().nullable(),
+  min_purchase_cents: z.number().int().min(0).optional().nullable(),
   first_purchase_only: z.boolean().optional(),
   active: z.boolean().default(true),
-}).refine(
-  (data) => data.type !== 'percent' || data.value <= 100,
-  { message: 'Percent discount cannot exceed 100%', path: ['value'] },
-);
+}).strict().superRefine((data, ctx) => {
+  if (data.type === 'percentage' && data.value > 99) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Percent discount must be between 1 and 99%', path: ['value'] });
+  }
+  if (data.applies_to_plan_ids.length > 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Coupons apply to one-time products, not subscription plans', path: ['applies_to_plan_ids'] });
+  }
+  if (data.start_date && data.end_date && new Date(data.end_date) <= new Date(data.start_date)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'End date must be after the start date', path: ['end_date'] });
+  }
+});
 
 // ── Entitlement schemas ─────────────────────────────
 

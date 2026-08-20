@@ -19,7 +19,12 @@ import { writeAuditLog } from '../../services/audit.js';
 export function buildStoreCommand() {
   return new SlashCommandBuilder()
     .setName('store')
-    .setDescription('Browse the server store');
+    .setDescription('Browse the server store')
+    .addStringOption((option) => option
+      .setName('coupon')
+      .setDescription('Apply a coupon code to eligible one-time products')
+      .setMinLength(2)
+      .setMaxLength(32));
 }
 
 function productMatchesEnabledType(product: Record<string, unknown>, enabled: Set<string>): boolean {
@@ -43,6 +48,13 @@ export async function handleStoreCommand(
   paypalApiBase: string,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
+  const requestedCoupon = typeof interaction.options?.getString === 'function'
+    ? interaction.options.getString('coupon')?.trim().toUpperCase() ?? null
+    : null;
+  if (requestedCoupon && !/^[A-Z0-9][A-Z0-9_-]{1,31}$/.test(requestedCoupon)) {
+    await interaction.editReply({ content: '❌ Coupon codes may contain only letters, numbers, underscores, and hyphens.' });
+    return;
+  }
 
   // Fetch active products
   const { data: products, error } = await supabase
@@ -115,7 +127,9 @@ export async function handleStoreCommand(
   // owner's powered-by toggle.
   const headerEmbed = new EmbedBuilder()
     .setTitle(kit.brandName)
-    .setDescription('Browse our products below. Click "Buy" to purchase!');
+    .setDescription(requestedCoupon
+      ? `Coupon **${requestedCoupon}** will be verified against eligible one-time products before PayPal opens.`
+      : 'Browse our products below. Click "Buy" to purchase!');
   applyBrand(headerEmbed, kit, { intent: 'primary' });
   embeds.push(headerEmbed);
 
@@ -138,10 +152,16 @@ export async function handleStoreCommand(
       ),
     );
 
+    const couponSuffix = requestedCoupon && product.type === 'one_time' ? `:${requestedCoupon}` : '';
+    const purchaseLabel = product.type === 'free' && product.price_cents === 0
+      ? `Claim ${product.name}`
+      : requestedCoupon && product.type === 'one_time'
+        ? `Buy ${product.name} with ${requestedCoupon}`
+        : `Buy ${product.name} — $${price}`;
     const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(product.type === 'free' && product.price_cents === 0 ? `store:claim:${product.id}` : `store:buy:${product.id}`)
-        .setLabel(product.type === 'free' && product.price_cents === 0 ? `Claim ${product.name}` : `Buy ${product.name} — $${price}`)
+        .setCustomId(product.type === 'free' && product.price_cents === 0 ? `store:claim:${product.id}` : `store:buy:${product.id}${couponSuffix}`)
+        .setLabel(purchaseLabel.slice(0, 80))
         .setStyle(ButtonStyle.Primary)
         .setEmoji(product.type === 'free' ? '🎁' : '🛒'),
     );

@@ -260,17 +260,37 @@ function makeQueryEngine(
     deactivationError?: string;
     deactivationErrorOnce?: string;
     checkoutInspectionError?: string;
+    pricingResult?: {
+      amount_cents: number;
+      discount_cents: number;
+      promotion_id: string | null;
+      coupon_code: string | null;
+    };
   } = {},
 ) {
   const inserts: Record<string, any[]> = {};
   let deactivationAttempts = 0;
   let activeCheckoutAttempts = 0;
+  let claimedProductId: unknown;
   const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
     if (name === 'commerce_claim_checkout_intent') {
+      claimedProductId = args?.p_product_id;
       return {
         data: {
           disposition: 'claimed',
           checkout_token: args?.p_checkout_token,
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_reserve_checkout_pricing') {
+      const product = (tables.products ?? []).find((row) => row.id === claimedProductId);
+      return {
+        data: options.pricingResult ?? {
+          amount_cents: product?.price_cents ?? 1000,
+          discount_cents: 0,
+          promotion_id: null,
+          coupon_code: null,
         },
         error: null,
       };
@@ -315,6 +335,8 @@ function makeQueryEngine(
         status: 'pending',
         checkout_active: true,
         checkout_approval_url: args?.p_approval_url,
+        promotion_id: options.pricingResult?.promotion_id ?? null,
+        discount_cents: options.pricingResult?.discount_cents ?? 0,
         delivery_type_snapshot: product?.delivery_type ?? 'access_pass',
         granted_role_ids_snapshot: product?.granted_role_ids ?? [],
         granted_channel_ids_snapshot: product?.granted_channel_ids ?? [],
@@ -581,9 +603,9 @@ function makePayPalFetch() {
   });
 }
 
-function makeInteraction() {
+function makeInteraction(customId = 'store:buy:prod-1') {
   return {
-    customId: 'store:buy:prod-1',
+    customId,
     user: { id: 'user-1', username: 'Tester' },
     deferReply: vi.fn().mockResolvedValue({}),
     editReply: vi.fn().mockResolvedValue({}),
@@ -862,6 +884,12 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
       activeCheckoutResponseLossOnce?: boolean;
       malformedCheckoutField?: string;
       malformedCheckoutAttempts?: number;
+      pricingResult?: {
+        amount_cents: number;
+        discount_cents: number;
+        promotion_id: string | null;
+        coupon_code: string | null;
+      };
     } = {},
   ) {
     const product = type === 'one_time' ? oneTimeProduct : subscriptionProduct;
@@ -918,6 +946,34 @@ describe('handleBuyButton — durable checkout snapshot boundary', () => {
       );
     },
   );
+
+  it('uses the atomically reserved coupon price for PayPal and the order', async () => {
+    const { supabase, rpc } = setup('one_time', {
+      pricingResult: {
+        amount_cents: 750,
+        discount_cents: 250,
+        promotion_id: '00000000-0000-4000-8000-0000000000f1',
+        coupon_code: 'SAVE25',
+      },
+    });
+    const interaction = makeInteraction('store:buy:prod-1:SAVE25');
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(rpc).toHaveBeenCalledWith('commerce_reserve_checkout_pricing', {
+      p_checkout_token: expect.any(String),
+      p_coupon_code: 'SAVE25',
+    });
+    expect(rpc).toHaveBeenCalledWith(
+      'commerce_create_and_bind_active_paid_checkout',
+      expect.objectContaining({ p_amount_cents: 750 }),
+    );
+    expect(JSON.stringify(interaction.editReply.mock.calls.at(-1)?.[0])).toContain('SAVE25');
+    expect(JSON.stringify(interaction.editReply.mock.calls.at(-1)?.[0])).toContain('$2.50');
+  });
 
   it.each(['one_time', 'subscription'] as const)(
     'does not expose a %s approval link when the atomic reservation fails',
@@ -1487,6 +1543,23 @@ describe('handleBuyButton — one live checkout per product (Finding 10)', () =>
     expect(inserts.orders ?? []).toHaveLength(0);
     expect(lastEmbedText(interaction)).toContain(approvalUrl);
     expect(lastEmbedText(interaction)).toContain('no second checkout was created');
+  });
+
+  it('does not pretend a new coupon applies to an existing differently priced checkout', async () => {
+    const approvalUrl = 'https://www.sandbox.paypal.com/checkoutnow?token=PAYPAL-LIVE-1';
+    const { supabase, fetchMock } = setup([
+      pendingOrder({ checkout_approval_url: approvalUrl }),
+    ]);
+    const interaction = makeInteraction('store:buy:prod-1:SAVE25');
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v2/checkout/orders/PAYPAL-LIVE-1'))).toBe(false);
+    expect(lastEmbedText(interaction)).toContain('different pricing');
+    expect(lastEmbedText(interaction)).toContain('will not create a second charge');
   });
 
   it('resumes a subscription only after PayPal confirms the exact approval URL', async () => {
