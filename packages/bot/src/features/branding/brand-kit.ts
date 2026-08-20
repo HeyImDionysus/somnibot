@@ -43,6 +43,7 @@ export interface BrandKit {
   currencyName: string;
   /** Owner-configured economy currency emoji (guild_config.currency_emoji). */
   currencyEmoji: string;
+  logoUrl: string | null;
 }
 
 /** Allowed voice presets — keep in sync with the guild_config CHECK constraint. */
@@ -62,7 +63,7 @@ export const POWERED_BY_ATTRIBUTION = 'Powered by SomniBot';
  * so the cached row they already hold can feed brandKitFromConfig() directly.
  */
 export const BRAND_KIT_COLUMNS =
-  'store_brand_name, store_brand_source, store_show_powered_by, brand_primary_color, brand_accent_color, brand_voice_preset, currency_name, currency_emoji';
+  'store_brand_name, store_brand_source, store_show_powered_by, brand_primary_color, brand_accent_color, brand_voice_preset, currency_name, currency_emoji, brand_logo_url';
 
 /** Max valid Discord embed color (24-bit 0xFFFFFF). */
 const MAX_COLOR = 0xffffff;
@@ -93,6 +94,7 @@ export function defaultBrandKit(fallbackName?: string): BrandKit {
     poweredByAttribution: POWERED_BY_ATTRIBUTION,
     currencyName: DEFAULT_CURRENCY_NAME,
     currencyEmoji: DEFAULT_CURRENCY_EMOJI,
+    logoUrl: null,
   };
 }
 
@@ -113,6 +115,16 @@ function coerceVoicePreset(value: unknown): BrandVoicePreset {
 /** Coerce a stored non-empty string, else the fallback. */
 function coerceText(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function coerceOptionalHttpUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -148,6 +160,7 @@ export function brandKitFromConfig(
     poweredByAttribution: showPoweredBy ? POWERED_BY_ATTRIBUTION : null,
     currencyName: coerceText(cfg.currency_name, fallback.currencyName),
     currencyEmoji: coerceText(cfg.currency_emoji, fallback.currencyEmoji),
+    logoUrl: coerceOptionalHttpUrl(cfg.brand_logo_url),
   };
 }
 

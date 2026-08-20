@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 289 migration files in packages/supabase/migrations/
+ * Source: 291 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -489,6 +489,12 @@ export interface DbGuildConfig {
   rbac_max_permissions_per_role: number;
   rbac_priority_escalation_guard: boolean;
   rbac_unknown_route_access: string;
+  brand_logo_url: string | null;
+  brand_logo_storage_path: string | null;
+  brand_header_url: string | null;
+  brand_header_storage_path: string | null;
+  brand_background_url: string | null;
+  brand_background_storage_path: string | null;
 }
 
 export interface DbInstanceSettings {

@@ -343,10 +343,52 @@ async function handleUpdateRole(
     }
   }
 
-  // Update desired state
-  const templateKey = payload.templateKey as string | undefined;
-  if (templateKey) {
-    await updateRoleInDesiredState(supabase, guild.id, templateKey, payload);
+  const requestedTemplateKey = payload.templateKey as string | undefined;
+  const { data: existingMapping, error: mappingReadError } = requestedTemplateKey
+    ? { data: { template_key: requestedTemplateKey }, error: null }
+    : await supabase
+      .from('discord_id_map')
+      .select('template_key')
+      .eq('guild_id', guild.id)
+      .eq('entity_type', 'role')
+      .eq('discord_id', role.id)
+      .maybeSingle();
+  if (mappingReadError) {
+    return { success: false, error: `Could not read role tier mapping: ${mappingReadError.message}`, retryable: true };
+  }
+
+  const templateKey = existingMapping?.template_key ?? `custom-${role.id}`;
+  if (requestedTemplateKey || existingMapping || payload.tier !== undefined) {
+    const { error: mappingWriteError } = await supabase.from('discord_id_map').upsert(
+      {
+        guild_id: guild.id,
+        entity_type: 'role',
+        template_key: templateKey,
+        discord_id: role.id,
+      },
+      { onConflict: 'guild_id,entity_type,template_key' },
+    );
+    if (mappingWriteError) {
+      return { success: false, error: `Could not save role tier mapping: ${mappingWriteError.message}`, retryable: true };
+    }
+
+    const desiredRole: Record<string, unknown> = {
+      key: templateKey,
+      name: role.name,
+      color: role.color,
+      hoist: role.hoist,
+      mentionable: role.mentionable,
+      permissions: role.permissions.bitfield.toString(),
+      position: role.position,
+    };
+    if (payload.tier !== undefined) desiredRole.tier = payload.tier;
+    const { error: desiredStateError } = await supabase.rpc('desired_state_upsert_role', {
+      p_guild_id: guild.id,
+      p_role: desiredRole,
+    });
+    if (desiredStateError) {
+      return { success: false, error: `Could not save role tier: ${desiredStateError.message}`, retryable: true };
+    }
   }
 
   return { success: true, data: { roleId: role.id, name: role.name } };

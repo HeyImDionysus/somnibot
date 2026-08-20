@@ -82,6 +82,7 @@ describe('resolveBrandKit', () => {
       poweredByAttribution: 'Powered by SomniBot',
       currencyName: 'Coins',
       currencyEmoji: '🪙',
+      logoUrl: null,
     });
   });
 
@@ -102,6 +103,7 @@ describe('resolveBrandKit', () => {
         brand_primary_color: 0x112233,
         brand_accent_color: 0x445566,
         brand_voice_preset: 'professional',
+        brand_logo_url: 'https://cdn.example.com/acme.png',
       }),
       'g1',
       { fallbackName: 'Guild Name' },
@@ -114,6 +116,7 @@ describe('resolveBrandKit', () => {
       poweredByAttribution: 'Powered by SomniBot',
       currencyName: 'Coins',
       currencyEmoji: '🪙',
+      logoUrl: 'https://cdn.example.com/acme.png',
     });
   });
 

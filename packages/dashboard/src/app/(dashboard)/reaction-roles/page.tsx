@@ -147,7 +147,7 @@ export default function ReactionRolesPage() {
 
   useAutoRefresh('reaction_role_panels', undefined, fetchRoles);
 
-  const openEditor = (rr?: ReactionRole) => {
+  const openEditor = (rr?: ReactionRole, target?: MessageTarget) => {
     if (rr) {
       setEditingId(rr.id);
       setForm({
@@ -166,8 +166,15 @@ export default function ReactionRolesPage() {
       setMessageLink('');
     } else {
       setEditingId(null);
-      setForm({ ...emptyForm, remove_on_unreact: defaults.default_remove_on_unreact, max_per_group: defaults.default_max_per_group ? String(defaults.default_max_per_group) : '', require_level: defaults.default_require_level ? String(defaults.default_require_level) : '' });
-      setSelectedTargetKey('');
+      setForm({
+        ...emptyForm,
+        channel_id: target?.channelId ?? '',
+        message_id: target?.messageId ?? '',
+        remove_on_unreact: defaults.default_remove_on_unreact,
+        max_per_group: defaults.default_max_per_group ? String(defaults.default_max_per_group) : '',
+        require_level: defaults.default_require_level ? String(defaults.default_require_level) : '',
+      });
+      setSelectedTargetKey(target?.key ?? '');
       setMessageLink('');
     }
     setShowForm(true);
@@ -549,17 +556,25 @@ export default function ReactionRolesPage() {
                 <p className="text-sm font-medium text-discord-text-primary">Role message in <RRChannelName id={mappings[0].channel_id} /></p>
                 <p className="text-xs text-discord-text-muted">Message ID (diagnostic): {mappings[0].message_id}</p>
               </div>
-              <button onClick={async () => {
-                const readback = await fetchRoles();
-                if (readback?.some((role) => role.id === mappings[0].id)) {
-                  setMappingReadback(messageTargetFor(mappings[0]));
-                  toast({ title: 'Saved mapping read back from the server', variant: 'success' });
-                } else {
-                  toast({ title: 'Saved mapping readback is unavailable', variant: 'error' });
-                }
-              }} className="rounded-input border border-discord-border-subtle px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary">
-                Read saved mapping
-              </button>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button
+                  onClick={() => openEditor(undefined, messageTargetFor(mappings[0]))}
+                  className="rounded-input bg-discord-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-discord-accent/80"
+                >
+                  + Add another role to this message
+                </button>
+                <button onClick={async () => {
+                  const readback = await fetchRoles();
+                  if (readback?.some((role) => role.id === mappings[0].id)) {
+                    setMappingReadback(messageTargetFor(mappings[0]));
+                    toast({ title: 'Saved mapping read back from the server', variant: 'success' });
+                  } else {
+                    toast({ title: 'Saved mapping readback is unavailable', variant: 'error' });
+                  }
+                }} className="rounded-input border border-discord-border-subtle px-3 py-1.5 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary">
+                  Read saved mapping
+                </button>
+              </div>
             </div>
             <div className="divide-y divide-discord-border-subtle">
               {mappings.map((rr) => (

@@ -105,7 +105,7 @@ describe('GET /api/branding', () => {
     expect(body).toEqual({ success: true, data: row });
     expect(mockFrom).toHaveBeenCalledWith('guild_config');
     expect(chain.select).toHaveBeenCalledWith(
-      'store_brand_name, store_show_powered_by, brand_primary_color, brand_accent_color, brand_voice_preset',
+      'store_brand_name, store_show_powered_by, brand_primary_color, brand_accent_color, brand_voice_preset, brand_logo_url, brand_header_url, brand_background_url',
     );
     expect(chain.eq).toHaveBeenCalledWith('guild_id', 'guild-123');
     expect(requireGuildOwner).toHaveBeenCalled();

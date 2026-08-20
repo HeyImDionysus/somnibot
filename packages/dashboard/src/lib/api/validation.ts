@@ -580,11 +580,31 @@ const scheduledMessageUpdate = z.object({
 
 // ── Ticket panel schemas ────────────────────────────
 
+const ticketPanelMessage = z.object({
+  title: z.string().max(256).optional(),
+  description: z.string().max(2000).optional(),
+  footer: z.string().max(2048).optional(),
+}).strict();
+
+const ticketIntakeField = z.object({
+  id: z.string().max(64).optional(),
+  label: z.string().trim().min(1).max(45),
+  placeholder: z.string().max(100).optional(),
+  style: z.enum(['short', 'paragraph']).default('short'),
+  required: z.boolean().default(true),
+  min_length: z.number().int().min(0).max(4000).optional(),
+  max_length: z.number().int().min(1).max(4000).optional(),
+}).strict().superRefine((field, ctx) => {
+  if (field.min_length != null && field.max_length != null && field.min_length > field.max_length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['max_length'], message: 'Maximum length must be at least the minimum length' });
+  }
+});
+
 const ticketPanelCreate = z.object({
   name: safeName,
   channel_id: snowflake,
-  panel_message: z.string().max(2000).optional(),
-  input_mode: z.string().max(32).optional(),
+  panel_message: ticketPanelMessage.optional(),
+  input_mode: z.enum(['buttons', 'dropdown']).optional(),
   ticket_types: z.array(z.record(z.unknown())).max(25).optional(),
   manager_roles: snowflakeArray,
   open_category_id: snowflake.optional().nullable(),
@@ -593,6 +613,11 @@ const ticketPanelCreate = z.object({
   dm_transcript_to_creator: z.boolean().optional(),
   max_open_per_user: z.number().int().min(1).max(10).default(1),
   introduction_message: z.string().max(2000).optional(),
+  inactivity_warn_hours: z.number().int().min(0).max(720).optional(),
+  inactivity_close_hours: z.number().int().min(0).max(720).optional(),
+  feedback_prompt_enabled: z.boolean().optional(),
+  intake_form_enabled: z.boolean().optional(),
+  intake_form_fields: z.array(ticketIntakeField).max(5).optional(),
 });
 
 // ── Level reward schemas ────────────────────────────
