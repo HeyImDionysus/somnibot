@@ -499,6 +499,47 @@ describe('deployServerState — role creation', () => {
     expect(guild.roles.cache.get('new-role-Admin')?.setPosition).toHaveBeenCalled();
   });
 
+  it('stops role moves immediately when the deployment lease is lost mid-hierarchy', async () => {
+    const abortController = new AbortController();
+    const guild = makeGuild();
+    const originalCreate = guild.roles.create;
+    let created = 0;
+    guild.roles.create = vi.fn(async (options) => {
+      const role = await originalCreate(options);
+      created++;
+      if (created === 1) {
+        const moveRole = role.setPosition;
+        role.setPosition = vi.fn(async (...args: Parameters<typeof moveRole>) => {
+          const moved = await moveRole(...args);
+          abortController.abort(new Error('deployment lease lost'));
+          return moved;
+        });
+      }
+      return role;
+    });
+    const supabase = { from: vi.fn(() => supaChain()) };
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild,
+      supabase,
+      desiredState,
+      { cleanExisting: false, dryRun: false, abortSignal: abortController.signal },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.at(-1)?.error).toContain('deployment lease lost');
+    expect(guild.roles.cache.get('new-role-Member')?.setPosition).toHaveBeenCalledTimes(1);
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition).not.toHaveBeenCalled();
+    expect(guild.channels.create).not.toHaveBeenCalled();
+  });
+
   it('reports honestly when a role Discord did not displace remains inside the band', async () => {
     // Outcome verification: if the reorder does NOT actually raise the
     // created roles above an interloper, step 4 must fail loudly instead of
@@ -571,6 +612,43 @@ describe('deployServerState — role creation', () => {
 });
 
 describe('deployServerState — clean existing', () => {
+  it('stops message deletions immediately when the deployment lease is lost mid-purge', async () => {
+    const abortController = new AbortController();
+    const messages = new MockCollection();
+    const firstDelete = vi.fn(async () => {
+      abortController.abort(new Error('deployment lease lost'));
+    });
+    const secondDelete = vi.fn(async () => {});
+    messages.set('m1', { id: 'm1', author: { id: 'bot1' }, delete: firstDelete });
+    messages.set('m2', { id: 'm2', author: { id: 'bot1' }, delete: secondDelete });
+    const channels = new MockCollection();
+    const channelDelete = vi.fn(async () => {});
+    channels.set('ch1', {
+      id: 'ch1',
+      name: 'old-channel',
+      type: 0,
+      delete: channelDelete,
+      messages: { fetch: vi.fn(async () => messages) },
+    });
+    const guild = makeGuild({
+      channels: { cache: channels, create: vi.fn() },
+    });
+    const supabase = { from: vi.fn(() => supaChain()) };
+
+    const result = await deployServerState(
+      guild,
+      supabase,
+      defaultDesiredState,
+      { cleanExisting: true, dryRun: false, abortSignal: abortController.signal },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.at(-1)?.error).toContain('deployment lease lost');
+    expect(firstDelete).toHaveBeenCalledTimes(1);
+    expect(secondDelete).not.toHaveBeenCalled();
+    expect(channelDelete).not.toHaveBeenCalled();
+  });
+
   it('deletes non-protected channels when cleanExisting is true', async () => {
     const channels = new MockCollection();
     const ch1 = { id: 'ch1', name: 'old-channel', type: 0, delete: vi.fn(async () => {}), messages: { fetch: vi.fn(async () => new MockCollection()) } };

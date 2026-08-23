@@ -20,9 +20,11 @@ function hierarchyContext(guild: Guild, roles: readonly Role[]): string {
 export async function placeRolesDirectlyBelowBot(
   guild: Guild,
   orderedRoleIds: readonly string[],
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   if (orderedRoleIds.length === 0) return;
 
+  abortSignal?.throwIfAborted();
   await guild.roles.fetch();
   const roles: Role[] = orderedRoleIds.map((roleId) => {
     const role = guild.roles.cache.get(roleId);
@@ -34,6 +36,7 @@ export async function placeRolesDirectlyBelowBot(
   });
 
   for (const role of roles) {
+    abortSignal?.throwIfAborted();
     await guild.roles.fetch();
     const liveRole = guild.roles.cache.get(role.id);
     const botPosition = guild.members.me?.roles.highest.position;
@@ -45,11 +48,13 @@ export async function placeRolesDirectlyBelowBot(
         `Desired role ${liveRole.name} is not movable below the bot (${hierarchyContext(guild, roles)})`,
       );
     }
+    abortSignal?.throwIfAborted();
     await liveRole.setPosition(botPosition - 1, {
       reason: 'SomniBot — apply reviewed role hierarchy',
     });
   }
 
+  abortSignal?.throwIfAborted();
   await guild.roles.fetch();
   const botPosition = guild.members.me?.roles.highest.position;
   if (botPosition === undefined) {
