@@ -102,6 +102,8 @@ export class AutoModSync {
   private syncInterval: NodeJS.Timeout | null = null;
   private started = false;
   private stopping = false;
+  private stopPromise: Promise<void> | null = null;
+  private lifecycleGeneration = 0;
   private syncQueue: Promise<void> = Promise.resolve();
   private readonly handleConfigChanged = (
     event: PlatformEvent<'config.changed', ConfigChangedData>,
@@ -121,9 +123,10 @@ export class AutoModSync {
    * Start listening for moderation config changes and sync to Discord.
    */
   start(): void {
-    if (this.started) return;
+    if (this.started || this.stopPromise) return;
     this.started = true;
     this.stopping = false;
+    this.lifecycleGeneration += 1;
     this.eventBus.on('config.changed', this.handleConfigChanged);
 
     // Initial sync on startup
@@ -139,24 +142,36 @@ export class AutoModSync {
     log.info('AutoMod sync service started');
   }
 
-  async stop(): Promise<void> {
-    if (!this.started) return;
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    if (!this.started) return Promise.resolve();
     this.started = false;
     this.stopping = true;
+    this.lifecycleGeneration += 1;
     this.eventBus.off('config.changed', this.handleConfigChanged);
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
       this.syncInterval = null;
     }
-    await this.syncQueue;
+    const drain = this.syncQueue;
+    const stopPromise = drain.finally(() => {
+      if (this.stopPromise === stopPromise) {
+        this.stopping = false;
+        this.stopPromise = null;
+      }
+    });
+    this.stopPromise = stopPromise;
+    return stopPromise;
   }
 
   /**
    * Push dashboard automod rules to Discord's native AutoMod API.
    */
   syncRules(): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    const generation = this.lifecycleGeneration;
     const run = this.syncQueue.then(async () => {
-      if (this.stopping) return;
+      if (this.stopping || generation !== this.lifecycleGeneration) return;
       await this.performSync();
     });
     this.syncQueue = run.then(() => undefined, () => undefined);

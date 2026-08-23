@@ -11,21 +11,17 @@ function configuredPublicOrigin(): URL | null {
   }
 }
 
-function headerHostMatches(value: string | null, configured: URL): boolean {
-  if (!value) return false;
+function requestHostMatches(value: string | null, configured: URL): boolean {
+  if (!value || value.includes(',')) return false;
 
-  const host = value.split(',', 1)[0].trim().toLowerCase();
-  return host === configured.host.toLowerCase();
+  return value.trim().toLowerCase() === configured.host.toLowerCase();
 }
 
 export function getTrustedRedirectOrigin(request: Request): string {
   const configured = configuredPublicOrigin();
   if (
     configured
-    && (
-      headerHostMatches(request.headers.get('host'), configured)
-      || headerHostMatches(request.headers.get('x-forwarded-host'), configured)
-    )
+    && requestHostMatches(request.headers.get('host'), configured)
   ) {
     return configured.origin;
   }

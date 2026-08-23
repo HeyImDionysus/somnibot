@@ -210,6 +210,69 @@ describe('POST /api/portal/auth guild scoping', () => {
     });
   });
 
+  it('rejects a forwarded-only public host match from an internal request URL', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.example.com';
+    vi.mocked(requireAuth).mockResolvedValue({
+      ok: true,
+      userId: 'dashboard-user-1',
+      discordId: 'discord-user-1',
+    });
+
+    const res = await POST(new NextRequest('http://localhost:3456/api/portal/auth', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://somni.example.com',
+        host: 'localhost:3456',
+        'x-forwarded-host': 'somni.example.com',
+        'x-forwarded-for': '198.51.100.2',
+      },
+      body: JSON.stringify({ action: 'dashboard_session', guild_id: 'guild-B' }),
+    }));
+
+    expect(res.status).toBe(403);
+    expect(requireAuth).not.toHaveBeenCalled();
+    expect(insertedSession).toBeNull();
+  });
+
+  it('rejects the configured public host when the browser origin disagrees', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.example.com';
+
+    const res = await POST(new NextRequest('http://localhost:3456/api/portal/auth', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://attacker.example',
+        host: 'somni.example.com',
+        'x-forwarded-for': '198.51.100.2',
+      },
+      body: JSON.stringify({ action: 'dashboard_session', guild_id: 'guild-B' }),
+    }));
+
+    expect(res.status).toBe(403);
+    expect(requireAuth).not.toHaveBeenCalled();
+    expect(insertedSession).toBeNull();
+  });
+
+  it('rejects non-JSON dashboard-session requests on the configured public host', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.example.com';
+
+    const res = await POST(new NextRequest('http://localhost:3456/api/portal/auth', {
+      method: 'POST',
+      headers: {
+        'content-type': 'text/plain',
+        origin: 'https://somni.example.com',
+        host: 'somni.example.com',
+        'x-forwarded-for': '198.51.100.2',
+      },
+      body: JSON.stringify({ action: 'dashboard_session', guild_id: 'guild-B' }),
+    }));
+
+    expect(res.status).toBe(403);
+    expect(requireAuth).not.toHaveBeenCalled();
+    expect(insertedSession).toBeNull();
+  });
+
   it('does not mint a portal session without a valid dashboard session', async () => {
     vi.mocked(requireAuth).mockResolvedValue({
       ok: false,

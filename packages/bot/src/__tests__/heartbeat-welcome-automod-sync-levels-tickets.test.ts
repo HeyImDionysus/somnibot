@@ -363,6 +363,52 @@ describe('AutoModSync', () => {
     expect(bus.off).toHaveBeenCalledTimes(1);
   });
 
+  it('drains the active generation, drops queued stale work, and blocks restart until stop settles', async () => {
+    const { AutoModSync } = await import('../features/discord-native/automod-sync.js');
+    let resolveFirstQuery: ((value: { data: unknown[]; error: null }) => void) | undefined;
+    const firstQuery = new Promise<{ data: unknown[]; error: null }>((resolve) => {
+      resolveFirstQuery = resolve;
+    });
+    const deferredQuery = {
+      select: vi.fn(),
+      eq: vi.fn(),
+      limit: vi.fn(() => firstQuery),
+    };
+    deferredQuery.select.mockReturnValue(deferredQuery);
+    deferredQuery.eq.mockReturnValue(deferredQuery);
+    const from = vi.fn()
+      .mockReturnValueOnce(deferredQuery)
+      .mockImplementation(() => chainAsync([]));
+    const bus = eb();
+    const sync = new AutoModSync(
+      guild(),
+      { from } as unknown as ConstructorParameters<typeof AutoModSync>[1],
+      bus,
+    );
+
+    sync.start();
+    await vi.waitFor(() => expect(from).toHaveBeenCalledTimes(1));
+    const staleQueuedSync = sync.syncRules();
+    const firstStop = sync.stop();
+    const repeatedStop = sync.stop();
+
+    sync.start();
+    expect(bus.on).toHaveBeenCalledTimes(1);
+    expect(repeatedStop).toBe(firstStop);
+
+    if (!resolveFirstQuery) throw new Error('Deferred AutoMod query did not initialize');
+    resolveFirstQuery({ data: [], error: null });
+    await Promise.all([firstStop, repeatedStop, staleQueuedSync]);
+    expect(from).toHaveBeenCalledTimes(1);
+
+    sync.start();
+    await vi.waitFor(() => expect(from).toHaveBeenCalledTimes(2));
+    await sync.stop();
+
+    expect(bus.on).toHaveBeenCalledTimes(2);
+    expect(bus.off).toHaveBeenCalledTimes(2);
+  });
+
   it('syncs only the guild whose moderation config changed', async () => {
     const { AutoModSync } = await import('../features/discord-native/automod-sync.js');
     type ConfigListener = (event: {
