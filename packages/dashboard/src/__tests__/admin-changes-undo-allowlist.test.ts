@@ -132,8 +132,8 @@ function wireSupabase(
   return { targetUpdate, targetMatch, targetEq, targetContains, parentMaybeSingle };
 }
 
-function okAuth(guildId = 'guild-1', discordId = '123') {
-  mockRequirePermission.mockResolvedValue({ guildId, discordId });
+function okAuth(guildId = 'guild-1', discordId = '123', isOwner = true) {
+  mockRequirePermission.mockResolvedValue({ guildId, discordId, isOwner });
 }
 
 const validUndoBody = { action: 'undo', id: '00000000-0000-0000-0000-000000000001' };
@@ -882,7 +882,15 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
         request_id: expect.any(String),
       }),
     }));
-    expect(mockNotifyBot).toHaveBeenCalledWith('guild-1', 'onboarding', { onboarding_enabled: false });
+    expect(mockNotifyBot).toHaveBeenCalledWith(
+      'guild-1',
+      'onboarding',
+      { onboarding_enabled: false },
+      'dashboard',
+      undefined,
+      undefined,
+      expect.any(String),
+    );
     expect(json.data.onboardingSync).toEqual(expect.objectContaining({ status: 'pending' }));
   });
 
@@ -915,6 +923,36 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
     expect(json.success).toBe(true);
     expect(json.warning).toBe('Change undone, but Discord synchronization could not be queued.');
     expect(json.data.onboardingSync).toEqual(expect.objectContaining({ status: 'failed' }));
+  });
+
+  it('rejects onboarding undo from a delegated non-owner administrator', async () => {
+    okAuth('guild-1', 'admin-42', false);
+    const { targetUpdate } = wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: { onboarding_enabled: true },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+
+    const res = await POST(buildRequest(validUndoBody));
+    const json = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(json.error).toContain('server owner');
+    expect(targetUpdate).not.toHaveBeenCalled();
+    expect(mockNotifyBot).not.toHaveBeenCalled();
   });
 
   it('is a no-op (no target write) when undo_payload is null but still marks undone', async () => {

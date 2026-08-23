@@ -58,6 +58,7 @@ import {
   startActionQueueListener,
 } from '../services/action-queue.js';
 import { repairDriftItem, acceptDriftItem } from '../sync/repair-actions.js';
+import { eventBus } from '../services/event-bus.js';
 
 // Multi-table Supabase mock that returns different data per table/call
 function makeSupa(pendingActions: any[] = []) {
@@ -1796,6 +1797,27 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
       expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // config_reload calls various cache invalidation - no crash = success
+  });
+
+  it('awaits onboarding config reload with its synchronization request fence', async () => {
+    const requestId = '77777777-7777-4777-8777-777777777777';
+    const emitAndWait = vi.spyOn(eventBus, 'emitAndWait').mockResolvedValue(undefined);
+    const actions = [{
+      id: 'act-onboarding', guild_id: 'guild-1', action: 'config_reload', status: 'pending',
+      payload: {
+        section: 'onboarding',
+        changes: { onboarding_enabled: true },
+        sync_request_id: requestId,
+      },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+
+    await startActionQueueListener(makeGuild(), makeSupa(actions));
+
+    expect(emitAndWait).toHaveBeenCalledWith('config.changed', 'guild-1', expect.objectContaining({
+      section: 'onboarding',
+      syncRequestId: requestId,
+    }));
   });
 
   it('processes send_embed action', async () => {

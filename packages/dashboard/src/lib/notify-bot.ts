@@ -110,8 +110,17 @@ export async function notifyBotForGuildWithResult(
   changedBy: string = 'dashboard',
   auditEvent?: ConfigReloadAuditEvent,
   before?: Record<string, unknown>,
+  syncRequestId?: string,
 ): Promise<boolean> {
-  return enqueueBotNotification(guildId, section, changes, changedBy, auditEvent, before);
+  return enqueueBotNotification(
+    guildId,
+    section,
+    changes,
+    changedBy,
+    auditEvent,
+    before,
+    syncRequestId,
+  );
 }
 
 async function enqueueBotNotification(
@@ -121,6 +130,7 @@ async function enqueueBotNotification(
   changedBy: string = 'dashboard',
   auditEvent?: ConfigReloadAuditEvent,
   before?: Record<string, unknown>,
+  syncRequestId?: string,
 ): Promise<boolean> {
 
   try {
@@ -136,6 +146,7 @@ async function enqueueBotNotification(
         // audit occurrence key, so a redelivered config_reload action cannot
         // double-write the audit row.
         occurrence_id: crypto.randomUUID(),
+        ...(syncRequestId ? { sync_request_id: syncRequestId } : {}),
         ...(before ? { before } : {}),
         ...(auditEvent ? { audit_event: auditEvent } : {}),
       },

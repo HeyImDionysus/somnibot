@@ -61,9 +61,18 @@ export async function PUT(req: NextRequest) {
   ]);
   const allowed = {
     ...picked,
-    onboarding_config: picked.onboarding_config
-      ? { ...picked.onboarding_config, enabled: picked.onboarding_enabled }
-      : null,
+    ...(picked.onboarding_config === undefined
+      ? {}
+      : {
+          onboarding_config: picked.onboarding_config === null
+            ? null
+            : {
+                ...picked.onboarding_config,
+                ...(picked.onboarding_enabled === undefined
+                  ? {}
+                  : { enabled: picked.onboarding_enabled }),
+              },
+        }),
   };
 
   const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));
@@ -95,7 +104,15 @@ export async function PUT(req: NextRequest) {
     before,
   }, supabase);
 
-  const queued = await notifyBotForGuildWithResult(guildId, 'onboarding', allowed);
+  const queued = await notifyBotForGuildWithResult(
+    guildId,
+    'onboarding',
+    allowed,
+    'dashboard',
+    undefined,
+    undefined,
+    syncState.request_id,
+  );
   if (!queued) {
     const failedState = {
       ...syncState,
@@ -103,11 +120,20 @@ export async function PUT(req: NextRequest) {
       observed_at: new Date().toISOString(),
       error: 'The bot notification could not be queued.',
     };
-    await supabase
+    const { error: receiptError } = await supabase
       .from('guild_config')
       .update({ onboarding_sync_state: failedState })
       .eq('guild_id', guildId)
       .contains('onboarding_sync_state', { request_id: syncState.request_id });
+
+    if (receiptError) {
+      return NextResponse.json({
+        success: false,
+        saved: true,
+        error: 'Settings were saved, but Discord synchronization could not be queued and its failure receipt could not be stored.',
+        sync: syncState,
+      }, { status: 503 });
+    }
 
     return NextResponse.json({
       success: false,

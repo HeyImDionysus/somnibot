@@ -2610,6 +2610,14 @@ export interface DbOnboardingFallbackIntents {
   updated_at: string;
 }
 
+export interface DbOnboardingSyncLeases {
+  guild_id: string;
+  request_id: string;
+  lease_token: string;
+  acquired_at: string;
+  expires_at: string;
+}
+
 export interface DbPaymentRefunds {
   id: string;
   payment_id: string;

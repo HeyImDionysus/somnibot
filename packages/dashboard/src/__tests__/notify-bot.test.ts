@@ -116,4 +116,21 @@ describe('notifyBot', () => {
     await expect(notifyBotForGuildWithResult('guild_12345', 'onboarding')).resolves.toBe(false);
     expect(consoleSpy).toHaveBeenCalledOnce();
   });
+
+  it('carries an onboarding synchronization request fence in queue metadata', async () => {
+    const { notifyBotForGuildWithResult } = await import('@/lib/notify-bot');
+    const requestId = '77777777-7777-4777-8777-777777777777';
+
+    await notifyBotForGuildWithResult(
+      'guild_12345',
+      'onboarding',
+      { onboarding_enabled: true },
+      'dashboard',
+      undefined,
+      undefined,
+      requestId,
+    );
+
+    expect(mockInsert.mock.calls[0][0].payload.sync_request_id).toBe(requestId);
+  });
 });

@@ -1306,6 +1306,18 @@ async function handleConfigReload(
     typeof payload.occurrence_id === 'string' && payload.occurrence_id !== ''
       ? payload.occurrence_id
       : undefined;
+  const syncRequestId =
+    typeof payload.sync_request_id === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.sync_request_id)
+      ? payload.sync_request_id
+      : undefined;
+  if (payload.sync_request_id !== undefined && syncRequestId === undefined) {
+    return {
+      success: false,
+      error: 'Malformed config_reload synchronization request ID',
+      retryable: false,
+    };
+  }
 
   const configEvent = {
     section: section ?? 'unknown',
@@ -1313,6 +1325,7 @@ async function handleConfigReload(
     changedBy: changedBy ?? 'dashboard',
     ...(beforeValues ? { before: beforeValues } : {}),
     ...(occurrenceId ? { occurrenceId } : {}),
+    ...(syncRequestId ? { syncRequestId } : {}),
   };
   if (section === 'onboarding') {
     await eventBus.emitAndWait('config.changed', guild.id, configEvent);

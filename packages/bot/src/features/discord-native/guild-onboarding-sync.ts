@@ -139,7 +139,7 @@ export class GuildOnboardingSync {
     // Listen for onboarding config changes
     this.eventBus.on('config.changed', async (event: PlatformEvent<'config.changed', ConfigChangedData>) => {
       if (event.data.section === 'onboarding' || event.data.section === 'welcome') {
-        await this.syncOnboarding();
+        await this.syncOnboarding(event.data.syncRequestId);
       }
     });
 
@@ -153,13 +153,17 @@ export class GuildOnboardingSync {
   /**
    * Push dashboard onboarding config to Discord's Guild Onboarding API.
    */
-  syncOnboarding(): Promise<void> {
-    const run = this.syncQueue.then(() => this.performSync());
-    this.syncQueue = run.catch(() => undefined);
-    return run;
+  syncOnboarding(expectedRequestId?: string): Promise<void> {
+    const run = this.syncQueue.then(() => this.performSync(expectedRequestId));
+    this.syncQueue = run.then(() => undefined, () => undefined);
+    return run.then(async (needsReconciliation) => {
+      if (needsReconciliation) {
+        await this.syncOnboarding();
+      }
+    });
   }
 
-  private async performSync(): Promise<void> {
+  private async performSync(expectedRequestId?: string): Promise<boolean> {
     const { data: config, error: configError } = await this.supabase
       .from('guild_config')
       .select('onboarding_config, onboarding_enabled, interest_role_mapping, onboarding_sync_state')
@@ -169,28 +173,65 @@ export class GuildOnboardingSync {
     if (configError) {
       const error = `Onboarding configuration read failed: ${configError.message}`;
       log.error(error);
-      const { error: receiptError } = await this.supabase.rpc('fail_pending_onboarding_sync', {
-        p_guild_id: this.guild.id,
-        p_error: error,
-      });
+      const receiptResult = expectedRequestId
+        ? await this.supabase.rpc('fail_pending_onboarding_sync', {
+            p_guild_id: this.guild.id,
+            p_request_id: expectedRequestId,
+            p_error: error,
+          })
+        : { error: null };
       this.eventBus.emit('sync.failed', this.guild.id, {
         stage: 'discord-native-onboarding',
         error,
       });
-      if (receiptError) {
-        throw new Error(`${error}; receipt write failed: ${receiptError.message}`);
+      if (receiptResult.error) {
+        throw new Error(`${error}; receipt write failed: ${receiptResult.error.message}`);
       }
       throw new Error(error);
     }
 
     if (!config) {
-      return;
+      return false;
     }
 
     const onboardingConfig = config.onboarding_config as OnboardingConfig | null;
     const interestRoleMapping = (config.interest_role_mapping ?? {}) as Record<string, string>;
     const syncState = readSyncState(config.onboarding_sync_state);
+    if (expectedRequestId && syncState.request_id !== expectedRequestId) {
+      log.info('Skipped superseded onboarding synchronization request', {
+        expectedRequestId,
+        currentRequestId: syncState.request_id ?? null,
+      });
+      return true;
+    }
     let observed: GuildOnboarding | null = null;
+    let leaseToken: string | null = null;
+
+    if (syncState.status !== 'idle' && syncState.managed !== false && syncState.request_id) {
+      const { data: lease, error: leaseError } = await this.supabase.rpc(
+        'acquire_onboarding_sync_lease',
+        {
+          p_guild_id: this.guild.id,
+          p_request_id: syncState.request_id,
+          p_lease_seconds: 90,
+        },
+      );
+      if (leaseError) {
+        throw new Error(`Onboarding synchronization lease failed: ${leaseError.message}`);
+      }
+      if (!lease || typeof lease !== 'object' || Array.isArray(lease)) {
+        throw new Error('Onboarding synchronization lease returned malformed evidence');
+      }
+      const disposition = lease.disposition;
+      if (disposition === 'stale') return true;
+      if (disposition === 'busy') {
+        throw new Error('Onboarding synchronization is already running for this guild');
+      }
+      if (disposition !== 'acquired' || typeof lease.lease_token !== 'string') {
+        throw new Error('Onboarding synchronization lease returned malformed evidence');
+      }
+      leaseToken = lease.lease_token;
+    }
 
     try {
       // Fail before editing if the guild cannot expose its native onboarding
@@ -206,13 +247,13 @@ export class GuildOnboardingSync {
         const matchesSaved = config.onboarding_enabled
           ? requested !== null && JSON.stringify(liveConfig) === JSON.stringify(requested)
           : !liveConfig.enabled;
-        await this.persistSyncState(syncState, {
+        const persisted = await this.persistSyncState(syncState, {
           status: matchesSaved ? 'synced' : 'drifted',
           managed: false,
           observed_at: new Date().toISOString(),
           live_config: liveConfig,
         });
-        return;
+        return !persisted;
       }
 
       if (!config.onboarding_enabled) {
@@ -229,7 +270,7 @@ export class GuildOnboardingSync {
             ? 'Discord onboarding remained enabled after disable request'
             : 'Disabled Discord onboarding');
         }
-        return;
+        return !persisted;
       }
 
       if (!onboardingConfig) {
@@ -279,22 +320,39 @@ export class GuildOnboardingSync {
       if (persisted) {
         log.info(`Synced ${prompts.length} onboarding prompts to Discord`);
       }
+      return !persisted;
     } catch (err) {
       const error = String(err);
-      await this.persistSyncState(syncState, {
-        ...syncState,
-        status: 'failed',
-        observed_at: new Date().toISOString(),
-        error,
-        ...(observed ? { live_config: serializeOnboarding(observed) } : {}),
-      }).catch((persistError) => {
-        log.error('Failed to persist onboarding sync failure:', { error: String(persistError) });
-      });
+      let persisted: boolean;
+      try {
+        persisted = await this.persistSyncState(syncState, {
+          ...syncState,
+          status: 'failed',
+          observed_at: new Date().toISOString(),
+          error,
+          ...(observed ? { live_config: serializeOnboarding(observed) } : {}),
+        });
+      } catch (persistError) {
+        throw new Error(`${error}; receipt write failed: ${String(persistError)}`);
+      }
       log.error('Failed to sync onboarding:', { error });
       this.eventBus.emit('sync.failed', this.guild.id, {
         stage: 'discord-native-onboarding',
         error,
       });
+      return !persisted;
+    } finally {
+      if (leaseToken) {
+        const { error: releaseError } = await this.supabase.rpc('release_onboarding_sync_lease', {
+          p_guild_id: this.guild.id,
+          p_lease_token: leaseToken,
+        });
+        if (releaseError) {
+          log.error('Failed to release onboarding synchronization lease:', {
+            error: releaseError.message,
+          });
+        }
+      }
     }
   }
 

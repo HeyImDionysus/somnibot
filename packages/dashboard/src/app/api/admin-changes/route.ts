@@ -91,6 +91,7 @@ export async function POST(request: NextRequest) {
     // list payload is rejected here, before any DB write.
     const undo = change.undo_payload;
     let onboardingSync: Record<string, unknown> | null = null;
+    let onboardingWarning: string | null = null;
 
     // Discord-side undo. The row-update path below reverses a database edit; it
     // cannot delete a role or recreate a channel, so changes the BOT made to
@@ -153,6 +154,12 @@ export async function POST(request: NextRequest) {
       }
 
       const isOnboardingUndo = change.action === 'onboarding.updated' && validation.table === 'guild_config';
+      if (isOnboardingUndo && !ctx.isOwner) {
+        return NextResponse.json(
+          { error: 'Only the server owner can undo onboarding changes.' },
+          { status: 403 },
+        );
+      }
       const pendingState = isOnboardingUndo ? {
         status: 'pending',
         managed: true,
@@ -170,7 +177,15 @@ export async function POST(request: NextRequest) {
       if (undoError) return dbError(undoError, 'admin-changes');
 
       if (pendingState) {
-        const queued = await notifyBotForGuildWithResult(ctx.guildId, 'onboarding', validation.data);
+        const queued = await notifyBotForGuildWithResult(
+          ctx.guildId,
+          'onboarding',
+          validation.data,
+          'dashboard',
+          undefined,
+          undefined,
+          pendingState.request_id,
+        );
         if (queued) {
           onboardingSync = pendingState;
         } else {
@@ -180,12 +195,17 @@ export async function POST(request: NextRequest) {
             observed_at: new Date().toISOString(),
             error: 'The bot notification could not be queued after undo.',
           };
-          await admin
+          const { error: receiptError } = await admin
             .from('guild_config')
             .update({ onboarding_sync_state: failedState })
             .eq('guild_id', ctx.guildId)
             .contains('onboarding_sync_state', { request_id: pendingState.request_id });
-          onboardingSync = failedState;
+          if (receiptError) {
+            onboardingSync = pendingState;
+            onboardingWarning = 'Change undone, but Discord synchronization could not be queued and its failure receipt could not be stored.';
+          } else {
+            onboardingSync = failedState;
+          }
         }
       }
     }
@@ -236,9 +256,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       data: { undone: change, undoRecord, ...(onboardingSync ? { onboardingSync } : {}) },
-      ...(onboardingSync?.status === 'failed'
-        ? { warning: 'Change undone, but Discord synchronization could not be queued.' }
-        : {}),
+      ...(onboardingWarning
+        ? { warning: onboardingWarning }
+        : onboardingSync?.status === 'failed'
+          ? { warning: 'Change undone, but Discord synchronization could not be queued.' }
+          : {}),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
