@@ -131,7 +131,17 @@ async function installCommunityApi(
 
   await page.route('**/api/roles', (route) => fulfillJson(route, {
     success: true,
-    data: [{ id: ROLE_ID, name: 'Announcements', color: 0, managed: false, position: 1 }],
+    data: [{
+      id: ROLE_ID,
+      name: 'Announcements',
+      color: 0,
+      managed: false,
+      position: 1,
+      editableByBot: true,
+    }],
+    snapshotVersion: 2,
+    snapshotAt: new Date().toISOString(),
+    awaitingSnapshot: false,
   }));
 
   await page.route('**/api/tickets/panels', (route) => fulfillJson(route, {
@@ -195,7 +205,7 @@ test.describe('Community self-service browser flow', () => {
     await expect(page.getByText('Role message in #role-picks', { exact: true })).toBeVisible();
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByRole('button', { name: 'Save mapping' })).not.toBeVisible();
@@ -268,7 +278,7 @@ test.describe('Community self-service browser flow', () => {
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByText('Reaction role saved; server readback is unavailable')).toBeVisible();
@@ -297,7 +307,7 @@ test.describe('Community self-service browser flow', () => {
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByText('Reaction role saved; server readback is unavailable')).toBeVisible();
@@ -355,7 +365,7 @@ test.describe('Community self-service browser flow', () => {
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByRole('button', { name: 'Saving mapping…' })).toBeDisabled();
@@ -443,7 +453,7 @@ test.describe('Community self-service browser flow', () => {
               type: 'multiple_choice',
               required: true,
               single_select: false,
-              options: [{ title: 'Gaming', role_ids: [ROLE_ID] }],
+              options: [{ title: 'Gaming', role_ids: [] }],
             }],
             default_channel_ids: [],
           },
@@ -466,9 +476,20 @@ test.describe('Community self-service browser flow', () => {
         },
       });
     });
+    const longRoleName = `Member${'Role'.repeat(32)}`;
     await page.route('**/api/roles', (route) => fulfillJson(route, {
       success: true,
-      data: [{ id: ROLE_ID, name: 'Member', color: 0, managed: false, position: 1 }],
+      data: [{
+        id: ROLE_ID,
+        name: longRoleName,
+        color: 0,
+        managed: false,
+        position: 1,
+        editableByBot: true,
+      }],
+      snapshotVersion: 2,
+      snapshotAt: new Date().toISOString(),
+      awaitingSnapshot: false,
     }));
     await page.route('**/api/channels', (route) => fulfillJson(route, {
       success: true,
@@ -494,8 +515,9 @@ test.describe('Community self-service browser flow', () => {
     const rolesGranted = page.getByRole('button', { name: 'Roles granted' });
     await rolesGranted.click();
     const rolesListbox = page.getByRole('listbox', { name: 'Roles granted' });
-    await rolesListbox.getByRole('option', { name: 'Member', exact: true }).click();
-    await expect(rolesListbox.getByRole('option', { name: 'Member', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await rolesListbox.getByRole('option', { name: longRoleName, exact: true }).click();
+    await expect(rolesListbox.getByRole('option', { name: longRoleName, exact: true })).toHaveAttribute('aria-selected', 'true');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await page.keyboard.press('Escape');
     await expect(rolesListbox).toBeHidden();
     await expect(rolesGranted).toBeFocused();

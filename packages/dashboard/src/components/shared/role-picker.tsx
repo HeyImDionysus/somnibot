@@ -368,7 +368,7 @@ export function RolePicker({
                 {selectedRoles.map((role) => (
                   <span
                     key={role.id}
-                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs"
+                    className="inline-flex min-w-0 max-w-full items-center gap-1 rounded px-1.5 py-0.5 text-xs"
                     style={{
                       backgroundColor: `${roleColor(role.color)}15`,
                       color: roleColor(role.color),
@@ -378,7 +378,7 @@ export function RolePicker({
                       className="h-2 w-2 rounded-full shrink-0"
                       style={{ backgroundColor: roleColor(role.color) }}
                     />
-                    {role.name}
+                    <span className="min-w-0 truncate">{role.name}</span>
                     <span aria-hidden="true" className="opacity-60 ml-0.5">
                       <X size={10} />
                     </span>
@@ -387,9 +387,9 @@ export function RolePicker({
                 {missingSelected.map((id) => (
                   <span
                     key={id}
-                    className="inline-flex items-center gap-1 rounded bg-discord-danger/15 px-1.5 py-0.5 text-xs text-discord-danger"
+                    className="inline-flex min-w-0 max-w-full items-center gap-1 rounded bg-discord-danger/15 px-1.5 py-0.5 text-xs text-discord-danger"
                   >
-                    Deleted role ({id})
+                    <span className="min-w-0 truncate">Deleted role ({id})</span>
                     <span aria-hidden="true" className="opacity-60">
                       <X size={10} />
                     </span>
@@ -398,9 +398,9 @@ export function RolePicker({
                 {unresolvedSelected.map((id) => (
                   <span
                     key={id}
-                    className="inline-flex items-center gap-1 rounded bg-discord-text-muted/10 px-1.5 py-0.5 text-xs text-discord-text-muted"
+                    className="inline-flex min-w-0 max-w-full items-center gap-1 rounded bg-discord-text-muted/10 px-1.5 py-0.5 text-xs text-discord-text-muted"
                   >
-                    Configured role ({id})
+                    <span className="min-w-0 truncate">Configured role ({id})</span>
                     <span aria-hidden="true" className="opacity-60">
                       <X size={10} />
                     </span>
