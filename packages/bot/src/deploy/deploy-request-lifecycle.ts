@@ -64,6 +64,7 @@ const requestedDeployRowSchema = deployRowBaseSchema.extend({
 const claimedDeployRowSchema = deployRowBaseSchema.extend({
   deploy_status: z.literal('running'),
   deploy_claim_token: z.string().uuid(),
+  deploy_lease_expires_at: z.string().datetime({ offset: true }),
 });
 
 const claimedDeployIdentitySchema = z.object({
@@ -162,6 +163,19 @@ export async function settleDeployRequest(
     p_error: errorMessage ?? null,
   });
   if (error) throw new Error(`Failed to settle deployment request: ${error.message}`);
+  return z.boolean().parse(data);
+}
+
+export async function renewDeployRequestClaim(
+  client: SomniClient,
+  request: ClaimedDeployRow,
+): Promise<boolean> {
+  const { data, error } = await client.supabase.rpc('renew_deploy_request_claim', {
+    p_guild_id: request.guild_id,
+    p_request_id: request.deploy_request_id,
+    p_claim_token: request.deploy_claim_token,
+  });
+  if (error) throw new Error(`Failed to renew deployment claim: ${error.message}`);
   return z.boolean().parse(data);
 }
 

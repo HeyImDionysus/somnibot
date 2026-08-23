@@ -4,7 +4,7 @@
  * Tests: getDeployStatus, startDeployListener, executeDeploy,
  * parseDesiredState, executeDeployDirect
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -87,6 +87,7 @@ function makeClient() {
   let latestRequestRow: Record<string, unknown> | null = null;
   let claimResultOverride: Record<string, unknown> | null = null;
   let settleResult = true;
+  let renewResult = true;
   const guilds = new Map([
     ['g1', makeGuild('g1')],
     ['g2', makeGuild('g2')],
@@ -129,6 +130,7 @@ function makeClient() {
               categories: [],
               ...latestRequestRow,
               deploy_claim_token: '22222222-2222-4222-8222-222222222222',
+              deploy_lease_expires_at: '2099-01-01T00:00:00.000Z',
               deploy_status: 'running',
               ...claimResultOverride,
             },
@@ -137,6 +139,9 @@ function makeClient() {
         }
         if (name === 'fail_interrupted_deploy_requests') {
           return Promise.resolve({ data: 0, error: null });
+        }
+        if (name === 'renew_deploy_request_claim') {
+          return Promise.resolve({ data: renewResult, error: null });
         }
         return Promise.resolve({ data: settleResult, error: null });
       }),
@@ -181,6 +186,9 @@ function makeClient() {
     _resubscribe: () => subscriptionCallback?.('SUBSCRIBED'),
     _setSettleResult: (value: boolean) => {
       settleResult = value;
+    },
+    _setRenewResult: (value: boolean) => {
+      renewResult = value;
     },
     _setClaimResult: (value: Record<string, unknown>) => {
       claimResultOverride = value;
@@ -464,6 +472,42 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     resetDeployMocks();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('renews the claim lease while Discord deployment remains in progress', async () => {
+    vi.useFakeTimers();
+    let finishDeployment: ((result: Awaited<ReturnType<typeof mockDeployServerState>>) => void)
+      | undefined;
+    mockDeployServerState.mockImplementationOnce(() => new Promise((resolve) => {
+      finishDeployment = resolve;
+    }));
+    const client = makeClient();
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback()!;
+
+    const deployment = cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('renew_deploy_request_claim', {
+      p_guild_id: 'g1',
+      p_request_id: '11111111-1111-4111-8111-111111111111',
+      p_claim_token: '22222222-2222-4222-8222-222222222222',
+    });
+
+    finishDeployment?.({
+      success: true,
+      actions: [],
+      errors: [],
+      idMappings: [],
+      duration: 30_000,
+    });
+    await deployment;
+  });
+
   it('leaves ID mapping persistence to the deployer', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
@@ -618,6 +662,17 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       'server.deployed',
       'g1',
       expect.anything(),
+    );
+    expect(mockWriteAuditLog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'deploy.failed',
+        errorMessage: expect.stringContaining('Failed to settle the claimed deployment request'),
+      }),
+    );
+    expect(mockWriteAuditLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'deploy.completed' }),
     );
   });
 

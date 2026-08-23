@@ -570,6 +570,7 @@ export interface DbGuildDesiredState {
   deploy_status: string;
   deploy_claim_token: string | null;
   deploy_claimed_at: string | null;
+  deploy_lease_expires_at: string | null;
   deploy_started_at: string | null;
   deploy_completed_at: string | null;
   deploy_error: string | null;

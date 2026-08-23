@@ -3,6 +3,7 @@ ALTER TABLE public.guild_desired_state
   ADD COLUMN IF NOT EXISTS deploy_status TEXT NOT NULL DEFAULT 'idle',
   ADD COLUMN IF NOT EXISTS deploy_claim_token UUID,
   ADD COLUMN IF NOT EXISTS deploy_claimed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS deploy_lease_expires_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS deploy_started_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS deploy_completed_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS deploy_error TEXT;
@@ -57,6 +58,7 @@ BEGIN
     deploy_status,
     deploy_claim_token,
     deploy_claimed_at,
+    deploy_lease_expires_at,
     deploy_started_at,
     deploy_completed_at,
     deploy_error,
@@ -76,6 +78,7 @@ BEGIN
     NULL,
     NULL,
     NULL,
+    NULL,
     p_requested_at
   )
   ON CONFLICT (guild_id) DO UPDATE
@@ -89,6 +92,7 @@ BEGIN
         deploy_status = 'requested',
         deploy_claim_token = NULL,
         deploy_claimed_at = NULL,
+        deploy_lease_expires_at = NULL,
         deploy_started_at = NULL,
         deploy_completed_at = NULL,
         deploy_error = NULL,
@@ -131,6 +135,7 @@ BEGIN
      SET deploy_status = 'running',
          deploy_claim_token = gen_random_uuid(),
          deploy_claimed_at = clock_timestamp(),
+         deploy_lease_expires_at = clock_timestamp() + INTERVAL '2 minutes',
          deploy_started_at = clock_timestamp(),
          deploy_completed_at = NULL,
          deploy_error = NULL,
@@ -144,6 +149,29 @@ BEGIN
     RETURN NULL;
   END IF;
   RETURN to_jsonb(v_state);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.renew_deploy_request_claim(
+  p_guild_id TEXT,
+  p_request_id UUID,
+  p_claim_token UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  UPDATE public.guild_desired_state
+     SET deploy_lease_expires_at = clock_timestamp() + INTERVAL '2 minutes',
+         updated_at = clock_timestamp()
+   WHERE guild_id = p_guild_id
+     AND deploy_request_id = p_request_id
+     AND deploy_claim_token = p_claim_token
+     AND deploy_status = 'running'
+     AND deploy_lease_expires_at > clock_timestamp();
+  RETURN FOUND;
 END;
 $$;
 
@@ -163,6 +191,7 @@ BEGIN
   UPDATE public.guild_desired_state
      SET deploy_status = CASE WHEN p_success THEN 'success' ELSE 'failed' END,
          deploy_claim_token = NULL,
+         deploy_lease_expires_at = NULL,
          deploy_completed_at = clock_timestamp(),
          deploy_error = CASE WHEN p_success THEN NULL ELSE left(COALESCE(p_error, 'Deployment failed'), 2000) END,
          applied_at = CASE WHEN p_success THEN clock_timestamp() ELSE applied_at END,
@@ -172,7 +201,8 @@ BEGIN
    WHERE guild_id = p_guild_id
      AND deploy_request_id = p_request_id
      AND deploy_claim_token = p_claim_token
-     AND deploy_status = 'running';
+     AND deploy_status = 'running'
+     AND deploy_lease_expires_at > clock_timestamp();
   RETURN FOUND;
 END;
 $$;
@@ -189,10 +219,12 @@ BEGIN
   UPDATE public.guild_desired_state
      SET deploy_status = 'failed',
          deploy_claim_token = NULL,
+         deploy_lease_expires_at = NULL,
          deploy_completed_at = clock_timestamp(),
-         deploy_error = 'Deployment interrupted before completion; submit an explicit retry',
+         deploy_error = 'Deployment lease expired before completion; submit an explicit retry',
          updated_at = clock_timestamp()
-   WHERE deploy_status = 'running';
+   WHERE deploy_status = 'running'
+     AND (deploy_lease_expires_at IS NULL OR deploy_lease_expires_at <= clock_timestamp());
   GET DIAGNOSTICS v_count = ROW_COUNT;
   RETURN v_count;
 END;
@@ -200,14 +232,20 @@ $$;
 
 REVOKE ALL ON FUNCTION public.request_server_deployment(TEXT, UUID, JSONB, JSONB, JSONB, JSONB, TEXT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.claim_deploy_request(TEXT, UUID) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.renew_deploy_request_claim(TEXT, UUID, UUID) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.settle_deploy_request(TEXT, UUID, UUID, BOOLEAN, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.fail_interrupted_deploy_requests() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.request_server_deployment(TEXT, UUID, JSONB, JSONB, JSONB, JSONB, TEXT, TIMESTAMPTZ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_deploy_request(TEXT, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.renew_deploy_request_claim(TEXT, UUID, UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.settle_deploy_request(TEXT, UUID, UUID, BOOLEAN, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.fail_interrupted_deploy_requests() TO service_role;
+
+REVOKE ALL ON TABLE public.guild_desired_state FROM PUBLIC, anon, authenticated;
 
 COMMENT ON COLUMN public.guild_desired_state.deploy_request_id IS
   'Unique dashboard submission identifier for an explicit deployment attempt.';
 COMMENT ON COLUMN public.guild_desired_state.deploy_status IS
   'Durable deployment lifecycle; only requested rows may be claimed by the bot.';
+COMMENT ON COLUMN public.guild_desired_state.deploy_lease_expires_at IS
+  'Server-controlled claim lease; only expired running deployments may be recovered.';

@@ -3,12 +3,56 @@ import type { DesiredState } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { deployServerState, type DeployOptions, type DeployResult } from './deployer.js';
 import type { ClaimedDeployRow } from './deploy-request-lifecycle.js';
-import { settleDeployRequest } from './deploy-request-lifecycle.js';
+import { renewDeployRequestClaim, settleDeployRequest } from './deploy-request-lifecycle.js';
 import { recordCreatedResourceChanges } from './deploy-created-resources.js';
 import { writeAuditBatch, writeAuditLog } from '../services/audit.js';
 import { writeGuildSnapshot } from '../services/guild-snapshot.js';
 
 const log = createLogger('DeployListener');
+const LEASE_RENEWAL_INTERVAL_MS = 30_000;
+
+type DeployLeaseHeartbeat = {
+  signal: AbortSignal;
+  stop(): Promise<Error | null>;
+};
+
+function startDeployLeaseHeartbeat(
+  client: SomniClient,
+  request: ClaimedDeployRow,
+): DeployLeaseHeartbeat {
+  const abortController = new AbortController();
+  let stopped = false;
+  let failure: Error | null = null;
+  let renewal = Promise.resolve();
+
+  const renew = (): void => {
+    renewal = renewal.then(async () => {
+      if (stopped || failure) return;
+      try {
+        const renewed = await renewDeployRequestClaim(client, request);
+        if (!renewed) throw new Error('Deployment claim lease is no longer owned by this executor');
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
+        abortController.abort(failure);
+      }
+    });
+  };
+
+  const timer = setInterval(renew, LEASE_RENEWAL_INTERVAL_MS);
+  timer.unref();
+
+  return {
+    signal: abortController.signal,
+    async stop(): Promise<Error | null> {
+      if (!stopped) {
+        stopped = true;
+        clearInterval(timer);
+      }
+      await renewal;
+      return failure;
+    },
+  };
+}
 
 type DeployStatus = {
   guildId: string;
@@ -48,7 +92,13 @@ export async function executeClaimedDeployment(
   const guild = client.guilds.cache.get(guildId);
   if (!guild) {
     log.error('Guild not found:', guildId);
-    await settleDeployRequest(client, request, false, 'Guild is not available to the bot');
+    const settled = await settleDeployRequest(
+      client,
+      request,
+      false,
+      'Guild is not available to the bot',
+    );
+    if (!settled) log.error('Failed to settle unavailable-guild deployment claim', { guildId });
     return;
   }
 
@@ -64,23 +114,13 @@ export async function executeClaimedDeployment(
   deployStatuses.set(guildId, deployStatus);
   latestDeployGuildId = guildId;
 
-  await writeAuditLog(client.supabase, {
-    guildId,
-    actorType: 'bot',
-    actorId: 'deployer',
-    action: 'deploy.started',
-    category: 'sync',
-    details: {
-      deployId,
-      roleCount: desiredState.roles.length,
-      channelCount: desiredState.channels.length,
-      categoryCount: desiredState.categories.length,
-    },
-  });
-
+  const heartbeat = startDeployLeaseHeartbeat(client, request);
+  const callerProgress = optionOverrides?.onProgress;
   const options: DeployOptions = {
     cleanExisting: false,
     dryRun: false,
+    ...optionOverrides,
+    abortSignal: heartbeat.signal,
     onProgress: (step, total, action) => {
       const activeStatus = deployStatuses.get(guildId);
       if (activeStatus?.deployId === deployId) {
@@ -88,17 +128,28 @@ export async function executeClaimedDeployment(
         activeStatus.totalSteps = total;
         activeStatus.currentAction = action;
       }
+      callerProgress?.(step, total, action);
       log.info(`[${step}/${total}] ${action}`);
     },
-    ...optionOverrides,
   };
 
   try {
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'bot',
+      actorId: 'deployer',
+      action: 'deploy.started',
+      category: 'sync',
+      details: {
+        deployId,
+        roleCount: desiredState.roles.length,
+        channelCount: desiredState.channels.length,
+        categoryCount: desiredState.categories.length,
+      },
+    });
+
     log.info('Starting deployment:', deployId);
     const result = await deployServerState(guild, client.supabase, desiredState, options);
-    const resultError = result.errors
-      .map((error) => `${error.entityName}: ${error.error}`)
-      .join('; ');
 
     await writeAuditBatch(
       client.supabase,
@@ -113,23 +164,6 @@ export async function executeClaimedDeployment(
         error: action.error,
       })),
     );
-    await writeAuditLog(client.supabase, {
-      guildId,
-      actorType: 'bot',
-      actorId: 'deployer',
-      action: result.success ? 'deploy.completed' : 'deploy.failed',
-      category: 'sync',
-      details: {
-        deployId,
-        duration: result.duration,
-        actionCount: result.actions.length,
-        errorCount: result.errors.length,
-      },
-      success: result.success,
-      errorMessage: result.errors.length > 0
-        ? result.errors.map((error) => `${error.entityName}: ${error.error}`).join('; ')
-        : undefined,
-    });
     await recordCreatedResourceChanges(client, guildId, result);
 
     try {
@@ -139,6 +173,12 @@ export async function executeClaimedDeployment(
       log.error('Failed to write post-deploy snapshot:', snapshotError);
     }
 
+    const leaseFailure = await heartbeat.stop();
+    if (leaseFailure) throw leaseFailure;
+
+    const resultError = result.errors
+      .map((error) => `${error.entityName}: ${error.error}`)
+      .join('; ');
     const settled = await settleDeployRequest(
       client,
       request,
@@ -154,6 +194,25 @@ export async function executeClaimedDeployment(
         error: 'Failed to settle the claimed deployment request',
       });
     }
+
+    const finalError = result.errors
+      .map((error) => `${error.entityName}: ${error.error}`)
+      .join('; ');
+    await writeAuditLog(client.supabase, {
+      guildId,
+      actorType: 'bot',
+      actorId: 'deployer',
+      action: result.success ? 'deploy.completed' : 'deploy.failed',
+      category: 'sync',
+      details: {
+        deployId,
+        duration: result.duration,
+        actionCount: result.actions.length,
+        errorCount: result.errors.length,
+      },
+      success: result.success,
+      errorMessage: finalError || undefined,
+    });
 
     deployStatus.status = result.success ? 'success' : 'failed';
     deployStatus.completedAt = new Date().toISOString();
@@ -186,26 +245,35 @@ export async function executeClaimedDeployment(
       + `${result.errors.length} errors`,
     );
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const heartbeatFailure = await heartbeat.stop();
+    const primaryError = error instanceof Error ? error : new Error(String(error));
+    const errorMessage = heartbeatFailure && heartbeatFailure.message !== primaryError.message
+      ? `${primaryError.message}; ${heartbeatFailure.message}`
+      : primaryError.message;
     log.error('Fatal deployment error:', errorMessage);
     deployStatus.status = 'failed';
     deployStatus.completedAt = new Date().toISOString();
     deployStatus.currentAction = `Fatal error: ${errorMessage}`;
 
     try {
-      await settleDeployRequest(client, request, false, errorMessage);
+      const settled = await settleDeployRequest(client, request, false, errorMessage);
+      if (!settled) log.error('Fatal deployment claim was no longer owned', { guildId, deployId });
     } catch (settlementError) {
       log.error('Failed to settle fatal deployment:', settlementError);
     }
-    await writeAuditLog(client.supabase, {
-      guildId,
-      actorType: 'bot',
-      actorId: 'deployer',
-      action: 'deploy.fatal',
-      category: 'sync',
-      details: { deployId },
-      success: false,
-      errorMessage,
-    });
+    try {
+      await writeAuditLog(client.supabase, {
+        guildId,
+        actorType: 'bot',
+        actorId: 'deployer',
+        action: 'deploy.fatal',
+        category: 'sync',
+        details: { deployId },
+        success: false,
+        errorMessage,
+      });
+    } catch (auditError) {
+      log.error('Failed to write fatal deployment audit:', auditError);
+    }
   }
 }

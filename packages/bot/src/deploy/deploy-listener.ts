@@ -1,15 +1,15 @@
 /**
  * Deploy Listener — Subscribes to Supabase Realtime for deploy requests.
  *
- * When the dashboard saves a desired state and sets `applied_at = null`,
- * this listener detects the change and triggers the deployer.
+ * When the dashboard atomically records a requested lifecycle row, this
+ * listener detects the change and claims it before triggering the deployer.
  *
  * Flow:
  * 1. Dashboard stores desired state in guild_desired_state
- * 2. Dashboard POSTs /api/deploy → clears applied_at (signals "deploy me")
- * 3. This listener detects the Realtime change
- * 4. Deployer runs, reports progress
- * 5. Results stored in audit_logs, applied_at set to now()
+ * 2. Dashboard POSTs /api/deploy → records a unique requested claim
+ * 3. This listener detects and claims the request
+ * 4. Deployer runs while renewing the claim lease
+ * 5. Results are audited and the matching claim is settled
  */
 
 import type { SomniClient } from '../client.js';
@@ -25,6 +25,7 @@ import { executeClaimedDeployment } from './deploy-executor.js';
 export { getDeployStatus } from './deploy-executor.js';
 
 const log = createLogger('DeployListener');
+const RECOVERY_INTERVAL_MS = 30_000;
 
 // ============================================================
 // Listener Setup
@@ -36,6 +37,16 @@ const log = createLogger('DeployListener');
 export function startDeployListener(client: SomniClient): void {
   const primaryGuildId = client.guildId;
   let recoveryStarted = false;
+  let recoveryInFlight = false;
+  const recover = async (): Promise<void> => {
+    if (recoveryInFlight) return;
+    recoveryInFlight = true;
+    try {
+      await recoverPendingDeploys(client);
+    } finally {
+      recoveryInFlight = false;
+    }
+  };
 
   log.info('Starting deploy listener for all guilds', { primaryGuildId });
 
@@ -63,7 +74,9 @@ export function startDeployListener(client: SomniClient): void {
       log.info(`Realtime subscription: ${status}`);
       if (status === 'SUBSCRIBED' && !recoveryStarted) {
         recoveryStarted = true;
-        void recoverPendingDeploys(client);
+        void recover();
+        const timer = setInterval(() => void recover(), RECOVERY_INTERVAL_MS);
+        timer.unref();
       }
     });
 

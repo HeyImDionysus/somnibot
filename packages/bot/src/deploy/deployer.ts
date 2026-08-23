@@ -65,6 +65,7 @@ export interface DeployOptions {
   dryRun: boolean;
   /** Progress callback */
   onProgress?: (step: number, total: number, action: string) => void;
+  abortSignal?: AbortSignal;
 }
 
 type DiscordIdMappingRow = {
@@ -142,6 +143,7 @@ export async function deployServerState(
 
   let totalSteps = 0;
   const report = (action: string) => {
+    options.abortSignal?.throwIfAborted();
     options.onProgress?.(step, totalSteps, action);
   };
 

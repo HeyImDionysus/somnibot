@@ -2,8 +2,8 @@
  * POST /api/deploy — Store a reviewed plan and trigger an explicit deployment.
  * GET /api/deploy — Get deployment status and recent actions.
  *
- * The dashboard stores the desired state in Supabase's `guild_desired_state` table.
- * Setting `applied_at = null` signals to the bot (via Realtime subscription) to deploy.
+ * The dashboard atomically records a requested lifecycle row in
+ * `guild_desired_state`. The bot claims that exact request before deployment.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -117,8 +117,8 @@ export async function POST(request: NextRequest) {
   });
 
   // A deploy is the single most far-reaching thing this dashboard can do: the
-  // bot's deploy listener watches guild_desired_state for `applied_at = null`
-  // and then creates, edits and (with cleanExisting) DELETES real Discord roles
+  // the bot claims this exact lifecycle request and then creates, edits and
+  // (with cleanExisting) DELETES real Discord roles
   // and channels. There is deliberately no `undo` — no db row update and no
   // allowlisted queue action can put a deleted channel and its message history
   // back, and offering a button that pretends otherwise would be the worst
