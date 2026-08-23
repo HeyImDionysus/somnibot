@@ -8,7 +8,7 @@ vi.mock('@/lib/admin-changes', () => ({
   recordAdminChange: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { POST } from '@/app/api/deploy/route';
+import { GET, POST } from '@/app/api/deploy/route';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -36,7 +36,7 @@ function makeSupabase(
     const existing = builders.get(table);
     if (existing) return existing;
     const builder = {} as Record<string, ReturnType<typeof vi.fn>>;
-    for (const method of ['select', 'eq', 'order', 'limit']) {
+    for (const method of ['select', 'eq', 'like', 'order', 'limit']) {
       builder[method] = vi.fn(() => builder);
     }
     builder.upsert = vi.fn((payload: unknown) => {
@@ -226,5 +226,39 @@ describe('POST /api/deploy persistence', () => {
     expect(supabase.writes.some(
       (write) => write.table === 'rpc:request_server_deployment',
     )).toBe(false);
+  });
+});
+
+describe('GET /api/deploy status', () => {
+  it('never returns internal deployment lease or error fields', async () => {
+    const supabase = makeSupabase({
+      guild_desired_state: {
+        guild_id: 'guild-1',
+        roles: [{ key: 'member' }],
+        channels: [{ key: 'general' }],
+        categories,
+        deploy_status: 'running',
+        deploy_claim_token: 'internal-claim-token',
+        deploy_claimed_by: 'bot-instance-1',
+        deploy_claim_expires_at: '2026-08-23T09:40:00.000Z',
+        deploy_error: 'internal stack details',
+      },
+      guild: { setup_completed: false, setup_confirmed_at: null },
+      audit_logs: [],
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.desiredState).toMatchObject({
+      guild_id: 'guild-1',
+      deploy_status: 'running',
+    });
+    expect(body.desiredState).not.toHaveProperty('deploy_claim_token');
+    expect(body.desiredState).not.toHaveProperty('deploy_claimed_by');
+    expect(body.desiredState).not.toHaveProperty('deploy_claim_expires_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_error');
   });
 });

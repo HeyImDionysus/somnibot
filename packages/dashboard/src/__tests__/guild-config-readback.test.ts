@@ -49,4 +49,37 @@ describe('GET /api/guild config readback', () => {
     expect(response.status).toBe(200);
     expect(body.config).toEqual({ ticket_transcript_enabled: true, ticket_dm_transcript: false });
   });
+
+  it('never returns internal deployment lease or error fields', async () => {
+    const guild = query({ id: GUILD_ID, guild_config: {} });
+    const desiredState = query({
+      guild_id: GUILD_ID,
+      roles: [{ key: 'member' }],
+      deploy_status: 'running',
+      deploy_claim_token: 'internal-claim-token',
+      deploy_claimed_by: 'bot-instance-1',
+      deploy_claim_expires_at: '2026-08-23T09:40:00.000Z',
+      deploy_error: 'internal stack details',
+    });
+    const liveState = query({ member_count: 3 });
+    vi.mocked(createAdminSupabase).mockReturnValue({
+      from: vi.fn((table: string) => {
+        if (table === 'guild') return guild;
+        if (table === 'guild_desired_state') return desiredState;
+        return liveState;
+      }),
+    } as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(body.desiredState).toMatchObject({
+      guild_id: GUILD_ID,
+      deploy_status: 'running',
+    });
+    expect(body.desiredState).not.toHaveProperty('deploy_claim_token');
+    expect(body.desiredState).not.toHaveProperty('deploy_claimed_by');
+    expect(body.desiredState).not.toHaveProperty('deploy_claim_expires_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_error');
+  });
 });

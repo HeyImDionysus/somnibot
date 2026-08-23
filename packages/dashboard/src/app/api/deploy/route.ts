@@ -12,6 +12,10 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { recordAdminChange } from '@/lib/admin-changes';
+import {
+  PUBLIC_DESIRED_STATE_COLUMNS,
+  toPublicDesiredState,
+} from '@/lib/public-desired-state';
 import { z } from 'zod';
 
 const deployRequestResultSchema = z.discriminatedUnion('disposition', [
@@ -170,11 +174,12 @@ export async function GET() {
   const admin = createAdminSupabase();
 
   // Get current desired state
-  const { data: desiredState } = await admin
+  const { data: desiredStateRow } = await admin
     .from('guild_desired_state')
-    .select('*')
+    .select(PUBLIC_DESIRED_STATE_COLUMNS)
     .eq('guild_id', guildId)
     .single();
+  const desiredState = toPublicDesiredState(desiredStateRow);
 
   // Get guild setup status
   const { data: guild } = await admin
