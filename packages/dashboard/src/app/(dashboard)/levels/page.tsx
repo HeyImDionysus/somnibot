@@ -704,6 +704,7 @@ export default function LevelsPage() {
                   value={newRewardRoleId || null}
                   onChange={(value) => setNewRewardRoleId(typeof value === 'string' ? value : '')}
                   placeholder="Select role…"
+                  requireAssignable
                 />
               )}
               {newRewardType === 'role' && (
@@ -713,6 +714,7 @@ export default function LevelsPage() {
                   onChange={(value) => setNewRewardRemoveRoleId(typeof value === 'string' ? value : '')}
                   placeholder="Keep existing roles"
                   allowNone
+                  requireAssignable
                 />
               )}
               {newRewardType === 'role' && (

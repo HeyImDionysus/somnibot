@@ -40,7 +40,7 @@ export function LicensingProductOverview() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 id="product-licensing-heading" className="text-base font-semibold text-discord-text-primary">Product licensing</h2>
-          <p className="mt-1 max-w-2xl text-xs text-discord-text-muted">Authoritative Store readback for every saved Static and Dynamic product. Prompt Generator does not create entries here.</p>
+          <p className="mt-1 max-w-2xl text-xs text-discord-text-muted">Authoritative Store readback for every saved Static and Dynamic product. The SDK does not create entries here.</p>
         </div>
         <Button type="button" size="sm" variant="secondary" onClick={() => void loadProducts()} disabled={loading}>
           <RefreshCw size={14} aria-hidden="true" />Refresh
@@ -57,10 +57,10 @@ export function LicensingProductOverview() {
       ) : products.length === 0 ? (
         <div className="mt-4 rounded-input border border-discord-border-subtle bg-discord-bg-primary p-4">
           <p className="text-sm font-medium text-discord-text-primary">No saved products</p>
-          <p className="mt-1 text-xs text-discord-text-muted">Create the sellable product in Store. Use Prompt Generator separately when you need an implementation contract.</p>
+          <p className="mt-1 text-xs text-discord-text-muted">Create the sellable product in Store. Use the SDK separately when you need an implementation contract.</p>
           <div className="mt-3 flex flex-wrap gap-2 text-xs">
             <Link href="/store" className="rounded-input bg-discord-accent px-3 py-2 font-medium text-white">Open Store</Link>
-            <Link href="/project-licensing" className="rounded-input bg-discord-bg-active px-3 py-2 font-medium text-discord-text-primary">Open Prompt Generator</Link>
+            <Link href="/sdk" className="rounded-input bg-discord-bg-active px-3 py-2 font-medium text-discord-text-primary">Open SDK</Link>
           </div>
         </div>
       ) : (

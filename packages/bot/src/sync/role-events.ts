@@ -12,6 +12,11 @@ import type { Guild, Role } from 'discord.js';
 import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity, DriftType } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
+import {
+  parseSyncConfigCache,
+  serializeSyncConfigCache,
+  type SyncConfigCache,
+} from './tenant-sync-cache.js';
 import { createLogger } from '@somnibot/shared';
 import { queueDriftItem } from './drift-debouncer.js';
 
@@ -270,17 +275,15 @@ export async function handleRoleDelete(
 // Helpers
 // ============================================================
 
-interface SyncConfigLocal {
-  autoRepair: boolean;
-  autoRepairEveryone: boolean;
-}
-
-async function getSyncConfig(client: SomniClient, guildId: string): Promise<SyncConfigLocal> {
+async function getSyncConfig(client: SomniClient, guildId: string): Promise<SyncConfigCache> {
   const cacheKey = `sync_config:${guildId}`;
 
   try {
     const cached = await client.valkey.get(cacheKey);
-    if (cached) return JSON.parse(cached);
+    if (cached) {
+      const parsed = parseSyncConfigCache(cached, guildId);
+      if (parsed) return parsed;
+    }
   } catch { /* miss */ }
 
   const { data } = await client.supabase
@@ -289,13 +292,13 @@ async function getSyncConfig(client: SomniClient, guildId: string): Promise<Sync
     .eq('guild_id', guildId)
     .maybeSingle();
 
-  const config: SyncConfigLocal = {
+  const config: SyncConfigCache = {
     autoRepair: data?.sync_auto_repair ?? false,
     autoRepairEveryone: data?.sync_auto_repair_everyone ?? false,
   };
 
   try {
-    await client.valkey.set(cacheKey, JSON.stringify(config), 'EX', 60);
+    await client.valkey.set(cacheKey, serializeSyncConfigCache(guildId, config), 'EX', 60);
   } catch { /* non-critical */ }
 
   return config;

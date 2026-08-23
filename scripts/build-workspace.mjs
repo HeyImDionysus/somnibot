@@ -13,7 +13,6 @@ const buildTargets = [
   '@somnibot/testkit',
   '@somnibot/bot',
   '@somnibot/dashboard',
-  '@somnibot/license-sdk',
   '@somnibot/launcher',
 ];
 

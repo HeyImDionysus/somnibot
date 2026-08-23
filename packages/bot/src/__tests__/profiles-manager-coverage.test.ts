@@ -340,7 +340,7 @@ describe('ProfilesManager', () => {
     });
 
     it('degrades honestly when the durable profile write is unavailable', async () => {
-      supabase.rpc.mockResolvedValueOnce({
+      supabase.rpc.mockResolvedValue({
         data: null,
         error: { message: 'profile write unavailable' },
       });

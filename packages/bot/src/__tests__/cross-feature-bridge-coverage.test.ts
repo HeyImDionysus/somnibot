@@ -1,188 +1,168 @@
-/**
- * CrossFeatureBridge — coverage tests.
- */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('discord.js', () => ({
-  Guild: class {},
-  EmbedBuilder: class {
-    data: Record<string, unknown> = {};
-    setColor(c: number) { this.data.color = c; return this; }
-    setTitle(t: string) { this.data.title = t; return this; }
-    setDescription(d: string) { this.data.description = d; return this; }
-    setTimestamp() { return this; }
-  },
-}));
+import { mockGuild, mockSupabase, mockValkey } from './helpers/discord-mocks.js';
+import { CrossFeatureBridge } from '../services/cross-feature-bridge.js';
+import { PlatformEventBus } from '../services/event-bus.js';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   }),
 }));
 
-import { CrossFeatureBridge } from '../services/cross-feature-bridge.js';
+type Mutation = {
+  readonly table: string;
+  readonly kind: 'update' | 'upsert';
+  readonly value: Record<string, unknown>;
+};
 
-// ── Helpers ───────────────────────────────────────────────
-
-function makeSupabase(overrides: Record<string, any> = {}) {
-  const fromMock = vi.fn();
-  fromMock.mockImplementation((table: string) => {
-    const chain: Record<string, any> = {};
-    const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle', 'in'];
-    for (const m of methods) {
-      chain[m] = vi.fn().mockReturnValue(chain);
-    }
-    const data = overrides[table] ?? null;
-    chain.then = (resolve: (v: any) => void) => resolve({ data, error: null });
-    (chain as any)[Symbol.toStringTag] = 'Promise';
+function bridgeFixture() {
+  const mutations: Mutation[] = [];
+  const rpc = vi.fn(async () => ({
+    data: { listings_cancelled: 1, heists_forfeited: 0, wallet_suspended: true },
+    error: null,
+  }));
+  const responses: Record<string, unknown> = {
+    giveaways: [{ id: 'giveaway-1' }],
+    level_unlock_configs: [{ feature_key: 'fishing', unlock_message: 'Fishing unlocked' }],
+    tickets: {
+      created_at: '2026-08-23T00:00:00.000Z',
+      closed_at: '2026-08-23T00:02:00.000Z',
+      creator_id: 'member-1',
+    },
+  };
+  const supabase = mockSupabase();
+  supabase.rpc = rpc;
+  supabase.from = vi.fn((table: string) => {
+    const chain: Record<string, unknown> = {};
+    const fluent = () => chain;
+    chain.select = vi.fn(fluent);
+    chain.eq = vi.fn(fluent);
+    chain.limit = vi.fn(fluent);
+    chain.update = vi.fn((value: Record<string, unknown>) => {
+      mutations.push({ table, kind: 'update', value });
+      return chain;
+    });
+    chain.upsert = vi.fn((value: Record<string, unknown>) => {
+      mutations.push({ table, kind: 'upsert', value });
+      return chain;
+    });
+    chain.single = vi.fn(async () => ({ data: responses[table] ?? null, error: null }));
+    chain.maybeSingle = vi.fn(async () => ({ data: responses[table] ?? null, error: null }));
+    chain.then = (resolve: (value: { readonly data: unknown; readonly error: null }) => void) =>
+      resolve({ data: responses[table] ?? null, error: null });
     return chain;
   });
-  return {
-    from: fromMock,
-    rpc: vi.fn().mockResolvedValue({ data: null, error: null }),
-  };
+  const valkey = mockValkey();
+  valkey.smembers = vi.fn(async () => []);
+  valkey.sadd = vi.fn(async () => 1);
+  valkey.expire = vi.fn(async () => 1);
+  valkey.hincrby = vi.fn(async () => 1);
+  valkey.lpush = vi.fn(async () => 1);
+  valkey.ltrim = vi.fn(async () => 'OK');
+  const guild = mockGuild({ id: 'guild-1', name: 'Test Guild' });
+  const eventBus = new PlatformEventBus();
+  const bridge = new CrossFeatureBridge(guild, supabase, eventBus, valkey);
+  bridge.start();
+  return { bridge, eventBus, guild, mutations, rpc, supabase, valkey };
 }
 
-function makeEventBus() {
-  const listeners: Record<string, Array<(event: any) => Promise<void>>> = {};
-  return {
-    on: vi.fn((event: string, handler: (e: any) => Promise<void>) => {
-      if (!listeners[event]) listeners[event] = [];
-      listeners[event].push(handler);
-      return () => { /* unsub */ };
-    }),
-    _emit: async (type: string, data: Record<string, unknown>) => {
-      for (const h of listeners[type] ?? []) {
-        await h({ type, guildId: 'g1', data });
-      }
-    },
-    _listeners: listeners,
-  };
-}
-
-function makeGuild() {
-  return {
-    id: 'g1',
-    channels: { cache: { get: vi.fn().mockReturnValue(null) } },
-    members: { cache: { get: vi.fn().mockReturnValue(null) } },
-  };
-}
-
-function makeValkey() {
-  return {
-    get: vi.fn().mockResolvedValue(null),
-    set: vi.fn().mockResolvedValue('OK'),
-    del: vi.fn().mockResolvedValue(1),
-    keys: vi.fn().mockResolvedValue([]),
-  };
-}
-
-// ── Tests ────────────────────────────────────────────────
-
-describe('CrossFeatureBridge', () => {
-  let bridge: CrossFeatureBridge;
-  let supabase: ReturnType<typeof makeSupabase>;
-  let eventBus: ReturnType<typeof makeEventBus>;
-  let guild: ReturnType<typeof makeGuild>;
-  let valkey: ReturnType<typeof makeValkey>;
+describe('CrossFeatureBridge production event integration', () => {
+  let fixture: ReturnType<typeof bridgeFixture>;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    supabase = makeSupabase();
-    eventBus = makeEventBus();
-    guild = makeGuild();
-    valkey = makeValkey();
-    bridge = new CrossFeatureBridge(guild as any, supabase as any, eventBus as any, valkey as any);
+    fixture = bridgeFixture();
   });
 
-  describe('start', () => {
-    it('registers event listeners', () => {
-      bridge.start();
-      expect(eventBus.on).toHaveBeenCalled();
-      // Should register multiple listeners
-      expect(eventBus.on.mock.calls.length).toBeGreaterThan(5);
-    });
-  });
-
-  describe('member.banned event', () => {
-    it('cleans up giveaway entries, tickets, and economy on ban', async () => {
-      bridge.start();
-      await eventBus._emit('member.banned', { discordId: 'u1' });
-      // Should call from for giveaway_entries, tickets, economy tables
-      expect(supabase.from).toHaveBeenCalled();
+  it('durably cleans giveaways, tickets, and economy after a ban', async () => {
+    await fixture.eventBus.emitAndWait('member.banned', 'guild-1', {
+      discordId: 'member-1', moderatorId: 'moderator-1', reason: 'spam',
     });
 
-    it('handles missing discordId gracefully', async () => {
-      bridge.start();
-      await eventBus._emit('member.banned', {});
-      // Should not throw
+    expect(fixture.rpc).toHaveBeenCalledWith('giveaway_remove_entry', {
+      p_giveaway_id: 'giveaway-1', p_user_id: 'member-1',
+    });
+    expect(fixture.rpc).toHaveBeenCalledWith('cleanup_member_economy', {
+      p_guild_id: 'guild-1', p_user_id: 'member-1', p_reason: 'banned',
+    });
+    expect(fixture.mutations).toContainEqual({
+      table: 'tickets',
+      kind: 'update',
+      value: expect.objectContaining({ status: 'closed', close_reason: 'User was banned' }),
     });
   });
 
-  describe('member.kicked event', () => {
-    it('cleans up giveaway entries and economy on kick', async () => {
-      bridge.start();
-      await eventBus._emit('member.kicked', { discordId: 'u1' });
-      expect(supabase.from).toHaveBeenCalled();
+  it('durably cleans economy after a kick', async () => {
+    await fixture.eventBus.emitAndWait('member.kicked', 'guild-1', {
+      discordId: 'member-2', moderatorId: 'moderator-1', reason: 'departure',
+    });
+
+    expect(fixture.rpc).toHaveBeenCalledWith('cleanup_member_economy', {
+      p_guild_id: 'guild-1', p_user_id: 'member-2', p_reason: 'kicked',
     });
   });
 
-  describe('member.left event', () => {
-    it('processes member leave', async () => {
-      bridge.start();
-      await eventBus._emit('member.left', { discordId: 'u1' });
+  it('durably cleans economy after a member leaves', async () => {
+    await fixture.eventBus.emitAndWait('member.left', 'guild-1', {
+      discordId: 'member-2', username: 'Member', roles: ['role-1'],
+    });
+
+    expect(fixture.rpc).toHaveBeenCalledWith('cleanup_member_economy', {
+      p_guild_id: 'guild-1', p_user_id: 'member-2', p_reason: 'left',
     });
   });
 
-  describe('level.up event', () => {
-    it('handles level up with discount unlock', async () => {
-      supabase = makeSupabase({
-        guild_config: { economy_level_discount_thresholds: { '10': 5, '20': 10, '50': 20 } },
-      });
-      bridge = new CrossFeatureBridge(guild as any, supabase as any, eventBus as any, valkey as any);
-      bridge.start();
-      await eventBus._emit('level.up', { discordId: 'u1', newLevel: 10, oldLevel: 9 });
+  it('persists level unlock entitlement and refreshes its cache', async () => {
+    await fixture.eventBus.emitAndWait('level.up', 'guild-1', {
+      discordId: 'member-3', previousLevel: 4, newLevel: 5, totalXp: 500,
     });
 
-    it('handles level up without threshold match', async () => {
-      bridge.start();
-      await eventBus._emit('level.up', { discordId: 'u1', newLevel: 3, oldLevel: 2 });
+    expect(fixture.mutations).toContainEqual({
+      table: 'member_feature_unlocks',
+      kind: 'upsert',
+      value: expect.objectContaining({
+        guild_id: 'guild-1', user_id: 'member-3', feature_key: 'fishing',
+      }),
+    });
+    expect(fixture.valkey.sadd).toHaveBeenCalledWith('unlocks:guild-1:member-3', 'fishing');
+  });
+
+  it('persists ticket-close duration and updates operational metrics', async () => {
+    await fixture.eventBus.emitAndWait('ticket.closed', 'guild-1', {
+      ticketId: 'ticket-1', ticketNumber: 1, channelId: 'channel-1',
+      userDiscordId: '', actorId: 'moderator-1', panelId: 'panel-1',
+    });
+
+    expect(fixture.mutations).toContainEqual({
+      table: 'ticket_metrics',
+      kind: 'upsert',
+      value: expect.objectContaining({
+        ticket_id: 'ticket-1', guild_id: 'guild-1', resolution_time_ms: 120_000,
+      }),
+    });
+    expect(fixture.valkey.hincrby).toHaveBeenCalledWith(
+      'stats:tickets:guild-1', 'total_resolved', 1,
+    );
+  });
+
+  it('applies moderation cleanup for a ban infraction', async () => {
+    await fixture.eventBus.emitAndWait('infraction.created', 'guild-1', {
+      infractionId: 'infraction-1', userId: 'member-4', moderatorId: 'mod-1',
+      type: 'ban', reason: 'raid', totalInfractions: 10,
+    });
+
+    expect(fixture.rpc).toHaveBeenCalledWith('giveaway_remove_entry', {
+      p_giveaway_id: 'giveaway-1', p_user_id: 'member-4',
     });
   });
 
-  describe('purchase.completed event', () => {
-    it('does not install a purchase-to-XP or purchase-to-role mutation path', async () => {
-      bridge.start();
-      supabase.rpc.mockClear();
-      supabase.from.mockClear();
-
-      await eventBus._emit('purchase.completed', {
-        discordId: 'u1',
-        productId: 'product-1',
-        amount: 999,
-      });
-
-      expect(eventBus._listeners['purchase.completed']).toBeUndefined();
-      expect(supabase.rpc).not.toHaveBeenCalled();
-      expect(supabase.from).not.toHaveBeenCalled();
+  it('isolates every durable side effect from another guild', async () => {
+    await fixture.eventBus.emitAndWait('member.banned', 'guild-other', {
+      discordId: 'member-other', moderatorId: 'moderator-other', reason: 'other guild',
     });
-  });
 
-  describe('ticket.closed event', () => {
-    it('logs ticket resolution', async () => {
-      bridge.start();
-      await eventBus._emit('ticket.closed', { ticketId: 't1', closedBy: 'mod1', channelId: 'c1' });
-    });
-  });
-
-  describe('infraction.created event', () => {
-    it('checks escalation on infraction', async () => {
-      bridge.start();
-      await eventBus._emit('infraction.created', { userId: 'u1', type: 'warn', totalInfractions: 5 });
-    });
+    expect(fixture.rpc).not.toHaveBeenCalled();
+    expect(fixture.mutations).toEqual([]);
   });
 });

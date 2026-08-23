@@ -16,6 +16,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+import { discordTargetFailureStatus, validateDiscordRoleTargets } from '@/lib/api/live-discord-facts';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const reactionRoleStyles = ['reaction', 'buttons', 'select-menu'] as const;
@@ -126,6 +127,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const roleValidation = await validateDiscordRoleTargets(supabase, guildId, {
+    assignableRoleIds: [role_id],
+    existingRoleIds: require_role ? [require_role] : [],
+  });
+  if (!roleValidation.ok) {
+    return NextResponse.json(
+      { success: false, error: roleValidation.issues.join(' '), issues: roleValidation.issues },
+      { status: discordTargetFailureStatus(roleValidation) },
+    );
+  }
+
   const { data, error } = await supabase
     .from('reaction_roles')
     .insert({
@@ -209,6 +221,31 @@ export async function PUT(req: NextRequest) {
   const updates = typedPick(body, ['channel_id', 'message_id', 'emoji', 'role_id', 'exclusive_group', 'require_role', 'require_level', 'max_per_group', 'remove_on_unreact', 'log_actions', 'active']);
 
   const before = await readRowBefore(supabase, 'reaction_roles', { id: body.id, guild_id: guildId });
+
+  if (!before) {
+    return NextResponse.json({ success: false, error: 'Reaction role mapping not found.' }, { status: 404 });
+  }
+  const effectiveRoleId = typeof updates.role_id === 'string'
+    ? updates.role_id
+    : typeof before.role_id === 'string' ? before.role_id : null;
+  const effectiveRequiredRoleId = typeof updates.require_role === 'string'
+    ? updates.require_role
+    : updates.require_role === null
+      ? null
+      : typeof before.require_role === 'string' ? before.require_role : null;
+  if (!effectiveRoleId) {
+    return NextResponse.json({ success: false, error: 'Reaction role mapping has no valid target role. Select a current role.' }, { status: 409 });
+  }
+  const roleValidation = await validateDiscordRoleTargets(supabase, guildId, {
+    assignableRoleIds: [effectiveRoleId],
+    existingRoleIds: effectiveRequiredRoleId ? [effectiveRequiredRoleId] : [],
+  });
+  if (!roleValidation.ok) {
+    return NextResponse.json(
+      { success: false, error: roleValidation.issues.join(' '), issues: roleValidation.issues },
+      { status: discordTargetFailureStatus(roleValidation) },
+    );
+  }
 
   const { data, error } = await supabase
     .from('reaction_roles')

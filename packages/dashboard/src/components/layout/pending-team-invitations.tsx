@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { Button } from '@/components/shared/button';
 import { useToast } from '@/components/shared/toast';
 
 interface PendingInvitation {
@@ -23,6 +24,7 @@ function hoursUntil(iso: string): number {
 export function PendingTeamInvitations() {
   const { toast } = useToast();
   const [invitations, setInvitations] = useState<PendingInvitation[]>([]);
+  const [respondingId, setRespondingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -39,18 +41,29 @@ export function PendingTeamInvitations() {
   useEffect(() => { void load(); }, [load]);
 
   const respond = async (id: string, action: 'accept' | 'decline') => {
-    const response = await fetch(`/api/rbac/invitations/${id}/${action}`, { method: 'POST' });
-    const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
-    if (!response.ok) {
-      toast({ title: body.error ?? 'That invitation is no longer available.', variant: 'error' });
+    if (respondingId) return;
+    setRespondingId(id);
+    try {
+      const response = await fetch(`/api/rbac/invitations/${id}/${action}`, { method: 'POST' });
+      const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
+      if (!response.ok) {
+        toast({ title: body.error ?? 'That invitation is no longer available.', variant: 'error' });
+        await load();
+        return;
+      }
+      toast({
+        title: body.message ?? (action === 'accept' ? 'Team invitation accepted.' : 'Team invitation declined.'),
+        variant: 'success',
+      });
       await load();
-      return;
+    } catch (error) {
+      toast({
+        title: error instanceof Error ? error.message : 'Could not update this invitation. Try again.',
+        variant: 'error',
+      });
+    } finally {
+      setRespondingId(null);
     }
-    toast({
-      title: body.message ?? (action === 'accept' ? 'Team invitation accepted.' : 'Team invitation declined.'),
-      variant: 'success',
-    });
-    await load();
   };
 
   if (invitations.length === 0) return null;
@@ -78,20 +91,23 @@ export function PendingTeamInvitations() {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
+                disabled={respondingId === invitation.id}
                 onClick={() => void respond(invitation.id, 'decline')}
-                className="rounded-md px-3 py-1.5 text-xs text-discord-text-muted hover:text-discord-text-primary"
               >
                 Decline
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                size="sm"
+                disabled={respondingId === invitation.id}
                 onClick={() => void respond(invitation.id, 'accept')}
-                className="rounded-md bg-[#FF1493] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#FF1493]/80"
               >
-                Accept invitation
-              </button>
+                {respondingId === invitation.id ? 'Updating…' : 'Accept invitation'}
+              </Button>
             </div>
           </div>
         ))}

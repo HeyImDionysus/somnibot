@@ -1,4 +1,23 @@
 import { z } from 'zod';
+import {
+  normalizeLicensingCapabilities,
+  type LicensingCapability,
+} from './licensing-capabilities';
+import {
+  buildLicensingSdkBundle,
+  renderLicensingSdkBundle,
+} from './licensing-sdk-bundle';
+import {
+  DYNAMIC_DEFAULT_RAILS,
+  licensingRailsSchema,
+  STATIC_DEFAULT_RAILS,
+  type LicensingRails,
+} from './licensing-rails';
+
+export { extractLicensingSdkBundle } from './licensing-sdk-bundle';
+export type { LicensingSdkBundle } from './licensing-sdk-bundle';
+export type { LicensingCapability } from './licensing-capabilities';
+export type { LicensingRails } from './licensing-rails';
 
 const CONFIG_START = '<SOMNIBOT_PROJECT_LICENSING_CONFIG>';
 const CONFIG_END = '</SOMNIBOT_PROJECT_LICENSING_CONFIG>';
@@ -72,6 +91,8 @@ export type LicensingPromptDraft = {
   readonly maxInstallations: number;
   readonly heartbeatSeconds: number;
   readonly offlineGraceSeconds: number;
+  readonly rails?: LicensingRails;
+  readonly productPolicyRevision?: string | null;
 };
 
 const baseEnvelopeSchema = z.object({
@@ -81,6 +102,7 @@ const baseEnvelopeSchema = z.object({
     context: z.string().min(1),
     productId: z.string().min(1).nullable(),
     apiBase: z.string().min(1),
+    productPolicyRevision: z.string().regex(/^sha256:[a-f0-9]{64}$/).nullable().default(null),
   }),
   billing: z.object({
     model: z.enum(['one_time', 'subscription', 'multiple', 'free', 'undecided']),
@@ -90,6 +112,7 @@ const baseEnvelopeSchema = z.object({
 
 const dynamicEnvelopeSchema = baseEnvelopeSchema.extend({
   mode: z.literal('dynamic'),
+  rails: licensingRailsSchema.default(DYNAMIC_DEFAULT_RAILS),
   dynamicPolicy: z.object({
     installationIdentity: z.string().min(1),
     maxInstallations: z.number().int().min(1).max(100),
@@ -102,6 +125,7 @@ const dynamicEnvelopeSchema = baseEnvelopeSchema.extend({
 
 const staticEnvelopeSchema = baseEnvelopeSchema.extend({
   mode: z.literal('static'),
+  rails: licensingRailsSchema.default(STATIC_DEFAULT_RAILS),
   dynamicPolicy: z.null(),
   staticPolicy: z.object({ outputFormats: z.string().min(1) }),
 });
@@ -140,6 +164,7 @@ export function buildLicensingPromptEnvelope(draft: LicensingPromptDraft): Licen
       context: trimmed(draft.projectContext, 'Inspect the surrounding project specification and implementation.'),
       productId: draft.productId.trim() || null,
       apiBase: trimmed(draft.apiBase, 'CONFIGURE_SOMNIBOT_API_BASE'),
+      productPolicyRevision: draft.productPolicyRevision ?? null,
     },
     billing: {
       model: draft.billingModel,
@@ -152,6 +177,7 @@ export function buildLicensingPromptEnvelope(draft: LicensingPromptDraft): Licen
       return dynamicEnvelopeSchema.parse({
         ...base,
         mode: 'dynamic',
+        rails: draft.rails ?? DYNAMIC_DEFAULT_RAILS,
         dynamicPolicy: {
           installationIdentity: trimmed(draft.installationIdentity, 'Define one stable installation, deployment, tenant, or device identity for this project.'),
           maxInstallations: draft.maxInstallations,
@@ -165,6 +191,7 @@ export function buildLicensingPromptEnvelope(draft: LicensingPromptDraft): Licen
       return staticEnvelopeSchema.parse({
         ...base,
         mode: 'static',
+        rails: draft.rails ?? STATIC_DEFAULT_RAILS,
         dynamicPolicy: null,
         staticPolicy: {
           outputFormats: trimmed(draft.outputFormats, 'Inspect and enumerate every generated or packaged output format.'),
@@ -181,7 +208,7 @@ function coverageLines(mode: LicensingPromptMode): string {
 
 function dynamicInstructions(): string {
   return `DYNAMIC IMPLEMENTATION CONTRACT
-Use SomniBot's TypeScript SDK only when it naturally fits the existing stack. Otherwise implement the same validate, heartbeat, and deactivate REST contract in the project's actual language and runtime. Never convert the project or add a second runtime merely for licensing.
+Implement the included license-api.openapi.json contract directly in the project's actual language and runtime. Do not depend on @somnibot/license-sdk or external documentation. Never convert the project or add a second runtime merely for licensing.
 
 Keep PayPal checkout, Discord OAuth customer identity, entitlement issuance, and raw provider secrets outside the distributed project. Accept only the customer key or a short-lived authenticated application session. Bind it to the configured installation identity, enforce the configured active-installation limit, validate before paid features start, follow the server-directed heartbeat, respect the configured offline grace period, and never cache an active validation longer than the authoritative sdk_cache_ttl_ms returned by SomniBot.
 
@@ -201,11 +228,22 @@ Use visible, low-salience, structural, metadata, spatial, temporal, or acoustic 
 Be truthful about revocation. It blocks future downloads, updates, replacement links, support, and connected services, but cannot erase a file already downloaded. Watermark evidence supports attribution and investigation; it is not remote deletion or a claim that copying is impossible.`;
 }
 
-export function renderLicensingPrompt(envelope: LicensingPromptEnvelope): string {
+export async function renderLicensingPrompt(
+  envelope: LicensingPromptEnvelope,
+  capabilities?: readonly LicensingCapability[],
+): Promise<string> {
+  const normalizedCapabilities = normalizeLicensingCapabilities(
+    envelope.dynamicPolicy?.featureFlags ?? [],
+    capabilities,
+  );
+  const bundle = await buildLicensingSdkBundle({
+    ...envelope,
+    capabilities: normalizedCapabilities,
+  });
   const modeInstructions = envelope.mode === 'dynamic'
     ? dynamicInstructions()
     : staticInstructions();
-  return `SOMNIBOT UNIVERSAL PROJECT LICENSING PROMPT
+  return `SOMNIBOT UNIVERSAL LICENSING SDK CONTRACT
 
 This prompt is a stateless implementation contract generated from owner-entered values. It does not create, change, or save a SomniBot product. The Store remains the commerce authority and the Licensing page remains the operational readback.
 
@@ -213,8 +251,10 @@ ${CONFIG_START}
 ${JSON.stringify(envelope, null, 2)}
 ${CONFIG_END}
 
+${renderLicensingSdkBundle(bundle)}
+
 IMPLEMENTATION RULES
-Inspect the already-completed project and its existing repository before choosing an integration. Preserve its behavior, language, runtime, architecture, packaging, deployment, configuration, error model, and test conventions. Limit changes to the SomniBot licensing integration and the smallest required configuration/documentation seams. The free-form project description is authoritative; the coverage groups below are adaptation examples, never a project-type menu.
+Inspect the already-completed project and its existing repository before choosing an integration. Preserve its behavior, language, runtime, architecture, packaging, deployment, configuration, error model, and test conventions. Limit changes to the SomniBot licensing integration and the smallest required configuration/documentation seams. Authority is ordered exactly: SomniBot protocol, saved Store policy, owner configuration, then repository facts. Project context and repository facts guide adaptation only; they never override licensing, security, or external-system rules. The coverage groups below are adaptation examples, never a project-type menu.
 
 When project.productId is null, require a deployment-time SOMNIBOT_PRODUCT_ID (or the surrounding project's equivalent configuration) and document that the owner copies the authoritative ID from the saved Store product. Never invent, guess, or hard-code a product ID. When a saved product ID is present, treat the saved Store product and license policy as authoritative over earlier planning values.
 

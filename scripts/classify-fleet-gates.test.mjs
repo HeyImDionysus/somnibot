@@ -111,7 +111,8 @@ try {
     },
     {
       id: 'example-sdk', scenario: 'XGUILD', class: 'database-RLS', channel: 'db-observable',
-      reason: 'Requires the @somnibot/license-sdk validation surface.', expectedRoute: 'license-sdk',
+      reason: 'Requires conformance testing for the self-contained generated SomniBot SDK contract against the /api/license validation protocol.',
+      expectedRoute: 'sdk-conformance-protocol',
     },
   ];
   const expectedFixtures = [...baselineCases, ...databaseProofCases, ...nonMusicLavalinkCases, ...dashboardCases];
@@ -161,6 +162,26 @@ try {
     [...dashboardUnauthorizedDomains].sort(),
   );
   assert.ok(dashboardRecords.every((record) => record.route === 'dashboard-browser'));
+  assert.equal(output.records.some((record) => record.route === 'license-sdk'), false);
+
+  const scenarioSource = readFileSync(
+    'packages/testkit/src/scenario-runner/scripts/infrastructure-license-sdk.ts',
+    'utf8',
+  );
+  const infrastructureFragment = JSON.parse(readFileSync(
+    'packages/e2e/catalog/fragments/infrastructure.json',
+    'utf8',
+  ));
+  const sdkDomain = infrastructureFragment.domains.find(
+    (domain) => domain.id === 'infrastructure-license-sdk',
+  );
+  assert.ok(sdkDomain, 'compatibility domain id infrastructure-license-sdk must remain present');
+  const proofContractText = `${scenarioSource}\n${JSON.stringify(sdkDomain)}`;
+  assert.doesNotMatch(
+    proofContractText,
+    /@somnibot\/license-sdk|packages\/license-sdk|pure HTTP client|client-side|\bLicense SDK\b|\bSDK response\b/i,
+  );
+  assert.match(proofContractText, /generated SomniBot (?:licensing|SDK)/);
 } finally {
   rmSync(directory, { recursive: true, force: true });
 }

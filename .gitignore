@@ -66,6 +66,10 @@ __pycache__/
 # Testing
 coverage/
 /pytest-cache-files-*/
+.omo/
+.next-playwright-local/
+playwright-report/
+test-results/
 
 # Supabase
 packages/supabase/.branches/

@@ -60,7 +60,6 @@ import {
 import {
   ACTION_QUEUE_LANES,
   COMMERCE_LANE_ACTIONS,
-  LANE_CONCURRENCY,
   LANE_DEPTH_ALERT_SEVERITY,
   LANE_PENDING_DEPTH_THRESHOLDS,
   LaneScheduler,
@@ -77,6 +76,7 @@ import { runReconciliation } from './reconciliation.js';
 import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
 import { raiseOwnerAlert, resolveOwnerAlert } from './alert-service.js';
 import { createLogger, type DriftItem } from '@somnibot/shared';
+import { roleAssignmentIssue } from './role-assignability.js';
 
 const log = createLogger('ActionQueue');
 export const ACTION_QUEUE_CLAIM_PROTOCOL_VERSION = 2;
@@ -3059,6 +3059,11 @@ async function handleBulkRoleAdd(
   if (!memberId) return { success: false, error: 'Missing member_id' };
   if (!roleId) return { success: false, error: 'Missing role_id' };
 
+  const assignmentIssue = roleAssignmentIssue(guild, roleId);
+  if (assignmentIssue) {
+    return { success: false, error: assignmentIssue.message, retryable: false };
+  }
+
   const member = await guild.members.fetch(memberId).catch(() => null);
   if (!member) return { success: false, error: `Member ${memberId} not found in guild` };
 
@@ -3066,18 +3071,24 @@ async function handleBulkRoleAdd(
     return { success: true, data: { memberId, roleId, skipped: true } };
   }
 
-  const source = payload.source === 'economy_item_use' ? 'economy_item_use' : 'dashboard_bulk';
+  const source = payload.source === 'economy_item_use'
+    ? 'economy_item_use'
+    : payload.source === 'economy_shop_purchase'
+      ? 'economy_shop_purchase'
+      : 'dashboard_bulk';
   await member.roles.add(
     roleId,
     source === 'economy_item_use'
       ? 'SomniBot economy item used'
-      : 'SomniBot dashboard — bulk role assign',
+      : source === 'economy_shop_purchase'
+        ? 'SomniBot economy shop purchase'
+        : 'SomniBot dashboard — bulk role assign',
   );
   eventBus.emit('role.gained', guild.id, {
     discordId: memberId,
     roleId,
     roleName: guild.roles.cache.get(roleId)?.name ?? roleId,
-    source: source === 'economy_item_use' ? 'bot' : 'dashboard',
+    source: source === 'dashboard_bulk' ? 'dashboard' : 'bot',
   });
   return { success: true, data: { memberId, roleId } };
 }
@@ -3094,6 +3105,11 @@ async function handleBulkRoleRemove(
   const roleId = payload.role_id as string;
   if (!memberId) return { success: false, error: 'Missing member_id' };
   if (!roleId) return { success: false, error: 'Missing role_id' };
+
+  const assignmentIssue = roleAssignmentIssue(guild, roleId);
+  if (assignmentIssue) {
+    return { success: false, error: assignmentIssue.message, retryable: false };
+  }
 
   const member = await guild.members.fetch(memberId).catch(() => null);
   if (!member) return { success: false, error: `Member ${memberId} not found in guild` };
@@ -3330,6 +3346,14 @@ export async function handleLevelRewardRoleDelivery(
 
   try {
     const member = await guild.members.fetch(payload.member_id);
+    if (typeof grantRoleId === 'string') {
+      const issue = roleAssignmentIssue(guild, grantRoleId);
+      if (issue) return { success: false, error: issue.message, retryable: false };
+    }
+    if (typeof removeRoleId === 'string') {
+      const issue = roleAssignmentIssue(guild, removeRoleId);
+      if (issue) return { success: false, error: issue.message, retryable: false };
+    }
     if (typeof grantRoleId === 'string' && !member.roles.cache.has(grantRoleId)) {
       await member.roles.add(grantRoleId, 'SomniBot level reward');
       eventBus.emit('role.gained', guild.id, {
@@ -3595,8 +3619,9 @@ async function processAction(
           `Scheduling retry #${retryCount} for ${claimedAction.id} `
           + `in ${backoffMs / 1000}s`,
         );
-        scheduler.schedule(
-          claimedAction.lane,
+        scheduler.scheduleAction(
+          claimedAction.action,
+          claimedAction.guild_id,
           backoffMs,
           () => processAction(guild, supabase, claimedAction, scheduler),
           (e) => {
@@ -3844,7 +3869,7 @@ async function recoverStaleActions(
     // job.
     const recoveredRows = [...commerceRows, ...gameRows].filter((r) => r.status === 'pending');
     for (const r of recoveredRows) {
-      await scheduler.run(laneOf(r), () => processAction(guild, supabase, r, scheduler));
+      await scheduler.runAction(r.action, r.guild_id, () => processAction(guild, supabase, r, scheduler));
     }
   }
 }
@@ -3942,7 +3967,7 @@ async function sweepPendingActions(
       // sorted first), while counting against the lane budgets shared with
       // the Realtime path. If the game lane is saturated by a Realtime
       // flood, the sweep waits AFTER all commerce rows are already done.
-      await scheduler.run(laneOf(row), () => processAction(guild, supabase, row, scheduler));
+      await scheduler.runAction(row.action, row.guild_id, () => processAction(guild, supabase, row, scheduler));
     }
   }
 }
@@ -4055,7 +4080,7 @@ export async function startActionQueueListener(
 
   // Per-lane concurrency budgets shared by every processing path (sweeps,
   // Realtime events, in-process retries). One scheduler per guild listener.
-  const scheduler = new LaneScheduler(LANE_CONCURRENCY);
+  const scheduler = new LaneScheduler();
 
   // V48-C3: before processing pending rows, recover anything stuck in
   // 'processing' from a previous bot crash. This is the DLQ-equivalent —
@@ -4156,7 +4181,7 @@ export async function startActionQueueListener(
       // Realtime callbacks are fire-and-forget, so admission goes through the
       // shared per-lane scheduler. The atomic claim deduplicates INSERT/UPDATE
       // deliveries against startup, reconnect, and periodic sweeps.
-      await scheduler.run(laneOf(action), () =>
+      await scheduler.runAction(action.action, action.guild_id, () =>
         stopped
           ? Promise.resolve()
           : processAction(guild, supabase, action, scheduler),

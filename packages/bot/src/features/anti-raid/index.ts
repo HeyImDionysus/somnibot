@@ -670,12 +670,34 @@ export async function processAntiRaid(
               }
 
               const deletePromises = invites.map((inv) =>
-                inv.delete('Anti-raid lockdown: pausing active invites').catch(() => null),
+                inv.delete('Anti-raid lockdown: pausing active invites'),
               );
               const results = await Promise.allSettled(deletePromises);
               pausedCount = results.filter((r) => r.status === 'fulfilled').length;
+              const failedCount = results.length - pausedCount;
               if (pausedCount > 0) {
                 log.info(`Lockdown: paused ${pausedCount} invite(s) for guild ${guild.id}`);
+              }
+              if (failedCount > 0) {
+                const error = `${failedCount}_of_${results.length}_invite_deletions_failed`;
+                eventBus?.emit('anti_raid.action_failed', guild.id, {
+                  action: 'lockdown_invite_pause',
+                  error,
+                });
+                await raiseAntiRaidAlert(
+                  supabase,
+                  guild,
+                  'anti_raid_lockdown_invite_pause_failed',
+                  'Anti-raid lockdown left active invites',
+                  `Lockdown raised verification, but only ${pausedCount} of ${results.length} active invites were paused. ` +
+                    'Delete the remaining invites or fix the bot\'s Manage Server permission.',
+                  {
+                    action: 'lockdown_invite_pause',
+                    invites_total: results.length,
+                    invites_paused: pausedCount,
+                    invites_failed: failedCount,
+                  },
+                );
               }
             }
           } catch (invErr) {

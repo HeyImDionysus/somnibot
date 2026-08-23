@@ -11,7 +11,16 @@ import {
   SOMNIBOT_REPOSITORY_REF,
   SOMNIBOT_REPOSITORY_URL,
 } from './vps-bootstrap.js';
-import { isImmutableRepositoryRef } from './release-source.js';
+import {
+  SOMNIBOT_CONFIGURATION_GENERATION,
+  SOMNIBOT_MIGRATION_HEAD,
+  isImmutableRepositoryRef,
+} from './release-source.js';
+import {
+  evaluateVpsDeploymentProfileGate,
+  type DeploymentProfileGateResult,
+} from './deployment-profile-gate.js';
+import type { DeploymentCapacityInput } from '@somnibot/shared';
 
 export type VpsDeploymentPlanStatus = 'blocked' | 'ready';
 export const VPS_DEPLOYMENT_BUILD_TIMEOUT_MS = 45 * 60 * 1000;
@@ -22,6 +31,8 @@ export interface VpsDeploymentPlanInput extends RuntimeNetworkingConfig {
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
   lastGoodCommit?: string;
+  enabledGuildCount?: number;
+  deploymentCapacity?: DeploymentCapacityInput;
 }
 
 export interface VpsDeploymentEnvVar {
@@ -64,6 +75,7 @@ export interface VpsDeploymentPlan {
   canApprove: boolean;
   blockedReasons: string[];
   warnings: string[];
+  deploymentProfile: DeploymentProfileGateResult['profile'];
   target: {
     publicAccessMode: 'domain' | 'tailscale-funnel';
     domain: string;
@@ -107,15 +119,15 @@ export interface VpsDeploymentPlan {
   } | null;
 }
 
-export const ENV_FILE_PERMISSIONS = '0600' as const;
-const SSH_BASE_ARGS = [
+export const ENV_FILE_PERMISSIONS = '0600';
+const SSH_BASE_ARGS: readonly string[] = [
   '-o',
   'BatchMode=yes',
   '-o',
   'ConnectTimeout=10',
   '-o',
   'StrictHostKeyChecking=yes',
-] as const;
+];
 const COMPOSE_FILE = 'docker-compose.prod.yml';
 const CADDY_FILE = 'services/caddy/Caddyfile';
 const FUNNEL_COMPOSE_OVERRIDE_FILE = '.somnibot/launcher-tailscale-funnel.compose.yml';
@@ -188,6 +200,9 @@ function buildEnvironmentVariables(
     envVar('NODE_ENV', 'production', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_RUNTIME_MODE', 'vps', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_RUNTIME_HOLDER_ID', '<SOMNIBOT_RUNTIME_HOLDER_ID>', { secret: false, required: true, source: 'derived' }),
+    envVar('SOMNIBOT_GIT_SHA', SOMNIBOT_REPOSITORY_REF, { secret: false, required: true, source: 'derived' }),
+    envVar('SOMNIBOT_MIGRATION_HEAD', SOMNIBOT_MIGRATION_HEAD, { secret: false, required: true, source: 'derived' }),
+    envVar('SOMNIBOT_CONFIG_GENERATION', String(SOMNIBOT_CONFIGURATION_GENERATION), { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true', { secret: false, required: true, source: 'derived' }),
     envVar('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', publicBaseUrl, { secret: false, required: true, source: 'derived' }),
     envVar('DASHBOARD_URL', publicBaseUrl, { secret: false, required: true, source: 'derived' }),
@@ -583,6 +598,11 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
   const publicAccessMode = normalizeVpsPublicAccessMode(input.vpsPublicAccessMode);
   const blockedReasons: string[] = [];
   const warnings: string[] = [];
+  const enabledGuildCount = input.enabledGuildCount ?? 1;
+  const profileGate = evaluateVpsDeploymentProfileGate(enabledGuildCount, input.deploymentCapacity);
+  const deploymentProfile = profileGate.profile;
+  blockedReasons.push(...profileGate.blockers);
+  warnings.push(...profileGate.warnings);
 
   if (runtimeMode !== 'vps') {
     blockedReasons.push('VPS deployment plans are only available in VPS mode.');
@@ -626,6 +646,11 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
   if (!isImmutableRepositoryRef(SOMNIBOT_REPOSITORY_REF)) {
     blockedReasons.push('This launcher build has no embedded approved release commit SHA; rebuild it from the exact release candidate before VPS deployment.');
   }
+  if (!/^\d{14}_[a-z0-9_]+\.sql$/.test(SOMNIBOT_MIGRATION_HEAD)
+    || !Number.isSafeInteger(SOMNIBOT_CONFIGURATION_GENERATION)
+    || SOMNIBOT_CONFIGURATION_GENERATION < 0) {
+    blockedReasons.push('This launcher build has no exact migration head and configuration generation metadata.');
+  }
 
   if (input.lastGoodCommit !== undefined && !/^[0-9a-f]{40}$/i.test(input.lastGoodCommit)) {
     blockedReasons.push('Rollback requires an exact 40-character hexadecimal last-good commit SHA.');
@@ -637,6 +662,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
       canApprove: false,
       blockedReasons,
       warnings,
+      deploymentProfile,
       target: null,
       environment: null,
       serviceLayout: [],
@@ -666,12 +692,45 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
     ? joinPath(deployPath, FUNNEL_COMPOSE_OVERRIDE_FILE)
     : null;
   const variables = buildEnvironmentVariables(profile.publicCallbackBaseUrl, domain, projectName, publicAccessMode, input);
+  const serviceLayout: VpsDeploymentPlan['serviceLayout'] = [
+    {
+      name: 'dashboard',
+      role: 'Next.js operator dashboard and provider callback receiver',
+      exposure: publicAccessMode === 'domain' ? 'public' : 'private',
+      endpoint: publicAccessMode === 'domain' ? 'dashboard:3000 behind Caddy' : '127.0.0.1:3456 -> dashboard:3000',
+    },
+    {
+      name: 'bot',
+      role: 'Discord bot worker',
+      exposure: 'private',
+      endpoint: 'internal Docker network',
+    },
+    ...(publicAccessMode === 'domain' ? [{
+      name: 'caddy',
+      role: 'Public HTTPS reverse proxy',
+      exposure: 'public',
+      endpoint: `${domain}:80/443 -> dashboard:3000`,
+    }] satisfies VpsDeploymentPlan['serviceLayout'] : []),
+    {
+      name: 'lavalink',
+      role: 'Private music service',
+      exposure: 'private',
+      endpoint: 'http://lavalink:2333',
+    },
+    {
+      name: 'valkey',
+      role: 'Private cache, queues, rate limits, and heartbeat state',
+      exposure: 'private',
+      endpoint: 'redis://:<VALKEY_PASSWORD>@valkey:6379',
+    },
+  ];
 
   return {
     status: 'ready',
     canApprove: true,
     blockedReasons: [],
     warnings,
+    deploymentProfile,
     target: {
       publicAccessMode,
       domain,
@@ -694,38 +753,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
       variables,
       redactedEnvFile: buildRedactedEnvFile(variables),
     },
-    serviceLayout: [
-      {
-        name: 'dashboard',
-        role: 'Next.js operator dashboard and provider callback receiver',
-        exposure: publicAccessMode === 'domain' ? 'public' : 'private',
-        endpoint: publicAccessMode === 'domain' ? 'dashboard:3000 behind Caddy' : '127.0.0.1:3456 -> dashboard:3000',
-      },
-      {
-        name: 'bot',
-        role: 'Discord bot worker',
-        exposure: 'private',
-        endpoint: 'internal Docker network',
-      },
-      ...(publicAccessMode === 'domain' ? [{
-        name: 'caddy',
-        role: 'Public HTTPS reverse proxy',
-        exposure: 'public' as const,
-        endpoint: `${domain}:80/443 -> dashboard:3000`,
-      }] : []),
-      {
-        name: 'lavalink',
-        role: 'Private music service',
-        exposure: 'private',
-        endpoint: 'http://lavalink:2333',
-      },
-      {
-        name: 'valkey',
-        role: 'Private cache, queues, rate limits, and heartbeat state',
-        exposure: 'private',
-        endpoint: 'redis://:<VALKEY_PASSWORD>@valkey:6379',
-      },
-    ],
+    serviceLayout,
     reverseProxy: publicAccessMode === 'domain' ? {
       filePath: CADDY_FILE,
       publicPorts: ['80/tcp', '443/tcp'],

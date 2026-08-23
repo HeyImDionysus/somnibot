@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { PendingTeamInvitations } from '@/components/layout/pending-team-invitations';
+import { DashboardControlCenter } from '@/components/dashboard/dashboard-control-center';
 
 interface GuildData {
   guild: {
@@ -184,6 +185,8 @@ export default function DashboardPage() {
       </div>
 
       <PendingTeamInvitations />
+
+      <DashboardControlCenter />
 
       {error && (
         <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-discord-danger/40 bg-discord-danger/10 px-4 py-3 text-sm text-discord-text-primary">

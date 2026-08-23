@@ -21,6 +21,7 @@ import {
   type PartialGuildMember,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { requireAssignableRole } from '../../services/role-assignability.js';
 import type { SomniClient } from '../../client.js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { z } from 'zod';
@@ -213,6 +214,7 @@ async function runFallbackAttempt(
   }
   if (!roleWasPresent) {
     try {
+      requireAssignableRole(member.guild, claim.member_role_id);
       await member.roles.add(claim.member_role_id, 'Onboarding fallback timeout');
     } catch (err) {
       return failFallbackAttempt(client, claim.intent_id, claim.attempt_token, String(err));
@@ -221,6 +223,7 @@ async function runFallbackAttempt(
 
   if (fallbackTimers.get(timerKey)?.generation !== generation) {
     if (!roleWasPresent) {
+      requireAssignableRole(member.guild, claim.member_role_id);
       await member.roles.remove(claim.member_role_id, 'Onboarding fallback configuration changed');
     }
     await cancelFallbackIntent(client, claim.intent_id, claim.attempt_token);
@@ -249,12 +252,14 @@ async function runFallbackAttempt(
 
   if (completion.status === 'stale_config') {
     if (member.roles.cache.has(claim.member_role_id)) {
+      requireAssignableRole(member.guild, claim.member_role_id);
       await member.roles.remove(claim.member_role_id, 'Onboarding fallback completion rejected');
     }
     await cancelFallbackIntent(client, claim.intent_id, claim.attempt_token);
     return null;
   }
   if (completion.status === 'not_found' && !roleWasPresent) {
+    requireAssignableRole(member.guild, claim.member_role_id);
     await member.roles.remove(claim.member_role_id, 'Onboarding fallback completion rejected');
   }
   return null;
@@ -283,6 +288,7 @@ async function cancelStaleFallback(
 ): Promise<void> {
   if (!claim.intent_id || !claim.attempt_token || !claim.member_role_id) return;
   if (member.roles.cache.has(claim.member_role_id)) {
+    requireAssignableRole(member.guild, claim.member_role_id);
     await member.roles.remove(claim.member_role_id, 'Onboarding fallback configuration changed');
   }
   await cancelFallbackIntent(client, claim.intent_id, claim.attempt_token);
@@ -328,6 +334,7 @@ async function recoverNativeCompletedMember(
   );
   await markOnboardingCompleted(client.supabase, member.guild.id, member.id);
   if (config.member_role_id && !member.roles.cache.has(config.member_role_id)) {
+    requireAssignableRole(member.guild, config.member_role_id);
     await member.roles.add(config.member_role_id, 'Recovering completed Discord onboarding');
   }
 }
@@ -526,6 +533,7 @@ export async function handleMemberJoin(
     // Grant Member role immediately
     if (config.member_role_id) {
       try {
+        requireAssignableRole(member.guild, config.member_role_id);
         await member.roles.add(config.member_role_id, 'Returning member — auto-granted');
         log.info(`Member role granted to returning member ${member.user.tag}`);
       } catch (err) {
@@ -607,6 +615,7 @@ export async function handleMemberUpdate(
     // Grant Member role
     if (config.member_role_id) {
       try {
+        requireAssignableRole(newMember.guild, config.member_role_id);
         await newMember.roles.add(
           config.member_role_id,
           'Completed Discord onboarding',

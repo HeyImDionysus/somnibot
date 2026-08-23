@@ -28,6 +28,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { eventBus as defaultEventBus, type PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
+import { requireAssignableRole } from '../../services/role-assignability.js';
 import { applyBrand, resolveBrandKit } from '../branding/index.js';
 
 const log = createLogger('ButtonRoles');
@@ -143,6 +144,7 @@ export async function handleButtonRoleInteraction(
 
   try {
     if (hasRole) {
+      requireAssignableRole(member.guild, roleId);
       await member.roles.remove(roleId, 'Button role toggle');
       eventBus.emit('role.lost', guild.id, {
         discordId: member.id,
@@ -170,6 +172,7 @@ export async function handleButtonRoleInteraction(
             .map((e) => e.role_id)
             .filter((rid) => member.roles.cache.has(rid));
           for (const rid of rolesToRemove) {
+            requireAssignableRole(member.guild, rid);
             const removed = await member.roles.remove(rid, 'Button role exclusive group swap')
               .then(() => true)
               .catch((e: unknown) => { log.warn('Role operation failed:', (e as Error)?.message ?? e); return false; });
@@ -185,6 +188,7 @@ export async function handleButtonRoleInteraction(
         }
       }
 
+      requireAssignableRole(member.guild, roleId);
       await member.roles.add(roleId, 'Button role toggle');
       eventBus.emit('role.gained', guild.id, {
         discordId: member.id,
@@ -247,6 +251,7 @@ export async function handleSelectMenuRoleInteraction(
     }
     try {
       if (member.roles.cache.has(entry.role_id)) {
+        requireAssignableRole(member.guild, entry.role_id);
         await member.roles.remove(entry.role_id, 'Select-menu role toggle');
         eventBus.emit('role.lost', guild.id, {
           discordId: member.id, roleId: entry.role_id,
@@ -259,9 +264,13 @@ export async function handleSelectMenuRoleInteraction(
             .eq('guild_id', guild.id).eq('panel_id', panelId)
             .eq('exclusive_group', entry.exclusive_group).neq('role_id', entry.role_id).limit(25);
           for (const peer of peers ?? []) {
-            if (member.roles.cache.has(peer.role_id)) await member.roles.remove(peer.role_id, 'Select-menu exclusive group swap');
+            if (member.roles.cache.has(peer.role_id)) {
+              requireAssignableRole(member.guild, peer.role_id);
+              await member.roles.remove(peer.role_id, 'Select-menu exclusive group swap');
+            }
           }
         }
+        requireAssignableRole(member.guild, entry.role_id);
         await member.roles.add(entry.role_id, 'Select-menu role toggle');
         eventBus.emit('role.gained', guild.id, {
           discordId: member.id, roleId: entry.role_id,

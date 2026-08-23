@@ -6,7 +6,10 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { createLogger } from '@somnibot/shared';
+import {
+  assertCriticalAuditWriteSucceeded,
+  createLogger,
+} from '@somnibot/shared';
 import { randomUUID } from 'node:crypto';
 
 const log = createLogger('AuditSvc');
@@ -70,7 +73,7 @@ export async function writeEconomyAudit(
 ): Promise<{ correlationId: string; occurrenceKey: string }> {
   const correlationId = options.operationId?.trim() || randomUUID();
   const occurrenceKey = `${options.action}:${correlationId}`;
-  await writeAuditLog(supabase, {
+  await writeCriticalAuditLog(supabase, {
     guildId: options.guildId,
     actorType: options.actorType ?? 'user',
     actorId: options.actorId,
@@ -95,22 +98,7 @@ export async function writeAuditLog(
   entry: AuditEntry,
 ): Promise<void> {
   try {
-    const row = {
-      guild_id: entry.guildId,
-      actor_type: entry.actorType,
-      actor_id: entry.actorId,
-      action: entry.action,
-      category: entry.category ?? 'system',
-      target_type: entry.targetType ?? null,
-      target_id: entry.targetId ?? null,
-      details: entry.details ?? {},
-      before_state: entry.beforeState ?? null,
-      after_state: entry.afterState ?? null,
-      correlation_id: entry.correlationId ?? null,
-      occurrence_key: entry.occurrenceKey ?? null,
-      success: entry.success ?? true,
-      error_message: entry.errorMessage ?? null,
-    };
+    const row = auditRow(entry);
 
     // Occurrence-keyed entries dedupe against uq_audit_logs_guild_occurrence;
     // keyless entries keep plain insert semantics (NULL keys never conflict,
@@ -128,6 +116,46 @@ export async function writeAuditLog(
     // Never let audit logging failures crash the bot
     log.error('Exception writing audit log:', { error: String(err) });
   }
+}
+
+type CriticalAuditEntry = AuditEntry & { readonly correlationId: string };
+
+/**
+ * Persist proof for a critical mutation and fail closed when the database does
+ * not accept it. Callers must supply the operation identity that ties the
+ * mutation, retry, and integrity record together.
+ */
+export async function writeCriticalAuditLog(
+  supabase: SupabaseClient,
+  entry: CriticalAuditEntry,
+): Promise<void> {
+  const row = auditRow(entry);
+  const { error } = entry.occurrenceKey
+    ? await supabase
+        .from('audit_logs')
+        .upsert([row], { onConflict: 'guild_id,occurrence_key', ignoreDuplicates: true })
+    : await supabase.from('audit_logs').insert(row);
+  assertCriticalAuditWriteSucceeded(entry.correlationId, error?.message ?? null);
+}
+
+function auditRow(entry: AuditEntry) {
+  return {
+    guild_id: entry.guildId,
+    actor_type: entry.actorType,
+    actor_id: entry.actorId,
+    action: entry.action,
+    category: entry.category ?? 'system',
+    target_type: entry.targetType ?? null,
+    target_id: entry.targetId ?? null,
+    details: entry.details ?? {},
+    before_state: entry.beforeState ?? null,
+    after_state: entry.afterState ?? null,
+    correlation_id: entry.correlationId ?? null,
+    occurrence_key: entry.occurrenceKey ?? null,
+    operation_id: entry.correlationId ?? entry.occurrenceKey ?? null,
+    success: entry.success ?? true,
+    error_message: entry.errorMessage ?? null,
+  };
 }
 
 /**

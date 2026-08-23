@@ -1034,11 +1034,6 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
 /** DEPFAIL — Supabase-unreachable fail-safe (needs a dependency-outage fault lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // This DB-observable harness's whole premise is a REACHABLE local Supabase, so a
-  // database outage cannot be induced without a fault-injection lane. GATE the
-  // outage-dependent behavior honestly rather than fake an outage. (Note: the branded
-  // "achievements-unavailable" degradation template also appears unimplemented in
-  // viewBadges/prestige — surfaced in the run summary for the owner.)
   ctx.gate(
     'Discord',
     'db-observable',
@@ -1067,7 +1062,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'branding',
     'captured-reply',
     'The degradation reply uses the branded achievements-unavailable template in the owner voice.',
-    'requires the outage fault lane to reach the achievements-unavailable branch (which also appears unimplemented in code)',
+    'the guild-branded achievements-unavailable branch exists and preserves progress; capturing it requires the Supabase outage fault lane and real command reply',
   );
   ctx.gate(
     'database-RLS',

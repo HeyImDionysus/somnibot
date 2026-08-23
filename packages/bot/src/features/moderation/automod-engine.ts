@@ -23,9 +23,9 @@ import type {
   EscalationStep,
 } from '@somnibot/shared';
 import { createHash } from 'node:crypto';
-import { runInNewContext } from 'node:vm';
 import { executeAutoModAction } from './automod-actions.js';
 import { createLogger } from '@somnibot/shared';
+import { evaluateBoundedRegex } from '../../services/bounded-regex.js';
 
 const log = createLogger('AutoModEngine');
 
@@ -363,11 +363,12 @@ function checkWordFilter(
           // above, and input is sliced, so 250ms still firmly bounds
           // backtracking. Keep in sync with condition-evaluator.ts.
           const input = content.slice(0, 2000);
-          const matched = runInNewContext(
-            'regex.test(input)',
-            { regex, input },
-            { timeout: regexBudgetMs, microtaskMode: 'afterEvaluate' },
-          );
+          const matched = evaluateBoundedRegex(regex, input, {
+            timeoutMs: regexBudgetMs,
+            onFinalTimeout: () => {
+              log.warn(`Regex pattern "${word}" timed out after ${regexBudgetMs}ms — skipping for safety`);
+            },
+          });
 
           if (matched) {
             return `Matched regex filter: "${word}"`;

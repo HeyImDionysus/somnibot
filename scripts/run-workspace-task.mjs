@@ -13,7 +13,6 @@ const TASKS = {
     ['--filter', '@somnibot/testkit', 'type-check'],
     ['--filter', '@somnibot/bot', 'type-check'],
     ['--filter', '@somnibot/dashboard', 'type-check'],
-    ['--filter', '@somnibot/license-sdk', 'typecheck'],
     ['--filter', '@somnibot/launcher', 'exec', 'tsc', '--noEmit'],
     ['--filter', '@somnibot/launcher', 'exec', 'tsc', '-p', 'tsconfig.preload.json', '--noEmit'],
   ],

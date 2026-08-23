@@ -7,8 +7,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 // Module-level import (matches moderation/automod-engine.ts). The regex
 // evaluation path must stay fully synchronous so the budget check-and-reserve
 // below is atomic — do NOT convert back to a dynamic `await import`.
-import { runInNewContext } from 'node:vm';
 import { createLogger } from '@somnibot/shared';
+import { evaluateBoundedRegex, REGEX_VM_TIMEOUT_MS } from '../../services/bounded-regex.js';
 
 const log = createLogger('ConditionEval');
 
@@ -19,8 +19,6 @@ const log = createLogger('ConditionEval');
  * the worst-case slice reserved against the per-event budget before each
  * evaluation (see message_matches_regex below).
  */
-const REGEX_VM_TIMEOUT_MS = 250;
-
 /**
  * PR #269 review (P2): Aggregate regex-evaluation budget per platform event.
  *
@@ -276,12 +274,7 @@ async function evaluateCondition(
         // tolerating scheduling jitter.
         // Keep in sync with moderation/automod-engine.ts.
         const input = ctx.messageContent.slice(0, 2000);
-        const result = runInNewContext(
-          'pattern.test(input)',
-          { pattern, input },
-          { timeout: REGEX_VM_TIMEOUT_MS, microtaskMode: 'afterEvaluate' },
-        );
-        return Boolean(result);
+        return evaluateBoundedRegex(pattern, input);
       } catch {
         // Timeout, invalid regex, or other error — treat as non-match
         return false;

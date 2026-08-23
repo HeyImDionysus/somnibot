@@ -84,23 +84,32 @@ function makeSupabase(responses: Record<string, any> = {}) {
 }
 
 function makeInteraction(customId: string, hasRole = false) {
+  const guild = {
+    id: 'g1',
+    members: {
+      me: {
+        permissions: { has: vi.fn().mockReturnValue(true) },
+      },
+      fetch: vi.fn(),
+    },
+    roles: {
+      cache: new Map([['role1', { name: 'TestRole', managed: false, editable: true }]]),
+    },
+  };
+  const member = {
+    id: 'u1',
+    guild,
+    roles: {
+      cache: new Map(hasRole ? [['role1', {}]] : []),
+      add: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    },
+  };
+  guild.members.fetch.mockResolvedValue(member);
   return {
     customId,
     user: { id: 'u1' },
-    guild: {
-      id: 'g1',
-      members: {
-        fetch: vi.fn().mockResolvedValue({
-          id: 'u1',
-          roles: {
-            cache: new Map(hasRole ? [['role1', {}]] : []),
-            add: vi.fn().mockResolvedValue(undefined),
-            remove: vi.fn().mockResolvedValue(undefined),
-          },
-        }),
-      },
-      roles: { cache: new Map([['role1', { name: 'TestRole' }]]) },
-    },
+    guild,
     reply: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -332,15 +341,24 @@ describe('deployButtonRolesPanel', () => {
 
 describe('handleSelectMenuRoleInteraction', () => {
   it('dispatches selected role assignments', async () => {
+    const guild = {
+      id: 'g1',
+      members: {
+        me: { permissions: { has: vi.fn().mockReturnValue(true) } },
+        fetch: vi.fn(),
+      },
+      roles: { cache: new Map([['r1', { name: 'Red', managed: false, editable: true }]]) },
+    };
+    guild.members.fetch.mockResolvedValue({
+      id: 'u1',
+      guild,
+      roles: { cache: new Map(), add: vi.fn().mockResolvedValue(undefined), remove: vi.fn().mockResolvedValue(undefined) },
+    });
     const interaction = {
       customId: 'selrole:p1',
       values: ['r1'],
       user: { id: 'u1' },
-      guild: {
-        id: 'g1',
-        members: { fetch: vi.fn().mockResolvedValue({ id: 'u1', roles: { cache: new Map(), add: vi.fn().mockResolvedValue(undefined), remove: vi.fn().mockResolvedValue(undefined) } }) },
-        roles: { cache: new Map([['r1', { name: 'Red' }]]) },
-      },
+      guild,
       reply: vi.fn().mockResolvedValue(undefined),
     };
     const supabase = makeSupabase({ button_roles: { data: [{ role_id: 'r1', active: true, require_role: null, require_level: null, exclusive_group: null }], error: null } });

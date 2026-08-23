@@ -432,8 +432,20 @@ describe('reserved legacy role metadata', () => {
 });
 
 describe('product mutations', () => {
-  it('models generated PayPal ids before POST, including a zero-price explicit plan', async () => {
+  it('creates an inactive paid subscription with its zero-price PayPal plan before activation', async () => {
     const fake = useFake({ economy_role_income: { rows: [income()] } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'PAYPAL-PRODUCT' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'PAYPAL-ZERO-PLAN' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })),
+    );
     const res = await productsPOST(buildRequest('/api/store/products', {
       method: 'POST',
       body: productBody({
@@ -443,9 +455,16 @@ describe('product mutations', () => {
         plans: [{ name: 'Zero', interval_unit: 'MONTH', price_cents: 0 }],
       }),
     }) as never);
-    expect(res.status).toBe(409);
-    expect(fetch).not.toHaveBeenCalled();
-    expect(fake._writes.products ?? []).toHaveLength(0);
+    expect(res.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fake._writes.products?.[0]?.payload).toEqual(expect.objectContaining({
+      active: false,
+      paypal_product_id: 'PAYPAL-PRODUCT',
+    }));
+    expect(fake._writes.plans?.[0]?.payload).toEqual(expect.objectContaining({
+      price_cents: 0,
+      paypal_plan_id: 'PAYPAL-ZERO-PLAN',
+    }));
   });
 
   it('allows a subscription whose complete generated plan set has no PayPal path', async () => {
@@ -551,10 +570,18 @@ describe('product mutations', () => {
     expect(fake._writes.products ?? []).toHaveLength(0);
   });
 
-  it('keeps the precheck guild-scoped', async () => {
+  it('keeps the income precheck guild-scoped after launch readiness is satisfied', async () => {
     const fake = useFake({
       products: {
         rows: [product({ type: 'one_time', active: false, granted_role_ids: [ROLE] })],
+      },
+      commerce_product_launch_runs: {
+        rows: [{
+          guild_id: GUILD,
+          product_id: PRODUCT_ID,
+          state: 'ready',
+          launch_receipt_hash: 'verified-launch-receipt',
+        }],
       },
       economy_role_income: {
         rows: [income({ guild_id: FOREIGN_GUILD })],

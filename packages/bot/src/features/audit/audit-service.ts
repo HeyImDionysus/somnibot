@@ -1510,7 +1510,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
   },
   'temp_channel.creation_failed': {
-    action: 'temp_channel.creation_failed',
+    action: 'temp_channels.creation_failed',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: (d) => (d.memberId ? 'user' : 'system'),
@@ -1533,7 +1533,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:hub:${d.hubId as string}`,
   },
   'temp_channel.orphan_reconciled': {
-    action: 'temp_channel.orphan_reconciled',
+    action: 'temp_channels.orphan_reconciled',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: 'system',

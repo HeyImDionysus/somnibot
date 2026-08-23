@@ -281,7 +281,7 @@ function gateAudit(ctx: ScenarioContext): void {
     'audit',
     'discord-readback',
     'Each anti-raid detection, containment action, lockdown, and restoration lands exactly one append-only audit row with actor, guild, and correlation id.',
-    'requires a guildMemberAdd event lane to reach the containment paths; the current anti-raid feature also persists no audit_logs rows (it emits log-channel embeds), so there is no DB-observable audit surface to read here',
+    'anti-raid containment and failure paths emit mapped anti_raid.* audit events, but proving them requires a real guildMemberAdd lane and live audit_logs readback after the event-bus flush',
   );
 }
 
@@ -927,7 +927,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained in anonymized form).',
-    'requires an audit_logs anonymization readback lane; anti-raid writes no audit_logs rows in the current feature, so there is nothing DB-observable to anonymize here',
+    'anti-raid writes mapped audit rows; proving anonymize-over-delete requires driving real containment events, running cleanup, and reading the retained audit_logs rows',
   );
   gateValkeyTracking(
     ctx,

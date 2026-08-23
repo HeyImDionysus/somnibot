@@ -840,9 +840,7 @@ export async function initGuildFeatures(
       () => { void services.auditService?.refreshFlushInterval(); },
       () => { void services.automationEngine?.refreshPreviewRequirement(); },
       (snapshotIntervalMs) => {
-        if (snapshotIntervalMs !== undefined) {
-          services.diagnosticsService?.setSnapshotInterval(snapshotIntervalMs);
-        }
+        services.diagnosticsService?.refreshConfiguration(snapshotIntervalMs);
       },
       async () => {
         await reconcilePendingOnboardingMembers(client, guild);

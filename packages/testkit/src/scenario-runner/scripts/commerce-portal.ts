@@ -34,13 +34,6 @@
  * bulk of member-facing cells are correctly GATED. Where a real DB-observable
  * fact exists, it is asserted against a REAL captured row — never a synthetic
  * literal, never an always-true expression, never an unconditional pass.
- *
- * Two behavior concerns surfaced while wiring this (see the XGUILD and SET-*
- * gates): the portal-auth customer match is by discord_id ONLY (not guild-scoped
- * and takes no guild parameter), and the self-service cancellation / refund /
- * service-request features described by the catalog have no portal endpoint or
- * dedicated table in this tree. Both are recorded as precise GATE reasons for the
- * owner rather than softened away.
  */
 import { createHash } from 'node:crypto';
 
@@ -619,13 +612,11 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   await proveRlsIsolation(ctx, handle, 'entitlements', entRow !== null);
   await proveNoOwnerAlert(ctx, handle);
 
-  // The cancellation ACTION and its guarantees are gated: no portal cancellation
-  // endpoint exists in this tree, and the non-renewal is a PayPal effect.
   ctx.gate(
     'database-RLS',
     'paypal-sandbox',
     `Under the default cancellation-timing="${cancellationDefault}", a confirmed cancellation sets the entitlement's end-of-term expiry (access retained until term end) rather than revoking immediately.`,
-    'no self-service portal cancellation endpoint exists under /api/portal/* in this tree, and the non-renewal is a PayPal sandbox effect (needs PAYPAL_* creds) — the end-of-term transition cannot be driven here (concern: portal cancellation appears unimplemented)',
+    'POST /api/portal/cancel owns this transition through the durable portal_cancellation_operations RPC and PayPal cancellation readback; this bot-only harness cannot drive the authenticated portal route or the required PAYPAL_* sandbox effect',
   );
   ctx.gate(
     'Discord',
@@ -678,7 +669,6 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   await proveRlsIsolation(ctx, handle, 'orders', orders.length > 0);
   await proveNoOwnerAlert(ctx, handle);
 
-  // TTL enforcement and refund-request filing are both out of harness reach.
   ctx.gate(
     'database-RLS',
     'discord-readback',
@@ -689,7 +679,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     'owner-notification',
     'discord-readback',
     'An enabled refund request routes the buyer’s ask into the owner’s dashboard queue as pending, with no auto-refund and no payments mutation.',
-    'no portal refund-request endpoint or dedicated refund/service request table exists in this tree; the owner refund queue is a dashboard surface — refund-request filing is not drivable here (concern: portal refund-request feature appears unimplemented)',
+    'POST /api/portal/requests writes commerce_portal_requests and the owner queue reads it through /api/commerce/requests; proving the authenticated buyer submission and rendered owner queue requires the dashboard browser lane',
   );
   gatePortalAudit(ctx, 'The config change, the expired-link refusal, and the request filing are each audited.');
   gateBrandingChrome(ctx);
@@ -697,7 +687,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     'replay-safety',
     'discord-readback',
     'Filing the same refund request twice dedupes to one queue entry.',
-    'requires the (absent) portal refund-request endpoint to observe its dedupe',
+    'requires replaying the authenticated POST /api/portal/requests action through the dashboard browser lane and reading back its durable dedupe result',
   );
   gateDiscordOAuth(ctx, 'No Discord-side money or role effect occurs from filing the refund request.');
 }

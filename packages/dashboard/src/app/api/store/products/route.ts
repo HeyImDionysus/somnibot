@@ -6,6 +6,7 @@
  * PUT: Update a product (syncs PayPal if name/description changed)
  * DELETE: Deactivate a product (soft delete; preserves entitlements)
  */
+import { randomUUID } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -54,6 +55,7 @@ import {
   declaresPendingCompletedProjectPolicy,
   hasPendingCompletedProjectPolicy,
   readCompletedProjectPolicy,
+  readCompletedProjectLicensingMetadata,
 } from '@/lib/store/licensing-handoff';
 
 // ── PayPal Helpers ─────────────────────────────────────
@@ -89,6 +91,13 @@ function commerceWriteError(error: { message: string; code?: string }) {
     return apiError(COMMERCE_INCOME_WALL_MESSAGE, 409);
   }
   return dbError(error, 'store/products');
+}
+
+function hasUnresolvedCapabilityPlanGrants(metadata: unknown): boolean {
+  const licensing = readCompletedProjectLicensingMetadata(metadata);
+  return licensing?.capabilities.some((capability) => (
+    capability.grantingPlans.some((plan) => !plan.planId)
+  )) ?? false;
 }
 
 /**
@@ -392,7 +401,6 @@ export async function POST(req: NextRequest) {
     currency,
     granted_role_ids,
     granted_channel_ids,
-    active,
     sort_order,
     metadata,
     plans: planDefs, // Optional: plan definitions for subscription products
@@ -406,7 +414,6 @@ export async function POST(req: NextRequest) {
   ) {
     return apiError('The requested license policy contains values the Store cannot save.', 400);
   }
-
   if (requestedProductId) {
     const { data: existing, error: existingError } = await supabase
       .from('products')
@@ -457,6 +464,7 @@ export async function POST(req: NextRequest) {
 
   const normalizedPlanDefs = (type === 'subscription' ? (planDefs ?? []) : []).map(
     (planDef) => ({
+      id: planDef.id,
       name: planDef.name,
       intervalUnit: planDef.interval_unit ?? 'MONTH',
       intervalCount: planDef.interval_count ?? 1,
@@ -471,6 +479,7 @@ export async function POST(req: NextRequest) {
 
   if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
     normalizedPlanDefs.push({
+      id: undefined,
       name: `${name} — MONTH`,
       intervalUnit: 'MONTH',
       intervalCount: 1,
@@ -485,7 +494,7 @@ export async function POST(req: NextRequest) {
   // any external side effect. This includes an explicit zero-price plan under
   // a positive-price subscription parent.
   const preparedPlans: PreparedPlan[] = normalizedPlanDefs.map((planDef) => {
-    const id = crypto.randomUUID();
+    const id = planDef.id ?? crypto.randomUUID();
     return {
       id,
       name: planDef.name ?? `${name} — ${planDef.intervalUnit}`,
@@ -502,7 +511,7 @@ export async function POST(req: NextRequest) {
     const evaluation = evaluateEffectivePostWriteProduct(
       {
         type,
-        active: active ?? true,
+        active: false,
         price_cents,
         granted_role_ids: granted_role_ids ?? [],
       },
@@ -530,16 +539,6 @@ export async function POST(req: NextRequest) {
   // drafts while the bot was offline (503) or before Discord permissions were
   // finished (409). Activation re-validates: the PUT handler checks targets
   // whenever a product becomes active.
-  if (active !== false) {
-    const discordTargetsError = await discordTargetsResponse(
-      supabase,
-      guildId,
-      granted_role_ids ?? [],
-      granted_channel_ids ?? [],
-    );
-    if (discordTargetsError) return discordTargetsError;
-  }
-
   let paypalProductId: string | null = null;
   let tenantPayPalConfig: PayPalRuntimeConfig | null = null;
   if (requiresPayPal) {
@@ -614,7 +613,7 @@ export async function POST(req: NextRequest) {
       currency: currency ?? 'USD',
       granted_role_ids: granted_role_ids ?? [],
       granted_channel_ids: granted_channel_ids ?? [],
-      active: active ?? true,
+      active: false,
       sort_order: sort_order ?? 0,
       metadata: metadata ?? {},
     })
@@ -678,7 +677,7 @@ export async function POST(req: NextRequest) {
         const recovery: CommercePlanRecovery = {
           id: planDef.id,
           product_id: data.id,
-          product_active: active ?? true,
+          product_active: false,
           name: planDef.name,
           paypal_plan_id: planDef.paypalPlanId,
           interval_unit: planDef.intervalUnit,
@@ -746,6 +745,21 @@ export async function POST(req: NextRequest) {
     .select('*, plans(*), product_license_config(*)')
     .eq('id', data.id)
     .single();
+
+  const { error: launchRunError } = await supabase
+    .from('commerce_product_launch_runs')
+    .upsert({
+      guild_id: guildId,
+      product_id: data.id,
+      operation_id: randomUUID(),
+      is_tutorial: false,
+      tutorial_visibility: 'visible',
+      environment: 'sandbox',
+      state: 'draft',
+      created_by: auth.ctx.discordId,
+      updated_by: auth.ctx.discordId,
+    }, { onConflict: 'guild_id,product_id', ignoreDuplicates: true });
+  if (launchRunError) return dbError(launchRunError, 'store/products/launch-run');
 
   // Notify bot about new product
   await notifyBot(guildId, 'commerce', { product_created: data.id });
@@ -841,6 +855,27 @@ export async function PUT(req: NextRequest) {
     }
     if (updates.active === true && hasPendingCompletedProjectPolicy(currentTargets.metadata)) {
       return apiError('Save and verify the requested license policy before activating this product.', 409);
+    }
+    if (updates.active === true) {
+      const { data: launchRun, error: launchRunError } = await supabase
+        .from('commerce_product_launch_runs')
+        .select('state, launch_receipt_hash')
+        .eq('guild_id', guildId)
+        .eq('product_id', id)
+        .maybeSingle();
+      if (launchRunError) return dbError(launchRunError, 'store/products/launch-readiness');
+      if (!launchRun) {
+        return apiError('Start a Product Launch Run before activation.', 409);
+      }
+      if (launchRun.state !== 'ready' || !launchRun.launch_receipt_hash) {
+        return apiError('Finish the Product Launch Run and verify its sandbox reversal before activation.', 409);
+      }
+    }
+    if (
+      updates.active === true
+      && hasUnresolvedCapabilityPlanGrants(updates.metadata ?? currentTargets.metadata)
+    ) {
+      return apiError('Resolve every capability grant to a saved subscription plan before activation.', 409);
     }
 
     const storePolicy = await loadStoreProductPolicy(supabase, guildId);

@@ -492,6 +492,7 @@ function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSum
   const operatorDashboardUrl = runtimeMode === 'vps'
     ? publicCallbackBaseUrl
     : REGULAR_LOCAL_OPERATOR_DASHBOARD_URL;
+  const runtimeIdentity = input.localServiceReadiness?.dashboardHealth?.runtimeIdentity;
 
   return {
     runtimeMode,
@@ -510,6 +511,14 @@ function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSum
       publicCallbackBaseUrl: publicCallbackBaseUrl || UNSET_DISPLAY,
       authCallbackUrl: callbacks.authCallbackUrl || UNSET_DISPLAY,
       paypalWebhookUrl: callbacks.paypalWebhookUrl || UNSET_DISPLAY,
+      ...(runtimeIdentity ? {
+        deploymentProfile: runtimeIdentity.deploymentProfile,
+        deployedSha: runtimeIdentity.exactSha ?? UNSET_DISPLAY,
+        migrationHead: runtimeIdentity.migrationHead ?? UNSET_DISPLAY,
+        configurationGeneration: runtimeIdentity.configurationGeneration === null
+          ? UNSET_DISPLAY
+          : String(runtimeIdentity.configurationGeneration),
+      } : {}),
     },
   };
 }

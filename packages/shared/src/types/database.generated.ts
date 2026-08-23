@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 300 migration files in packages/supabase/migrations/
+ * Source: 309 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -498,6 +498,8 @@ export interface DbGuildConfig {
   economy_pet_type_config: Json;
   economy_trivia_question_source: string;
   onboarding_sync_state: Json;
+  owner_notification_policy: Json;
+  owner_notification_rollout: Json;
 }
 
 export interface DbInstanceSettings {
@@ -1197,6 +1199,8 @@ export interface DbPayment {
   commerce_required_order_status: string | null;
   commerce_settled_capture_order_id: string | null;
   commerce_customer_totals_recorded_at: string | null;
+  provider_fee_cents: number | null;
+  provider_net_cents: number | null;
 }
 
 // — Commerce — Giveaways —
@@ -1242,6 +1246,7 @@ export interface DbAuditLog {
   correlation_id: string | null;
   occurrence_key: string | null;
   unscoped_occurrence_key: string | null;
+  operation_id: string;
 }
 
 export interface DbWebhookEvent {
@@ -1578,6 +1583,17 @@ export interface DbAppeals {
   expires_at: string | null;
 }
 
+export interface DbAuditLogIntegrityEvents {
+  id: number;
+  audit_id: string;
+  event_sequence: number;
+  change_kind: 'inserted' | 'anonymized';
+  occurred_at: string;
+  current_content_hash: string;
+  prior_event_hash: string | null;
+  event_hash: string;
+}
+
 export interface DbAutomationActionProgress {
   execution_id: string;
   action_index: number;
@@ -1842,6 +1858,28 @@ export interface DbCommercePortalRequests {
   customer_notified: boolean;
 }
 
+export interface DbCommerceProductLaunchRuns {
+  id: string;
+  guild_id: string;
+  product_id: string;
+  operation_id: string;
+  is_tutorial: boolean;
+  tutorial_visibility: 'visible' | 'hidden' | 'disabled';
+  environment: 'sandbox' | 'live';
+  state: 'draft' | 'validating' | 'sandbox_verifying' | 'ready' | 'live' | 'failed' | 'retired';
+  stages: Json;
+  launch_receipt: Json | null;
+  launch_receipt_hash: string | null;
+  last_error: string | null;
+  created_by: string;
+  updated_by: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  verified_at: string | null;
+  activated_at: string | null;
+}
+
 export interface DbCommerceProductTempRoleConfig {
   id: string;
   product_id: string;
@@ -1886,6 +1924,82 @@ export interface DbCommercePurchaseCelebrations {
   order_id: string;
   guild_id: string;
   created_at: string;
+}
+
+export interface DbCommerceRevenueExceptionEvents {
+  id: string;
+  exception_id: string;
+  guild_id: string;
+  operation_id: string;
+  actor_id: string;
+  action: string;
+  from_state: string | null;
+  to_state: string;
+  detail: Json;
+  created_at: string;
+}
+
+export interface DbCommerceRevenueExceptions {
+  id: string;
+  guild_id: string;
+  source_kind: 'paypal_event' | 'reconciliation' | 'fulfillment' | 'role_delivery' | 'license_delivery' | 'download' | 'refund' | 'cancellation' | 'dispute' | 'fraud' | 'identity';
+  source_id: string;
+  category: 'unattributed_paypal_event' | 'reconciliation_difference' | 'stalled_fulfillment' | 'failed_role_delivery' | 'failed_license_delivery' | 'download_problem' | 'refund_discrepancy' | 'cancellation_discrepancy' | 'payment_dispute' | 'fraud_hold' | 'customer_identity_conflict';
+  severity: 'info' | 'warning' | 'critical';
+  state: 'open' | 'in_progress' | 'resolved' | 'compensated' | 'dismissed';
+  owner_id: string | null;
+  operation_id: string;
+  order_id: string | null;
+  customer_id: string | null;
+  payment_id: string | null;
+  entitlement_id: string | null;
+  title: string;
+  safe_detail: string | null;
+  evidence: Json;
+  resolution_code: string | null;
+  resolution_note: string | null;
+  version: number;
+  detected_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+}
+
+export interface DbCommerceRiskCases {
+  id: string;
+  guild_id: string;
+  exception_id: string | null;
+  order_id: string | null;
+  customer_id: string | null;
+  payment_id: string | null;
+  operation_id: string;
+  kind: 'suspected_fraud' | 'confirmed_fraud' | 'payment_dispute' | 'chargeback' | 'ordinary_refund' | 'duplicate_payment' | 'support_cancellation';
+  state: 'open' | 'investigating' | 'confirmed' | 'resolved' | 'dismissed';
+  fulfillment_action: 'hold' | 'continue' | 'revoke' | 'restore';
+  entitlement_action: 'hold' | 'continue' | 'suspend' | 'revoke' | 'restore';
+  customer_notification: 'pending' | 'sent' | 'not_required' | 'failed';
+  evidence: Json;
+  resolution_note: string | null;
+  owner_id: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+}
+
+export interface DbCommerceRiskEffectActions {
+  id: string;
+  guild_id: string;
+  risk_case_id: string;
+  operation_id: string;
+  effect_kind: 'fulfillment' | 'entitlement' | 'notification';
+  requested_action: string;
+  state: 'pending' | 'processing' | 'completed' | 'failed' | 'compensated';
+  payload: Json;
+  attempt_count: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 export interface DbCommerceRoleDeliveryIntents {
@@ -2007,6 +2121,49 @@ export interface DbCommerceTempRoleMigrationIssues {
   issue_type: string;
   resolved_at: string | null;
   created_at: string;
+}
+
+export interface DbConfigurationReleases {
+  id: string;
+  operation_id: string;
+  guild_id: string;
+  config_domain: string;
+  base_revision: number;
+  target_revision: number;
+  base_snapshot: Json;
+  target_snapshot: Json;
+  config_diff: Json;
+  validation: Json;
+  recovery_kind: 'rollback' | 'compensation' | 'forward_fix';
+  recovery_payload: Json;
+  status: 'prepared' | 'applied' | 'read_back' | 'rolled_back' | 'compensated' | 'forward_fixed';
+  readback: Json | null;
+  recovered_readback: Json | null;
+  activated_at: string | null;
+  created_at: string;
+}
+
+export interface DbDashboardAdoptionMaps {
+  guild_id: string;
+  mode: 'guided' | 'expert';
+  tutorial_visible: boolean;
+  selected_track_ids: string[];
+  track_states: Json;
+  revision: number;
+  updated_by: string;
+  updated_at: string;
+}
+
+export interface DbDashboardAdoptionVerifications {
+  id: string;
+  guild_id: string;
+  track_id: 'core' | 'structure' | 'moderation' | 'welcome' | 'community' | 'economy' | 'music' | 'automation' | 'store' | 'licensing' | 'staff' | 'recovery';
+  evidence_kind: 'synthetic' | 'live';
+  result: 'pass' | 'fail' | 'blocked';
+  evidence: Json;
+  operation_id: string | null;
+  verified_at: string;
+  expires_at: string | null;
 }
 
 export interface DbDiscordOperationOccurrences {
@@ -2304,6 +2461,7 @@ export interface DbEconomyPetBattles {
   defender_dmg: number;
   reward: number;
   created_at: string;
+  operation_id: string | null;
 }
 
 export interface DbEconomyPetOperations {
@@ -2626,6 +2784,16 @@ export interface DbOnboardingSyncLeases {
   expires_at: string;
 }
 
+export interface DbOperationEvents {
+  id: number;
+  operation_id: string;
+  sequence: number;
+  stage: string;
+  event_type: 'prepared' | 'stage_completed' | 'conflict_detected' | 'stage_retry' | 'failed' | 'recovery_started' | 'rolled_back' | 'compensated' | 'forward_fixed';
+  evidence: Json;
+  created_at: string;
+}
+
 export interface DbPaymentRefunds {
   id: string;
   payment_id: string;
@@ -2756,6 +2924,35 @@ export interface DbRuntimeLeases {
   acquired_at: string;
   heartbeat_at: string;
   expires_at: string;
+}
+
+export interface DbSignificantOperations {
+  id: string;
+  guild_id: string;
+  idempotency_key: string;
+  domain: string;
+  action: string;
+  actor_type: 'owner' | 'administrator' | 'moderator' | 'finance' | 'support' | 'system' | 'customer';
+  actor_id: string;
+  source_surface: 'dashboard' | 'discord' | 'launcher' | 'portal' | 'sdk' | 'system';
+  lifecycle_stages: string[];
+  current_stage: string;
+  recovery_strategy: 'none' | 'rollback' | 'compensation';
+  outcome: 'active' | 'completed' | 'failed' | 'recovering' | 'rolled_back' | 'compensated' | 'forward_fixed';
+  request_payload: Json;
+  conflicts: Json;
+  blast_radius: Json;
+  external_effects: Json;
+  readback: Json | null;
+  audit_evidence: Json | null;
+  recovery_evidence: Json | null;
+  recovery_outcome: 'rolled_back' | 'compensated' | 'forward_fixed' | null;
+  failure_code: string | null;
+  configuration_generation: number | null;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 export interface DbStarboardEntries {

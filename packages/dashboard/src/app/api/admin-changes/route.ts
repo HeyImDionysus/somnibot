@@ -3,6 +3,7 @@
  * POST /api/admin-changes/undo — Undo a specific change.
  */
 import { NextResponse, type NextRequest } from 'next/server';
+import { evaluateTenantAccess } from '@somnibot/shared';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
@@ -164,12 +165,21 @@ export async function POST(request: NextRequest) {
           .maybeSingle();
 
         if (ownerError) return dbError(ownerError, 'admin-changes');
-        // foreignTable/foreignGuildColumn are dynamic, so the generated
-        // Supabase types can't narrow the row shape; read the guild value
-        // through an unknown-first cast.
-        const ownerGuild =
-          owner && ((owner as unknown as Record<string, unknown>)[foreignGuildColumn]);
-        if (!owner || ownerGuild !== ctx.guildId) {
+        const ownerRecord = z.record(z.unknown()).safeParse(owner);
+        const ownerGuild = ownerRecord.success
+          ? ownerRecord.data[foreignGuildColumn]
+          : undefined;
+        const access = typeof ownerGuild === 'string'
+          ? evaluateTenantAccess(
+              { guildId: ctx.guildId },
+              {
+                guildId: ownerGuild,
+                resourceType: 'undo-record',
+                resourceId: body.id,
+              },
+            )
+          : { allowed: false };
+        if (!access.allowed) {
           return NextResponse.json(
             { error: 'Undo blocked: target does not belong to this guild' },
             { status: 400 },

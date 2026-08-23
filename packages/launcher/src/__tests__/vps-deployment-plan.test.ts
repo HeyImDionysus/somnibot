@@ -52,6 +52,9 @@ describe('VPS deployment plan generator', () => {
     expect(plan.environment?.redactedEnvFile).toContain('PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook');
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_ACCESS_TOKEN=<SUPABASE_ACCESS_TOKEN>');
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=false');
+    expect(plan.environment?.redactedEnvFile).toContain(`SOMNIBOT_GIT_SHA=${'a'.repeat(40)}`);
+    expect(plan.environment?.redactedEnvFile).toContain('SOMNIBOT_MIGRATION_HEAD=20260823173000_experience_runtime_controls.sql');
+    expect(plan.environment?.redactedEnvFile).toContain('SOMNIBOT_CONFIG_GENERATION=20260823173000');
   });
 
   it('represents all secrets with placeholders and never emits concrete secret-looking values', () => {
@@ -398,6 +401,34 @@ describe('VPS deployment plan generator', () => {
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_SECRET_KEY=<SUPABASE_SECRET_KEY>');
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_ACCESS_TOKEN=');
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true');
+  });
+
+  it('blocks 26-guild deployment without measured higher-load evidence', () => {
+    const plan = buildVpsDeploymentPlan({ ...completeVpsInput, enabledGuildCount: 26 });
+
+    expect(plan.deploymentProfile).toBe('higher-load-vps');
+    expect(plan.status).toBe('blocked');
+    expect(plan.blockedReasons).toContain(
+      'Higher-load VPS deployment requires measured CPU, memory, backup, capacity, and fairness evidence.',
+    );
+  });
+
+  it('allows 26-guild deployment only with matching resource and fairness evidence', () => {
+    const plan = buildVpsDeploymentPlan({
+      ...completeVpsInput,
+      enabledGuildCount: 26,
+      deploymentCapacity: {
+        guildCount: 26,
+        registeredMembersPerGuild: 10_000,
+        cpuCores: 8,
+        memoryGiB: 16,
+        backupConfigured: true,
+        fairnessVerified: true,
+      },
+    });
+
+    expect(plan.deploymentProfile).toBe('higher-load-vps');
+    expect(plan.status).toBe('ready');
   });
 
   it('does not import child process execution APIs in the dry-run planner', () => {

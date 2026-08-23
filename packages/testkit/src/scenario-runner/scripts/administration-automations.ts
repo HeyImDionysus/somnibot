@@ -724,7 +724,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'replay-safety',
     'db-observable',
     'The retry reuses the occurrence id and cannot double-apply the grant.',
-    'the durable-occurrence dedup is not backed by the schema (see the REPLAY finding) and the retry needs the fault lane',
+    'the durable occurrence claim is schema-backed and now reuses producer occurrence IDs across redelivery; proving the eventual role grant still requires the live Discord fault lane and execution-row readback',
   );
   gateAuditEngine(ctx, 'The audit trail shows the failed attempt and the converged outcome.');
   gateBrandingNoReply(ctx);

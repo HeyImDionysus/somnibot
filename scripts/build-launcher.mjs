@@ -476,12 +476,28 @@ function buildElectron() {
   if (!/^[0-9a-f]{40}$/i.test(configuredReleaseSha)) {
     throw new Error('Launcher packaging requires an exact 40-character release commit SHA.');
   }
+  const migrationHead = readdirSync(path.join(ROOT, 'packages', 'supabase', 'migrations'))
+    .filter((name) => /^\d{14}_[a-z0-9_]+\.sql$/.test(name))
+    .sort()
+    .at(-1);
+  if (!migrationHead) {
+    throw new Error('Launcher packaging requires an exact migration head.');
+  }
+  const configurationGeneration = Number(migrationHead.slice(0, 14));
+  if (!Number.isSafeInteger(configurationGeneration)) {
+    throw new Error('Launcher packaging could not derive a safe configuration generation.');
+  }
   writeFileSync(
     path.join(LAUNCHER_DIR, 'dist', 'main', 'release-source.json'),
-    `${JSON.stringify({ repositoryRef: configuredReleaseSha.toLowerCase() }, null, 2)}\n`,
+    `${JSON.stringify({
+      repositoryRef: configuredReleaseSha.toLowerCase(),
+      migrationHead,
+      configurationGeneration,
+    }, null, 2)}\n`,
     'utf8',
   );
   console.log(`   Embedded immutable VPS source SHA: ${configuredReleaseSha.toLowerCase()}`);
+  console.log(`   Embedded migration head: ${migrationHead}`);
 
   // Determine platform flags for electron-builder
   const platformFlags =

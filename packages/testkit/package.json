@@ -12,11 +12,13 @@
     "type-check": "tsc --noEmit",
     "type-check:test": "tsc -p tsconfig.test.json",
     "test": "vitest run",
+    "test:readiness": "node verify-readiness.mjs",
     "test:live": "vitest run --config vitest.live.config.ts"
   },
   "devDependencies": {
     "@somnibot/bot": "workspace:*",
     "@somnibot/e2e": "workspace:*",
+    "@somnibot/shared": "workspace:*",
     "@types/node": "^22.0.0",
     "discord.js": "^14.24.0",
     "typescript": "^5.7.0",

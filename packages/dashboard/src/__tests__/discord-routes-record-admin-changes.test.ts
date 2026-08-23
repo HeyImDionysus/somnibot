@@ -36,6 +36,10 @@ vi.mock('@/lib/api/member-enrichment', () => ({
   enrichMembers: vi.fn().mockResolvedValue([]),
   MemberEnrichmentError: class MemberEnrichmentError extends Error {},
 }));
+vi.mock('@/lib/api/live-discord-facts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/live-discord-facts')>()),
+  validateDiscordRoleTargets: vi.fn(),
+}));
 vi.mock('@/lib/admin-changes', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/admin-changes')>()),
   recordAdminChange: vi.fn().mockResolvedValue(undefined),
@@ -47,6 +51,7 @@ import { NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { enrichMembers } from '@/lib/api/member-enrichment';
+import { validateDiscordRoleTargets } from '@/lib/api/live-discord-facts';
 import {
   recordAdminChange,
   recordCrudChange,
@@ -150,9 +155,13 @@ function expectRealDiscordUndo(change: RecordAdminChangeInput) {
 }
 
 beforeEach(() => {
-    vi.resetAllMocks();
+  vi.resetAllMocks();
   calls = [];
   vi.mocked(enrichMembers).mockResolvedValue([]);
+  vi.mocked(validateDiscordRoleTargets).mockResolvedValue({
+    ok: true,
+    snapshotAt: '2026-08-23T00:00:00.000Z',
+  });
   vi.mocked(requireGuildOwner).mockResolvedValue({
     ok: true,
     ctx: { userId: 'user-1', discordId: ACTOR, guildId: GUILD },

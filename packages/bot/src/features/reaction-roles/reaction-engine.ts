@@ -9,6 +9,7 @@ import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import type { DbReactionRole } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import { requireAssignableRole } from '../../services/role-assignability.js';
 
 const log = createLogger('ReactionEngine');
 
@@ -179,6 +180,7 @@ export async function handleReactionAdd(
       for (const gc of groupConfigs) {
         if (member.roles.cache.has(gc.role_id)) {
           try {
+            requireAssignableRole(member.guild, gc.role_id);
             await member.roles.remove(gc.role_id, 'Exclusive reaction role group');
           } catch (err) {
             log.error('Failed to remove exclusive group role:', { error: String(err) });
@@ -214,6 +216,7 @@ export async function handleReactionAdd(
 
   // Grant role
   try {
+    requireAssignableRole(member.guild, config.role_id);
     await member.roles.add(config.role_id, 'Reaction role');
     eventBus.emit('role.gained', guild.id, {
       discordId: user.id,
@@ -260,6 +263,7 @@ export async function handleReactionRemove(
 
   try {
     if (member.roles.cache.has(config.role_id)) {
+      requireAssignableRole(member.guild, config.role_id);
       await member.roles.remove(config.role_id, 'Reaction role removed');
       eventBus.emit('role.lost', guild.id, {
         discordId: user.id,

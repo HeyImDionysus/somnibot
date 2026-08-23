@@ -909,6 +909,8 @@ export class AutomationEngine {
     const t = event.type;
     const s = (v: unknown): string | null =>
       typeof v === 'string' && v ? v : typeof v === 'number' ? String(v) : null;
+    const producerOccurrenceId = s(event.occurrenceId) ?? s(data.occurrenceId);
+    if (producerOccurrenceId) return `${t}:${g}:${producerOccurrenceId}`;
     switch (t) {
       case 'message.sent': {
         // A message id is unique and immutable — a redelivery repeats it, and it

@@ -62,7 +62,7 @@ A full-featured Discord bot with a web dashboard. Moderation, levels, music, tic
 
 ### Infrastructure
 - **Electron Launcher** — Primary setup/control surface for regular-local and VPS operation with auto-update
-- **License SDK** — `@somnibot/license-sdk` for third-party app integration
+- **Generated SDK contracts** — self-contained product-bound integration files with receipt-based drift detection
 
 ---
 
@@ -525,8 +525,7 @@ somnibot/
 │   ├── dashboard/     Next.js App Router dashboard
 │   ├── launcher/      Electron desktop launcher
 │   ├── shared/        Shared types, constants, validators
-│   ├── supabase/      Database migration files
-│   └── license-sdk/   @somnibot/license-sdk for third-party integrations
+│   └── supabase/      Database migration files
 ├── services/
 │   └── lavalink/      Lavalink configuration
 ├── scripts/           Startup and setup scripts

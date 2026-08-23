@@ -15,6 +15,7 @@ import {
 import { cn } from '@/lib/utils/cn';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
+import { isAuthoritativeRoleSnapshot } from '@/components/shared/role-picker';
 
 // ============================================================
 // Types
@@ -310,6 +311,7 @@ export default function RolesPage() {
   const [botRoleId, setBotRoleId] = useState<string | null>(null);
   const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
   const [awaitingSnapshot, setAwaitingSnapshot] = useState(false);
+  const [snapshotAuthoritative, setSnapshotAuthoritative] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
@@ -330,6 +332,12 @@ export default function RolesPage() {
       setBotRoleId(response.botRoleId ?? null);
       setSnapshotAt(response.snapshotAt);
       setAwaitingSnapshot(response.awaitingSnapshot);
+      setSnapshotAuthoritative(isAuthoritativeRoleSnapshot({
+        snapshotVersion: response.snapshotVersion,
+        snapshotAt: response.snapshotAt,
+        awaitingSnapshot: response.awaitingSnapshot,
+        data: response.data,
+      }));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load roles');
@@ -440,7 +448,7 @@ export default function RolesPage() {
   // ── Select role for editing ──
   const selectRole = (role: LiveRoleData) => {
     setSelectedRoleId(role.id);
-    if (!role.managed) {
+    if (!role.managed && role.editableByBot && snapshotAuthoritative) {
       setEditingRole({ ...role });
     } else {
       setEditingRole(null);
@@ -488,7 +496,7 @@ export default function RolesPage() {
       )}
 
       {/* Actions for editable roles */}
-      {!readOnly && !role.managed && (
+      {!readOnly && !role.managed && role.editableByBot && (
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-standard group-hover:opacity-100">
           <button
             onClick={(e) => { e.stopPropagation(); selectRole(role); }}
@@ -507,7 +515,7 @@ export default function RolesPage() {
         </div>
       )}
 
-      {readOnly && (
+      {(readOnly || (!role.managed && !role.editableByBot)) && (
         <Lock size={12} className="shrink-0 text-discord-text-muted/40" />
       )}
     </div>
@@ -555,6 +563,16 @@ export default function RolesPage() {
             <AlertTriangle size={14} className="text-discord-warning" />
             <p className="text-sm text-discord-warning">
               Waiting for the bot to send its first snapshot. Make sure the bot is online and connected.
+            </p>
+          </div>
+        </Card>
+      )}
+      {!awaitingSnapshot && roles.length > 0 && !snapshotAuthoritative && (
+        <Card variant="warning">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={14} className="text-discord-warning" />
+            <p className="text-sm text-discord-warning">
+              The bot role snapshot is stale or incomplete. Existing roles are shown read-only; refresh after SomniBot publishes current hierarchy data.
             </p>
           </div>
         </Card>
@@ -611,7 +629,7 @@ export default function RolesPage() {
 
                   {/* Roles in this tier */}
                   {tierRoles.length > 0 ? (
-                    tierRoles.map((role) => <RoleRow key={role.id} role={role} />)
+                    tierRoles.map((role) => <RoleRow key={role.id} role={role} readOnly={!snapshotAuthoritative} />)
                   ) : (
                     <div className="px-3 py-1.5">
                       <span className="text-xs italic text-discord-text-muted/50">
@@ -635,7 +653,7 @@ export default function RolesPage() {
                     — created outside SomniBot, assign a tier to manage
                   </span>
                 </div>
-                {unassignedRoles.map((role) => <RoleRow key={role.id} role={role} />)}
+                {unassignedRoles.map((role) => <RoleRow key={role.id} role={role} readOnly={!snapshotAuthoritative} />)}
               </div>
             )}
 
@@ -819,7 +837,10 @@ export default function RolesPage() {
                 </div>
               )}
             </div>
-          ) : selectedRoleId && roles.find((r) => r.id === selectedRoleId)?.managed ? (
+          ) : selectedRoleId && (() => {
+            const selectedRole = roles.find((role) => role.id === selectedRoleId);
+            return selectedRole?.managed || selectedRole?.editableByBot === false;
+          })() ? (
             /* ── Managed role detail view ── */
             (() => {
               const role = roles.find((r) => r.id === selectedRoleId)!;
@@ -839,7 +860,7 @@ export default function RolesPage() {
                     <div className="flex items-center gap-2">
                       <Lock size={14} className="text-discord-text-muted" />
                       <p className="text-sm text-discord-text-secondary">
-                        This role is managed by Discord and cannot be edited or deleted through the dashboard.
+                        This role cannot be changed by SomniBot. Discord-managed roles are always read-only; for hierarchy-locked roles, grant Manage Roles and move SomniBot above the role.
                       </p>
                     </div>
 

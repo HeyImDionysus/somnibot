@@ -17,6 +17,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@somnibot/shared": "workspace:*",
     "electron-store": "^10.0.0",
     "electron-updater": "^6.3.0"
   },

@@ -416,7 +416,7 @@ describe('game-economy-pets', () => {
     expect(emit).toHaveBeenCalledWith('pet.acquired', 'g1', expect.objectContaining({ userId: 'u1', petType: 'hunting', price: 5000 }));
   });
 
-  it('emits pet.battle_payout_failed + writes an owner alert when the reward credit fails', async () => {
+  it('rolls back the battle and writes an owner alert when atomic resolution fails', async () => {
     const emit = spyEmit();
     let alertInserted = false;
     const pet = { name: 'Rex', level: 3, attack: 5, defense: 5, speed: 5, health: 20, status: 'happy' };
@@ -424,11 +424,15 @@ describe('game-economy-pets', () => {
       guild_config: () => supaChain({ economy_pets_enabled: true, economy_pet_battle_enabled: true }),
       economy_pets: () => supaChain(pet),
       alerts: () => { alertInserted = true; return supaChain(); },
-    }, { economy_add_balance: () => ({ data: null, error: { message: 'boom' } }), economy_pet_add_xp: () => ({ data: null, error: null }) });
+    }, {
+      economy_pet_battle_atomic: () => ({ data: null, error: { message: 'boom' } }),
+      economy_pet_add_xp: () => ({ data: null, error: null }),
+    });
     const mgr = new PetsManager(supabase);
     const interaction = makeInteraction({ options: { getString: () => null, getUser: () => ({ id: 'u2' }) } });
     await mgr.battlePet(interaction);
-    expect(emit).toHaveBeenCalledWith('pet.battle_payout_failed', 'g1', expect.objectContaining({ reward: expect.any(Number) }));
+    expect(emit).not.toHaveBeenCalledWith('pet.battle_resolved', 'g1', expect.anything());
+    expect(supabase.rpc).not.toHaveBeenCalledWith('economy_pet_add_xp', expect.anything());
     expect(alertInserted).toBe(true);
   });
 });

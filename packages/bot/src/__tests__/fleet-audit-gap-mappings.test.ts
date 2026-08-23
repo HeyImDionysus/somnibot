@@ -19,6 +19,8 @@ describe('fleet audit gap mappings', () => {
     ['scheduled_message.channel_missing', 'scheduled_messages.channel_missing', { scheduleId: 's1', name: 'Daily', channelId: 'c1', occurrenceId: 'o4' }],
     ['scheduled_message.send_retried', 'scheduled_messages.send_retried', { scheduleId: 's1', name: 'Daily', channelId: 'c1', attempt: 2, backoffMs: 500, occurrenceId: 'o5' }],
     ['temp_channel.creation_retried', 'temp_channels.creation_retried', { hubId: 'h1', hubChannelId: 'hvc', memberId: 'u1', attempt: 2, backoffMs: 250, occurrenceId: 'o6' }],
+    ['temp_channel.creation_failed', 'temp_channels.creation_failed', { hubId: 'h1', hubChannelId: 'hvc', memberId: 'u1', error: 'forbidden', occurrenceId: 'o6b' }],
+    ['temp_channel.orphan_reconciled', 'temp_channels.orphan_reconciled', { channelId: 'c1', ownerId: 'u1', occurrenceId: 'o6c' }],
     ['welcome.channel_missing', 'welcome.channel_missing', { memberId: 'u1', channelId: 'c1', occurrenceId: 'o7' }],
     ['welcome.dm_blocked_fallback', 'welcome.dm_blocked_fallback', { memberId: 'u1', occurrenceId: 'o8' }],
     ['welcome.member_role_grant_failed', 'welcome.member_role_grant_failed', { memberId: 'u1', roleId: 'r1', attempt: 2, occurrenceId: 'o9' }],

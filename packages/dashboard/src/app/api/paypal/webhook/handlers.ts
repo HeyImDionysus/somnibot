@@ -2148,6 +2148,29 @@ export async function handlePaymentCaptured(
     amountCents,
     currency: captureCurrency,
   });
+  const providerFeeCents = parsePayPalAmountToCents(
+    capture.seller_receivable_breakdown?.paypal_fee?.value,
+  );
+  const providerNetCents = parsePayPalAmountToCents(
+    capture.seller_receivable_breakdown?.net_amount?.value,
+  );
+  const feeCurrency = capture.seller_receivable_breakdown?.paypal_fee?.currency_code?.toUpperCase();
+  const netCurrency = capture.seller_receivable_breakdown?.net_amount?.currency_code?.toUpperCase();
+  if (
+    providerFeeCents !== null
+    && providerNetCents !== null
+    && providerFeeCents + providerNetCents === amountCents
+    && feeCurrency === captureCurrency
+    && netCurrency === captureCurrency
+  ) {
+    const { error: feeError } = await supabase
+      .from('payments')
+      .update({ provider_fee_cents: providerFeeCents, provider_net_cents: providerNetCents })
+      .eq('id', finalization.payment_id)
+      .eq('guild_id', order.guild_id)
+      .eq('amount_cents', amountCents);
+    requireSupabaseSuccess(feeError, 'Failed to persist PayPal fee breakdown');
+  }
   if (shouldSkipCaptureFulfillment(finalization, {
     order,
     amountCents,

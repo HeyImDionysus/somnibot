@@ -388,7 +388,7 @@ function gateAudit(ctx: ScenarioContext): void {
     'audit',
     'audit-row',
     'Every giveaways state change lands exactly one append-only audit row with actor, guild, and correlation id.',
-    'the production giveaway command/RPC path writes no audit_logs row today, so the catalog audit contract has no backing event to observe (flagged for owner review)',
+    'giveaway dashboard mutations and bot lifecycle events have occurrence-keyed audit paths; proving each action requires the authenticated dashboard or live Discord interaction followed by audit_logs readback',
   );
 }
 
@@ -419,7 +419,7 @@ function gateFaultLane(ctx: ScenarioContext, lane: string): void {
     'audit',
     'audit-row',
     'The append-only audit trail records the fault and its recovery/retry with no gap or duplicate.',
-    `${lane}; giveaway actions also write no audit_logs row today`,
+    `${lane}; the audited failure requires the real winner-announcement branch and audit_logs readback`,
   );
   ctx.gate(
     'owner-notification',
@@ -1344,7 +1344,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Giveaway audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained).',
-    'requires an audit_logs anonymization readback lane; the giveaway feature writes no audit_logs row today (flagged for owner review)',
+    'giveaway actions write durable audit rows; proving anonymize-over-delete requires real campaign actions, cleanup, and retained audit_logs readback',
   );
   gateReplayDeferredTo(ctx, 'REPLAY');
 }

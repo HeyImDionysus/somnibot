@@ -8,6 +8,20 @@
  * This makes client-side error handling predictable across all pages.
  */
 import { NextResponse } from 'next/server';
+import {
+  createOperatorError,
+  type OperatorErrorEnvelope,
+} from '@somnibot/shared';
+
+export type ApiErrorOptions = {
+  readonly code?: string;
+  readonly operatorDetail?: string | null;
+  readonly retryable?: boolean;
+  readonly operationId?: string | null;
+  readonly requiredAction?: string | null;
+  readonly fieldErrors?: OperatorErrorEnvelope['fieldErrors'];
+  readonly dependencies?: OperatorErrorEnvelope['dependencies'];
+};
 
 /** Return a success response with optional extra fields. */
 export function apiSuccess<T>(data: T, extras?: Record<string, unknown>): NextResponse {
@@ -15,8 +29,22 @@ export function apiSuccess<T>(data: T, extras?: Record<string, unknown>): NextRe
 }
 
 /** Return an error response with consistent shape. */
-export function apiError(message: string, status: number = 400): NextResponse {
-  return NextResponse.json({ success: false, error: message }, { status });
+export function apiError(
+  message: string,
+  status: number = 400,
+  options: ApiErrorOptions = {},
+): NextResponse {
+  const errorDetails = createOperatorError({
+    code: options.code ?? 'request_failed',
+    safeMessage: message,
+    operatorDetail: options.operatorDetail ?? null,
+    retryable: options.retryable ?? (status === 429 || status >= 500),
+    operationId: options.operationId ?? null,
+    requiredAction: options.requiredAction ?? null,
+    fieldErrors: options.fieldErrors ?? [],
+    dependencies: options.dependencies ?? [],
+  });
+  return NextResponse.json({ success: false, error: message, errorDetails }, { status });
 }
 
 /**
@@ -35,7 +63,11 @@ export function dbError(
   context: string,
 ): NextResponse {
   console.error(`[${context}] DB error:`, error.message);
-  return apiError('An internal error occurred', 500);
+  return apiError('An internal error occurred', 500, {
+    code: 'internal_error',
+    operatorDetail: `The ${context} data operation failed.`,
+    requiredAction: 'Retry the operation. If it fails again, review diagnostics.',
+  });
 }
 
 /**
@@ -67,5 +99,9 @@ export function dbConflictOr500(
 export function apiServerError(err: unknown, context?: string): NextResponse {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`[${context ?? 'api'}] Server error:`, message);
-  return apiError('An internal error occurred', 500);
+  return apiError('An internal error occurred', 500, {
+    code: 'internal_error',
+    operatorDetail: `The ${context ?? 'api'} operation failed.`,
+    requiredAction: 'Retry the operation. If it fails again, review diagnostics.',
+  });
 }

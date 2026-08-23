@@ -31,11 +31,6 @@
  *   anon-denial probe made non-vacuous by a real service-role row.
  *
  * The honesty boundary here is otherwise wide, so this domain is MOSTLY GATED:
- *   - Alert thresholds are constructor-level `DEFAULT_THRESHOLDS` with NO
- *     guild_config / dashboard wiring (catalog INTENT-DELTAS flags a code GAP), so
- *     SET-A / SET-B "lowered threshold takes live effect" cannot be driven. GATED.
- *   - The guided plain-language presentation is a dashboard surface and an
- *     unimplemented code GAP; there is no member-facing bot reply to brand. GATED.
  *   - RBAC (member 403 on /api/diagnostics + /diagnostics) is a dashboard-session
  *     lane; the DB-side enforcement (service-role-only RLS) IS proven here.
  *   - Discord channel/owner-mirror readback needs DISCORD_TOKEN + a live guild.
@@ -285,13 +280,12 @@ async function proveRlsDeny(ctx: ScenarioContext, handle: LiveClientHandle, tabl
   });
 }
 
-/** The member-facing branded/guided surface. This domain has none (no bot reply). */
 function gateBranding(ctx: ScenarioContext): void {
   ctx.gate(
     'branding',
     'discord-readback',
     'Guided explanations and alerts render in the owner voice with plain-language suggestions and subtle powered-by-SomniBot attribution.',
-    'diagnostics expose no member-facing bot reply; the guided plain-language presentation is a dashboard surface and, per catalog INTENT-DELTAS, an unimplemented code GAP (guided-mode has no code surface) — nothing to inspect in a bot-only harness.',
+    'the guided plain-language presentation is an authenticated dashboard surface and owner alerts are live Discord messages; proving both requires browser capture plus the configured owner channel readback',
   );
 }
 
@@ -305,13 +299,12 @@ function gateOwnerMirrorReadback(ctx: ScenarioContext): void {
   );
 }
 
-/** The AlertManager never writes audit_logs for alert lifecycle (code GAP). */
 function gateAlertAudit(ctx: ScenarioContext, promise: string): void {
   ctx.gate(
     'audit',
     'audit-row',
     promise,
-    'the diagnostics AlertManager writes no audit_logs row for alert open/resolve, and threshold-change audits originate in the (absent) dashboard config path — diagnostics audit lifecycle is an unimplemented code GAP.',
+    'diagnostic alert open/resolve emits diagnostics.alert_raised/resolved and the diagnostics PATCH records configuration changes; proving this lifecycle requires driving the authenticated dashboard update and reading the real audit_logs rows after evaluation',
   );
 }
 
@@ -471,20 +464,17 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   });
   await proveRlsDeny(ctx, handle, 'alerts');
 
-  // Headline: lowering memory-alert-threshold-mb to 128 to open memory_high cannot
-  // be driven — thresholds are constructor-level DEFAULT_THRESHOLDS with no
-  // guild_config/dashboard wiring (catalog INTENT-DELTAS code GAP).
   ctx.gate(
     'Discord',
     'db-observable',
     'With memory-alert-threshold-mb set to 128 (below actual usage), the next evaluation opens exactly one memory_high alert whose severity follows the 1.5x rule.',
-    'diagnostics alert thresholds are constructor-level DEFAULT_THRESHOLDS with no guild_config or dashboard configuration surface (code GAP) — the bot-only harness has no lever to lower a threshold, so the memory_high open cannot be driven.',
+    'per-guild thresholds are persisted by PATCH /api/diagnostics and invalidate the bot cache; this bot-only harness cannot authenticate the dashboard save needed to lower the threshold before the next live evaluation',
   );
   ctx.gate(
     'owner-notification',
     'redis-dependency',
     'The owner mirror for the memory_high alert includes a suggested next step, once per condition.',
-    'the memory_high alert cannot be opened without threshold wiring (code GAP); the owner-mirror delivery additionally needs DISCORD_TOKEN + a live guild.',
+    'requires the authenticated dashboard threshold update, a breaching live evaluation, and the configured owner notification channel readback with DISCORD_TOKEN',
   );
   gateAlertAudit(ctx, 'The threshold change is recorded with before/after values.');
   gateBranding(ctx);
@@ -492,7 +482,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     'replay-safety',
     'db-observable',
     'Continued breaching snapshots update the same memory_high row.',
-    'the memory_high alert cannot be opened without threshold wiring (code GAP); its update-in-place path is exercised structurally in REPLAY.',
+    'requires the authenticated dashboard threshold update and repeated live snapshots against the persisted per-guild threshold; the structural update-in-place path is exercised in REPLAY',
   );
 }
 
@@ -522,13 +512,11 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
   });
   await proveRlsDeny(ctx, handle, 'alerts');
 
-  // Headline: lowering ws-ping-alert-threshold-ms to 1 to force ws_ping_high cannot
-  // be driven (same threshold-config code GAP as SET-A).
   ctx.gate(
     'Discord',
     'db-observable',
     'With ws-ping-alert-threshold-ms set to 1, the next evaluation opens exactly one ws_ping_high alert (memory stays quiet), independent of SET-A.',
-    'diagnostics alert thresholds are constructor-level DEFAULT_THRESHOLDS with no guild_config or dashboard configuration surface (code GAP) — the harness cannot lower the ws threshold to force ws_ping_high.',
+    'the persisted ws threshold is saved by the authenticated dashboard and invalidates the bot cache; this bot-only harness cannot perform that browser-session update before the next live evaluation',
   );
   gateAlertAudit(ctx, 'The threshold change and alert lifecycle are recorded.');
   gateOwnerMirrorReadback(ctx);
@@ -559,14 +547,11 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
   });
   await proveRlsDeny(ctx, handle, 'bot_diagnostics');
 
-  // The rejection itself lives in the dashboard Zod layer, and there are NO
-  // threshold storage columns to leave unchanged (code GAP), so the reject path is
-  // not reachable here. GATE honestly (never fake a rejection).
   ctx.gate(
     'database-RLS',
     'db-observable',
     'A negative ws-ping threshold, a zero memory threshold, or a sub-floor snapshot interval is rejected and stored thresholds are unchanged.',
-    'diagnostics thresholds have no persisted configuration rows (constructor-level defaults, code GAP) and validation lives in the dashboard Zod layer — the reject-and-retain path is not reachable in a bot-only harness.',
+    'the persisted diagnostics columns and strict PATCH /api/diagnostics validation exist; proving reject-and-retain requires authenticated invalid browser requests followed by authoritative diagnostics readback',
   );
   ctx.gate(
     'audit',

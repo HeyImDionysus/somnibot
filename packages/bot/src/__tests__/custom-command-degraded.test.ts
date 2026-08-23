@@ -90,6 +90,46 @@ const makeValkey = () => ({
   ttl: vi.fn().mockResolvedValue(30),
 });
 
+type CustomCommandInvocation = Parameters<typeof handleCustomCommand>;
+
+function hasFunction(value: unknown, key: string): boolean {
+  return typeof value === 'object'
+    && value !== null
+    && key in value
+    && typeof Reflect.get(value, key) === 'function';
+}
+
+function isCustomCommandInvocation(
+  value: readonly unknown[],
+): value is CustomCommandInvocation {
+  if (value.length !== 4) return false;
+  const [interaction, supabase, valkey, guild] = value;
+  return hasFunction(interaction, 'reply')
+    && hasFunction(interaction, 'followUp')
+    && hasFunction(supabase, 'from')
+    && hasFunction(valkey, 'set')
+    && hasFunction(valkey, 'ttl')
+    && typeof guild === 'object'
+    && guild !== null
+    && 'id' in guild
+    && 'name' in guild
+    && 'channels' in guild
+    && 'members' in guild;
+}
+
+function customCommandInvocation(
+  interaction: ReturnType<typeof makeInteraction>,
+  supabase: ReturnType<typeof makeSupabase>,
+  valkey: ReturnType<typeof makeValkey>,
+  guild: ReturnType<typeof makeGuild>,
+): CustomCommandInvocation {
+  const value = [interaction, supabase, valkey, guild];
+  if (!isCustomCommandInvocation(value)) {
+    throw new TypeError('Invalid custom command test fixture');
+  }
+  return value;
+}
+
 const baseCmd = {
   id: 'cmd-1',
   name: 'hello',
@@ -207,5 +247,38 @@ describe('custom command with a failing action', () => {
     expect(events).toContain('custom_command.invoked');
     expect(events).not.toContain('custom_command.degraded');
     expect(raiseOwnerAlert).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with a branded notice when the cooldown store is unavailable', async () => {
+    // Given: a cooldown-protected command and an unavailable Valkey claim.
+    await load({ ...baseCmd, cooldown_seconds: 30 });
+    const interaction = makeInteraction();
+    const valkey = makeValkey();
+    valkey.set.mockRejectedValueOnce(new Error('Valkey offline'));
+
+    // When: the member invokes the command during the outage.
+    await handleCustomCommand(...customCommandInvocation(
+      interaction, makeSupabase(), valkey, makeGuild(),
+    ));
+
+    // Then: the action is not run, the member sees the guild brand, and the
+    // owner/audit lanes receive the degraded occurrence.
+    const firstReply = interaction.reply.mock.calls[0]?.[0];
+    expect(firstReply).toMatchObject({ ephemeral: true, allowedMentions: { parse: [] } });
+    expect(firstReply?.content).toContain('Test Guild');
+    expect(firstReply?.content).toContain('temporarily unavailable');
+    expect(emitSpy).toHaveBeenCalledWith(
+      'custom_command.degraded',
+      'g1',
+      expect.objectContaining({ commandId: 'cmd-1', failedTypes: ['cooldown_store'] }),
+    );
+    expect(emitSpy).not.toHaveBeenCalledWith(
+      'custom_command.invoked', expect.anything(), expect.anything(),
+    );
+    expect(raiseOwnerAlert).toHaveBeenCalledWith(
+      expect.anything(),
+      'g1',
+      expect.objectContaining({ alertType: 'custom_command_failing' }),
+    );
   });
 });

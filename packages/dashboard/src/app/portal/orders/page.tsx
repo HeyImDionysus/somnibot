@@ -41,7 +41,16 @@ interface Order {
   entitlements: Entitlement[];
 }
 
-type RequestType = 'refund' | 'service';
+type RequestType = 'refund' | 'service' | 'identity_relink' | 'download_help';
+interface PortalRequest {
+  id: string;
+  order_id: string | null;
+  type: RequestType;
+  status: 'pending' | 'reviewing' | 'resolved' | 'rejected';
+  resolution_note: string | null;
+  customer_notified: boolean;
+  created_at: string;
+}
 type Notice = { kind: 'success' | 'error'; message: string };
 type PortalControls = {
   self_service_cancellation: boolean;
@@ -92,6 +101,7 @@ function accessBoundary(entitlement: Entitlement): string | null {
 
 export default function PortalOrders() {
   const [orders, setOrders] = useState<Order[]>([]);
+  const [requests, setRequests] = useState<PortalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
   const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
@@ -112,15 +122,17 @@ export default function PortalOrders() {
         return;
       }
       try {
-        const res = await fetch('/api/portal/orders', {
-          headers: { 'x-portal-token': token },
-        });
-        if (res.status === 401) {
+        const headers = { 'x-portal-token': token };
+        const [res, requestsResponse] = await Promise.all([
+          fetch('/api/portal/orders', { headers }),
+          fetch('/api/portal/requests', { headers }),
+        ]);
+        if (res.status === 401 || requestsResponse.status === 401) {
           clearPortalToken();
           window.location.href = portalLoginUrl();
           return;
         }
-        const json = await res.json();
+        const [json, requestsBody] = await Promise.all([res.json(), requestsResponse.json()]);
         const loadedControls = json.controls as Partial<PortalControls> | undefined;
         if (
           res.ok
@@ -132,6 +144,9 @@ export default function PortalOrders() {
           && typeof loadedControls.service_requests_enabled === 'boolean'
         ) {
           setOrders(json.data);
+          if (requestsResponse.ok && requestsBody.success && Array.isArray(requestsBody.data)) {
+            setRequests(requestsBody.data);
+          }
           setControls(loadedControls as PortalControls);
           setOrdersLoaded(true);
         } else {
@@ -249,6 +264,11 @@ export default function PortalOrders() {
       });
       setRequestTarget(null);
       setRequestReason('');
+      const historyResponse = await fetch('/api/portal/requests', { headers: { 'x-portal-token': token } });
+      const historyBody = await historyResponse.json();
+      if (historyResponse.ok && historyBody.success && Array.isArray(historyBody.data)) {
+        setRequests(historyBody.data);
+      }
     } catch (error) {
       setNotice({
         kind: 'error',
@@ -285,6 +305,12 @@ export default function PortalOrders() {
             Contact seller
           </Button>
         )}
+        <Button size="sm" variant="ghost" disabled={requesting} onClick={() => openRequest(order, 'download_help')}>
+          Download help
+        </Button>
+        <Button size="sm" variant="ghost" disabled={requesting} onClick={() => openRequest(order, 'identity_relink')}>
+          Recover linked access
+        </Button>
       </div>
     );
   };
@@ -323,7 +349,13 @@ export default function PortalOrders() {
             <CircleHelp className="mt-0.5 text-discord-accent" size={20} aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <h2 id="portal-request-title" className="font-medium text-discord-text-primary">
-                {requestType === 'refund' ? 'Request a refund' : 'Contact the seller'}
+                {requestType === 'refund'
+                  ? 'Request a refund'
+                  : requestType === 'identity_relink'
+                    ? 'Recover linked access'
+                    : requestType === 'download_help'
+                      ? 'Get download help'
+                      : 'Contact the seller'}
               </h2>
               <p className="mt-1 text-xs text-discord-text-muted">
                 Order {requestTarget.order_number}. This opens one seller-review request; it does not automatically refund money or change access.
@@ -348,6 +380,30 @@ export default function PortalOrders() {
               </div>
             </div>
           </div>
+        </section>
+      )}
+
+      {requests.length > 0 && (
+        <section className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5" aria-labelledby="portal-request-history-title">
+          <h2 id="portal-request-history-title" className="font-medium text-discord-text-primary">Requests and recovery</h2>
+          <p className="mt-1 text-xs text-discord-text-muted">See what is waiting, what the seller decided, and whether the response was delivered.</p>
+          <ul className="mt-4 space-y-2">
+            {requests.map((portalRequest) => (
+              <li key={portalRequest.id} className="rounded-input bg-discord-bg-tertiary p-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium capitalize text-discord-text-primary">{portalRequest.type.replaceAll('_', ' ')}</span>
+                  <span className="rounded-full bg-discord-bg-elevated px-2 py-0.5 text-xs text-discord-text-secondary">{portalRequest.status}</span>
+                </div>
+                <p className="mt-1 text-xs text-discord-text-muted">
+                  Opened {formatDate(portalRequest.created_at)}
+                  {portalRequest.status === 'resolved' || portalRequest.status === 'rejected'
+                    ? portalRequest.customer_notified ? ' · response delivered' : ' · response delivery pending'
+                    : ' · seller action pending'}
+                </p>
+                {portalRequest.resolution_note && <p className="mt-2 text-sm text-discord-text-secondary">{portalRequest.resolution_note}</p>}
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 

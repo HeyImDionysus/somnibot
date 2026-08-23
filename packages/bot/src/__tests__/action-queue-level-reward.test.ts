@@ -31,7 +31,7 @@ type LevelRewardHandler = (typeof ACTION_HANDLERS)['deliver_level_reward_roles']
 type ActionGuild = Parameters<LevelRewardHandler>[0];
 type ActionSupabase = Parameters<LevelRewardHandler>[1];
 
-function makeFixture() {
+function makeFixture(grantRoleEditable = true) {
   const roleCache = new Map<string, { name: string }>([[REMOVE_ROLE_ID, { name: 'Previous tier' }]]);
   const add = vi.fn(async (roleId: string) => {
     roleCache.set(roleId, { name: 'New tier' });
@@ -43,11 +43,12 @@ function makeFixture() {
     id: GUILD_ID,
     members: {
       fetch: vi.fn(async () => ({ roles: { cache: roleCache, add, remove } })),
+      me: { permissions: { has: vi.fn(() => true) } },
     },
     roles: {
       cache: new Map([
-        [GRANT_ROLE_ID, { name: 'New tier' }],
-        [REMOVE_ROLE_ID, { name: 'Previous tier' }],
+        [GRANT_ROLE_ID, { name: 'New tier', managed: false, editable: grantRoleEditable }],
+        [REMOVE_ROLE_ID, { name: 'Previous tier', managed: false, editable: true }],
       ]),
     },
   };
@@ -110,6 +111,26 @@ describe('deliver_level_reward_roles action', () => {
     expect(result).toEqual({
       success: false,
       error: 'Malformed level reward role delivery',
+      retryable: false,
+    });
+    expect(add).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unreachable configured role before Discord or database mutation', async () => {
+    const { guild, supabase, rpc, add, remove } = makeFixture(false);
+
+    const result = await ACTION_HANDLERS.deliver_level_reward_roles(
+      guild,
+      supabase,
+      payload(),
+      context,
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Move SomniBot above the "New tier" role and grant Manage Roles, then retry.',
       retryable: false,
     });
     expect(add).not.toHaveBeenCalled();

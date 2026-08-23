@@ -166,6 +166,8 @@ describe('POST /api/license/validate', () => {
       config_feature_flags: ['pro-mode'],
       config_tier: 'pro',
       config_heartbeat_interval_seconds: 300,
+      customer_discord_id: '123456789012345678',
+      customer_discord_username: 'Private Customer',
     });
 
     const body = await (await POST(makeReq())).json();
@@ -173,6 +175,133 @@ describe('POST /api/license/validate', () => {
     expect(body.status).toBe('active');
     expect(body.features).toEqual(['pro-mode']);
     expect(body.tier).toBe('pro');
+    expect(body).not.toHaveProperty('customer_discord_id');
+    expect(body).not.toHaveProperty('customer_name');
+  });
+
+  it('returns only capabilities granted by the entitlement plan', async () => {
+    const basicPlanId = '00000000-0000-4000-a000-000000000010';
+    const proPlanId = '00000000-0000-4000-a000-000000000020';
+    mockLookup({
+      found: true,
+      key_id: 'key-plan',
+      key_status: 'active',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-plan',
+      entitlement_status: 'active',
+      entitlement_plan_id: basicPlanId,
+      config_feature_flags: ['legacy-global-flag'],
+      product_licensing_metadata: {
+        capabilities: [
+          {
+            key: 'core',
+            name: 'Core',
+            behavioralMeaning: 'Core project behavior',
+            controlledFunctionality: 'Core commands',
+            grantingPlans: [],
+            unavailableBehavior: 'Keep core data readable',
+            dependencyKeys: [],
+          },
+          {
+            key: 'basic-export',
+            name: 'Basic export',
+            behavioralMeaning: 'Exports basic reports',
+            controlledFunctionality: 'Basic export command',
+            grantingPlans: [{ key: 'basic', name: 'Basic', planId: basicPlanId }],
+            unavailableBehavior: 'Disable basic export',
+            dependencyKeys: ['core'],
+          },
+          {
+            key: 'pro-export',
+            name: 'Pro export',
+            behavioralMeaning: 'Exports complete reports',
+            controlledFunctionality: 'Pro export command',
+            grantingPlans: [{ key: 'pro', name: 'Pro', planId: proPlanId }],
+            unavailableBehavior: 'Disable pro export',
+            dependencyKeys: ['core'],
+          },
+        ],
+      },
+    });
+
+    const body = await (await POST(makeReq())).json();
+    expect(body).toMatchObject({
+      valid: true,
+      features: ['core', 'basic-export'],
+    });
+  });
+
+  it('removes a granted capability when its dependency is unavailable', async () => {
+    const basicPlanId = '00000000-0000-4000-a000-000000000010';
+    const proPlanId = '00000000-0000-4000-a000-000000000020';
+    mockLookup({
+      found: true,
+      key_id: 'key-dependency',
+      key_status: 'active',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-dependency',
+      entitlement_status: 'active',
+      entitlement_plan_id: basicPlanId,
+      product_licensing_metadata: {
+        capabilities: [
+          {
+            key: 'pro-core',
+            name: 'Pro core',
+            behavioralMeaning: 'Required pro behavior',
+            controlledFunctionality: 'Pro core engine',
+            grantingPlans: [{ key: 'pro', name: 'Pro', planId: proPlanId }],
+            unavailableBehavior: 'Disable pro core',
+            dependencyKeys: [],
+          },
+          {
+            key: 'basic-export',
+            name: 'Basic export',
+            behavioralMeaning: 'Exports basic reports',
+            controlledFunctionality: 'Basic export command',
+            grantingPlans: [{ key: 'basic', name: 'Basic', planId: basicPlanId }],
+            unavailableBehavior: 'Disable basic export',
+            dependencyKeys: ['pro-core'],
+          },
+        ],
+      },
+    });
+
+    const body = await (await POST(makeReq())).json();
+    expect(body).toMatchObject({ valid: true, features: [] });
+  });
+
+  it('fails closed when a saved capability grant has no authoritative plan id', async () => {
+    mockLookup({
+      found: true,
+      key_id: 'key-unresolved',
+      key_status: 'active',
+      key_product_id: '00000000-0000-4000-a000-000000000001',
+      key_failed_attempts: 0,
+      entitlement_id: 'ent-unresolved',
+      entitlement_status: 'active',
+      entitlement_plan_id: '00000000-0000-4000-a000-000000000010',
+      product_guild_id: 'guild-1',
+      product_licensing_metadata: {
+        capabilities: [{
+          key: 'exports',
+          name: 'Exports',
+          behavioralMeaning: 'Exports reports',
+          controlledFunctionality: 'Export command',
+          grantingPlans: [{ key: 'pro', name: 'Pro' }],
+          unavailableBehavior: 'Disable exports',
+          dependencyKeys: [],
+        }],
+      },
+    });
+
+    const response = await POST(makeReq());
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      valid: false,
+      status: 'service_unavailable',
+    });
   });
 
   it('activates a purchased key on its first project validation', async () => {

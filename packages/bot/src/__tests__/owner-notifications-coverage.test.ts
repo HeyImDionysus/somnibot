@@ -2,6 +2,7 @@
  * OwnerNotificationService — coverage tests.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mockEventBus, mockGuild, mockSupabase } from './helpers/discord-mocks.js';
 
 vi.mock('discord.js', () => ({
   EmbedBuilder: class {
@@ -33,56 +34,56 @@ import { OwnerNotificationService } from '../services/owner-notifications.js';
 
 // ── Helpers ───────────────────────────────────────────────
 
-function makeSupabase(overrides: Record<string, any> = {}) {
+function makeSupabase(overrides: Record<string, unknown> = {}) {
   const fromMock = vi.fn();
   fromMock.mockImplementation((table: string) => {
-    const chain: Record<string, any> = {};
+    const chain: Record<PropertyKey, unknown> = {};
     const methods = ['select', 'eq', 'single', 'maybeSingle'];
     for (const m of methods) {
       chain[m] = vi.fn().mockReturnValue(chain);
     }
     const data = overrides[table] ?? null;
-    chain.then = (resolve: (v: any) => void) => resolve({ data, error: null });
-    (chain as any)[Symbol.toStringTag] = 'Promise';
+    chain.then = (resolve: (value: { readonly data: unknown; readonly error: null }) => void) =>
+      resolve({ data, error: null });
     return chain;
   });
-  return { from: fromMock };
+  const supabase = mockSupabase();
+  supabase.from = fromMock;
+  return supabase;
 }
 
 function makeEventBus() {
-  const listeners: Record<string, Array<(event: any) => void>> = {};
-  return {
-    on: vi.fn((event: string, handler: (e: any) => void) => {
-      if (!listeners[event]) listeners[event] = [];
-      listeners[event].push(handler);
-    }),
-    _emit: (type: string, data: Record<string, unknown>, guildId = 'g1') => {
-      for (const h of listeners[type] ?? []) {
-        h({ type, guildId, data });
-      }
-    },
-    _listeners: listeners,
+  const listeners: Record<string, Array<(event: { readonly type: string; readonly guildId: string; readonly data: Record<string, unknown> }) => void>> = {};
+  const eventBus = mockEventBus();
+  eventBus.on = vi.fn((event: string, handler: (payload: { readonly type: string; readonly guildId: string; readonly data: Record<string, unknown> }) => void) => {
+    if (!listeners[event]) listeners[event] = [];
+    listeners[event].push(handler);
+  });
+  eventBus._emit = (type: string, data: Record<string, unknown>, guildId = 'g1') => {
+    for (const handler of listeners[type] ?? []) {
+      handler({ type, guildId, data });
+    }
   };
+  eventBus._listeners = listeners;
+  return eventBus;
 }
 
-function makeClient(overrides: Record<string, any> = {}) {
+function makeClient(overrides: Record<string, unknown> = {}) {
+  const client = mockGuild();
   const sendMock = vi.fn().mockResolvedValue(undefined);
-  const channel = overrides.hasChannel ? { send: sendMock } : null;
-  return {
-    guilds: {
-      cache: {
-        get: vi.fn().mockReturnValue({
-          channels: { cache: { get: vi.fn().mockReturnValue(channel) } },
-        }),
-      },
-    },
-    users: {
-      fetch: vi.fn().mockResolvedValue({
-        send: sendMock,
+  const channel = overrides.hasChannel === true ? { send: sendMock } : null;
+  client.guilds = {
+    cache: {
+      get: vi.fn().mockReturnValue({
+        channels: { cache: { get: vi.fn().mockReturnValue(channel) } },
       }),
     },
-    _sendMock: sendMock,
   };
+  client.users = {
+    fetch: vi.fn().mockResolvedValue({ send: sendMock }),
+  };
+  client._sendMock = sendMock;
+  return client;
 }
 
 // ── Tests ────────────────────────────────────────────────
@@ -101,7 +102,7 @@ describe('OwnerNotificationService', () => {
       guild_config: { mod_log_channel_id: 'ch1' },
     });
     eventBus = makeEventBus();
-    service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
+    service = new OwnerNotificationService(client, 'g1', supabase, eventBus);
   });
 
   describe('start', () => {
@@ -128,7 +129,7 @@ describe('OwnerNotificationService', () => {
 
     it('handles null config values', async () => {
       supabase = makeSupabase({});
-      service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
+      service = new OwnerNotificationService(client, 'g1', supabase, eventBus);
       await service.start();
       expect(eventBus.on).toHaveBeenCalled();
     });
@@ -166,7 +167,7 @@ describe('OwnerNotificationService', () => {
         guild_config: { mod_log_channel_id: 'ch1', fraud_owner_dm_on_critical: false },
       });
       client = makeClient({ hasChannel: false });
-      service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
+      service = new OwnerNotificationService(client, 'g1', supabase, eventBus);
       await service.start();
       eventBus._emit('fraud.detected', { signal: 'velocity', severity: 'critical', discordId: 'u1' });
       await new Promise((r) => process.nextTick(r));
@@ -179,7 +180,7 @@ describe('OwnerNotificationService', () => {
         guild_config: { mod_log_channel_id: 'ch1', fraud_staff_alert_channel_id: 'staff1', fraud_owner_dm_on_critical: true },
       });
       client = makeClient({ hasChannel: true });
-      service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
+      service = new OwnerNotificationService(client, 'g1', supabase, eventBus);
       await service.start();
       eventBus._emit('fraud.detected', { signal: 'velocity', severity: 'critical', discordId: 'u1' });
       await new Promise((r) => process.nextTick(r));
@@ -190,15 +191,20 @@ describe('OwnerNotificationService', () => {
     it('mirrors a non-critical signal to the staff channel without DMing owner', async () => {
       const dmMock = vi.fn().mockResolvedValue(undefined);
       const channelSend = vi.fn().mockResolvedValue(undefined);
-      const localClient = {
-        guilds: { cache: { get: vi.fn().mockReturnValue({ channels: { cache: { get: vi.fn().mockReturnValue({ send: channelSend }) } } }) } },
-        users: { fetch: vi.fn().mockResolvedValue({ send: dmMock }) },
+      const localClient = mockGuild();
+      localClient.guilds = {
+        cache: {
+          get: vi.fn().mockReturnValue({
+            channels: { cache: { get: vi.fn().mockReturnValue({ send: channelSend }) } },
+          }),
+        },
       };
+      localClient.users = { fetch: vi.fn().mockResolvedValue({ send: dmMock }) };
       supabase = makeSupabase({
         guild: { owner_discord_id: 'owner1' },
         guild_config: { mod_log_channel_id: 'ch1', fraud_staff_alert_channel_id: 'staff1', fraud_owner_dm_on_critical: true },
       });
-      service = new OwnerNotificationService(localClient as any, 'g1', supabase as any, eventBus as any);
+      service = new OwnerNotificationService(localClient, 'g1', supabase, eventBus);
       await service.start();
       eventBus._emit('fraud.detected', { signal: 'payment_pattern', severity: 'medium', discordId: 'u1' });
       await new Promise((r) => process.nextTick(r));
@@ -208,6 +214,31 @@ describe('OwnerNotificationService', () => {
   });
 
   describe('incident.created', () => {
+    it('suppresses runtime delivery when the feature rollout is emergency-disabled', async () => {
+      supabase = makeSupabase({
+        guild: { owner_discord_id: 'owner1' },
+        guild_config: {
+          mod_log_channel_id: 'ch1',
+          owner_notification_rollout: {
+            state: 'emergency_disabled',
+            guildIds: [],
+            deploymentIds: [],
+          },
+        },
+      });
+      service = new OwnerNotificationService(client, 'g1', supabase, eventBus);
+      await service.start();
+
+      eventBus._emit('incident.created', {
+        severity: 'critical',
+        title: 'DB Connection Lost',
+        category: 'infrastructure',
+      });
+      await new Promise((resolve) => process.nextTick(resolve));
+
+      expect(client._sendMock).not.toHaveBeenCalled();
+    });
+
     it('sends notification for critical incidents', async () => {
       await service.start();
       eventBus._emit('incident.created', {
@@ -320,7 +351,7 @@ describe('OwnerNotificationService', () => {
         guild_config: { mod_log_channel_id: null },
       });
       client = makeClient({ hasChannel: false });
-      service = new OwnerNotificationService(client as any, 'g1', supabase as any, eventBus as any);
+      service = new OwnerNotificationService(client, 'g1', supabase, eventBus);
       await service.start();
 
       eventBus._emit('fraud.detected', { signal: 'test', severity: 'critical' });

@@ -368,6 +368,7 @@ export default function CustomCommandsPage() {
                             value={action.roleId || null}
                             onChange={(v) => updateAction(i, { roleId: (v as string) ?? '' })}
                             placeholder="Select role…"
+                            requireAssignable
                           />
                         )}
                         {action.type === 'send_embed' && (

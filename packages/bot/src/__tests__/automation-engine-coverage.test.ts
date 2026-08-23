@@ -339,6 +339,36 @@ describe('AutomationEngine', () => {
   });
 
   describe('handleEvent / processAutomation', () => {
+    it('reuses a producer occurrence id across retries for durable claims', async () => {
+      // Given: a retryable producer event carries one stable occurrence identity.
+      mockGetForTrigger.mockReturnValue([makeAutomation({})]);
+      await engine.start();
+      const occurrenceId = 'harvest:user-1:2026-08-23T12:00:00.000Z';
+
+      // When: the same source occurrence is delivered twice.
+      eventBus.fire({
+        type: 'farm.harvested',
+        guildId: 'g1',
+        data: { userId: 'u1', cropCount: 2, earnings: 50, occurrenceId },
+      });
+      eventBus.fire({
+        type: 'farm.harvested',
+        guildId: 'g1',
+        data: { userId: 'u1', cropCount: 2, earnings: 50, occurrenceId },
+      });
+      eventBus.fire({
+        type: 'farm.harvested',
+        guildId: 'g1',
+        data: { userId: 'u1', cropCount: 1, earnings: 25, occurrenceId: `${occurrenceId}:next` },
+      });
+
+      // Then: both deliveries address the same schema-backed claim key.
+      await vi.waitFor(() => expect(mockClaim).toHaveBeenCalledTimes(3));
+      const claimOccurrenceIds = mockClaim.mock.calls.map(([claim]) => claim.occurrenceId);
+      expect(claimOccurrenceIds[0]).toBe(claimOccurrenceIds[1]);
+      expect(new Set(claimOccurrenceIds).size).toBe(2);
+    });
+
     it('durably holds an oversized resolved member set before any action executes', async () => {
       mockGetForTrigger.mockReturnValue([
         makeAutomation({

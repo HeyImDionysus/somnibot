@@ -52,6 +52,7 @@ export interface LiveRoleData {
   hoist: boolean;
   mentionable: boolean;
   managed: boolean;
+  editableByBot: boolean;
   tags: {
     botId: string | null;
     integrationId: string | null;
@@ -69,6 +70,7 @@ export interface RolesResponse {
   success: boolean;
   data: LiveRoleData[];
   botRoleId?: string;
+  snapshotVersion?: number;
   snapshotAt: string | null;
   awaitingSnapshot: boolean;
 }

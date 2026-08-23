@@ -418,21 +418,12 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
   });
 }
 
-/**
- * Branding always GATEs for this domain. The member-facing surfaces the catalog
- * brands (panel embed, intro embed, close embed, feedback prompt, transcript HTML)
- * are only emitted when a real thread + channel exist through the live gateway.
- * The one reply the harness CAN capture — the claim embed — is built from a
- * hardcoded SOMNI_PALETTE with no owner brand-kit/voice-preset injection, so the
- * white-label branding contract cannot be affirmed and is GATED (never faked),
- * with the code gap surfaced in the reason.
- */
 function gateBranding(ctx: ScenarioContext): void {
   ctx.gate(
     'branding',
     'discord-readback',
     "Every member-facing ticket surface (panel embed, intro, close embed, feedback prompt, transcript HTML) shows the owner's brand kit, colors, and voice preset with the subtle powered-by-SomniBot attribution and zero stock-bot wording.",
-    'the branded ticket surfaces (panel/intro/close embeds, transcript HTML) are only emitted when a real thread + channel exist through the live Discord gateway (DISCORD_TOKEN + live guild); note the ticket embeds are currently built from a hardcoded SOMNI_PALETTE with no owner brand-kit/voice-preset injection, so the white-label branding contract is unmet even before the gateway is available',
+    'ticket panel, intro, close, feedback, and transcript rendering resolve the persisted owner brand kit and voice preset; capturing those emitted surfaces still requires a real thread and channel through the live Discord gateway (DISCORD_TOKEN + live guild)',
   );
 }
 

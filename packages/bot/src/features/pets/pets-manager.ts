@@ -103,6 +103,13 @@ type PetRenameResult =
       readonly replayed: boolean;
     };
 
+type BattleResolutionFailure = {
+  readonly guildId: string;
+  readonly userId: string;
+  readonly reward: number;
+  readonly reason: string;
+};
+
 function parsePetRenameResult(value: unknown): PetRenameResult | null {
   if (value === null || typeof value !== 'object') return null;
 
@@ -824,74 +831,60 @@ export class PetsManager {
     const iWin = myPower > theirPower;
     const reward = 100 + myPet.level * 10;
 
-    const { error: battleInsertErr } = await this.supabase.from('economy_pet_battles').insert({
-      guild_id: guildId,
-      challenger_id: interaction.user.id,
-      defender_id: opponent.id,
-      winner_id: iWin ? interaction.user.id : opponent.id,
-      challenger_dmg: Math.floor(myPower),
-      defender_dmg: Math.floor(theirPower),
-      reward,
+    const battleWinnerId = iWin ? interaction.user.id : opponent.id;
+    const { data: battleResult, error: battleInsertErr } = await this.supabase.rpc('economy_pet_battle_atomic', {
+      p_guild_id: guildId,
+      p_challenger_id: interaction.user.id,
+      p_defender_id: opponent.id,
+      p_winner_id: battleWinnerId,
+      p_challenger_dmg: Math.floor(myPower),
+      p_defender_dmg: Math.floor(theirPower),
+      p_reward: reward,
+      p_operation_id: operationId,
     });
 
-    if (battleInsertErr) {
+    if (battleInsertErr || !battleResult || typeof battleResult !== 'object') {
+      await this.raiseBattleResolutionAlert({
+        guildId,
+        userId: battleWinnerId,
+        reward,
+        reason: battleInsertErr?.message ?? 'invalid_result',
+      });
       await this.auditPet(guildId, interaction.user.id, 'pets.battle_failed', operationId, {
-        challengerId: interaction.user.id, defenderId: opponent.id, reason: battleInsertErr.message,
-      }, false, battleInsertErr.message);
+        challengerId: interaction.user.id,
+        defenderId: opponent.id,
+        reason: battleInsertErr?.message ?? 'invalid_result',
+      }, false, battleInsertErr?.message ?? 'invalid_result');
       await interaction.reply({ content: '⚠️ The battle could not be recorded. No reward was charged; please try again.', ephemeral: true });
       return;
     }
-
-    const battleWinnerId = iWin ? interaction.user.id : opponent.id;
-    const { error: payoutErr } = await this.supabase.rpc('economy_add_balance', {
-      p_guild_id: guildId, p_user_id: battleWinnerId, p_amount: reward,
-    });
-    // V49-L3: Surface payout failure to the user instead of silently swallowing
-    const payoutWarning = payoutErr ? '\n⚠️ *Reward payout failed — contact an admin.*' : '';
-    if (payoutErr) {
-      log.error('battlePet payout failed:', payoutErr.message);
-      // [game-economy-pets] Owner alert + operator-retry queue + audit on the
-      // battle-payout-failure branch (catalog battle-payout-failed contract).
-      await this.raiseBattlePayoutAlert(guildId, battleWinnerId, reward)
-        .catch((e: unknown) => { log.warn('pet battle payout alert failed:', (e as Error)?.message ?? e); });
-      await Promise.resolve(this.supabase.from('bot_action_queue').insert({
-        guild_id: guildId,
-        action: 'pet_battle_payout_retry',
-        payload: { user_id: battleWinnerId, amount: reward, reason: 'battle_payout_failed', original_error: payoutErr.message },
-        status: 'pending',
-      })).catch((e: unknown) => { log.warn('pet battle payout retry-queue failed:', (e as Error)?.message ?? e); });
-      await this.auditPet(guildId, battleWinnerId, 'pets.battle_payout_failed', `${operationId}:payout`, {
-        reward, battleId: operationId,
-      }, false, payoutErr.message, 'system');
-      eventBus.emit('pet.battle_payout_failed', guildId, {
-        winnerId: battleWinnerId,
-        reward,
-        correlationId: `${operationId}:payout`,
-        occurrenceId: `${operationId}:payout`,
-      });
-    }
+    const replayed = Reflect.get(battleResult, 'replayed') === true;
 
     // XP for both — atomic increment via RPC (prevents TOCTOU race on stale xp value)
-    for (const uid of [interaction.user.id, opponent.id]) {
-      await Promise.resolve(this.supabase.rpc('economy_pet_add_xp', {
-        p_guild_id: guildId, p_user_id: uid, p_xp: 10,
-      })).catch((err: Error) => log.error('pet XP increment failed:', err.message));
+    if (!replayed) {
+      for (const uid of [interaction.user.id, opponent.id]) {
+        await Promise.resolve(this.supabase.rpc('economy_pet_add_xp', {
+          p_guild_id: guildId, p_user_id: uid, p_xp: 10,
+        })).catch((err: Error) => log.error('pet XP increment failed:', err.message));
+      }
     }
 
     // [game-economy-pets] Append-only audit row for the battle-resolved state
     // change (winner decided, reward credited or flagged failed).
-    await this.auditPet(guildId, interaction.user.id, 'pet.battle_resolved', operationId, {
-      challengerId: interaction.user.id, defenderId: opponent.id, winnerId: battleWinnerId, reward, payoutFailed: !!payoutErr,
-    });
-    eventBus.emit('pet.battle_resolved', guildId, {
-      challengerId: interaction.user.id,
-      defenderId: opponent.id,
-      winnerId: battleWinnerId,
-      reward,
-      payoutFailed: !!payoutErr,
-      correlationId: operationId,
-      occurrenceId: operationId,
-    });
+    if (!replayed) {
+      await this.auditPet(guildId, interaction.user.id, 'pet.battle_resolved', operationId, {
+        challengerId: interaction.user.id, defenderId: opponent.id, winnerId: battleWinnerId, reward, payoutFailed: false,
+      });
+      eventBus.emit('pet.battle_resolved', guildId, {
+        challengerId: interaction.user.id,
+        defenderId: opponent.id,
+        winnerId: battleWinnerId,
+        reward,
+        payoutFailed: false,
+        correlationId: operationId,
+        occurrenceId: operationId,
+      });
+    }
 
     await interaction.reply({
       embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), {
@@ -900,24 +893,19 @@ export class PetsManager {
         description:
           `**${myPet.name}** (Lv.${myPet.level}) vs **${theirPet.name}** (Lv.${theirPet.level})\n\n` +
           `${iWin ? `🏆 **${myPet.name}** wins!` : `💀 **${theirPet.name}** wins!`}\n` +
-          (iWin ? `+**${reward}** coins to ${interaction.user}` : `+**${reward}** coins to ${opponent}`) +
-          payoutWarning,
+          (iWin ? `+**${reward}** coins to ${interaction.user}` : `+**${reward}** coins to ${opponent}`),
       })],
     });
   }
 
-  /**
-   * [game-economy-pets] Raise a battle-payout-failed owner alert when a pet-battle
-   * reward credit fails, so an operator knows a winner is still owed their reward
-   * (a retry job is queued in bot_action_queue). Best effort — never blocks play.
-   */
-  private async raiseBattlePayoutAlert(guildId: string, userId: string, reward: number): Promise<void> {
-    await raiseOwnerAlert(this.supabase, guildId, {
-      alertType: 'pet_battle_payout_failed',
+  private async raiseBattleResolutionAlert(failure: BattleResolutionFailure): Promise<void> {
+    await raiseOwnerAlert(this.supabase, failure.guildId, {
+      alertType: 'pet_battle_resolution_failed',
       severity: 'warning',
-      title: 'Pet battle payout failed',
-      message: `A pet-battle reward of ${reward} failed to credit ${userId}. A retry has been queued.`,
-      metadata: { user_id: userId, reward },
+      title: 'Pet battle resolution failed',
+      message: `A pet battle for ${failure.userId} could not commit atomically. No battle or ${failure.reward}-coin reward was recorded. Detail: ${failure.reason}`,
+      channelMessage: 'A pet battle could not commit. The battle and reward were both rolled back safely; the member can retry.',
+      metadata: { user_id: failure.userId, reward: failure.reward, reason: failure.reason },
       client: this.client,
     });
   }
@@ -945,8 +933,11 @@ export class PetsManager {
 
     // V49-M7: Atomic prestige — RPC only applies if level >= MAX_LEVEL,
     // preventing two concurrent prestige calls from both applying bonuses.
-    const { data: prestigeResult } = await this.supabase.rpc('economy_pet_atomic_prestige', {
-      p_guild_id: guildId, p_user_id: interaction.user.id, p_max_level: MAX_LEVEL,
+    const { data: prestigeResult } = await this.supabase.rpc('economy_pet_atomic_prestige_audited', {
+      p_guild_id: guildId,
+      p_user_id: interaction.user.id,
+      p_max_level: MAX_LEVEL,
+      p_request_id: operationId,
     });
 
     if (!prestigeResult || !Array.isArray(prestigeResult) || prestigeResult.length === 0) {
@@ -955,16 +946,18 @@ export class PetsManager {
       return;
     }
 
-    const pr = prestigeResult[0] as { new_prestige: number };
+    const pr = prestigeResult[0] as { new_prestige: number; replayed?: boolean };
 
     // [game-economy-pets] Append-only audit row for the pet-prestige state change.
-    await this.auditPet(guildId, interaction.user.id, 'pet.prestiged', operationId, { newPrestige: pr.new_prestige });
-    eventBus.emit('pet.prestiged', guildId, {
-      userId: interaction.user.id,
-      newPrestige: pr.new_prestige,
-      correlationId: operationId,
-      occurrenceId: operationId,
-    });
+    if (pr.replayed !== true) {
+      await this.auditPet(guildId, interaction.user.id, 'pet.prestiged', operationId, { newPrestige: pr.new_prestige });
+      eventBus.emit('pet.prestiged', guildId, {
+        userId: interaction.user.id,
+        newPrestige: pr.new_prestige,
+        correlationId: operationId,
+        occurrenceId: operationId,
+      });
+    }
 
     await interaction.reply({
       embeds: [brandedEmbed(brandKitFromConfig(config, interaction.guild?.name), {

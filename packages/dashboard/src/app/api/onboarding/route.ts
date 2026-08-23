@@ -10,6 +10,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
+import { discordTargetFailureStatus, validateDiscordRoleTargets } from '@/lib/api/live-discord-facts';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -74,6 +75,24 @@ export async function PUT(req: NextRequest) {
               },
         }),
   };
+
+  const nativeRoleIds = body.onboarding_config?.prompts.flatMap((prompt) =>
+    prompt.options.flatMap((option) => option.role_ids ?? []),
+  ) ?? [];
+  const roleValidation = await validateDiscordRoleTargets(supabase, guildId, {
+    assignableRoleIds: [
+      ...(body.member_role_id ? [body.member_role_id] : []),
+      ...Object.values(body.interest_role_mapping ?? {}),
+      ...nativeRoleIds,
+    ],
+    existingRoleIds: [],
+  });
+  if (!roleValidation.ok) {
+    return NextResponse.json(
+      { success: false, error: roleValidation.issues.join(' '), issues: roleValidation.issues },
+      { status: discordTargetFailureStatus(roleValidation) },
+    );
+  }
 
   const before = await readGuildConfigBefore(supabase, guildId, Object.keys(allowed));
   const syncState = {

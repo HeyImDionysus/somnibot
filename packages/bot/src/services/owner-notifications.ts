@@ -12,7 +12,16 @@
 import { EmbedBuilder, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
-import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import {
+  NotificationPolicySchema,
+  RolloutPolicySchema,
+  SOMNI_PALETTE,
+  createLogger,
+  evaluateRollout,
+  planNotificationDelivery,
+  type NotificationPolicy,
+  type RolloutPolicy,
+} from '@somnibot/shared';
 import type {
   PlatformEvent,
   PlatformEventMap,
@@ -27,12 +36,31 @@ interface NotificationConfig {
   // commerce-fraud controls (staff-alert-channel / owner-dm-on-critical).
   fraudStaffChannelId: string | null;
   fraudOwnerDmOnCritical: boolean;
+  policy: NotificationPolicy;
+  rollout: RolloutPolicy;
 }
+
+const DEFAULT_NOTIFICATION_POLICY = NotificationPolicySchema.parse({
+  schemaVersion: 1,
+  enabled: true,
+  minimumSeverity: 'warning',
+  audiences: ['owner'],
+  channels: ['discord_channel', 'discord_dm'],
+  cooldownSeconds: 60,
+  quietHours: null,
+  acknowledgementRequired: ['critical'],
+  escalation: { afterSeconds: 900, audiences: ['owner'] },
+});
+
+const DEFAULT_ROLLOUT_POLICY = RolloutPolicySchema.parse({
+  state: 'general_availability',
+  guildIds: [],
+  deploymentIds: [],
+});
 
 export class OwnerNotificationService {
   private config: NotificationConfig | null = null;
   private cooldowns = new Map<string, number>(); // eventType → lastSentTimestamp
-  private cooldownMs = 60_000; // 1 minute between same event type
   // V10 Audit M-5: Store listener references so stop() can remove them.
   private listenerDisposers: Array<() => void> = [];
 
@@ -53,11 +81,13 @@ export class OwnerNotificationService {
 
     const { data: guildConfig } = await this.supabase
       .from('guild_config')
-      .select('mod_log_channel_id, fraud_staff_alert_channel_id, fraud_owner_dm_on_critical')
+      .select('mod_log_channel_id, fraud_staff_alert_channel_id, fraud_owner_dm_on_critical, owner_notification_policy, owner_notification_rollout')
       .eq('guild_id', this.guildId)
       .maybeSingle();
 
     const rawStaffChannel = guildConfig?.fraud_staff_alert_channel_id ?? null;
+    const policy = NotificationPolicySchema.safeParse(guildConfig?.owner_notification_policy);
+    const rollout = RolloutPolicySchema.safeParse(guildConfig?.owner_notification_rollout);
 
     this.config = {
       ownerDiscordId: guild?.owner_discord_id ?? '',
@@ -65,6 +95,8 @@ export class OwnerNotificationService {
       // Treat empty string (catalog default for staff-alert-channel) as unset.
       fraudStaffChannelId: rawStaffChannel && rawStaffChannel.length > 0 ? rawStaffChannel : null,
       fraudOwnerDmOnCritical: guildConfig?.fraud_owner_dm_on_critical ?? true,
+      policy: policy.success ? policy.data : DEFAULT_NOTIFICATION_POLICY,
+      rollout: rollout.success ? rollout.data : DEFAULT_ROLLOUT_POLICY,
     };
 
     // Subscribe to critical events — store references for stop() cleanup.
@@ -92,7 +124,7 @@ export class OwnerNotificationService {
             { name: 'Severity', value: severity.toUpperCase(), inline: true },
             { name: 'Category', value: String(data.category ?? 'unknown'), inline: true },
           ],
-        });
+        }, severity === 'critical' ? 'critical' : 'error');
       }
     });
 
@@ -109,7 +141,7 @@ export class OwnerNotificationService {
             { name: 'By', value: data.moderatorId === 'system' ? 'Auto-Mod' : `<@${String(data.moderatorId)}>`, inline: true },
             { name: 'Reason', value: String(data.reason ?? 'No reason'), inline: false },
           ],
-        });
+        }, 'warning');
       }
     });
 
@@ -125,7 +157,7 @@ export class OwnerNotificationService {
           { name: 'Amount', value: data.amount ? `$${(Number(data.amount) / 100).toFixed(2)}` : 'Unknown', inline: true },
           { name: 'Error', value: String(data.error ?? 'Unknown error'), inline: false },
         ],
-      });
+      }, 'error');
     });
 
     log.info('Owner notification service started');
@@ -149,6 +181,12 @@ export class OwnerNotificationService {
   ): void {
     const scopedHandler = (event: PlatformEvent<T, PlatformEventMap[T]>): void => {
       if (event.guildId !== this.guildId) return;
+      if (!this.config || !evaluateRollout(this.config.rollout, {
+        guildId: this.guildId,
+        deploymentId: process.env.SOMNIBOT_RUNTIME_HOLDER_ID ?? 'default',
+        internal: process.env.NODE_ENV !== 'production',
+        sandbox: process.env.PAYPAL_SANDBOX === 'true',
+      }).enabled) return;
       handler(event);
     };
     this.eventBus.on(type, scopedHandler);
@@ -163,13 +201,19 @@ export class OwnerNotificationService {
       color: number;
       fields?: { name: string; value: string; inline?: boolean }[];
     },
+    severity: 'warning' | 'error' | 'critical',
   ): Promise<void> {
-    // Check cooldown
     const lastSent = this.cooldowns.get(eventType) ?? 0;
-    if (Date.now() - lastSent < this.cooldownMs) return;
-    this.cooldowns.set(eventType, Date.now());
-
     if (!this.config) return;
+    const now = new Date();
+    const plan = planNotificationDelivery(this.config.policy, {
+      severity,
+      audience: 'owner',
+      occurredAt: now.toISOString(),
+      lastDeliveredAt: lastSent > 0 ? new Date(lastSent).toISOString() : null,
+    });
+    if (plan.kind === 'suppressed') return;
+    this.cooldowns.set(eventType, now.getTime());
 
     const discordEmbed = new EmbedBuilder()
       .setColor(embed.color)
@@ -185,7 +229,7 @@ export class OwnerNotificationService {
     }
 
     // Send to admin channel if configured
-    if (this.config.adminChannelId) {
+    if (this.config.adminChannelId && plan.channels.includes('discord_channel')) {
       try {
         const guild = this.client.guilds.cache.get(this.guildId);
         const channel = guild?.channels.cache.get(this.config.adminChannelId);
@@ -198,7 +242,7 @@ export class OwnerNotificationService {
     }
 
     // DM the owner
-    if (this.config.ownerDiscordId) {
+    if (this.config.ownerDiscordId && plan.channels.includes('discord_dm')) {
       try {
         const owner = await this.client.users.fetch(this.config.ownerDiscordId);
         await owner.send({ embeds: [discordEmbed] });
@@ -250,7 +294,7 @@ export class OwnerNotificationService {
     if (severity !== 'critical' || !this.config.fraudOwnerDmOnCritical) return;
 
     const lastSent = this.cooldowns.get('fraud.detected') ?? 0;
-    if (Date.now() - lastSent < this.cooldownMs) return;
+    if (Date.now() - lastSent < this.config.policy.cooldownSeconds * 1_000) return;
     this.cooldowns.set('fraud.detected', Date.now());
 
     if (this.config.ownerDiscordId) {

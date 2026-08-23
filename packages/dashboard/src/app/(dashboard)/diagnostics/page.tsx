@@ -12,6 +12,7 @@ import { isApiRecord, requireApiArray, requireApiRecord, requireApiSuccess, requ
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { DIAGNOSTICS_GUIDANCE, type GuidedMetric } from '@/lib/diagnostics-guidance';
+import { SystemStatePanel } from '@/components/system-state/system-state-panel';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -354,7 +355,7 @@ export default function DiagnosticsPage() {
     setSavingThresholds(true);
     setThresholdError(null);
     try {
-      const res = await fetch('/api/guild', {
+      const res = await fetch('/api/diagnostics', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
@@ -373,6 +374,11 @@ export default function DiagnosticsPage() {
     } finally {
       setSavingThresholds(false);
     }
+  };
+
+  const setGuidedMode = (enabled: boolean) => {
+    setDiag((current) => current ? { ...current, guidedMode: enabled } : current);
+    void saveThresholds({ diagnostics_guided_mode: enabled });
   };
 
   const handleAlertAction = async () => {
@@ -523,6 +529,8 @@ export default function DiagnosticsPage() {
           System health, infrastructure status, and webhook monitoring
         </p>
       </div>
+
+      <SystemStatePanel />
 
       {alertActionError && (
         <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
@@ -770,7 +778,7 @@ export default function DiagnosticsPage() {
                 type="checkbox"
                 className="h-4 w-4"
                 checked={diag?.guidedMode !== false}
-                onChange={(e) => void saveThresholds({ diagnostics_guided_mode: e.target.checked })}
+                onChange={(e) => setGuidedMode(e.target.checked)}
                 disabled={savingThresholds}
               />
               Explain these numbers

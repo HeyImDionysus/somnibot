@@ -15,6 +15,29 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
 import { dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
+import { discordTargetFailureStatus, validateDiscordRoleTargets } from '@/lib/api/live-discord-facts';
+
+function commandEffectRoleIds(actions: readonly unknown[]): string[] | null {
+  const roleIds: string[] = [];
+  for (const candidate of actions) {
+    const parsed = schemas.customCommand.action.safeParse(candidate);
+    if (!parsed.success) return null;
+    if (parsed.data.type === 'give_role' || parsed.data.type === 'remove_role') {
+      roleIds.push(parsed.data.roleId);
+    }
+  }
+  return roleIds;
+}
+
+function configuredRoleIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const roleIds: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== 'string') return null;
+    roleIds.push(candidate);
+  }
+  return roleIds;
+}
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -105,6 +128,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const effectRoleIds = commandEffectRoleIds(actions ?? []);
+  if (!effectRoleIds) {
+    return NextResponse.json({ success: false, error: 'A custom-command role action is malformed.' }, { status: 400 });
+  }
+  const roleValidation = await validateDiscordRoleTargets(supabase, guildId, {
+    assignableRoleIds: effectRoleIds,
+    existingRoleIds: [...(allowed_roles ?? []), ...(denied_roles ?? [])],
+  });
+  if (!roleValidation.ok) {
+    return NextResponse.json(
+      { success: false, error: roleValidation.issues.join(' '), issues: roleValidation.issues },
+      { status: discordTargetFailureStatus(roleValidation) },
+    );
+  }
+
   const { data, error } = await supabase
     .from('custom_commands')
     .insert({
@@ -169,6 +207,35 @@ export async function PUT(req: NextRequest) {
   updates.updated_at = new Date().toISOString();
 
   const before = await readRowBefore(supabase, 'custom_commands', { id: body.id, guild_id: guildId });
+
+  if (!before) {
+    return NextResponse.json({ success: false, error: 'Custom command not found.' }, { status: 404 });
+  }
+
+  const validateEffectiveRoles = body.enabled === true
+    || body.actions !== undefined
+    || body.allowed_roles !== undefined
+    || body.denied_roles !== undefined;
+  const effectiveActions = body.actions
+    ?? (validateEffectiveRoles ? (Array.isArray(before.actions) ? before.actions : null) : []);
+  const effectiveAllowedRoles = body.allowed_roles
+    ?? (validateEffectiveRoles ? configuredRoleIds(before.allowed_roles) : []);
+  const effectiveDeniedRoles = body.denied_roles
+    ?? (validateEffectiveRoles ? configuredRoleIds(before.denied_roles) : []);
+  const effectRoleIds = effectiveActions === null ? null : commandEffectRoleIds(effectiveActions);
+  if (!effectRoleIds || effectiveAllowedRoles === null || effectiveDeniedRoles === null) {
+    return NextResponse.json({ success: false, error: 'A custom-command role action is malformed.' }, { status: 400 });
+  }
+  const roleValidation = await validateDiscordRoleTargets(supabase, guildId, {
+    assignableRoleIds: effectRoleIds,
+    existingRoleIds: [...effectiveAllowedRoles, ...effectiveDeniedRoles],
+  });
+  if (!roleValidation.ok) {
+    return NextResponse.json(
+      { success: false, error: roleValidation.issues.join(' '), issues: roleValidation.issues },
+      { status: discordTargetFailureStatus(roleValidation) },
+    );
+  }
 
   const { data, error } = await supabase
     .from('custom_commands')

@@ -217,6 +217,36 @@ describe('VPS deployment run request coordinator', () => {
     expect(JSON.stringify(plan)).not.toContain(completeConfig.paypalClientSecret);
   });
 
+  it('selects the supported deployment profile from enabled guild count', () => {
+    const single = buildVpsDeploymentPlanFromConfig({
+      ...completeConfig,
+      guilds: [{ discordGuildId: '12345678901234567', enabled: true }],
+    });
+    const multi = buildVpsDeploymentPlanFromConfig({
+      ...completeConfig,
+      guilds: [
+        { discordGuildId: '12345678901234567', enabled: true },
+        { discordGuildId: '22345678901234567', enabled: true },
+      ],
+    });
+
+    expect(single.deploymentProfile).toBe('vps-single-guild');
+    expect(multi.deploymentProfile).toBe('vps-multi-guild');
+  });
+
+  it('blocks unsupported guild counts before producing remote commands', () => {
+    const guilds = Array.from({ length: 101 }, (_, index) => ({
+      discordGuildId: `${10_000_000_000_000_000n + BigInt(index)}`,
+      enabled: true,
+    }));
+
+    const plan = buildVpsDeploymentPlanFromConfig({ ...completeConfig, guilds });
+
+    expect(plan.status).toBe('blocked');
+    expect(plan.commands).toEqual([]);
+    expect(plan.blockedReasons).toContain('The higher-load VPS deployment profile supports at most 100 enabled servers.');
+  });
+
   it('serializes dotenv special characters without changing backslashes', () => {
     const original = "back\\slash'quote$dollar#hash and spaces";
 

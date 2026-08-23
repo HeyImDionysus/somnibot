@@ -1,24 +1,26 @@
 /**
- * scenario-runner/scripts/infrastructure-license-sdk — the License SDK + validation
- * API domain proof.
+ * scenario-runner/scripts/infrastructure-license-sdk — the generated SomniBot
+ * licensing contract + validation protocol domain proof.
  *
  * ── The honest harness boundary for THIS domain (why it is mostlyGated) ──
  * This domain is NOT a Discord slash-command flow. Its contracted behavior lives
  * in TWO surfaces the bot-only, local-Supabase loopback harness cannot drive:
- *   1. The @somnibot/license-sdk (packages/license-sdk) — a pure HTTP client that
- *      fetch()es POST /api/license/{validate,heartbeat,deactivate}, caches results
- *      on a monotonic clock, and enforces the offline-grace / payment-grace stop.
- *      It touches no database; it needs a live HTTP endpoint + a real clock/network.
+ *   1. The self-contained SomniBot licensing contract generated for the customer's
+ *      existing project. A conforming integration calls POST
+ *      /api/license/{validate,heartbeat,deactivate}, caches results on a monotonic
+ *      clock, and enforces the offline-grace / payment-grace stop. It touches no
+ *      database; protocol conformance needs a live HTTP endpoint + real clock/network.
  *   2. The dashboard validation API (Next.js routes) — hashes the key, rate-limits
  *      per IP/key, checks guild membership, calls the atomic device-registration
  *      RPC (license_validate_device: SELECT … FOR UPDATE) and the composite
  *      license_validate_lookup RPC, and writes the license_validations audit row.
- * The harness has no HTTP-API driver and no live Discord gateway, so every SDK /
- * route / membership / rate-limit / offline-grace / owner-alert CELL is GATED with
- * a precise reason — never faked, never forced green. mostlyGated = true.
+ * The harness has no HTTP-API driver and no live Discord gateway, so every protocol /
+ * route / membership / rate-limit / offline-grace / owner-alert CELL is GATED with a
+ * precise reason — never faked, never forced green. mostlyGated = true.
  *
  * ── What DOES run now, DB-observably, against the production license schema ──
- * The tables the SDK/route read and write are the real, inspectable substrate:
+ * The tables the generated integration protocol and routes read/write are the real,
+ * inspectable substrate:
  *   - license_keys — guild-scoped, keys stored ONLY as SHA-256 hashes (key_hash +
  *     key_prefix/suffix; no plaintext column). We prove hash-only storage, the
  *     guild-scoped admin-lookup predicate, and RLS anon-denial (positive control:
@@ -515,13 +517,12 @@ async function proveNoOwnerAlert(ctx: ScenarioContext, handle: LiveClientHandle)
   });
 }
 
-/** The SDK is a pure HTTP client — its message templates/branding are not a bot reply. */
-function gateSdkBranding(ctx: ScenarioContext): void {
+function gateSdkProtocolBranding(ctx: ScenarioContext): void {
   ctx.gate(
     'branding',
     'discord-readback',
     "Customer-facing license copy (validation-success greeting, device-limit, revoked, rate-limited) leads with the owner's brand and support path, with only subtle powered-by-SomniBot attribution on portal surfaces.",
-    'those templates are surfaced by the @somnibot/license-sdk HTTP responses and the rendered customer portal, not by any Discord bot reply — a snapshot capture of the SDK/portal render is required (no member-facing bot message exists to inspect)',
+    'those templates are surfaced by a project integration conforming to the generated SomniBot licensing protocol and by the rendered customer portal, not by any Discord bot reply — protocol-response and portal snapshots are required (no member-facing bot message exists to inspect)',
   );
 }
 
@@ -539,9 +540,10 @@ function gateDiscordMembership(ctx: ScenarioContext): void {
 
 /**
  * DEF — out-of-the-box lifecycle: portal_only, 3 devices, 300s heartbeat, 24h
- * offline grace, guild membership required. The SDK validate→heartbeat→deactivate
- * flow is gated; the config defaults, hash-only key storage, the durable validation
- * ledger row, RLS, and the DB-level single-session-per-device guard run now.
+ * offline grace, guild membership required. Generated-contract protocol conformance
+ * across validate→heartbeat→deactivate is gated; config defaults, hash-only key
+ * storage, the durable validation ledger row, RLS, and the DB-level
+ * single-session-per-device guard run now.
  */
 async function DEF(ctx: ScenarioContext): Promise<void> {
   const defMode = String(declaredDefault(ctx.domain, 'license-mode'));
@@ -643,14 +645,13 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   });
   await proveNoOwnerAlert(ctx, handle);
 
-  // Everything requiring the SDK, the HTTP route, a live clock, or a live gateway.
   gateDiscordMembership(ctx);
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
   ctx.gate(
     'Discord',
     'db-observable',
     'validate() returns valid with session id/tier/features, heartbeats at the directed 300s cadence, and deactivate() frees the device slot.',
-    'the validate→heartbeat→deactivate lifecycle runs through the @somnibot/license-sdk HTTP client against POST /api/license/* — the harness has no HTTP-API driver, so the SDK round-trip cannot be exercised',
+    'the validate→heartbeat→deactivate lifecycle must be exercised by a project integration generated from the SomniBot licensing contract against POST /api/license/* — the harness has no HTTP-API driver, so protocol conformance cannot be exercised',
   );
   ctx.gate(
     'audit',
@@ -666,8 +667,9 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
 
 /**
  * SET-A — dashboard config takes effect: max_devices=1, heartbeat=60s. The saved
- * config persisting is DB-observable; the SDK honoring the 60s cadence and the
- * second device being refused (RPC/route enforcement) are gated.
+ * config persisting is DB-observable; a generated integration honoring the 60s
+ * protocol cadence and the second device being refused (RPC/route enforcement)
+ * are gated.
  */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', economyEnabled: false });
@@ -704,7 +706,6 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   });
   await proveNoOwnerAlert(ctx, handle);
 
-  // Device-limit enforcement + heartbeat cadence are RPC/SDK behaviors.
   ctx.gate(
     'database-RLS',
     'db-observable',
@@ -714,8 +715,8 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   ctx.gate(
     'Discord',
     'discord-readback',
-    'The SDK observes the new 60-second server-directed heartbeat spacing.',
-    'heartbeat cadence is driven by the @somnibot/license-sdk setInterval against POST /api/license/heartbeat — needs the SDK + a live HTTP endpoint + real time to observe spacing',
+    'A project integration generated from the SomniBot licensing contract observes the new 60-second server-directed heartbeat spacing.',
+    'heartbeat cadence is a generated-protocol conformance behavior against POST /api/license/heartbeat — it needs a conforming built integration, a live HTTP endpoint, and real time to observe spacing',
   );
   ctx.gate(
     'audit',
@@ -723,7 +724,7 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     'The config change and the device_limit rejection are each logged.',
     'the config-change audit row is written by the dashboard save route and the device_limit row by the validate route — neither route is drivable in this harness',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
   gateDiscordMembership(ctx);
 }
 
@@ -762,11 +763,11 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     {
       assertionClass: 'Discord',
       channel: 'db-observable',
-      promise: 'A max_devices=5 / offline_grace=3600s / feature_flags+tier config persists exactly to product_license_config (the values the lookup RPC returns to the SDK).',
+      promise: 'A max_devices=5 / offline_grace=3600s / feature_flags+tier config persists exactly to product_license_config (the values the lookup RPC returns through the generated licensing protocol).',
       observation:
         `config err=${cfg.error ?? 'none'}; max_devices=${config?.max_devices} (5), offline=${config?.offline_grace_period_seconds} (3600), ` +
         `tier="${config?.tier}" (pro), flags=${JSON.stringify(config?.feature_flags)}.`,
-      impact: 'The second saved license config did not persist — flags/tier/limits the SDK receives would be wrong.',
+      impact: 'The second saved license config did not persist — flags/tier/limits delivered through the generated protocol would be wrong.',
     },
   );
 
@@ -802,15 +803,15 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     'database-RLS',
     'db-observable',
     'A sixth device is refused at the limit; a device offline past one hour reports offline_grace_expired instead of the default 24h.',
-    'the sixth-device refusal is the license_validate_device RPC count check (route-only) and the shortened offline window is enforced client-side by the SDK on its monotonic clock — neither is reachable from the bot-only harness',
+    'the sixth-device refusal is the license_validate_device RPC count check (route-only) and the shortened offline window is enforced by the generated integration protocol on its monotonic clock — neither is reachable from the bot-only harness',
   );
   ctx.gate(
     'Discord',
     'discord-readback',
     'getFeatures() and getTier() return the configured flags and tier for the entitled customer.',
-    'the SDK surfaces features/tier from the validation HTTP response (config carried through license_validate_lookup) — needs the SDK + live route; only the stored config values are provable here',
+    'a conforming generated integration surfaces features/tier from the validation protocol response (config carried through license_validate_lookup) — it needs the built integration plus live route; only the stored config values are provable here',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
   gateDiscordMembership(ctx);
 }
 
@@ -871,7 +872,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     'Each rejected config attempt is recorded with its validation failure reason; no config-change audit row is written.',
     'the rejected-config audit row is written by the dashboard config save route (not reachable in a bot-only harness)',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
   gateDiscordMembership(ctx);
 }
 
@@ -940,13 +941,13 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     'Repeated foreign-guild probing is surfaced to the legitimate owner as suspicious activity.',
     'the security/anomaly surface is fed by the live HTTP routes generating the denial signals — not reachable here',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
 }
 
 /**
  * DEPFAIL — dependency failure fails safe. The bounded offline window, the
  * never-validated-device refusal, and the fail-closed RPC-failure 500 all need a
- * fault-injection lane + the SDK/route; the one DB-observable fact is that an
+ * fault-injection lane plus protocol/routes; the one DB-observable fact is that an
  * already-validated device's server-side state (session + validation ledger) is
  * durable in Supabase and RLS-protected, so it is readable with no external
  * dependency in the path.
@@ -971,7 +972,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   ctx.expect(sess.id !== null && val.id !== null && active === 1 && validations.length === 1, {
     assertionClass: 'database-RLS',
     channel: 'db-observable',
-    promise: "An already-validated device's server-side state (its active session + its validation-ledger row) is durable in Supabase and readable with no license-server/SDK dependency in the path — the truth the offline cache mirrors.",
+    promise: "An already-validated device's server-side state (its active session + its validation-ledger row) is durable in Supabase and readable with no generated-integration dependency in the path — the truth the offline cache mirrors.",
     observation: `active sessions=${active} (expected 1, sess err=${sess.error ?? 'none'}); validation rows=${validations.length} (expected 1, val err=${val.error ?? 'none'}).`,
     impact: "The already-validated device's durable session/validation state was not independently readable — an outage could not fail safe for an authenticated device.",
   });
@@ -989,7 +990,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'db-observable',
     'With the license server down, the cached device reports offline_grace until the window ends then offline_grace_expired; a never-validated device gets network_error with no entitlement.',
-    'the offline-grace / network_error behavior is enforced client-side by the @somnibot/license-sdk on its monotonic clock with a real fetch failure — needs the SDK + an induced network outage, absent in the bot-only harness',
+    'offline-grace / network_error behavior is generated-protocol conformance on a monotonic clock under a real transport failure — it needs the built customer integration plus an induced network outage, absent in the bot-only harness',
   );
   ctx.gate(
     'database-RLS',
@@ -1013,9 +1014,9 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'replay-safety',
     'db-observable',
     'Repeated failing calls during the outage do not corrupt the cache or duplicate sessions on recovery.',
-    'requires the SDK offline path + an outage fault lane to replay failing calls and observe the post-recovery state',
+    'requires the generated-protocol offline path plus an outage fault lane to replay failing calls and observe the post-recovery state',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
 
   // The seeded ledger row never cascades (permanent forensic ledger — key delete
   // only DETACHES it) and would FK-block the products sweep: remove it explicitly.
@@ -1026,7 +1027,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
  * RETRY — transient failures converge to exactly one session. The convergence
  * invariant (a re-validated fingerprint reuses one active session via the UNIQUE
  * guard) is DB-observable; the 429/Retry-After honoring and the transient-network
- * retry glue are SDK/route behaviors and are gated.
+ * retry glue are generated-protocol/route behaviors and are gated.
  */
 async function RETRY(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', economyEnabled: false });
@@ -1071,7 +1072,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'A 429-rate-limited validate() retried too early is refused again and succeeds after the Retry-After window; a transient network fault succeeds on retry.',
-    'the 429/Retry-After honoring and network-fault backoff live in the validate route (rate limiter) and the @somnibot/license-sdk retry path — neither is drivable by the bot-only harness',
+    '429/Retry-After honoring and network-fault backoff span the validate route rate limiter and generated-protocol retry behavior — neither is drivable by the bot-only harness',
   );
   ctx.gate(
     'audit',
@@ -1083,7 +1084,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'branding',
     'discord-readback',
     'The rate-limit message states the wait plainly in the branded voice.',
-    'the rate-limited template is an SDK/route HTTP response surface, not a Discord bot reply — no member-facing message to inspect',
+    'the rate-limited template is a generated-protocol/route HTTP response surface, not a Discord bot reply — no member-facing message to inspect',
   );
 }
 
@@ -1175,16 +1176,16 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'Replayed heartbeat only refreshes last_seen and replayed deactivate over HTTP is a no-op; key status and slot accounting stay byte-identical to a single execution.',
-    'the end-to-end HTTP replay of validate/heartbeat/deactivate runs through the @somnibot/license-sdk against the routes — only the DB-level guards are provable here',
+    'the end-to-end HTTP replay of validate/heartbeat/deactivate requires a built project integration conforming to the generated SomniBot licensing protocol — only the DB-level guards are provable here',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
 }
 
 /**
  * RESTART — license state survives a full stack reboot because it lives in Supabase,
  * not process memory. Key + session + validation-ledger persistence across a boot,
- * and the restart-revalidation slot-reuse guard, are DB-observable; the SDK
- * revalidating into its existing session and resuming heartbeats are gated.
+ * and the restart-revalidation slot-reuse guard, are DB-observable; generated-
+ * protocol revalidation into the existing session and heartbeat resume are gated.
  */
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
@@ -1258,10 +1259,10 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   ctx.gate(
     'Discord',
     'discord-readback',
-    "The restarted SDK's validate() reoccupies the same fingerprint's session and heartbeat cadence resumes at the configured interval; admin/portal listings match pre-restart state.",
-    'the SDK revalidation + heartbeat resume run through the @somnibot/license-sdk against the routes, and the admin/portal views are dashboard surfaces — none drivable by the bot-only harness',
+    "After restart, a project integration conforming to the generated SomniBot licensing protocol revalidates into the same fingerprint's session and resumes the configured heartbeat cadence; admin/portal listings match pre-restart state.",
+    'generated-protocol revalidation and heartbeat resume require the built customer integration against live routes, while admin/portal readback requires dashboard surfaces — none are drivable by the bot-only harness',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
 
   // The seeded ledger row never cascades (permanent forensic ledger — key delete
   // only DETACHES it) and would FK-block the products sweep on BOTH of this
@@ -1330,7 +1331,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     'Both racing attempts are logged: one success and one device_limit rejection.',
     'the per-attempt license_validations rows are written by the validate route — not producible without the HTTP route',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
 }
 
 /** Session ids under any of the given license keys (parent-scoping of the guild-less table). */
@@ -1431,7 +1432,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'Per-guild rate-limit counters and validation logs stay separate; each guild\'s license messages use that guild\'s own brand configuration.',
-    'per-guild rate-limit state lives in the route limiter and per-guild brand kits render on the SDK/portal surfaces — needs the HTTP routes + live surfaces to observe separation',
+    'per-guild rate-limit state lives in the route limiter and per-guild brand kits render on generated-protocol/portal surfaces — needs the HTTP routes plus live surfaces to observe separation',
   );
   ctx.gate(
     'audit',
@@ -1439,7 +1440,7 @@ async function XGUILD(ctx: ScenarioContext): Promise<void> {
     'Validation logs carry the correct guild-scoped product for every attempt in each guild.',
     'the route writes license_validations per attempt with the resolved product/guild — not producible without driving the validate route',
   );
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
 }
 
 /** Private row counter across guild_id tables (kept local; mirrors the runner's). */
@@ -1549,13 +1550,14 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'the production retention path (20260724110000: key deletion DETACHES ledger rows via ON DELETE SET NULL; PII anonymized by the scrub_expired_license_validations daily cron, never deleted) is a cron behavior with a 60-day floor — not exercisable in a single harness run; the suite deleting its own synthetic seeded ledger rows above is test hygiene, not that path',
   );
   gateDiscordMembership(ctx);
-  gateSdkBranding(ctx);
+  gateSdkProtocolBranding(ctx);
 }
 
 // ── DomainProof export ────────────────────────────────────────────────────
 
 /**
- * The License SDK + validation API domain proof. guildScopedTables are child→parent
+ * The generated SomniBot licensing contract + validation protocol domain proof.
+ * guildScopedTables are child→parent
  * so FK-constrained rows are removed before their parents (guild_config + guild are
  * always swept in addition by the runner). product_license_config and
  * license_sessions are intentionally OMITTED: they carry no guild_id and cascade

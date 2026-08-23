@@ -37,7 +37,16 @@ describe('apiError', () => {
     expect(res.status).toBe(400);
 
     const body = await res.json();
-    expect(body).toEqual({ success: false, error: 'Invalid input' });
+    expect(body).toEqual({
+      success: false,
+      error: 'Invalid input',
+      errorDetails: expect.objectContaining({
+        schemaVersion: 1,
+        code: 'request_failed',
+        safeMessage: 'Invalid input',
+        retryable: false,
+      }),
+    });
   });
 
   it('accepts a custom status code', async () => {
@@ -45,12 +54,38 @@ describe('apiError', () => {
     expect(res.status).toBe(404);
 
     const body = await res.json();
-    expect(body).toEqual({ success: false, error: 'Not found' });
+    expect(body.errorDetails.code).toBe('request_failed');
   });
 
   it('returns 403 for forbidden errors', async () => {
     const res = apiError('Forbidden', 403);
     expect(res.status).toBe(403);
+  });
+
+  it('accepts a stable operation-linked error contract', async () => {
+    const res = apiError('Provider unavailable', 503, {
+      code: 'provider_unavailable',
+      operatorDetail: 'PayPal sandbox health timed out.',
+      operationId: '11111111-1111-4111-8111-111111111111',
+      requiredAction: 'Retry after provider recovery.',
+      dependencies: [{ key: 'paypal', state: 'unavailable' }],
+    });
+
+    expect(await res.json()).toEqual({
+      success: false,
+      error: 'Provider unavailable',
+      errorDetails: {
+        schemaVersion: 1,
+        code: 'provider_unavailable',
+        safeMessage: 'Provider unavailable',
+        operatorDetail: 'PayPal sandbox health timed out.',
+        retryable: true,
+        operationId: '11111111-1111-4111-8111-111111111111',
+        requiredAction: 'Retry after provider recovery.',
+        fieldErrors: [],
+        dependencies: [{ key: 'paypal', state: 'unavailable' }],
+      },
+    });
   });
 });
 
@@ -62,7 +97,11 @@ describe('apiServerError', () => {
 
     const body = await res.json();
     // V11 Re-Audit N-1: internal details must NOT reach the client
-    expect(body).toEqual({ success: false, error: 'An internal error occurred' });
+    expect(body).toEqual(expect.objectContaining({
+      success: false,
+      error: 'An internal error occurred',
+      errorDetails: expect.objectContaining({ code: 'internal_error', retryable: true }),
+    }));
     expect(spy).toHaveBeenCalledWith('[api] Server error:', 'DB connection failed');
     spy.mockRestore();
   });
@@ -73,7 +112,7 @@ describe('apiServerError', () => {
     expect(res.status).toBe(500);
 
     const body = await res.json();
-    expect(body).toEqual({ success: false, error: 'An internal error occurred' });
+    expect(body.errorDetails).toEqual(expect.objectContaining({ code: 'internal_error' }));
     spy.mockRestore();
   });
 
@@ -100,7 +139,11 @@ describe('dbError', () => {
     expect(res.status).toBe(500);
 
     const body = await res.json();
-    expect(body).toEqual({ success: false, error: 'An internal error occurred' });
+    expect(body).toEqual(expect.objectContaining({
+      success: false,
+      error: 'An internal error occurred',
+      errorDetails: expect.objectContaining({ code: 'internal_error' }),
+    }));
     expect(spy).toHaveBeenCalledWith('[alerts] DB error:', 'relation "guilds" does not exist');
     spy.mockRestore();
   });

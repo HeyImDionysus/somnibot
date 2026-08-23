@@ -76,7 +76,7 @@ export async function POST(req: NextRequest) {
   const ipLimit = await rateLimits.licenseHeartbeat(clientIp);
   if (ipLimit.limited) {
     return NextResponse.json(
-      { valid: false, status: 'rate_limited', error: 'Too many requests' },
+      { valid: false, status: 'rate_limited', error: 'Too many requests', ...HEARTBEAT_EXTRA },
       {
         status: 429,
         headers: { 'Retry-After': String(Math.ceil(ipLimit.retryAfterMs / 1000)) },

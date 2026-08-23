@@ -1,14 +1,16 @@
 import {
   isActionQueuePlatformEventType,
   isConfigReloadAuditEventType,
+  parseInternalContractHeader,
   type ActionQueuePlatformEvent,
   type ActionQueuePlatformEventType,
   type ConfigReloadAuditEvent,
+  type InternalContractHeader,
   type PlatformEventMap,
 } from '@somnibot/shared';
 
-export type ActionQueuePlatformEventContract = ActionQueuePlatformEvent;
-export type ConfigReloadAuditEventContract = ConfigReloadAuditEvent;
+export type ActionQueuePlatformEventContract = ActionQueuePlatformEvent & InternalContractHeader;
+export type ConfigReloadAuditEventContract = ConfigReloadAuditEvent & InternalContractHeader;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -75,28 +77,39 @@ function isSubscriptionExpiredData(
 function buildContract(
   type: ActionQueuePlatformEventType,
   data: unknown,
+  header: InternalContractHeader,
 ): ActionQueuePlatformEventContract | null {
   switch (type) {
     case 'automation.created':
-      return isAutomationCreatedData(data) ? { type, data } : null;
+      return isAutomationCreatedData(data) ? { ...header, type, data } : null;
     case 'automation.updated':
-      return isAutomationUpdatedData(data) ? { type, data } : null;
+      return isAutomationUpdatedData(data) ? { ...header, type, data } : null;
     case 'automation.deleted':
-      return isAutomationDeletedData(data) ? { type, data } : null;
+      return isAutomationDeletedData(data) ? { ...header, type, data } : null;
     case 'webhook.received':
-      return isWebhookReceivedData(data) ? { type, data } : null;
+      return isWebhookReceivedData(data) ? { ...header, type, data } : null;
     case 'webhook.replayed':
-      return isWebhookReplayedData(data) ? { type, data } : null;
+      return isWebhookReplayedData(data) ? { ...header, type, data } : null;
     case 'subscription.expired':
-      return isSubscriptionExpiredData(data) ? { type, data } : null;
+      return isSubscriptionExpiredData(data) ? { ...header, type, data } : null;
   }
+}
+
+function parseIngressHeader(value: Record<string, unknown>): InternalContractHeader | null {
+  return parseInternalContractHeader({
+    schemaVersion: value.schema_version ?? value.schemaVersion ?? 1,
+    operationId: value.operation_id ?? value.operationId ?? null,
+    producer: 'bot',
+  });
 }
 
 export function parseConfigReloadAuditEvent(
   value: unknown,
 ): ConfigReloadAuditEventContract | null {
   if (!isPlainRecord(value) || !isConfigReloadAuditEventType(value.type)) return null;
-  const event = buildContract(value.type, value.data);
+  const header = parseIngressHeader(value);
+  if (!header) return null;
+  const event = buildContract(value.type, value.data, header);
   if (!event) return null;
   switch (event.type) {
     case 'automation.created':
@@ -112,5 +125,6 @@ export function parseActionQueuePlatformEvent(
   payload: Record<string, unknown>,
 ): ActionQueuePlatformEventContract | null {
   if (!isActionQueuePlatformEventType(payload.event_type)) return null;
-  return buildContract(payload.event_type, payload.event_data);
+  const header = parseIngressHeader(payload);
+  return header ? buildContract(payload.event_type, payload.event_data, header) : null;
 }

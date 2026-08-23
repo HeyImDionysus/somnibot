@@ -6,20 +6,18 @@
  * DM-failure path (invitation stays pending + owner mirror + audit), and the
  * expiry sweep (pending → expired + audit + owner mirror).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('discord.js', () => ({
   EmbedBuilder: class {
     data: Record<string, unknown> = {};
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    fields: any[] = [];
+    fields: Array<Record<string, unknown>> = [];
     setColor(c: number) { this.data.color = c; return this; }
     setTitle(t: string) { this.data.title = t; return this; }
     setDescription(d: string) { this.data.description = d; return this; }
     setTimestamp() { return this; }
     setFooter(f: { text: string }) { this.data.footer = f; return this; }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    addFields(...args: any[]) { for (const a of args) this.fields.push(a); return this; }
+    addFields(...args: Array<Record<string, unknown>>) { for (const a of args) this.fields.push(a); return this; }
   },
 }));
 
@@ -42,8 +40,7 @@ interface QState {
 function makeSupabase(handler: (s: QState) => unknown) {
   const from = (table: string) => {
     const state: QState = { table, op: 'select', filters: {}, columns: null, payload: null };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const builder: any = {
+    const builder = {
       select: (cols?: string) => { state.columns = cols ?? null; return builder; },
       insert: (p: unknown) => { state.op = 'insert'; state.payload = p; return builder; },
       upsert: (p: unknown) => { state.op = 'upsert'; state.payload = Array.isArray(p) ? p[0] : p; return builder; },
@@ -109,7 +106,12 @@ function setup(opts: SetupOpts) {
   };
   const ownerUser = { send: vi.fn(() => Promise.resolve()) };
   const usersFetched: string[] = [];
-  const guild = { id: 'guild-1', name: 'Guild One', ownerId: 'owner-1', channels: { cache: new Map() } };
+  const guild = {
+    id: 'guild-1',
+    name: 'Guild One',
+    ownerId: 'owner-1',
+    channels: { cache: new Map<string, unknown>() },
+  };
   const client = {
     guilds: { cache: new Map([['guild-1', guild]]) },
     users: {
@@ -140,17 +142,32 @@ function inviteRow(over: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-beforeEach(() => vi.clearAllMocks());
+const previousDashboardUrl = process.env.DASHBOARD_URL;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  process.env.DASHBOARD_URL = 'https://ops.example.test';
+});
+
+afterAll(() => {
+  if (previousDashboardUrl === undefined) delete process.env.DASHBOARD_URL;
+  else process.env.DASHBOARD_URL = previousDashboardUrl;
+});
 
 describe('TeamInvitationSweeper', () => {
   it('delivers a DM for a queued pending invitation and marks it sent', async () => {
-    const env = setup({ deliverRows: [inviteRow()], dmEnabled: true });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sweeper = new TeamInvitationSweeper(env.client as any, env.supabase, 60_000);
+    const env = setup({
+      deliverRows: [inviteRow({ invited_by_name: 'Owner Alice' })],
+      dmEnabled: true,
+    });
+    const sweeper = new TeamInvitationSweeper(env.client, env.supabase, 60_000);
     await sweeper.runOnce();
 
     expect(env.usersFetched).toContain('invitee-1');
     expect(env.inviteeUser.send).toHaveBeenCalledTimes(1);
+    const deliveredDm = JSON.stringify(env.inviteeUser.send.mock.calls);
+    expect(deliveredDm).toContain('Owner Alice');
+    expect(deliveredDm).toContain('https://ops.example.test/dashboard');
     const claim = env.updates.find((u) => u.filters.dm_status === 'queued');
     expect(claim!.payload.dm_status).toBe('sent');
     expect(claim!.payload.delivery_mode).toBe('dm');
@@ -160,8 +177,7 @@ describe('TeamInvitationSweeper', () => {
 
   it('keeps the invitation pending and mirrors to the owner when the DM fails', async () => {
     const env = setup({ deliverRows: [inviteRow()], dmEnabled: true, dmThrows: true });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sweeper = new TeamInvitationSweeper(env.client as any, env.supabase, 60_000);
+    const sweeper = new TeamInvitationSweeper(env.client, env.supabase, 60_000);
     await sweeper.runOnce();
 
     const claim = env.updates.find((u) => u.filters.dm_status === 'queued');
@@ -175,8 +191,7 @@ describe('TeamInvitationSweeper', () => {
 
   it('does not DM when invite-dm-enabled is false (dashboard-only)', async () => {
     const env = setup({ deliverRows: [inviteRow()], dmEnabled: false });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sweeper = new TeamInvitationSweeper(env.client as any, env.supabase, 60_000);
+    const sweeper = new TeamInvitationSweeper(env.client, env.supabase, 60_000);
     await sweeper.runOnce();
 
     expect(env.usersFetched).not.toContain('invitee-1');
@@ -186,11 +201,26 @@ describe('TeamInvitationSweeper', () => {
     expect(claim!.payload.delivery_mode).toBe('dashboard');
   });
 
+  it('does not run a queued invitation against a mismatched cached guild', async () => {
+    const env = setup({ deliverRows: [inviteRow()], dmEnabled: true });
+    env.client.guilds.cache.set('guild-1', {
+      id: 'guild-2',
+      name: 'Foreign Guild',
+      ownerId: 'owner-2',
+      channels: { cache: new Map<string, unknown>() },
+    });
+    const sweeper = new TeamInvitationSweeper(env.client, env.supabase, 60_000);
+
+    await sweeper.runOnce();
+
+    expect(env.inviteeUser.send).not.toHaveBeenCalled();
+    expect(env.updates.some((update) => update.filters.dm_status === 'queued')).toBe(false);
+  });
+
   it('expires overdue pending invitations, audits, and mirrors to the owner', async () => {
     const expired = inviteRow({ id: 'inv-9', discord_id: 'invitee-9', role_id: 'role-9', expires_at: past(), dashboard_roles: { name: 'Support' } });
     const env = setup({ expireRows: [expired] });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sweeper = new TeamInvitationSweeper(env.client as any, env.supabase, 60_000);
+    const sweeper = new TeamInvitationSweeper(env.client, env.supabase, 60_000);
     await sweeper.runOnce();
 
     // The expiry update writes status='expired'.

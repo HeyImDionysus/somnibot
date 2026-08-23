@@ -13,22 +13,49 @@ import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
-import { dbError } from '@/lib/api/response';
+import { apiError, dbError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 import { automationPreviewHash } from '@/lib/automation-preview';
 
-async function previewRequired(supabase: ReturnType<typeof createAdminSupabase>, guildId: string): Promise<boolean> {
+type PreviewPolicyRead =
+  | { readonly ok: true; readonly required: boolean }
+  | { readonly ok: false };
+
+const PREVIEW_POLICY_UNAVAILABLE = {
+  message: 'Automation preview policy is unavailable. Retry after restoring the guild configuration.',
+  code: 'automation_preview_policy_unavailable',
+  requiredAction: 'Restore the guild automation preview policy, then retry the operation.',
+} as const;
+
+function previewPolicyUnavailable(): NextResponse {
+  return apiError(PREVIEW_POLICY_UNAVAILABLE.message, 503, {
+    code: PREVIEW_POLICY_UNAVAILABLE.code,
+    operatorDetail: 'The automation preview policy could not be read.',
+    requiredAction: PREVIEW_POLICY_UNAVAILABLE.requiredAction,
+    retryable: true,
+  });
+}
+
+async function previewRequired(supabase: ReturnType<typeof createAdminSupabase>, guildId: string): Promise<PreviewPolicyRead> {
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('guild_config')
       .select('automation_preview_required')
       .eq('guild_id', guildId)
       .maybeSingle();
+    if (error) {
+      console.error('[automations] automation preview policy lookup failed', error.message);
+      return { ok: false };
+    }
     // A deployed guild_config row has the migration default true. Missing
     // config is retained as legacy mode for setup/test databases.
-    return data?.automation_preview_required === true;
-  } catch {
-    return false;
+    return { ok: true, required: data?.automation_preview_required === true };
+  } catch (error) {
+    console.error(
+      '[automations] automation preview policy lookup failed',
+      error instanceof Error ? error.message : String(error),
+    );
+    return { ok: false };
   }
 }
 
@@ -87,7 +114,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const requiresPreview = await previewRequired(supabase, guildId);
+  const previewPolicy = await previewRequired(supabase, guildId);
+  if (!previewPolicy.ok) return previewPolicyUnavailable();
+  const requiresPreview = previewPolicy.required;
   const expectedPreviewHash = automationPreviewHash({
     name,
     description,
@@ -190,6 +219,10 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing automation id' }, { status: 400 });
   }
 
+  const previewPolicy = await previewRequired(supabase, guildId);
+  if (!previewPolicy.ok) return previewPolicyUnavailable();
+  const requiresPreview = previewPolicy.required;
+
   const updates = typedPick(body, ['name', 'description', 'trigger_type', 'trigger_config', 'conditions', 'actions', 'enabled', 'target_user_ids', 'target_channel_ids', 'exclude_user_ids', 'exclude_channel_ids', 'preview_hash']);
 
   updates.updated_at = new Date().toISOString();
@@ -199,7 +232,6 @@ export async function PUT(req: NextRequest) {
   if (!before) {
     return NextResponse.json({ success: false, error: 'Automation not found' }, { status: 404 });
   }
-  const requiresPreview = await previewRequired(supabase, guildId);
   const definitionKeys = ['name', 'description', 'trigger_type', 'trigger_config', 'conditions', 'actions', 'target_user_ids', 'target_channel_ids', 'exclude_user_ids', 'exclude_channel_ids'] as const;
   const definitionChanged = definitionKeys.some((key) => Object.prototype.hasOwnProperty.call(updates, key));
   const candidate = { ...before, ...updates } as Record<string, unknown>;

@@ -128,6 +128,7 @@ describe('ConfigWatcher', () => {
   let eventBus: any;
   let configHandler: any;
   let onboardingReload: ReturnType<typeof vi.fn>;
+  let refreshDiagnostics: ReturnType<typeof vi.fn>;
   let valkey: ReturnType<typeof makeValkey>;
 
   beforeEach(() => {
@@ -139,6 +140,7 @@ describe('ConfigWatcher', () => {
       emit: vi.fn(),
     };
     onboardingReload = vi.fn().mockResolvedValue(undefined);
+    refreshDiagnostics = vi.fn();
     valkey = makeValkey();
     watcher = new ConfigWatcher(
       makeGuild(),
@@ -148,7 +150,7 @@ describe('ConfigWatcher', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
+      refreshDiagnostics,
       onboardingReload,
     );
     watcher.start();
@@ -162,6 +164,19 @@ describe('ConfigWatcher', () => {
   it('ignores events from other guilds', async () => {
     await configHandler({ guildId: 'other-guild', data: { section: 'economy', changedBy: 'user1' } });
     expect(mocks.invalidateEconomyCache).not.toHaveBeenCalled();
+  });
+
+  it('refreshes running diagnostics when only an alert threshold changes', async () => {
+    await configHandler({
+      guildId: 'guild-1',
+      data: {
+        section: 'all',
+        changedBy: 'owner',
+        changes: { memory_alert_threshold_mb: 256 },
+      },
+    });
+
+    expect(refreshDiagnostics).toHaveBeenCalledWith(undefined);
   });
 
   it('reconciles pending members after onboarding config reloads', async () => {

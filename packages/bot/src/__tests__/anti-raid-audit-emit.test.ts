@@ -210,4 +210,51 @@ describe('anti-raid audit observability', () => {
       expect.objectContaining({ action: 'account_age' }),
     );
   });
+
+  it('audits and alerts when lockdown only pauses some active invites', async () => {
+    mockExec.mockResolvedValue([[null, 0], [null, 1], [null, 15], [null, 1]]);
+    const bus = makeBus();
+    const deleteOk = vi.fn().mockResolvedValue(undefined);
+    const deleteFailed = vi.fn().mockRejectedValue(new Error('Missing Permissions'));
+    const invites = [
+      { channelId: 'c1', maxAge: 0, maxUses: 0, temporary: false, delete: deleteOk },
+      { channelId: 'c2', maxAge: 0, maxUses: 0, temporary: false, delete: deleteFailed },
+    ];
+    const g = makeGuild({
+      members: {
+        me: { permissions: { has: vi.fn().mockReturnValue(true) } },
+        unban: vi.fn(async () => {}),
+        cache: new Map(),
+      },
+      invites: {
+        fetch: vi.fn().mockResolvedValue({
+          size: invites.length,
+          values: () => invites.values(),
+          map: <T>(project: (invite: (typeof invites)[number]) => T) => invites.map(project),
+        }),
+      },
+    });
+    const member = makeMember(g, 'raider', 30);
+    const supa = makeSupa({ ...baseConfig, anti_raid_action: 'lockdown' });
+
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    await processAntiRaid(g, member, supa, bus);
+
+    expect(bus.emit).toHaveBeenCalledWith(
+      'anti_raid.contained',
+      'g1',
+      expect.objectContaining({ action: 'lockdown', invitesPaused: 1 }),
+    );
+    expect(bus.emit).toHaveBeenCalledWith(
+      'anti_raid.action_failed',
+      'g1',
+      expect.objectContaining({ action: 'lockdown_invite_pause' }),
+    );
+    expect(supa._alertsInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guild_id: 'g1',
+        alert_type: 'anti_raid_lockdown_invite_pause_failed',
+      }),
+    );
+  });
 });

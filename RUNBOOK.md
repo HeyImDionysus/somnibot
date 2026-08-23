@@ -12,7 +12,7 @@ Discord Gateway → Bot (Node.js + Valkey) → Supabase (Postgres)
 Browser → Dashboard (Next.js 15) → Supabase (Postgres)
 ```
 
-**Packages:** bot, dashboard, shared, launcher, license-sdk, supabase (migrations)
+**Packages:** bot, dashboard, shared, launcher, supabase (migrations)
 **External:** Supabase, Valkey/Redis, Lavalink, PayPal, Discord API
 
 ## Deployment

@@ -125,3 +125,55 @@ export {
   type DomainScriptMap,
   type DomainProof,
 } from './scenario-runner/index.js';
+
+export {
+  CAPACITY_DIMENSIONS,
+  PROOF_STATUSES,
+  SERVICE_OBJECTIVES,
+  type CapacityDimension,
+  type ProofObservation,
+  type ProofStatus,
+  type ReliabilityProof,
+  type ServiceObjective,
+} from './readiness/contracts.js';
+export {
+  buildDomainAcceptanceContracts,
+  type DomainAcceptanceContract,
+} from './readiness/domain-acceptance.js';
+export {
+  CROSS_DOMAIN_JOURNEYS,
+  crossDomainJourneyObservations,
+  type CrossDomainJourney,
+} from './readiness/cross-domain-journeys.js';
+export { FAILURE_CASES, runExecutableFailureMatrix, type FailureCaseId } from './readiness/failure-injection.js';
+export {
+  buildCapacityMetrics,
+  capacityObservations,
+  createCapacityFixture,
+  generateCapacityDataset,
+  runCapacityReplay,
+  type CapacityDataset,
+  type CapacityFixture,
+  type CapacityMetric,
+  type CapacityReplayMetrics,
+} from './readiness/capacity-model.js';
+export {
+  WORKLOAD_CLASSES,
+  fairnessObservation,
+  runFairScheduling,
+  type FairnessResult,
+  type WorkloadClass,
+} from './readiness/fairness-model.js';
+export {
+  STORAGE_AUDIT_REQUIREMENTS,
+  STORAGE_SURFACES,
+  storageAuditObservations,
+  type StorageAuditRequirement,
+  type StorageSurface,
+} from './readiness/storage-audit.js';
+export { buildReliabilityProof } from './readiness/proof.js';
+export {
+  CapabilitySurfaceDiscoveryError,
+  discoverCapabilitySurfaces,
+  type CapabilitySurfaceInventory,
+} from './capability-manifests/discover-surfaces.js';

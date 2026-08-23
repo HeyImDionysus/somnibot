@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { NotificationPolicySchema, RolloutPolicySchema } from '@somnibot/shared';
 import { discordEmojiSchema, discordSnowflakeSchema } from '@/lib/api/discord-values';
 
 export const guildConfigPatchSchema = z.object({
@@ -31,6 +32,8 @@ export const guildConfigPatchSchema = z.object({
   // critical fraud signals to this channel and optionally DMs the owner.
   fraud_staff_alert_channel_id: discordSnowflakeSchema.nullable().optional(),
   fraud_owner_dm_on_critical: z.boolean().optional(),
+  owner_notification_policy: NotificationPolicySchema.optional(),
+  owner_notification_rollout: RolloutPolicySchema.optional(),
   diagnostics_guided_mode: z.boolean().optional(),
   memory_alert_threshold_mb: z.number().int().min(128).max(8192).optional(),
   ws_ping_alert_threshold_ms: z.number().int().min(50).max(10000).optional(),

@@ -361,15 +361,12 @@ function gateBranding(ctx: ScenarioContext): void {
   );
 }
 
-/** The audit rows for this domain are written by the dashboard invitation flow
- *  (send/accept/decline/revoke/expire/dm-failed) — none of which is implemented
- *  or reachable here (no `team.*` audit event exists in the codebase). GATE. */
 function gateAudit(ctx: ScenarioContext, event: string): void {
   ctx.gate(
     'audit',
     'audit-row',
     `An audit_logs row (${event}) is written with actor + target for this transition.`,
-    'team invitation audit events are written by the dashboard invitation flow; that flow is unimplemented (no `team.*` audit event exists) and its HTTP path is unreachable in a bot-only harness',
+    'team invitation transitions write team.* audit rows through the dashboard invitation APIs and atomic acceptance RPC; proving this event requires the authenticated dashboard action followed by audit_logs readback',
   );
 }
 
@@ -472,9 +469,6 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
   await deleteUsers(handle, [memberDiscord]);
 }
 
-/** SET-A — a shortened invitation-expiry-ms is honored exactly. No expiry
- *  mechanism exists (no invitation table, no scheduler); GATE it honestly while
- *  still proving the assignment table's RLS/owner-alert live. */
 async function SET_A(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', economyEnabled: false });
   const memberDiscord = ctx.userId('seta-m');
@@ -488,13 +482,13 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'db-observable',
     `A pending invitation transitions to expired exactly once after its configured window (default ${JSON.stringify(expiryDefault)} ms), then grants nothing.`,
-    'no invitation entity or expiry column exists and there is no periodic expiry sweep in the bot; the shortened-expiry behavior cannot be exercised (see the DEF invitation-model finding)',
+    'the invitation row, expiry column, and periodic sweeper exist; proving the shortened expiry requires saving the dashboard setting, creating a real invitation, running the live sweep, and reading back the terminal state',
   );
   ctx.gate(
     'replay-safety',
     'db-observable',
     'Repeated late-accept attempts on an expired invitation remain rejected with zero grants.',
-    'requires the invitation lifecycle (expired state) which is unimplemented',
+    'the durable invitation expiry lifecycle exists, but proving repeated late acceptance requires an authenticated dashboard attempt after the real expiry sweep runs',
   );
 
   await proveRlsIsolation(ctx, handle, roleId ?? '', userId ?? '');
@@ -506,9 +500,6 @@ async function SET_A(ctx: ScenarioContext): Promise<void> {
   await deleteUsers(handle, [memberDiscord]);
 }
 
-/** SET-B — disabling invite DMs switches delivery to the dashboard-only path
- *  (a distinct second configuration effect). DM-mode is not stored anywhere and
- *  DM send/suppression is a Discord effect → GATE; RLS/owner-alert still prove. */
 async function SET_B(ctx: ScenarioContext): Promise<void> {
   const handle = await ctx.bootGuild({ label: 'a', economyEnabled: false });
   const memberDiscord = ctx.userId('setb-m');
@@ -521,13 +512,13 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'With invite-dm-enabled false, sending an invitation delivers NO DM; the invitee discovers and accepts it on dashboard sign-in.',
-    'invite-dm-enabled has no storage column and DM send/suppression is a Discord effect delivered by the (unimplemented) invitation flow — needs DISCORD_TOKEN + the dashboard invitation path',
+    'invite-dm-enabled is persisted and enforced by the invitation flow; proving DM suppression requires DISCORD_TOKEN plus the authenticated dashboard invitation path and live invitee readback',
   );
   ctx.gate(
     'database-RLS',
     'db-observable',
     'The invitation row records the dm-disabled delivery mode.',
-    'no invitation table exists to carry a delivery_mode column (see the DEF invitation-model finding)',
+    'the invitation model persists the DM preference; proving the stored delivery choice requires the authenticated dashboard invitation flow and database readback',
   );
 
   await proveRlsIsolation(ctx, handle, roleId ?? '', userId ?? '');
@@ -617,21 +608,18 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
   await deleteUsers(handle, [memberDiscord]);
 }
 
-/** DEPFAIL — the invitee has DMs closed: the invitation stays pending and a
- *  share-link fallback appears; no role is granted. Entirely a Discord-DM +
- *  invitation-flow path — fully GATED (no invitation model, no DM lane). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   ctx.gate(
     'Discord',
     'discord-readback',
     'When the invitee’s DMs are closed the DM send fails; the invitation stays pending and the member can still accept via the dashboard link.',
-    'requires a Discord DM send (which fails closed) plus the invitation lifecycle (pending state) — neither is implemented/reachable in this bot-only harness',
+    'requires a real Discord DM failure plus readback of the durable pending invitation through the authenticated dashboard flow; neither live surface is reachable in this bot-only harness',
   );
   ctx.gate(
     'database-RLS',
     'db-observable',
     'The invitation row records the failed delivery and remains pending.',
-    'no invitation table exists to carry a delivery-failed/pending state (see the DEF invitation-model finding)',
+    'the durable invitation records pending delivery failure; proving it requires driving the real failed DM branch and reading the invitation back from Supabase',
   );
   gateAudit(ctx, 'team.invite_dm_failed');
   ctx.gate(
@@ -650,13 +638,13 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'replay-safety',
     'db-observable',
     'Resending the DM later does not create a second invitation.',
-    'requires the invitation lifecycle (resend on one pending invitation) which is unimplemented',
+    'the resend path reuses the durable pending invitation; proving it requires a real DM failure followed by the authenticated dashboard resend action and database readback',
   );
   ctx.gate(
     'cleanup',
     'db-observable',
     'The pending invitation is removed at teardown.',
-    'no invitation row is created (no invitation model) — nothing to clean',
+    'requires creating the real pending invitation through the dashboard, then running cleanup and confirming its row is gone',
   );
 }
 
@@ -669,7 +657,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'db-observable',
     'An acceptance whose DB write transiently fails is retried and yields exactly one assignment and one accepted invitation.',
-    'requires a mid-acceptance fault-injection lane plus the dashboard accept flow (unimplemented invitation model)',
+    'requires a mid-acceptance database fault lane plus the authenticated dashboard accept flow to exercise the atomic invitation-acceptance RPC',
   );
   ctx.gate(
     'database-RLS',
@@ -727,7 +715,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'A replayed accept shows an already-accepted notice; accepting a revoked invitation shows a revoked notice.',
-    'the friendly no-op / revoked copy is a dashboard render on the (unimplemented) invitation lifecycle',
+    'the friendly already-accepted and revoked notices are authenticated dashboard renders that require a real invitation transition and browser capture',
   );
 
   await proveRlsIsolation(ctx, handle, roleId ?? '', userId ?? '');
@@ -738,10 +726,6 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   await deleteUsers(handle, [memberDiscord]);
 }
 
-/** RESTART — a grant persists across a full stack reboot (it lives in Supabase).
- *  The catalog frames this for a pending invitation + expiry clock; those don't
- *  exist, so the persistence property is proven on the assignment row instead
- *  and the invitation-specific facets GATE. */
 async function RESTART(ctx: ScenarioContext): Promise<void> {
   const guildId = ctx.scenarioGuildId('a');
   const memberDiscord = ctx.userId('restart-m');
@@ -772,7 +756,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'A pending invitation created before restart is still pending and acceptable after, with its original expiry timestamp honored (not reset), and no DM is re-sent.',
-    'requires the invitation lifecycle (pending row + expiry clock + DM) which is unimplemented; only the assignment row’s persistence is DB-observable here',
+    'requires creating a real pending invitation through the dashboard, restarting the deployed stack, and reading back its original expiry plus DM state; only the assignment persistence is observable in this bot-only harness',
   );
 
   await proveRlsIsolation(ctx, second, roleId ?? '', userId ?? '');
@@ -820,7 +804,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'An invitee accepting while the inviter revokes concurrently ends in exactly one of accepted/revoked; the losing actor sees a clear branded notice.',
-    'the accept-vs-revoke state machine and the losing-actor copy are dashboard flows on the (unimplemented) invitation lifecycle',
+    'the atomic accept-vs-revoke state machine and losing-actor notice require concurrent authenticated dashboard actions plus database and browser readback',
   );
 
   await proveRlsIsolation(ctx, handle, roleId ?? '', userId ?? '');
@@ -955,7 +939,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'audit',
     'audit-row',
     'Run audit rows persist through cleanup (anonymize-over-delete); none are deleted.',
-    'this domain writes no team.* audit rows to retain (the invitation flow is unimplemented); audit retention is proven where real audit rows exist',
+    'team.* audit rows are written by the invitation flow; proving anonymize-over-delete retention requires real dashboard invitation transitions followed by the cleanup and audit readback lanes',
   );
   gateReplayDeferredTo(ctx, 'REPLAY');
 }

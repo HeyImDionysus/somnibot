@@ -120,6 +120,27 @@ describe('POST /api/store/products PayPal readiness', () => {
     vi.restoreAllMocks();
   });
 
+  it('always persists a newly created dashboard product inactive even when the client requests active', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const product = {
+      id: 'product-1', guild_id: 'guild-1', name: 'Free SDK', type: 'free',
+      delivery_type: 'license_key', active: false, metadata: {},
+    };
+    productsTable.single
+      .mockResolvedValueOnce({ data: product, error: null })
+      .mockResolvedValueOnce({ data: { ...product, plans: [], product_license_config: [] }, error: null });
+    const launchRuns = registerTable(mock, 'commerce_product_launch_runs');
+    launchRuns.upsert.mockResolvedValue({ error: null });
+
+    const response = await POST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: { ...baseProductBody, type: 'free', price_cents: 0, active: true },
+    }));
+
+    expect(response.status).toBe(200);
+    expect(productsTable.insert).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
+  });
+
   it('writes one occurrence-keyed load failure audit for a real products query error', async () => {
     productsTable.limit.mockResolvedValueOnce({
       data: null,
@@ -237,7 +258,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(productsTable.insert).not.toHaveBeenCalled();
   });
 
-  it('rejects an unsaveable desired policy before product or PayPal creation', async () => {
+  it('rejects a malformed desired policy before product or PayPal creation', async () => {
     vi.stubGlobal('fetch', vi.fn());
 
     const res = await POST(buildRequest('/api/store/products', {
@@ -268,7 +289,7 @@ describe('POST /api/store/products PayPal readiness', () => {
 
     expect(res.status).toBe(400);
     await expect(res.json()).resolves.toMatchObject({
-      error: 'The requested license policy contains values the Store cannot save.',
+      error: 'Validation failed',
     });
     expect(productsTable.insert).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
@@ -374,7 +395,7 @@ describe('POST /api/store/products PayPal readiness', () => {
     expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-123' });
   });
 
-  it('creates zero-price static products with optional Discord fulfillment without PayPal setup', async () => {
+  it('creates an inactive zero-price static draft without requiring live Discord targets or PayPal setup', async () => {
     (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     vi.stubGlobal('fetch', vi.fn());
 
@@ -416,12 +437,7 @@ describe('POST /api/store/products PayPal readiness', () => {
       granted_role_ids: ['123456789012345678'],
       granted_channel_ids: ['234567890123456789'],
     }));
-    expect(validateAssignableDiscordTargets).toHaveBeenCalledWith(
-      expect.anything(),
-      'guild-1',
-      ['123456789012345678'],
-      ['234567890123456789'],
-    );
+    expect(validateAssignableDiscordTargets).not.toHaveBeenCalled();
     expect(plansTable.insert).not.toHaveBeenCalled();
     expect(notifyBot).toHaveBeenCalledWith('guild-1', 'commerce', { product_created: 'product-free-123' });
   });

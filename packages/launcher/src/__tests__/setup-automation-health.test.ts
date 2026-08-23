@@ -13,6 +13,29 @@ describe('setup automation dashboard health evaluation', () => {
     });
   });
 
+  it('consumes the shared runtime identity published by dashboard health', () => {
+    const runtimeIdentity = {
+      lifecycle: 'ready',
+      version: '1.2.3',
+      exactSha: 'a'.repeat(40),
+      bootId: '11111111-1111-4111-8111-111111111111',
+      migrationHead: '20260823173000_experience_runtime_controls.sql',
+      configurationGeneration: 20260823173000,
+      deploymentProfile: 'higher-load-vps',
+    };
+
+    expect(evaluateDashboardHealthPayload({
+      status: 'healthy',
+      services: { bot: 'online' },
+      runtimeIdentity,
+    })).toEqual({
+      ok: true,
+      status: 'healthy',
+      services: { bot: 'online' },
+      runtimeIdentity,
+    });
+  });
+
   it('rejects degraded health payloads with service details', () => {
     const result = evaluateDashboardHealthPayload({
       status: 'degraded',

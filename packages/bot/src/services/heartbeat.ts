@@ -22,6 +22,7 @@ import { BOOT_ID } from './boot-identity.js';
 import type Valkey from 'iovalkey';
 import type { Client } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
+import { buildBotRuntimeSystemState } from './runtime-system-state.js';
 
 const log = createLogger('Heartbeat');
 
@@ -97,13 +98,21 @@ export class HeartbeatService {
   private async writeValkeyHeartbeat(): Promise<void> {
     try {
       const memUsage = process.memoryUsage();
+      const timestamp = Date.now();
+      const guildIds = this.client ? Array.from(this.client.guilds.cache.keys()) : [];
       const payload = JSON.stringify({
         bootId: BOOT_ID,
-        timestamp: Date.now(),
-        uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
+        timestamp,
+        uptimeSeconds: Math.floor((timestamp - this.startedAt) / 1000),
         guildCount: this.client?.guilds.cache.size ?? 0,
-        guildIds: this.client ? Array.from(this.client.guilds.cache.keys()) : [],
+        guildIds,
         memoryUsageMB: Math.round(memUsage.rss / 1024 / 1024),
+        systemState: buildBotRuntimeSystemState({
+          bootId: BOOT_ID,
+          observedAt: new Date(timestamp).toISOString(),
+          discordReady: this.client?.ws?.status === 0,
+          guildIds,
+        }),
       });
 
       // Write bot-level key only

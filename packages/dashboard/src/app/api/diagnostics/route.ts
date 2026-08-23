@@ -10,6 +10,11 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { parseBody } from '@/lib/api/validation';
+import { dbError } from '@/lib/api/response';
+import { notifyBot } from '@/lib/notify-bot';
+import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
+import { diagnosticsSettings, diagnosticsSettingsSchema } from '@/lib/diagnostics-settings';
 
 const BOT_HEARTBEAT_STALE_MS = 120_000;
 const MAX_FUTURE_CLOCK_SKEW_MS = 30_000;
@@ -165,18 +170,12 @@ export async function GET(request: NextRequest) {
     .select('diagnostics_guided_mode, memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold, diagnostics_snapshot_interval_ms')
     .eq('guild_id', guildId)
     .maybeSingle();
-  const cfgRow = (guidedCfg ?? null) as Record<string, unknown> | null;
+  const settings = diagnosticsSettings(guidedCfg);
 
   return NextResponse.json({
     success: true,
     data: {
-      guidedMode: (cfgRow?.diagnostics_guided_mode as boolean | undefined) ?? true,
-      thresholds: {
-        memoryRssMb: Number(cfgRow?.memory_alert_threshold_mb ?? 512),
-        wsPingMs: Number(cfgRow?.ws_ping_alert_threshold_ms ?? 500),
-        webhookErrorRate: Number(cfgRow?.webhook_error_rate_threshold ?? 0.25),
-      },
-      snapshotIntervalMs: Number(cfgRow?.diagnostics_snapshot_interval_ms ?? 60_000),
+      ...settings,
       bot: {
         online: isOnline,
         uptimeSeconds: botHealth?.uptime_seconds ?? 0,
@@ -226,4 +225,49 @@ export async function GET(request: NextRequest) {
       healthMetrics: metricsByType,
     },
   });
+}
+
+export async function PATCH(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId, discordId } = auth.ctx;
+
+  const parsed = await parseBody(request, diagnosticsSettingsSchema);
+  if (!parsed.ok) return parsed.response;
+  const updates = parsed.data;
+  if (Object.keys(updates).length === 0) {
+    return NextResponse.json({ error: 'No diagnostics settings to update' }, { status: 400 });
+  }
+
+  const supabase = createAdminSupabase();
+  const before = await readGuildConfigBefore(supabase, guildId, Object.keys(updates));
+  const { error } = await supabase
+    .from('guild_config')
+    .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
+  if (error) return dbError(error, 'diagnostics settings');
+
+  const { data: persisted, error: readError } = await supabase
+    .from('guild_config')
+    .select('diagnostics_guided_mode, memory_alert_threshold_mb, ws_ping_alert_threshold_ms, webhook_error_rate_threshold, diagnostics_snapshot_interval_ms')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  if (readError) return dbError(readError, 'diagnostics settings');
+  if (!persisted) {
+    return NextResponse.json({ error: 'Diagnostics settings readback was unavailable' }, { status: 500 });
+  }
+
+  await notifyBot(guildId, 'all', updates, discordId, undefined, before);
+  await recordGuildConfigChange({
+    guildId,
+    actorId: discordId,
+    action: 'guild.config_updated',
+    area: 'diagnostics settings',
+    updates,
+    before,
+  }, supabase);
+
+  return NextResponse.json({ success: true, data: diagnosticsSettings(persisted) });
 }

@@ -142,7 +142,7 @@ async function mockStore(page: Page, options: {
 }
 
 async function fillCompletedProject(page: Page) {
-  await page.goto('/project-licensing');
+  await page.goto('/sdk');
   await page.getByLabel('Project name').fill('Completed Sentinel');
   await page.getByLabel('Completed project context').fill('An already-completed Rust plugin whose behavior must be preserved.');
 }
@@ -210,7 +210,7 @@ test('completed project handoff survives reload and creates an inactive product 
   expect(cardBounds.scrollWidth).toBeLessThanOrEqual(cardBounds.clientWidth);
   expect(cardBounds.buttonsInside).toBe(true);
 
-  await page.getByRole('link', { name: 'Open Prompt Generator' }).click();
+  await page.getByRole('link', { name: 'Open SDK' }).click();
   await expect(page.getByText('Loaded authoritative Store product Completed Sentinel.')).toBeVisible();
   const prompt = await page.locator('section[aria-labelledby="generated-prompt-heading"] pre').innerText();
   expect(extractLicensingPromptEnvelope(prompt)).toMatchObject({
@@ -246,7 +246,7 @@ test('authoritative product loading locks manual edits until the public API read
     await route.fulfill({ json: { success: true, data: [product()] } });
   });
 
-  await page.goto(`/project-licensing?productId=${productId}`);
+  await page.goto(`/sdk?productId=${productId}`);
   await expect(page.getByText('Loading the authoritative Store product and public API base…')).toBeVisible();
   await expect(page.getByLabel('Project name')).toBeDisabled();
   releaseProducts?.();
@@ -328,7 +328,7 @@ test('free static handoff needs no PayPal and remains usable without responsive 
   await expect(page.getByRole('heading', { name: 'Integrate Completed Sentinel' })).toBeVisible();
   expect(submitted).toMatchObject({ type: 'free', price_cents: 0, active: false, delivery_type: 'file' });
   await expect(page.getByText('PayPal is not required.')).toBeVisible();
-  await page.getByRole('link', { name: 'Open Prompt Generator' }).click();
+  await page.getByRole('link', { name: 'Open SDK' }).click();
   await expect(page.getByText('Loaded authoritative Store product Completed Sentinel.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Use in Store' })).toBeDisabled();
   const prompt = await page.locator('section[aria-labelledby="generated-prompt-heading"] pre').innerText();

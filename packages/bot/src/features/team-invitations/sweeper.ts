@@ -19,9 +19,9 @@
  * directly to audit_logs (the same self-contained pattern the rest of the bot
  * uses via services/audit).
  */
-import { EmbedBuilder, type Client, type Guild } from 'discord.js';
+import { EmbedBuilder, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { createLogger } from '@somnibot/shared';
+import { createLogger, evaluateTenantAccess } from '@somnibot/shared';
 import { writeAuditLog } from '../../services/audit.js';
 import {
   applyBrand,
@@ -60,11 +60,84 @@ function hoursUntil(iso: string): number {
   return Math.max(1, Math.round((new Date(iso).getTime() - Date.now()) / 3_600_000));
 }
 
+interface TeamInvitationGuild {
+  id: string;
+  name: string;
+  ownerId: string | null;
+  channels: {
+    cache: {
+      get(channelId: string): unknown;
+    };
+  };
+}
+
+interface TeamInvitationClient {
+  guilds: {
+    cache: {
+      get(guildId: string): unknown;
+    };
+  };
+  users: {
+    fetch(userId: string): Promise<unknown>;
+  };
+}
+
+interface TeamInvitationUser {
+  send(payload: unknown): Promise<unknown>;
+}
+
+interface TeamInvitationChannel {
+  send(payload: unknown): Promise<unknown>;
+}
+
+function isTeamInvitationGuild(value: unknown): value is TeamInvitationGuild {
+  if (typeof value !== 'object' || value === null) return false;
+  if (!('id' in value) || typeof value.id !== 'string') return false;
+  if (!('name' in value) || typeof value.name !== 'string') return false;
+  if (!('ownerId' in value) || (typeof value.ownerId !== 'string' && value.ownerId !== null)) return false;
+  if (!('channels' in value) || typeof value.channels !== 'object' || value.channels === null) return false;
+  if (!('cache' in value.channels) || typeof value.channels.cache !== 'object' || value.channels.cache === null) {
+    return false;
+  }
+  return 'get' in value.channels.cache && typeof value.channels.cache.get === 'function';
+}
+
+function isTeamInvitationUser(value: unknown): value is TeamInvitationUser {
+  return typeof value === 'object'
+    && value !== null
+    && 'send' in value
+    && typeof value.send === 'function';
+}
+
+function isTeamInvitationChannel(value: unknown): value is TeamInvitationChannel {
+  return isTeamInvitationUser(value);
+}
+
+function invitationBelongsToGuild(guild: TeamInvitationGuild, row: InviteRow): boolean {
+  return evaluateTenantAccess(
+    { guildId: guild.id },
+    { guildId: row.guild_id, resourceType: 'background-job', resourceId: row.id },
+  ).allowed;
+}
+
+function invitationDashboardUrl(): string {
+  const fallback = 'https://dashboard.somnibot.com/dashboard';
+  const configured = process.env.DASHBOARD_URL?.trim()
+    || process.env.NEXT_PUBLIC_APP_URL?.trim();
+  if (!configured) return fallback;
+  try {
+    const url = new URL('/dashboard', configured);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export class TeamInvitationSweeper {
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
-    private readonly client: Client,
+    private readonly client: TeamInvitationClient,
     private readonly supabase: SupabaseClient,
     private readonly intervalMs: number = DEFAULT_INTERVAL_MS,
   ) {}
@@ -128,7 +201,8 @@ export class TeamInvitationSweeper {
     for (const row of (data ?? []) as InviteRow[]) {
       const guild = this.client.guilds.cache.get(row.guild_id);
       // Not in this process's cache (other shard / not ready) — retry next tick.
-      if (!guild) continue;
+      if (!isTeamInvitationGuild(guild)) continue;
+      if (!invitationBelongsToGuild(guild, row)) continue;
 
       // Re-check invite-dm-enabled: the owner may have turned DMs off after the
       // invitation was queued.
@@ -148,6 +222,9 @@ export class TeamInvitationSweeper {
           fallbackName: guild.name,
         });
         const user = await this.client.users.fetch(row.discord_id);
+        if (!isTeamInvitationUser(user)) {
+          throw new Error(`Discord user ${row.discord_id} does not support direct messages`);
+        }
         await user.send({ embeds: [this.buildInviteEmbed(guild, row, kit)] });
         await this.claimDm(row.id, 'sent', 'dm');
       } catch (err) {
@@ -217,7 +294,8 @@ export class TeamInvitationSweeper {
       const guild = this.client.guilds.cache.get(row.guild_id);
       // Wait for the guild to be cached before consuming the one-shot flag, so
       // the owner mirror is never silently dropped.
-      if (!guild) continue;
+      if (!isTeamInvitationGuild(guild)) continue;
+      if (!invitationBelongsToGuild(guild, row)) continue;
 
       const { data: claimed } = await this.supabase
         .from('team_invitations')
@@ -270,7 +348,7 @@ export class TeamInvitationSweeper {
       });
 
       const guild = this.client.guilds.cache.get(row.guild_id);
-      if (guild) {
+      if (isTeamInvitationGuild(guild) && invitationBelongsToGuild(guild, row)) {
         await this.notifyOwner(guild, {
           intent: 'info',
           title: 'Team invitation expired',
@@ -284,14 +362,17 @@ export class TeamInvitationSweeper {
 
   // ── Discord helpers ───────────────────────────────────────────────────────
 
-  private buildInviteEmbed(guild: Guild, row: InviteRow, kit: BrandKit): EmbedBuilder {
+  private buildInviteEmbed(guild: TeamInvitationGuild, row: InviteRow, kit: BrandKit): EmbedBuilder {
     const roleName = roleNameOf(row);
     const hours = hoursUntil(row.expires_at);
+    const inviterName = row.invited_by_name
+      ?? (row.invited_by ? `<@${row.invited_by}>` : 'A dashboard team manager');
+    const dashboardUrl = invitationDashboardUrl();
     const embed = new EmbedBuilder()
       .setTitle(`You're invited to help run ${guild.name}`)
       .setDescription(
-        `You've been invited to join the **${guild.name}** dashboard team as **${roleName}**.\n\n` +
-          `Open the dashboard and accept within **${hours} hours** to gain access. ` +
+        `${inviterName} invited you to join the **${guild.name}** dashboard team as **${roleName}**.\n\n` +
+          `[Open the dashboard to review this invitation](${dashboardUrl}) within **${hours} hours**. ` +
           `You won't have any permissions until you accept.`,
       )
       .addFields(
@@ -309,7 +390,7 @@ export class TeamInvitationSweeper {
    * a delivery failure never throws.
    */
   private async notifyOwner(
-    guild: Guild,
+    guild: TeamInvitationGuild,
     spec: { intent: BrandIntent; title: string; description: string },
   ): Promise<void> {
     // Owner/staff mirror: brand the frame, suppress the powered-by attribution.
@@ -331,8 +412,8 @@ export class TeamInvitationSweeper {
     if (adminChannelId) {
       try {
         const channel = guild.channels.cache.get(adminChannelId);
-        if (channel && 'send' in channel) {
-          await (channel as { send: (opts: unknown) => Promise<unknown> }).send({ embeds: [embed] });
+        if (isTeamInvitationChannel(channel)) {
+          await channel.send({ embeds: [embed] });
         }
       } catch (err) {
         log.error('Failed to post team event to admin channel', { error: String(err) });
@@ -343,6 +424,9 @@ export class TeamInvitationSweeper {
     if (ownerId) {
       try {
         const owner = await this.client.users.fetch(ownerId);
+        if (!isTeamInvitationUser(owner)) {
+          throw new Error(`Discord user ${ownerId} does not support direct messages`);
+        }
         await owner.send({ embeds: [embed] });
       } catch (err) {
         log.error('Failed to DM owner team event', { error: String(err) });

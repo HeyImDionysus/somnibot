@@ -71,6 +71,11 @@ export class DiagnosticsService {
     log.info(`Snapshot interval updated to ${next}ms`);
   }
 
+  refreshConfiguration(snapshotIntervalMs?: number): void {
+    this.alertManager.invalidateThresholds(this.guildId);
+    if (snapshotIntervalMs !== undefined) this.setSnapshotInterval(snapshotIntervalMs);
+  }
+
   private clampInterval(intervalMs: number): number {
     return Math.max(15_000, Math.min(600_000, Math.trunc(intervalMs)));
   }
