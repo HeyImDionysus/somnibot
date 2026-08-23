@@ -200,6 +200,7 @@ export interface ConfigChangedData {
   section: string;
   changes: Record<string, unknown>;
   changedBy: string;
+  syncRequestId?: string;
   /**
    * Values of the changed keys BEFORE the change was applied — the audit
    * row's before_state. Emitters that know the prior values (e.g. the

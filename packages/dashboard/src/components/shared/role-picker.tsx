@@ -9,7 +9,7 @@
  */
 'use client';
 
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo, useId } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { ChevronDown, Search, X, Shield } from 'lucide-react';
 
@@ -184,6 +184,8 @@ export function RolePicker({
   requireAssignable = false,
   className,
 }: RolePickerProps) {
+  const labelId = useId();
+  const listboxId = useId();
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [rolesAuthoritative, setRolesAuthoritative] = useState(false);
@@ -196,6 +198,7 @@ export function RolePicker({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const selected = useMemo(() => {
@@ -281,15 +284,6 @@ export function RolePicker({
     [multi, onChange],
   );
 
-  const removeTag = useCallback(
-    (id: string, e: React.MouseEvent) => {
-      e.stopPropagation();
-      const next = selected.filter((s) => s !== id);
-      onChange(next.length > 0 ? next : multi ? [] : null);
-    },
-    [multi, selected, onChange],
-  );
-
   const selectedRoles = useMemo(
     () => selected.map((id) => roles.find((r) => r.id === id)).filter(Boolean) as DiscordRole[],
     [selected, roles],
@@ -312,9 +306,20 @@ export function RolePicker({
   );
 
   return (
-    <div className={cn('space-y-1', className)} ref={containerRef}>
+    <div
+      className={cn('space-y-1', className)}
+      ref={containerRef}
+      onKeyDownCapture={(event) => {
+        if (!open || event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        setSearch('');
+        queueMicrotask(() => triggerRef.current?.focus());
+      }}
+    >
       {label && (
-        <label className="mb-1 block text-xs font-medium text-discord-text-muted">
+        <label id={labelId} className="mb-1 block text-xs font-medium text-discord-text-muted">
           {label}
         </label>
       )}
@@ -324,17 +329,6 @@ export function RolePicker({
 
       {/* Trigger */}
       <div
-        role="button"
-        tabIndex={disabled ? -1 : 0}
-        aria-disabled={disabled}
-        aria-expanded={open}
-        onClick={() => !disabled && setOpen(!open)}
-        onKeyDown={(event) => {
-          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
-            event.preventDefault();
-            setOpen(!open);
-          }
-        }}
         className={cn(
           'flex w-full items-center gap-2 rounded-input border px-3 py-2 text-sm text-left transition-colors',
           'bg-discord-bg-tertiary',
@@ -346,120 +340,133 @@ export function RolePicker({
           disabled && 'opacity-50 cursor-not-allowed',
         )}
       >
-        <div className="flex-1 min-w-0 flex flex-wrap gap-1">
-          {selectedRoles.length === 0 && missingSelected.length === 0 && unresolvedSelected.length === 0 ? (
-            <span className="text-discord-text-muted/60">{loading ? 'Loading…' : placeholder}</span>
-          ) : !multi && unresolvedSelected.length > 0 ? (
-            <span className="truncate text-discord-text-muted">
-              Configured role ({unresolvedSelected[0]})
-            </span>
-          ) : !multi && selectedRoles.length === 0 ? (
-            <span className="truncate text-discord-danger">
-              Deleted role ({missingSelected[0]})
-            </span>
-          ) : multi ? (
-            <>
-              {selectedRoles.map((role) => (
-                <span
-                  key={role.id}
-                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs"
-                  style={{
-                    backgroundColor: `${roleColor(role.color)}15`,
-                    color: roleColor(role.color),
-                  }}
-                >
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-labelledby={label ? labelId : undefined}
+          aria-label={label ? undefined : placeholder}
+          aria-haspopup="listbox"
+          aria-controls={open ? listboxId : undefined}
+          aria-expanded={open}
+          disabled={disabled}
+          onClick={() => setOpen(!open)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <div className="flex-1 min-w-0 flex flex-wrap gap-1">
+            {selectedRoles.length === 0 && missingSelected.length === 0 && unresolvedSelected.length === 0 ? (
+              <span className="text-discord-text-muted/60">{loading ? 'Loading…' : placeholder}</span>
+            ) : !multi && unresolvedSelected.length > 0 ? (
+              <span className="truncate text-discord-text-muted">
+                Configured role ({unresolvedSelected[0]})
+              </span>
+            ) : !multi && selectedRoles.length === 0 ? (
+              <span className="truncate text-discord-danger">
+                Deleted role ({missingSelected[0]})
+              </span>
+            ) : multi ? (
+              <>
+                {selectedRoles.map((role) => (
                   <span
-                    className="h-2 w-2 rounded-full shrink-0"
-                    style={{ backgroundColor: roleColor(role.color) }}
-                  />
-                  {role.name}
-                  <button
-                    type="button"
-                    aria-label={`Remove ${role.name}`}
-                    onClick={(e) => removeTag(role.id, e)}
-                    className="opacity-60 hover:opacity-100 ml-0.5"
+                    key={role.id}
+                    className="inline-flex min-w-0 max-w-full items-center gap-1 rounded px-1.5 py-0.5 text-xs"
+                    style={{
+                      backgroundColor: `${roleColor(role.color)}15`,
+                      color: roleColor(role.color),
+                    }}
                   >
-                    <X size={10} />
-                  </button>
-                </span>
-              ))}
-              {missingSelected.map((id) => (
+                    <span
+                      className="h-2 w-2 rounded-full shrink-0"
+                      style={{ backgroundColor: roleColor(role.color) }}
+                    />
+                    <span className="min-w-0 truncate">{role.name}</span>
+                    <span aria-hidden="true" className="opacity-60 ml-0.5">
+                      <X size={10} />
+                    </span>
+                  </span>
+                ))}
+                {missingSelected.map((id) => (
+                  <span
+                    key={id}
+                    className="inline-flex min-w-0 max-w-full items-center gap-1 rounded bg-discord-danger/15 px-1.5 py-0.5 text-xs text-discord-danger"
+                  >
+                    <span className="min-w-0 truncate">Deleted role ({id})</span>
+                    <span aria-hidden="true" className="opacity-60">
+                      <X size={10} />
+                    </span>
+                  </span>
+                ))}
+                {unresolvedSelected.map((id) => (
+                  <span
+                    key={id}
+                    className="inline-flex min-w-0 max-w-full items-center gap-1 rounded bg-discord-text-muted/10 px-1.5 py-0.5 text-xs text-discord-text-muted"
+                  >
+                    <span className="min-w-0 truncate">Configured role ({id})</span>
+                    <span aria-hidden="true" className="opacity-60">
+                      <X size={10} />
+                    </span>
+                  </span>
+                ))}
+              </>
+            ) : (
+              <span className="flex items-center gap-1.5 text-discord-text-primary truncate">
                 <span
-                  key={id}
-                  className="inline-flex items-center gap-1 rounded bg-discord-danger/15 px-1.5 py-0.5 text-xs text-discord-danger"
-                >
-                  Deleted role ({id})
-                  <button
-                    type="button"
-                    aria-label={`Remove deleted role ${id}`}
-                    onClick={(e) => removeTag(id, e)}
-                    className="opacity-60 hover:opacity-100"
-                  >
-                    <X size={10} />
-                  </button>
-                </span>
-              ))}
-              {unresolvedSelected.map((id) => (
-                <span
-                  key={id}
-                  className="inline-flex items-center gap-1 rounded bg-discord-text-muted/10 px-1.5 py-0.5 text-xs text-discord-text-muted"
-                >
-                  Configured role ({id})
-                  <button
-                    type="button"
-                    aria-label={`Remove configured role ${id}`}
-                    onClick={(e) => removeTag(id, e)}
-                    className="opacity-60 hover:opacity-100"
-                  >
-                    <X size={10} />
-                  </button>
-                </span>
-              ))}
-            </>
-          ) : (
-            <span className="flex items-center gap-1.5 text-discord-text-primary truncate">
-              <span
-                className="h-2.5 w-2.5 rounded-full shrink-0"
-                style={{ backgroundColor: roleColor(selectedRoles[0].color) }}
-              />
-              {selectedRoles[0].name}
-            </span>
-          )}
-        </div>
+                  className="h-2.5 w-2.5 rounded-full shrink-0"
+                  style={{ backgroundColor: roleColor(selectedRoles[0].color) }}
+                />
+                {selectedRoles[0].name}
+              </span>
+            )}
+          </div>
+          <ChevronDown
+            size={14}
+            className={cn('shrink-0 text-discord-text-muted transition-transform', open && 'rotate-180')}
+          />
+        </button>
         {selected.length > 0 && (
           <button
+            type="button"
+            aria-label={multi ? 'Clear selected roles' : 'Clear selected role'}
             onClick={clear}
             className="shrink-0 text-discord-text-muted hover:text-discord-text-primary"
           >
             <X size={14} />
           </button>
         )}
-        <ChevronDown
-          size={14}
-          className={cn('shrink-0 text-discord-text-muted transition-transform', open && 'rotate-180')}
-        />
       </div>
 
       {/* Dropdown */}
       {open && (
         <div className="relative z-50">
-          <div className="absolute top-1 left-0 right-0 max-h-64 overflow-hidden rounded-lg border border-discord-border-subtle bg-discord-bg-floating shadow-lg">
+          <div
+            className="absolute top-1 left-0 right-0 max-h-64 max-w-full overflow-hidden rounded-lg border border-discord-border-subtle bg-discord-bg-floating shadow-lg"
+          >
             {/* Search */}
             <div className="flex items-center gap-2 border-b border-discord-border-subtle px-3 py-2">
               <Search size={14} className="text-discord-text-muted" />
               <input
-                ref={searchRef}
-                value={search}
+                 ref={searchRef}
+                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search roles"
                 placeholder="Search roles…"
                 className="flex-1 bg-transparent text-sm text-discord-text-primary placeholder:text-discord-text-muted/50 outline-none"
               />
             </div>
 
             {/* Options */}
-            <div className="max-h-52 overflow-y-auto py-1">
+            <div
+              id={listboxId}
+              role="listbox"
+              aria-labelledby={label ? labelId : undefined}
+              aria-label={label ? undefined : placeholder}
+              aria-multiselectable={multi || undefined}
+              className="max-h-52 overflow-y-auto py-1"
+            >
               {allowNone && !multi && (
                 <button
+                  type="button"
+                  role="option"
+                  aria-selected={!value}
                   onClick={() => toggle('')}
                   className={cn(
                     'flex w-full items-center gap-2 px-3 py-1.5 text-sm transition-colors',
@@ -484,6 +491,8 @@ export function RolePicker({
                   <button
                     key={role.id}
                     type="button"
+                    role="option"
+                    aria-selected={isSelected}
                     disabled={cannotAssign}
                     onClick={() => toggle(role.id)}
                     title={assignIssue ?? undefined}

@@ -3,7 +3,7 @@
  * via startActionQueueListener with mock pending actions.
  * Targets the 599 uncovered statements (15.8% covered).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -58,6 +58,11 @@ import {
   startActionQueueListener,
 } from '../services/action-queue.js';
 import { repairDriftItem, acceptDriftItem } from '../sync/repair-actions.js';
+import { eventBus } from '../services/event-bus.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 // Multi-table Supabase mock that returns different data per table/call
 function makeSupa(pendingActions: any[] = []) {
@@ -1796,6 +1801,48 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
       expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // config_reload calls various cache invalidation - no crash = success
+  });
+
+  it('awaits onboarding config reload with its synchronization request fence', async () => {
+    const requestId = '77777777-7777-4777-8777-777777777777';
+    const emitAndWait = vi.spyOn(eventBus, 'emitAndWait').mockResolvedValue(undefined);
+    const actions = [{
+      id: 'act-onboarding', guild_id: 'guild-1', action: 'config_reload', status: 'pending',
+      payload: {
+        section: 'onboarding',
+        changes: { onboarding_enabled: true },
+        sync_request_id: requestId,
+      },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+
+    await startActionQueueListener(makeGuild(), makeSupa(actions));
+
+    expect(emitAndWait).toHaveBeenCalledWith('config.changed', 'guild-1', expect.objectContaining({
+      section: 'onboarding',
+      syncRequestId: requestId,
+    }));
+  });
+
+  it('rejects a synchronization request fence on a non-onboarding config reload', async () => {
+    const emitAndWait = vi.spyOn(eventBus, 'emitAndWait').mockResolvedValue(undefined);
+    const actions = [{
+      id: 'act-welcome-sync', guild_id: 'guild-1', action: 'config_reload', status: 'pending',
+      payload: {
+        section: 'welcome',
+        sync_request_id: '77777777-7777-4777-8777-777777777777',
+      },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const supa = makeSupa(actions);
+
+    await startActionQueueListener(makeGuild(), supa);
+
+    expect(emitAndWait).not.toHaveBeenCalled();
+    expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      error_message: expect.stringContaining('only valid for onboarding'),
+    }));
   });
 
   it('processes send_embed action', async () => {

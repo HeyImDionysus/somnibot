@@ -26,6 +26,7 @@ vi.mock('@/lib/api/admin-rate-limit', () => ({
 }));
 vi.mock('@/lib/notify-bot', () => ({
   notifyBot: vi.fn().mockResolvedValue(undefined),
+  notifyBotForGuildWithResult: vi.fn().mockResolvedValue(true),
 }));
 vi.mock('@/lib/admin-changes', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/admin-changes')>()),
@@ -41,6 +42,7 @@ vi.mock('@/lib/admin-changes', async (importOriginal) => ({
 import { NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { notifyBotForGuildWithResult } from '@/lib/notify-bot';
 import {
   recordGuildConfigChange,
   readGuildConfigBefore,
@@ -87,6 +89,7 @@ beforeEach(() => {
     ok: true,
     ctx: { userId: 'user-1', discordId: ACTOR, guildId: GUILD },
   } as never);
+  vi.mocked(notifyBotForGuildWithResult).mockResolvedValue(true);
   vi.mocked(readGuildConfigBefore).mockResolvedValue({
     store_brand_name: 'Old Name',
     welcome_enabled: false,
@@ -139,6 +142,27 @@ describe('PUT /api/welcome', () => {
       actorId: ACTOR,
       action: 'welcome.updated',
       updates: { welcome_enabled: true },
+    });
+  });
+});
+
+describe('PUT /api/onboarding', () => {
+  it('preserves onboarding_config when a partial update omits it', async () => {
+    const chain = mockConfigClient();
+    const { PUT } = await import('@/app/api/onboarding/route');
+
+    const res = await PUT(put('http://x/api/onboarding', {
+      returning_member_skip_welcome_dm: false,
+    }));
+
+    expect(res.status).toBe(200);
+    const upsert = chain.upsert as ReturnType<typeof vi.fn>;
+    const payload = upsert.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.returning_member_skip_welcome_dm).toBe(false);
+    expect(payload).not.toHaveProperty('onboarding_config');
+    const [recorded] = vi.mocked(recordGuildConfigChange).mock.calls[0];
+    expect(recorded.revision).toEqual({
+      onboarding_sync_state: payload.onboarding_sync_state,
     });
   });
 });

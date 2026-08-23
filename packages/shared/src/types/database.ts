@@ -288,6 +288,7 @@ export interface DbGuildConfig {
   paypal_enabled: boolean;
   custom_bot_statuses: string[];
   onboarding_config: Record<string, unknown> | null;
+  onboarding_sync_state: Record<string, unknown>;
   // V17 Behavioral Audit additions
   no_xp_role_id: string | null;
   anti_raid_enabled: boolean;

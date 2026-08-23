@@ -30,9 +30,15 @@ vi.mock('@/lib/api/validation', () => ({
   schemas: {},
 }));
 
-const mockSupabase = { from: vi.fn() };
+const mockRpc = vi.fn();
+const mockSupabase = { from: vi.fn(), rpc: mockRpc };
 vi.mock('@/lib/supabase/admin', () => ({
   createAdminSupabase: () => mockSupabase,
+}));
+
+const mockNotifyBot = vi.fn();
+vi.mock('@/lib/notify-bot', () => ({
+  notifyBotForGuildWithResult: (...args: unknown[]) => mockNotifyBot(...args),
 }));
 
 import { POST } from '@/app/api/admin-changes/route';
@@ -73,9 +79,14 @@ function buildRequest(body: unknown) {
 function wireSupabase(
   change: Record<string, unknown> | null,
   parentLookup?: { table: string; owner: Record<string, unknown> | null },
+  targetResult: Record<string, unknown> | null = { guild_id: 'guild-1' },
 ) {
-  const targetUpdate = vi.fn().mockReturnThis();
-  const targetMatch = vi.fn().mockResolvedValue({ error: null });
+  const targetUpdate = vi.fn();
+  const targetMatch = vi.fn();
+  const targetEq = vi.fn();
+  const targetContains = vi.fn();
+  const targetSelect = vi.fn();
+  const targetMaybeSingle = vi.fn().mockResolvedValue({ data: targetResult, error: null });
   const parentMaybeSingle = vi.fn().mockResolvedValue({ data: parentLookup?.owner ?? null });
 
   // `.single()` is called twice against admin_changes: first the select of the
@@ -109,22 +120,60 @@ function wireSupabase(
       return chain;
     }
     // Any other table access = the undo target write.
-    return { update: targetUpdate, match: targetMatch };
+    const targetChain: Record<string, unknown> = {
+      update: targetUpdate,
+      match: targetMatch,
+      eq: targetEq,
+      contains: targetContains,
+      select: targetSelect,
+      maybeSingle: targetMaybeSingle,
+      then: (resolve: (v: { error: null }) => unknown) => resolve({ error: null }),
+    };
+    targetUpdate.mockReturnValue(targetChain);
+    targetMatch.mockReturnValue(targetChain);
+    targetEq.mockReturnValue(targetChain);
+    targetContains.mockReturnValue(targetChain);
+    targetSelect.mockReturnValue(targetChain);
+    return targetChain;
   });
 
-  return { targetUpdate, targetMatch, parentMaybeSingle };
+  return {
+    targetUpdate,
+    targetMatch,
+    targetEq,
+    targetContains,
+    targetSelect,
+    targetMaybeSingle,
+    parentMaybeSingle,
+  };
 }
 
-function okAuth(guildId = 'guild-1', discordId = '123') {
-  mockRequirePermission.mockResolvedValue({ guildId, discordId });
+function okAuth(guildId = 'guild-1', discordId = '123', isOwner = true) {
+  mockRequirePermission.mockResolvedValue({ guildId, discordId, isOwner });
 }
 
 const validUndoBody = { action: 'undo', id: '00000000-0000-0000-0000-000000000001' };
 
 beforeEach(() => {
-    vi.resetAllMocks();
+  vi.resetAllMocks();
   mockRateLimit.mockResolvedValue(null); // not rate limited
   mockParseBody.mockResolvedValue({ ok: true, data: validUndoBody });
+  mockNotifyBot.mockResolvedValue(true);
+  mockRpc.mockImplementation(async (name: string, args: Record<string, unknown>) => ({
+    data: name === 'undo_onboarding_change'
+      ? {
+          status: 'applied',
+          sync_state: {
+            status: 'pending',
+            managed: true,
+            request_id: args.p_new_request_id,
+            requested_at: args.p_requested_at,
+          },
+          undo_record: { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' },
+        }
+      : null,
+    error: null,
+  }));
 });
 
 // ── Unit tests: validateUndoPayload ─────────────────────────
@@ -829,6 +878,188 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
     expect(mockSupabase.from).toHaveBeenCalledWith('economy_items');
     expect(targetUpdate).toHaveBeenCalledWith({ price: 5 });
     expect(targetMatch).toHaveBeenCalledWith({ id: 'item-9', guild_id: 'guild-1' });
+  });
+
+  it('creates a fresh sync receipt and notifies the bot when onboarding is undone', async () => {
+    okAuth('guild-1', 'admin-42');
+    wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: {
+        onboarding_enabled: true,
+        onboarding_sync_state: { request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+      },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+
+    const res = await POST(buildRequest(validUndoBody));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith('undo_onboarding_change', expect.objectContaining({
+      p_change_id: validUndoBody.id,
+      p_guild_id: 'guild-1',
+      p_actor_id: 'admin-42',
+      p_expected_request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      p_new_request_id: expect.any(String),
+      p_requested_at: expect.any(String),
+      p_undo_data: { onboarding_enabled: false },
+    }));
+    expect(mockNotifyBot).toHaveBeenCalledWith(
+      'guild-1',
+      'onboarding',
+      { onboarding_enabled: false },
+      'dashboard',
+      undefined,
+      undefined,
+      expect.any(String),
+    );
+    expect(json.data.onboardingSync).toEqual(expect.objectContaining({ status: 'pending' }));
+  });
+
+  it('returns an explicit warning when onboarding undo cannot notify the bot', async () => {
+    okAuth('guild-1', 'admin-42');
+    mockNotifyBot.mockResolvedValue(false);
+    wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: {
+        onboarding_enabled: true,
+        onboarding_sync_state: { request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+      },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+
+    const res = await POST(buildRequest(validUndoBody));
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json.success).toBe(true);
+    expect(json.warning).toBe('Change undone, but Discord synchronization could not be queued.');
+    expect(json.data.onboardingSync).toEqual(expect.objectContaining({ status: 'failed' }));
+  });
+
+  it('rejects an onboarding undo after a newer revision has been saved', async () => {
+    okAuth('guild-1', 'admin-42');
+    wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: {
+        onboarding_enabled: true,
+        onboarding_sync_state: { request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+      },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+    mockRpc.mockResolvedValue({ data: { status: 'stale' }, error: null });
+
+    const res = await POST(buildRequest(validUndoBody));
+    const json = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(json.error).toContain('changed since this revision');
+    expect(mockNotifyBot).not.toHaveBeenCalled();
+  });
+
+  it('leaves config and audit unchanged when the atomic onboarding undo fails', async () => {
+    okAuth('guild-1', 'admin-42');
+    const { targetUpdate } = wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: {
+        onboarding_enabled: true,
+        onboarding_sync_state: { request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+      },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'transaction rolled back' },
+    });
+
+    const res = await POST(buildRequest(validUndoBody));
+
+    expect(res.status).toBe(500);
+    expect(targetUpdate).not.toHaveBeenCalled();
+    expect(mockNotifyBot).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects onboarding undo from a delegated non-owner administrator', async () => {
+    okAuth('guild-1', 'admin-42', false);
+    const { targetUpdate } = wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: { onboarding_enabled: true },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+
+    const res = await POST(buildRequest(validUndoBody));
+    const json = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(json.error).toContain('server owner');
+    expect(targetUpdate).not.toHaveBeenCalled();
+    expect(mockNotifyBot).not.toHaveBeenCalled();
   });
 
   it('is a no-op (no target write) when undo_payload is null but still marks undone', async () => {

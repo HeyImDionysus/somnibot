@@ -131,7 +131,17 @@ async function installCommunityApi(
 
   await page.route('**/api/roles', (route) => fulfillJson(route, {
     success: true,
-    data: [{ id: ROLE_ID, name: 'Announcements', color: 0, managed: false, position: 1 }],
+    data: [{
+      id: ROLE_ID,
+      name: 'Announcements',
+      color: 0,
+      managed: false,
+      position: 1,
+      editableByBot: true,
+    }],
+    snapshotVersion: 2,
+    snapshotAt: new Date().toISOString(),
+    awaitingSnapshot: false,
   }));
 
   await page.route('**/api/tickets/panels', (route) => fulfillJson(route, {
@@ -195,7 +205,7 @@ test.describe('Community self-service browser flow', () => {
     await expect(page.getByText('Role message in #role-picks', { exact: true })).toBeVisible();
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByRole('button', { name: 'Save mapping' })).not.toBeVisible();
@@ -268,7 +278,7 @@ test.describe('Community self-service browser flow', () => {
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByText('Reaction role saved; server readback is unavailable')).toBeVisible();
@@ -297,7 +307,7 @@ test.describe('Community self-service browser flow', () => {
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByText('Reaction role saved; server readback is unavailable')).toBeVisible();
@@ -355,7 +365,7 @@ test.describe('Community self-service browser flow', () => {
     await page.getByLabel('Discord message link *').fill(`https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MESSAGE_ID}`);
     await page.getByLabel('Emoji *').fill('📣');
     await page.getByText('Select role to assign…', { exact: true }).click();
-    await page.getByRole('button', { name: /Announcements/ }).click();
+    await page.getByRole('option', { name: 'Announcements', exact: true }).click();
     await page.getByRole('button', { name: 'Save mapping' }).click();
 
     await expect(page.getByRole('button', { name: 'Saving mapping…' })).toBeDisabled();
@@ -402,5 +412,130 @@ test.describe('Community self-service browser flow', () => {
 
     await expect(page.getByText('Mapping status saved; server readback is unavailable')).toBeVisible();
     await expect(mappingSwitch).toHaveAttribute('aria-checked', 'true');
+  });
+
+  test('Given Discord normalizes onboarding, when an owner saves, then the authoritative receipt is shown without mobile overflow', async ({ page }, testInfo) => {
+    const requestId = '11111111-1111-4111-8111-111111111111';
+    let saved = false;
+    await page.route('**/api/onboarding', async (route) => {
+      if (route.request().method() === 'PUT') {
+        const payload = route.request().postDataJSON() as {
+          onboarding_config: {
+            default_channel_ids: string[];
+            prompts: Array<{ options: Array<{ role_ids?: string[]; channel_ids?: string[] }> }>;
+          };
+        };
+        expect(payload.onboarding_config.default_channel_ids).toEqual([CHANNEL_ID]);
+        expect(payload.onboarding_config.prompts[0].options[0].role_ids).toEqual([ROLE_ID]);
+        expect(payload.onboarding_config.prompts[0].options[0].channel_ids).toEqual([CHANNEL_ID]);
+        saved = true;
+        await fulfillJson(route, {
+          success: true,
+          sync: { status: 'pending', request_id: requestId },
+        });
+        return;
+      }
+      await fulfillJson(route, {
+        success: true,
+        data: {
+          member_role_id: ROLE_ID,
+          onboarding_enabled: true,
+          interest_role_mapping: {},
+          returning_member_skip_welcome_dm: true,
+          returning_member_restore_entitlements: true,
+          returning_member_restore_levels: true,
+          fallback_mode: 'grant-after-timeout',
+          fallback_timeout_minutes: 10,
+          onboarding_config: {
+            enabled: true,
+            prompts: [{
+              title: 'Choose your interests',
+              type: 'multiple_choice',
+              required: true,
+              single_select: false,
+              options: [{ title: 'Gaming', role_ids: [] }],
+            }],
+            default_channel_ids: [],
+          },
+          onboarding_sync_state: saved ? {
+            status: 'drifted',
+            request_id: requestId,
+            observed_at: '2030-01-01T00:00:00.000Z',
+            live_config: {
+              enabled: true,
+              prompts: [{
+                title: 'Choose your interests',
+                type: 'multiple_choice',
+                required: false,
+                single_select: false,
+                options: [{ title: 'Gaming', role_ids: [ROLE_ID], channel_ids: [] }],
+              }],
+              default_channel_ids: [CHANNEL_ID],
+            },
+          } : { status: 'idle' },
+        },
+      });
+    });
+    const longRoleName = `Member${'Role'.repeat(32)}`;
+    await page.route('**/api/roles', (route) => fulfillJson(route, {
+      success: true,
+      data: [{
+        id: ROLE_ID,
+        name: longRoleName,
+        color: 0,
+        managed: false,
+        position: 1,
+        editableByBot: true,
+      }],
+      snapshotVersion: 2,
+      snapshotAt: new Date().toISOString(),
+      awaitingSnapshot: false,
+    }));
+    await page.route('**/api/channels', (route) => fulfillJson(route, {
+      success: true,
+      channels: [{
+        id: CHANNEL_ID,
+        name: 'welcome',
+        type: 0,
+        position: 0,
+        parent_id: null,
+        botPermissions: '1024',
+        manageableByBot: true,
+      }],
+      categories: [],
+      snapshotAt: '2030-01-01T00:00:00.000Z',
+      awaitingSnapshot: false,
+    }));
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto('/onboarding');
+    await page.getByRole('combobox', { name: 'Default channels' }).click();
+    await page.getByRole('option', { name: 'welcome', exact: true }).click();
+    await page.keyboard.press('Escape');
+    const rolesGranted = page.getByRole('button', { name: 'Roles granted' });
+    await rolesGranted.click();
+    const rolesListbox = page.getByRole('listbox', { name: 'Roles granted' });
+    const longRoleOption = rolesListbox.getByRole('option', { name: longRoleName, exact: true });
+    await expect(longRoleOption).toHaveAttribute('aria-selected', 'false');
+    await longRoleOption.click();
+    await expect(longRoleOption).toHaveAttribute('aria-selected', 'true');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect(rolesListbox).toBeHidden();
+    await expect(rolesGranted).toBeFocused();
+    await page.getByRole('combobox', { name: 'Channels added' }).click();
+    await page.getByRole('option', { name: 'welcome', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await page.getByRole('checkbox', { name: 'Skip welcome DM for returning members' }).uncheck();
+    await page.getByRole('button', { name: 'Save Changes' }).click();
+
+    const driftReceipt = page.getByRole('alert').filter({ hasText: 'Discord differs from the saved request' });
+    await expect(driftReceipt).toContainText('Discord differs from the saved request');
+    await expect(driftReceipt).toContainText('1 live prompts and 1 live default channels');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await testInfo.attach('onboarding-authoritative-drift-mobile', {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: 'image/png',
+    });
   });
 });

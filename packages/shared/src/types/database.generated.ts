@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 298 migration files in packages/supabase/migrations/
+ * Source: 299 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -497,6 +497,7 @@ export interface DbGuildConfig {
   brand_background_storage_path: string | null;
   economy_pet_type_config: Json;
   economy_trivia_question_source: string;
+  onboarding_sync_state: Json;
 }
 
 export interface DbInstanceSettings {
@@ -2607,6 +2608,14 @@ export interface DbOnboardingFallbackIntents {
   completed_attempt_token: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DbOnboardingSyncLeases {
+  guild_id: string;
+  request_id: string;
+  lease_token: string;
+  acquired_at: string;
+  expires_at: string;
 }
 
 export interface DbPaymentRefunds {

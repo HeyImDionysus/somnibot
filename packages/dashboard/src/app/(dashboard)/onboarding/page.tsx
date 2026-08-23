@@ -13,6 +13,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
 
 interface OnboardingPromptOption {
   title: string;
@@ -48,6 +50,14 @@ interface OnboardingConfig {
   onboarding_config: NativeOnboardingConfig | null;
 }
 
+interface OnboardingSyncState {
+  status: 'idle' | 'pending' | 'synced' | 'drifted' | 'failed';
+  request_id?: string;
+  observed_at?: string;
+  error?: string;
+  live_config?: NativeOnboardingConfig;
+}
+
 interface DiscordRole {
   id: string;
   name: string;
@@ -67,6 +77,11 @@ const DEFAULT_CONFIG: OnboardingConfig = {
   onboarding_config: null,
 };
 
+function selectedIds(value: string | string[] | null): string[] {
+  if (Array.isArray(value)) return value;
+  return value ? [value] : [];
+}
+
 export default function OnboardingPage() {
   const { toast } = useToast();
 
@@ -77,6 +92,7 @@ export default function OnboardingPage() {
   const [dirty, setDirty] = useState(false);
   useUnsavedWarning(dirty);
   const [error, setError] = useState<string | null>(null);
+  const [syncState, setSyncState] = useState<OnboardingSyncState>({ status: 'idle' });
 
   // New interest mapping inputs
   const [newInterestName, setNewInterestName] = useState('');
@@ -93,7 +109,14 @@ export default function OnboardingPage() {
         const rolesJson = await rolesRes.json();
 
         if (configJson.success && configJson.data) {
-          setConfig({ ...DEFAULT_CONFIG, ...configJson.data });
+          const {
+            onboarding_sync_state: loadedSyncState,
+            ...loadedConfig
+          } = configJson.data as OnboardingConfig & {
+            onboarding_sync_state?: OnboardingSyncState;
+          };
+          setConfig({ ...DEFAULT_CONFIG, ...loadedConfig });
+          setSyncState(loadedSyncState ?? { status: 'idle' });
         }
         if (rolesJson.success && rolesJson.data) {
           setRoles(rolesJson.data);
@@ -125,9 +148,46 @@ export default function OnboardingPage() {
         body: JSON.stringify(config),
       });
       const json = await res.json();
-      if (!json.success) throw new Error(json.error);
-      toast({ title: 'Settings saved', variant: 'success' });
+      if (json.sync) setSyncState(json.sync as OnboardingSyncState);
+      if (!json.success) {
+        if (json.saved) setDirty(false);
+        throw new Error(json.error);
+      }
       setDirty(false);
+
+      const requestId = (json.sync as OnboardingSyncState).request_id;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const statusResponse = await fetch('/api/onboarding', { cache: 'no-store' });
+        const statusJson = await statusResponse.json();
+        const nextSync = statusJson.data?.onboarding_sync_state as OnboardingSyncState | undefined;
+        if (!statusJson.success || !nextSync || nextSync.request_id !== requestId) continue;
+        setSyncState(nextSync);
+        if (nextSync.status === 'pending' || nextSync.status === 'idle') continue;
+        if (nextSync.status === 'synced') {
+          toast({ title: 'Settings saved and verified in Discord', variant: 'success' });
+          return;
+        }
+        if (nextSync.status === 'drifted') {
+          const message = 'Discord accepted a different onboarding state. Review the authoritative readback below.';
+          setError(message);
+          toast({ title: message, variant: 'error' });
+          return;
+        }
+        const message = nextSync.error ?? 'Discord rejected the onboarding synchronization.';
+        setError(message);
+        toast({ title: message, variant: 'error' });
+        return;
+      }
+
+      const timeoutMessage = 'Settings were saved, but Discord did not confirm synchronization within 15 seconds.';
+      const timeoutState: OnboardingSyncState = {
+        status: 'pending',
+        request_id: requestId,
+        error: timeoutMessage,
+      };
+      setSyncState(timeoutState);
+      toast({ title: timeoutMessage, variant: 'error' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save';
       setError(msg);
@@ -155,6 +215,28 @@ export default function OnboardingPage() {
       const mapping = { ...prev.interest_role_mapping };
       delete mapping[key];
       return { ...prev, interest_role_mapping: mapping };
+    });
+  };
+
+  const updatePromptOption = (
+    promptIndex: number,
+    optionIndex: number,
+    updates: Partial<OnboardingPromptOption>,
+  ) => {
+    setConfig((prev) => {
+      const onboardingConfig = prev.onboarding_config ?? {
+        enabled: true,
+        prompts: [],
+        default_channel_ids: [],
+      };
+      const prompts = [...onboardingConfig.prompts];
+      const options = [...prompts[promptIndex].options];
+      options[optionIndex] = { ...options[optionIndex], ...updates };
+      prompts[promptIndex] = { ...prompts[promptIndex], options };
+      return {
+        ...prev,
+        onboarding_config: { ...onboardingConfig, prompts },
+      };
     });
   };
 
@@ -215,12 +297,39 @@ export default function OnboardingPage() {
               className="peer sr-only"
               checked={config.onboarding_enabled}
               onChange={(e) =>
-                setConfig((prev) => ({ ...prev, onboarding_enabled: e.target.checked }))
+                setConfig((prev) => ({
+                  ...prev,
+                  onboarding_enabled: e.target.checked,
+                  onboarding_config: prev.onboarding_config
+                    ? { ...prev.onboarding_config, enabled: e.target.checked }
+                    : null,
+                }))
               }
             />
             <div className="peer h-6 w-11 rounded-full bg-discord-bg-tertiary after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all peer-checked:bg-green-500 peer-checked:after:translate-x-full" />
           </label>
         </div>
+        {syncState.status !== 'idle' && (
+          <div
+            className={`mt-4 rounded-md border px-4 py-3 text-sm ${
+              syncState.status === 'synced'
+                ? 'border-green-500/30 bg-green-500/10 text-green-300'
+                : syncState.status === 'pending'
+                  ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-200'
+                  : 'border-red-500/30 bg-red-500/10 text-red-300'
+            }`}
+            role={syncState.status === 'failed' || syncState.status === 'drifted' ? 'alert' : 'status'}
+          >
+            {syncState.status === 'pending' && 'Saved. Waiting for the bot to apply and read back Discord onboarding.'}
+            {syncState.status === 'synced' && (
+              `Verified in Discord: ${syncState.live_config?.prompts.length ?? 0} prompts and ${syncState.live_config?.default_channel_ids.length ?? 0} default channels.`
+            )}
+            {syncState.status === 'drifted' && (
+              `Discord differs from the saved request: ${syncState.live_config?.prompts.length ?? 0} live prompts and ${syncState.live_config?.default_channel_ids.length ?? 0} live default channels.`
+            )}
+            {syncState.status === 'failed' && (syncState.error ?? 'Discord synchronization failed.')}
+          </div>
+        )}
       </section>
 
       {/* Member Role Selection */}
@@ -331,6 +440,22 @@ export default function OnboardingPage() {
             New members see these when they first join the server.
           </p>
 
+          <ChannelPicker
+            multi
+            value={config.onboarding_config?.default_channel_ids ?? []}
+            onChange={(value) => setConfig((prev) => ({
+              ...prev,
+              onboarding_config: {
+                ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }),
+                default_channel_ids: selectedIds(value),
+              },
+            }))}
+            label="Default channels"
+            hint="Channels every new member receives through Discord onboarding. SomniBot never creates or exposes channels automatically."
+            placeholder="Select existing Discord channels"
+            className="mt-4"
+          />
+
           <div className="mt-4 space-y-3">
             {(config.onboarding_config?.prompts ?? []).map((prompt, pIdx) => (
               <div
@@ -419,24 +544,16 @@ export default function OnboardingPage() {
                 {/* Options */}
                 <div className="space-y-1.5 pl-2">
                   {prompt.options.map((opt, oIdx) => (
-                    <div key={oIdx} className="flex items-center gap-2">
-                      <input
+                    <div key={oIdx} className="rounded border border-discord-border-subtle p-3">
+                      <div className="flex items-center gap-2">
+                        <input
                         type="text"
                         value={opt.title}
-                        onChange={(e) => {
-                          const prompts = [...(config.onboarding_config?.prompts ?? [])];
-                          const options = [...prompts[pIdx].options];
-                          options[oIdx] = { ...options[oIdx], title: e.target.value };
-                          prompts[pIdx] = { ...prompts[pIdx], options };
-                          setConfig((prev) => ({
-                            ...prev,
-                            onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
-                          }));
-                        }}
+                        onChange={(e) => updatePromptOption(pIdx, oIdx, { title: e.target.value })}
                         placeholder="Option title..."
                         className="flex-1 rounded border border-discord-border-subtle bg-discord-bg-primary px-2 py-1 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
                       />
-                      <button
+                        <button
                         onClick={() => {
                           const prompts = [...(config.onboarding_config?.prompts ?? [])];
                           prompts[pIdx] = {
@@ -451,7 +568,30 @@ export default function OnboardingPage() {
                         className="text-xs text-red-400 hover:text-red-300"
                       >
                         ✕
-                      </button>
+                        </button>
+                      </div>
+                      <div className="grid gap-3 pt-2 sm:grid-cols-2">
+                        <RolePicker
+                          multi
+                          value={opt.role_ids ?? []}
+                          onChange={(value) => updatePromptOption(pIdx, oIdx, {
+                            role_ids: selectedIds(value),
+                          })}
+                          label="Roles granted"
+                          placeholder="No roles"
+                          hideEveryone
+                          requireAssignable
+                        />
+                        <ChannelPicker
+                          multi
+                          value={opt.channel_ids ?? []}
+                          onChange={(value) => updatePromptOption(pIdx, oIdx, {
+                            channel_ids: selectedIds(value),
+                          })}
+                          label="Channels added"
+                          placeholder="No channels"
+                        />
+                      </div>
                     </div>
                   ))}
                   <button
@@ -575,7 +715,7 @@ export default function OnboardingPage() {
           disabled={saving}
           className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-medium text-white hover:bg-discord-accent-hover disabled:opacity-50"
         >
-          {saving ? 'Saving...' : 'Save Changes'}
+          {saving ? 'Saving and syncing...' : 'Save Changes'}
         </button>
         {error && <span className="text-sm text-red-400">{error}</span>}
       </div>
