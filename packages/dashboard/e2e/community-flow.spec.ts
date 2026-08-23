@@ -515,8 +515,10 @@ test.describe('Community self-service browser flow', () => {
     const rolesGranted = page.getByRole('button', { name: 'Roles granted' });
     await rolesGranted.click();
     const rolesListbox = page.getByRole('listbox', { name: 'Roles granted' });
-    await rolesListbox.getByRole('option', { name: longRoleName, exact: true }).click();
-    await expect(rolesListbox.getByRole('option', { name: longRoleName, exact: true })).toHaveAttribute('aria-selected', 'true');
+    const longRoleOption = rolesListbox.getByRole('option', { name: longRoleName, exact: true });
+    await expect(longRoleOption).toHaveAttribute('aria-selected', 'false');
+    await longRoleOption.click();
+    await expect(longRoleOption).toHaveAttribute('aria-selected', 'true');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await page.keyboard.press('Escape');
     await expect(rolesListbox).toBeHidden();
