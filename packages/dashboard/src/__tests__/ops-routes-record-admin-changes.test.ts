@@ -141,7 +141,7 @@ function createAdminMock(config: Record<string, QueryResult[] | QueryResult> = {
 
   const client = {
     from,
-    rpc: vi.fn(async (name: string, params?: Record<string, unknown>) => {
+    rpc: vi.fn(async (name: string, params?: Record<string, unknown>): Promise<QueryResult> => {
       if (name === 'request_server_deployment') {
         return {
           data: {
