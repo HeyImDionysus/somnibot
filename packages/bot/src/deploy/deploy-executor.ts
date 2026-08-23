@@ -193,26 +193,39 @@ export async function executeClaimedDeployment(
         entityName: 'Deployment completion',
         error: 'Failed to settle the claimed deployment request',
       });
+      deployStatus.status = 'failed';
+      deployStatus.completedAt = new Date().toISOString();
+      deployStatus.currentAction = 'Claim ownership was lost before terminal settlement';
+      deployStatus.result = result;
+      log.error('Deployment claim was no longer owned; terminal events remain authoritative to storage', {
+        guildId,
+        deployId,
+      });
+      return;
     }
 
     const finalError = result.errors
       .map((error) => `${error.entityName}: ${error.error}`)
       .join('; ');
-    await writeAuditLog(client.supabase, {
-      guildId,
-      actorType: 'bot',
-      actorId: 'deployer',
-      action: result.success ? 'deploy.completed' : 'deploy.failed',
-      category: 'sync',
-      details: {
-        deployId,
-        duration: result.duration,
-        actionCount: result.actions.length,
-        errorCount: result.errors.length,
-      },
-      success: result.success,
-      errorMessage: finalError || undefined,
-    });
+    try {
+      await writeAuditLog(client.supabase, {
+        guildId,
+        actorType: 'bot',
+        actorId: 'deployer',
+        action: result.success ? 'deploy.completed' : 'deploy.failed',
+        category: 'sync',
+        details: {
+          deployId,
+          duration: result.duration,
+          actionCount: result.actions.length,
+          errorCount: result.errors.length,
+        },
+        success: result.success,
+        errorMessage: finalError || undefined,
+      });
+    } catch (auditError) {
+      log.error('Failed to write terminal deployment audit:', auditError);
+    }
 
     deployStatus.status = result.success ? 'success' : 'failed';
     deployStatus.completedAt = new Date().toISOString();
@@ -255,25 +268,28 @@ export async function executeClaimedDeployment(
     deployStatus.completedAt = new Date().toISOString();
     deployStatus.currentAction = `Fatal error: ${errorMessage}`;
 
+    let settled = false;
     try {
-      const settled = await settleDeployRequest(client, request, false, errorMessage);
+      settled = await settleDeployRequest(client, request, false, errorMessage);
       if (!settled) log.error('Fatal deployment claim was no longer owned', { guildId, deployId });
     } catch (settlementError) {
       log.error('Failed to settle fatal deployment:', settlementError);
     }
-    try {
-      await writeAuditLog(client.supabase, {
-        guildId,
-        actorType: 'bot',
-        actorId: 'deployer',
-        action: 'deploy.fatal',
-        category: 'sync',
-        details: { deployId },
-        success: false,
-        errorMessage,
-      });
-    } catch (auditError) {
-      log.error('Failed to write fatal deployment audit:', auditError);
+    if (settled) {
+      try {
+        await writeAuditLog(client.supabase, {
+          guildId,
+          actorType: 'bot',
+          actorId: 'deployer',
+          action: 'deploy.fatal',
+          category: 'sync',
+          details: { deployId },
+          success: false,
+          errorMessage,
+        });
+      } catch (auditError) {
+        log.error('Failed to write fatal deployment audit:', auditError);
+      }
     }
   }
 }

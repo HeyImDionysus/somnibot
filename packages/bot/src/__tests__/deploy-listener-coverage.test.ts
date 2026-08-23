@@ -643,7 +643,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(mockWriteAuditLog).toHaveBeenCalled();
   });
 
-  it('reports failure when the claimed request cannot be settled', async () => {
+  it('publishes no terminal result when the claimed request cannot be settled', async () => {
     const client = makeClient();
     client._setSettleResult(false);
     startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
@@ -653,27 +653,50 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       new: { applied_at: null, roles: [{ name: 'x' }], channels: [] },
     });
 
-    expect(client.eventBus.emit).toHaveBeenCalledWith(
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
       'deploy.failed',
       'g1',
-      expect.objectContaining({ error: expect.stringContaining('Failed to settle the claimed deployment request') }),
+      expect.anything(),
     );
     expect(client.eventBus.emit).not.toHaveBeenCalledWith(
       'server.deployed',
       'g1',
       expect.anything(),
     );
-    expect(mockWriteAuditLog).toHaveBeenCalledWith(
+    expect(mockWriteAuditLog).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         action: 'deploy.failed',
-        errorMessage: expect.stringContaining('Failed to settle the claimed deployment request'),
       }),
     );
     expect(mockWriteAuditLog).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ action: 'deploy.completed' }),
     );
+  });
+
+  it('keeps a settled success authoritative when terminal audit reporting throws', async () => {
+    mockWriteAuditLog
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('terminal audit unavailable'));
+    const client = makeClient();
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'x' }], channels: [] },
+    });
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith(
+      'settle_deploy_request',
+      expect.objectContaining({ p_success: true }),
+    );
+    expect(client.eventBus.emit).toHaveBeenCalledWith(
+      'server.deployed',
+      'g1',
+      expect.anything(),
+    );
+    expect(getDeployStatus('g1')).toEqual(expect.objectContaining({ status: 'success' }));
   });
 
   it('parses categories from channel categoryKeys', async () => {
