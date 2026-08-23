@@ -6,6 +6,9 @@
  * role creation, category creation, channel creation, error handling.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Guild } from 'discord.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { DesiredState } from '@somnibot/shared';
 
 const mockCheckBotRolePosition = vi.fn(async (): Promise<any> => ({
   isTopPosition: true,
@@ -98,7 +101,7 @@ function makeGuild(overrides: Record<string, any> = {}) {
     return role;
   });
 
-  return {
+  const mockGuild = {
     id: 'g1',
     roles: {
       cache: roles,
@@ -133,6 +136,7 @@ function makeGuild(overrides: Record<string, any> = {}) {
     client: { user: { id: 'bot1' } },
     ...overrides,
   };
+  return mockGuild as typeof mockGuild & Guild;
 }
 
 function supaChain(data: any = null, error: any = null) {
@@ -147,7 +151,12 @@ function supaChain(data: any = null, error: any = null) {
   return c;
 }
 
-const defaultDesiredState = {
+function makeSupabase() {
+  const supabase = { from: vi.fn(() => supaChain()) };
+  return supabase as typeof supabase & SupabaseClient;
+}
+
+const defaultDesiredState: DesiredState = {
   everyonePermissions: '0',
   roles: [],
   categories: [],
@@ -228,14 +237,14 @@ describe('deployServerState — @everyone', () => {
 
   it('sets @everyone permissions to 0 during a destructive deploy', async () => {
     const guild = makeGuild();
-    const supabase = { from: vi.fn(() => supaChain()) };
+    const supabase = makeSupabase();
     const options: DeployOptions = { cleanExisting: true, dryRun: false };
 
     const desiredState = { ...defaultDesiredState };
     const result = await deployServerState(
-      guild as unknown as Parameters<typeof deployServerState>[0],
-      supabase as unknown as Parameters<typeof deployServerState>[1],
-      desiredState as unknown as Parameters<typeof deployServerState>[2],
+      guild,
+      supabase,
+      desiredState,
       options,
     );
 
@@ -269,7 +278,7 @@ describe('deployServerState — role creation', () => {
       ...defaultDesiredState,
       roles: [
         { key: 'mod', name: 'Moderator', color: 0x00FF00, permissions: '0', hoist: true, mentionable: false, position: 2 },
-        { key: 'member', name: 'Member', color: 0x0000FF, permissions: '0', hoist: false, mentionable: true, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0x0000FF, permissions: '0', hoist: false, mentionable: true, position: 1 },
       ],
     };
 
@@ -296,8 +305,8 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -328,8 +337,8 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -365,8 +374,8 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -414,7 +423,7 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
       ],
     };
 
@@ -449,8 +458,8 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -477,19 +486,19 @@ describe('deployServerState — role creation', () => {
       managed: true,
       editable: false,
     });
-    const supabase = { from: vi.fn(() => supaChain()) };
+    const supabase = makeSupabase();
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
     const result = await deployServerState(
-      guild as unknown as Parameters<typeof deployServerState>[0],
-      supabase as unknown as Parameters<typeof deployServerState>[1],
-      desiredState as unknown as Parameters<typeof deployServerState>[2],
+      guild,
+      supabase,
+      desiredState,
       { cleanExisting: false, dryRun: false },
     );
 
@@ -517,19 +526,19 @@ describe('deployServerState — role creation', () => {
       }
       return role;
     });
-    const supabase = { from: vi.fn(() => supaChain()) };
+    const supabase = makeSupabase();
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
     const result = await deployServerState(
-      guild as unknown as Parameters<typeof deployServerState>[0],
-      supabase as unknown as Parameters<typeof deployServerState>[1],
-      desiredState as unknown as Parameters<typeof deployServerState>[2],
+      guild,
+      supabase,
+      desiredState,
       { cleanExisting: false, dryRun: false, abortSignal: abortController.signal },
     );
 
@@ -543,7 +552,7 @@ describe('deployServerState — role creation', () => {
   it('renews ownership immediately before each Discord mutation', async () => {
     const abortController = new AbortController();
     const guild = makeGuild();
-    const supabase = { from: vi.fn(() => supaChain()) };
+    const supabase = makeSupabase();
     let ownershipChecks = 0;
     const assertOwnership = vi.fn(async () => {
       ownershipChecks++;
@@ -556,15 +565,15 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
     const result = await deployServerState(
-      guild as unknown as Parameters<typeof deployServerState>[0],
-      supabase as unknown as Parameters<typeof deployServerState>[1],
-      desiredState as unknown as Parameters<typeof deployServerState>[2],
+      guild,
+      supabase,
+      desiredState,
       {
         cleanExisting: false,
         dryRun: false,
@@ -600,7 +609,7 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
       ],
     };
 
@@ -632,7 +641,7 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -672,12 +681,12 @@ describe('deployServerState — clean existing', () => {
     const guild = makeGuild({
       channels: { cache: channels, create: vi.fn() },
     });
-    const supabase = { from: vi.fn(() => supaChain()) };
+    const supabase = makeSupabase();
 
     const result = await deployServerState(
-      guild as unknown as Parameters<typeof deployServerState>[0],
-      supabase as unknown as Parameters<typeof deployServerState>[1],
-      defaultDesiredState as unknown as Parameters<typeof deployServerState>[2],
+      guild,
+      supabase,
+      defaultDesiredState,
       { cleanExisting: true, dryRun: false, abortSignal: abortController.signal },
     );
 
@@ -754,13 +763,13 @@ describe('deployServerState — progress callback', () => {
         create: vi.fn(),
       },
     });
-    const supabase = { from: vi.fn(() => supaChain()) };
+    const supabase = makeSupabase();
     const onProgress = vi.fn();
 
     await deployServerState(
-      guild as unknown as Parameters<typeof deployServerState>[0],
-      supabase as unknown as Parameters<typeof deployServerState>[1],
-      defaultDesiredState as unknown as Parameters<typeof deployServerState>[2],
+      guild,
+      supabase,
+      defaultDesiredState,
       { cleanExisting: false, dryRun: false, onProgress },
     );
 
@@ -808,8 +817,8 @@ describe('deployServerState — managed roles OUTSIDE the target band are not ba
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 

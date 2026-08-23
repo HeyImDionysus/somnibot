@@ -5,6 +5,7 @@
  * parseDesiredState, executeDeployDirect
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { SomniClient } from '../client.js';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -106,7 +107,7 @@ function makeClient() {
     }),
   };
 
-  return {
+  const client = {
     guildId: 'g1',
     guilds: {
       cache: {
@@ -203,6 +204,7 @@ function makeClient() {
       claimResultOverride = value;
     },
   };
+  return client as SomniClient & typeof client;
 }
 
 describe('getDeployStatus', () => {
@@ -221,7 +223,7 @@ describe('startDeployListener', () => {
 
   it('subscribes to realtime channel', () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     expect(client.supabase.channel).toHaveBeenCalledWith('deploy-listener');
     expect(client._channelObj.subscribe).toHaveBeenCalled();
   });
@@ -240,13 +242,13 @@ describe('startDeployListener', () => {
       error: null,
     }));
 
-    startDeployListener(client as any);
+    startDeployListener(client);
     await vi.waitFor(() => expect(mockDeployServerState).toHaveBeenCalled());
   });
 
   it('subscribes to all guild desired-state updates', () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     expect(client._channelObj.on).toHaveBeenCalledWith(
       'postgres_changes',
@@ -262,13 +264,13 @@ describe('startDeployListener', () => {
 
   it('registers event bus listener for deploy.requested', () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     expect(client.eventBus.on).toHaveBeenCalledWith('deploy.requested', expect.any(Function));
   });
 
   it('handles realtime deploy trigger', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     // Get the realtime callback
     const cb = client._realtimeCallback();
@@ -289,7 +291,7 @@ describe('startDeployListener', () => {
 
   it('reconciles interrupted requests only once across realtime reconnects', async () => {
     const client = makeClient();
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
 
     client._resubscribe();
     client._resubscribe();
@@ -302,7 +304,7 @@ describe('startDeployListener', () => {
 
   it('claims one requested deployment and ignores the running-state echo', async () => {
     const client = makeClient();
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const callback = client._realtimeCallback();
     const requestId = '11111111-1111-4111-8111-111111111111';
 
@@ -343,7 +345,7 @@ describe('startDeployListener', () => {
   it('settles a claimed request as failed when its desired state is malformed', async () => {
     const client = makeClient();
     client._setClaimResult({ roles: null });
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const callback = client._realtimeCallback();
 
     await expect(callback!({
@@ -369,7 +371,7 @@ describe('startDeployListener', () => {
 
   it('uses destructive mode only when the reviewed row explicitly requests it', async () => {
     const client = makeClient();
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback();
 
     await cb!({
@@ -392,7 +394,7 @@ describe('startDeployListener', () => {
 
   it('handles realtime deploy trigger for a non-primary guild', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     const cb = client._realtimeCallback();
     await cb!({
@@ -416,7 +418,7 @@ describe('startDeployListener', () => {
 
   it('ignores realtime updates when applied_at is set', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback();
 
     await cb!({
@@ -428,7 +430,7 @@ describe('startDeployListener', () => {
 
   it('deploys a reviewed empty plan', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback();
 
     await cb!({ new: { applied_at: null, roles: [], channels: [] } });
@@ -454,7 +456,7 @@ describe('startDeployListener', () => {
       error: null,
     });
     client.supabase.from.mockReturnValue(desiredStateQuery);
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     await client._fireEvent('deploy.requested', {}, 'g2');
     expect(desiredStateQuery.eq).toHaveBeenCalledWith('guild_id', 'g2');
@@ -469,7 +471,7 @@ describe('startDeployListener', () => {
   it('handles event bus deploy when no state found', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     await client._fireEvent('deploy.requested', {});
     expect(mockDeployServerState).not.toHaveBeenCalled();
@@ -493,7 +495,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       finishDeployment = resolve;
     }));
     const client = makeClient();
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     const deployment = cb({
@@ -529,7 +531,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       finishRenewal = resolve;
       renewalStarted();
     }));
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     const deployment = cb({
@@ -553,7 +555,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       await options.assertOwnership?.();
       throw new Error('ownership assertion unexpectedly returned');
     });
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -572,7 +574,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('suppresses post-deploy writes when final ownership verification fails', async () => {
     const client = makeClient();
     client._setRenewResults([true, false]);
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -592,7 +594,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('leaves ID mapping persistence to the deployer', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -605,7 +607,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('settles the claimed desired state as successful', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -622,7 +624,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     mockWriteAuditBatch.mockRejectedValueOnce(new Error('audit unavailable'));
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -642,7 +644,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('emits server.deployed event', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -657,7 +659,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('writes guild snapshot after deploy', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -678,7 +680,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -695,7 +697,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -713,7 +715,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -727,7 +729,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('publishes no terminal result when the claimed request cannot be settled', async () => {
     const client = makeClient();
     client._setSettleResult(false);
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -761,7 +763,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('terminal audit unavailable'));
     const client = makeClient();
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -791,7 +793,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -817,7 +819,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('preserves stored category names exactly', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -838,7 +840,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     const client = makeClient();
     client.guilds.cache.get.mockReturnValue(undefined);
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
