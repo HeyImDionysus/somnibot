@@ -63,11 +63,12 @@ export async function GET() {
   }
 
   // Get desired state
-  const { data: desiredStateRow } = await admin
+  const { data: desiredStateRow, error: desiredStateError } = await admin
     .from('guild_desired_state')
     .select(PUBLIC_DESIRED_STATE_COLUMNS)
     .eq('guild_id', guildId)
     .single();
+  if (desiredStateError) return dbError(desiredStateError, 'guild');
   const desiredState = toPublicDesiredState(desiredStateRow);
 
   const { data: liveState } = await admin

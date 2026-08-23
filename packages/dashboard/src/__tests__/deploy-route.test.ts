@@ -12,6 +12,7 @@ import { GET, POST } from '@/app/api/deploy/route';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { PUBLIC_DESIRED_STATE_COLUMNS } from '@/lib/public-desired-state';
 
 const categories = [
   { key: 'cat-information', name: 'Information', position: 0 },
@@ -260,5 +261,19 @@ describe('GET /api/deploy status', () => {
     expect(body.desiredState).not.toHaveProperty('deploy_claimed_by');
     expect(body.desiredState).not.toHaveProperty('deploy_claim_expires_at');
     expect(body.desiredState).not.toHaveProperty('deploy_error');
+    expect(supabase.builders.get('guild_desired_state')?.select)
+      .toHaveBeenCalledWith(PUBLIC_DESIRED_STATE_COLUMNS);
+  });
+
+  it('fails closed when deployment status cannot be read', async () => {
+    const supabase = makeSupabase(
+      { guild: { setup_completed: false, setup_confirmed_at: null } },
+      { guild_desired_state: { message: 'invalid projection' } },
+    );
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await GET();
+
+    expect(response.status).toBe(500);
   });
 });

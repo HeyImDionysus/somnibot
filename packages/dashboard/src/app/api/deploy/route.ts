@@ -174,11 +174,12 @@ export async function GET() {
   const admin = createAdminSupabase();
 
   // Get current desired state
-  const { data: desiredStateRow } = await admin
+  const { data: desiredStateRow, error: desiredStateError } = await admin
     .from('guild_desired_state')
     .select(PUBLIC_DESIRED_STATE_COLUMNS)
     .eq('guild_id', guildId)
     .single();
+  if (desiredStateError) return dbError(desiredStateError, 'deploy');
   const desiredState = toPublicDesiredState(desiredStateRow);
 
   // Get guild setup status
