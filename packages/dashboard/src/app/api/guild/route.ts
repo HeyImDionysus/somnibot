@@ -67,7 +67,7 @@ export async function GET() {
     .from('guild_desired_state')
     .select(PUBLIC_DESIRED_STATE_COLUMNS)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
   if (desiredStateError) return dbError(desiredStateError, 'guild');
   const desiredState = toPublicDesiredState(desiredStateRow);
 

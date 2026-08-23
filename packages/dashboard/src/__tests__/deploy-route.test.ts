@@ -240,8 +240,8 @@ describe('GET /api/deploy status', () => {
         categories,
         deploy_status: 'running',
         deploy_claim_token: 'internal-claim-token',
-        deploy_claimed_by: 'bot-instance-1',
-        deploy_claim_expires_at: '2026-08-23T09:40:00.000Z',
+        deploy_claimed_at: '2026-08-23T09:38:00.000Z',
+        deploy_lease_expires_at: '2026-08-23T09:40:00.000Z',
         deploy_error: 'internal stack details',
       },
       guild: { setup_completed: false, setup_confirmed_at: null },
@@ -258,8 +258,8 @@ describe('GET /api/deploy status', () => {
       deploy_status: 'running',
     });
     expect(body.desiredState).not.toHaveProperty('deploy_claim_token');
-    expect(body.desiredState).not.toHaveProperty('deploy_claimed_by');
-    expect(body.desiredState).not.toHaveProperty('deploy_claim_expires_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_claimed_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_lease_expires_at');
     expect(body.desiredState).not.toHaveProperty('deploy_error');
     expect(supabase.builders.get('guild_desired_state')?.select)
       .toHaveBeenCalledWith(PUBLIC_DESIRED_STATE_COLUMNS);
@@ -275,5 +275,18 @@ describe('GET /api/deploy status', () => {
     const response = await GET();
 
     expect(response.status).toBe(500);
+  });
+
+  it('returns an empty status when a fresh guild has no desired state yet', async () => {
+    const supabase = makeSupabase({
+      guild: { setup_completed: false, setup_confirmed_at: null },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.desiredState).toBeNull();
   });
 });

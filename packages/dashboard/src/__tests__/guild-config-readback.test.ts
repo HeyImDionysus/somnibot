@@ -58,8 +58,8 @@ describe('GET /api/guild config readback', () => {
       roles: [{ key: 'member' }],
       deploy_status: 'running',
       deploy_claim_token: 'internal-claim-token',
-      deploy_claimed_by: 'bot-instance-1',
-      deploy_claim_expires_at: '2026-08-23T09:40:00.000Z',
+      deploy_claimed_at: '2026-08-23T09:38:00.000Z',
+      deploy_lease_expires_at: '2026-08-23T09:40:00.000Z',
       deploy_error: 'internal stack details',
     });
     const liveState = query({ member_count: 3 });
@@ -79,8 +79,8 @@ describe('GET /api/guild config readback', () => {
       deploy_status: 'running',
     });
     expect(body.desiredState).not.toHaveProperty('deploy_claim_token');
-    expect(body.desiredState).not.toHaveProperty('deploy_claimed_by');
-    expect(body.desiredState).not.toHaveProperty('deploy_claim_expires_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_claimed_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_lease_expires_at');
     expect(body.desiredState).not.toHaveProperty('deploy_error');
     expect(desiredState.select).toHaveBeenCalledWith(PUBLIC_DESIRED_STATE_COLUMNS);
   });
@@ -100,5 +100,24 @@ describe('GET /api/guild config readback', () => {
     const response = await GET();
 
     expect(response.status).toBe(500);
+  });
+
+  it('returns null desired state for a fresh guild', async () => {
+    const guild = query({ id: GUILD_ID, guild_config: {} });
+    const desiredState = query(null);
+    const liveState = query({ member_count: 3 });
+    vi.mocked(createAdminSupabase).mockReturnValue({
+      from: vi.fn((table: string) => {
+        if (table === 'guild') return guild;
+        if (table === 'guild_desired_state') return desiredState;
+        return liveState;
+      }),
+    } as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.desiredState).toBeNull();
   });
 });
