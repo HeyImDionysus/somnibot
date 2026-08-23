@@ -304,8 +304,6 @@ export class AppealsManager {
       log.error('Failed to decide appeal:', error.message);
       return null;
     }
-    // TODO(audit): appeal.approved / appeal.denied — emit an audit event once the
-    // audit wave wires appeal.* into events.ts / audit-service.ts.
     return (data as AppealRecord) ?? null;
   }
 

@@ -128,9 +128,6 @@ export async function PATCH(req: NextRequest) {
     );
   }
 
-  // TODO(audit): appeal.approved / appeal.denied — emit an audit event once the
-  // audit wave wires appeal.* into events.ts / audit-service.ts.
-
   // The decided row is what the atomic update returned, so no second read can
   // disagree with it. The prior status is known exactly: only a 'pending' row
   // could have matched.

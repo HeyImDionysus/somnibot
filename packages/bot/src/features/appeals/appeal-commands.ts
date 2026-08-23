@@ -108,9 +108,6 @@ export async function handleAppealCommand(
       return;
     }
 
-    // TODO(audit): appeal.submitted — emit an audit event once the audit wave
-    // wires appeal.* into events.ts / audit-service.ts.
-
     if (result.deduped) {
       await interaction.editReply('⏳ You already have a pending appeal for that infraction.');
       return;

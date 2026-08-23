@@ -396,18 +396,18 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <input
             type="text"
             placeholder="Interest name..."
             value={newInterestName}
             onChange={(e) => setNewInterestName(e.target.value)}
-            className="flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
+            className="min-w-0 flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
           />
           <select
             value={newInterestRole}
             onChange={(e) => setNewInterestRole(e.target.value)}
-            className="flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+            className="min-w-0 flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
           >
             <option value="">Select role...</option>
             {roles

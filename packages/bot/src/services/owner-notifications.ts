@@ -13,7 +13,11 @@ import { EmbedBuilder, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
-import type { PlatformEvent } from '@somnibot/shared';
+import type {
+  PlatformEvent,
+  PlatformEventMap,
+  PlatformEventType,
+} from '@somnibot/shared';
 
 const log = createLogger('OwnerNotify');
 
@@ -25,15 +29,12 @@ interface NotificationConfig {
   fraudOwnerDmOnCritical: boolean;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyHandler = (event: PlatformEvent<any>) => void;
-
 export class OwnerNotificationService {
   private config: NotificationConfig | null = null;
   private cooldowns = new Map<string, number>(); // eventType → lastSentTimestamp
   private cooldownMs = 60_000; // 1 minute between same event type
   // V10 Audit M-5: Store listener references so stop() can remove them.
-  private boundListeners: Array<{ type: string; handler: AnyHandler }> = [];
+  private listenerDisposers: Array<() => void> = [];
 
   constructor(
     private client: Client,
@@ -73,14 +74,14 @@ export class OwnerNotificationService {
     // channel, and DM the owner ONLY for critical signals when owner-dm-on-critical
     // is on — never leak buyer payment details.
     this.listen('fraud.detected', (event) => {
-      const data = event.data as Record<string, unknown>;
+      const data = event.data;
       const severity = String(data.severity ?? '');
       void this.notifyFraud(severity, data);
     });
 
     // incident.created — emitted when a critical incident is auto-created
     this.listen('incident.created', (event) => {
-      const data = event.data as Record<string, unknown>;
+      const data = event.data;
       const severity = String(data.severity ?? '');
       if (severity === 'critical' || severity === 'high') {
         this.notify('incident.created', {
@@ -97,7 +98,7 @@ export class OwnerNotificationService {
 
     // moderation.action — emitted by moderation/commands.ts on warn, mute, kick, ban
     this.listen('moderation.action', (event) => {
-      const data = event.data as Record<string, unknown>;
+      const data = event.data;
       if (data.action === 'ban') {
         this.notify('moderation.ban', {
           title: '🔨 Member Banned',
@@ -114,7 +115,7 @@ export class OwnerNotificationService {
 
     // payment.failed — emitted by commerce-fulfillment on subscription_payment_failed
     this.listen('payment.failed', (event) => {
-      const data = event.data as Record<string, unknown>;
+      const data = event.data;
       this.notify('payment.failed', {
         title: '💳 Payment Failed',
         description: `A payment could not be processed.`,
@@ -134,19 +135,24 @@ export class OwnerNotificationService {
    * V10 Audit M-5: Remove all event listeners registered by this service.
    */
   stop(): void {
-    for (const { type, handler } of this.boundListeners) {
-      this.eventBus.off(type, handler);
-    }
-    this.boundListeners = [];
+    for (const dispose of this.listenerDisposers) dispose();
+    this.listenerDisposers = [];
     log.info('Owner notification service stopped');
   }
 
   /**
    * Register a listener on the event bus and store the reference for cleanup.
    */
-  private listen(type: string, handler: AnyHandler): void {
-    this.eventBus.on(type, handler);
-    this.boundListeners.push({ type, handler });
+  private listen<T extends PlatformEventType>(
+    type: T,
+    handler: (event: PlatformEvent<T, PlatformEventMap[T]>) => void,
+  ): void {
+    const scopedHandler = (event: PlatformEvent<T, PlatformEventMap[T]>): void => {
+      if (event.guildId !== this.guildId) return;
+      handler(event);
+    };
+    this.eventBus.on(type, scopedHandler);
+    this.listenerDisposers.push(() => this.eventBus.off(type, scopedHandler));
   }
 
   private async notify(
@@ -209,7 +215,10 @@ export class OwnerNotificationService {
    *  - DM the owner ONLY for critical signals and only when
    *    owner-dm-on-critical is enabled (default true), throttled by cooldown.
    */
-  private async notifyFraud(severity: string, data: Record<string, unknown>): Promise<void> {
+  private async notifyFraud(
+    severity: string,
+    data: PlatformEventMap['fraud.detected'],
+  ): Promise<void> {
     if (!this.config) return;
 
     const discordEmbed = new EmbedBuilder()

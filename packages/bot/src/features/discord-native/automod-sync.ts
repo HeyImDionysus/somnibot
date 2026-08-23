@@ -12,6 +12,7 @@ import { Guild, AutoModerationRuleManager, AutoModerationActionType, AutoModerat
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
+import type { ConfigChangedData, PlatformEvent } from '@somnibot/shared';
 
 const log = createLogger('AutoModSync');
 
@@ -100,10 +101,13 @@ export function buildDiscordTriggerMetadata(
 export class AutoModSync {
   private syncInterval: NodeJS.Timeout | null = null;
   private started = false;
-  private readonly handleConfigChanged = (event: { data: { section: string } }): void => {
-    if (event.data.section !== 'moderation') return;
-    this.syncRules().catch((error: unknown) => log.error('Sync failed:', { error: String(error) }));
-  };
+  private stopping = false;
+  private stopPromise: Promise<void> | null = null;
+  private lifecycleGeneration = 0;
+  private syncQueue: Promise<void> = Promise.resolve();
+  private configChangedListener: ((
+    event: PlatformEvent<'config.changed', ConfigChangedData>
+  ) => void) | null = null;
 
   constructor(
     private guild: Guild,
@@ -115,9 +119,21 @@ export class AutoModSync {
    * Start listening for moderation config changes and sync to Discord.
    */
   start(): void {
-    if (this.started) return;
+    if (this.started || this.stopPromise) return;
     this.started = true;
-    this.eventBus.on('config.changed', this.handleConfigChanged);
+    this.stopping = false;
+    this.lifecycleGeneration += 1;
+    const generation = this.lifecycleGeneration;
+    const configChangedListener = (
+      event: PlatformEvent<'config.changed', ConfigChangedData>,
+    ): void => {
+      if (!this.started || this.stopping || generation !== this.lifecycleGeneration) return;
+      if (event.guildId !== this.guild.id) return;
+      if (event.data.section !== 'moderation') return;
+      this.syncRules().catch((error: unknown) => log.error('Sync failed:', { error: String(error) }));
+    };
+    this.configChangedListener = configChangedListener;
+    this.eventBus.on('config.changed', configChangedListener);
 
     // Initial sync on startup
     this.syncRules().catch((err) =>
@@ -132,20 +148,47 @@ export class AutoModSync {
     log.info('AutoMod sync service started');
   }
 
-  stop(): void {
-    if (!this.started) return;
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    if (!this.started) return Promise.resolve();
     this.started = false;
-    this.eventBus.off('config.changed', this.handleConfigChanged);
+    this.stopping = true;
+    this.lifecycleGeneration += 1;
+    const configChangedListener = this.configChangedListener;
+    this.configChangedListener = null;
+    if (configChangedListener) {
+      this.eventBus.off('config.changed', configChangedListener);
+    }
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
       this.syncInterval = null;
     }
+    const drain = this.syncQueue;
+    const stopPromise = drain.finally(() => {
+      if (this.stopPromise === stopPromise) {
+        this.stopping = false;
+        this.stopPromise = null;
+      }
+    });
+    this.stopPromise = stopPromise;
+    return stopPromise;
   }
 
   /**
    * Push dashboard automod rules to Discord's native AutoMod API.
    */
-  async syncRules(): Promise<void> {
+  syncRules(): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    const generation = this.lifecycleGeneration;
+    const run = this.syncQueue.then(async () => {
+      if (this.stopping || generation !== this.lifecycleGeneration) return;
+      await this.performSync();
+    });
+    this.syncQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async performSync(): Promise<void> {
     const { data: dbRules, error } = await this.supabase
       .from('automod_rules')
       .select('*')

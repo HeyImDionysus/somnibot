@@ -479,7 +479,7 @@ async function repairDriftItem(
     }
 
     default:
-      return { success: false, action: 'manual_required', reason: `Repair not implemented for ${item.type}` };
+      return { success: false, action: 'manual_required', reason: `Unknown drift type ${item.type} cannot be repaired automatically` };
   }
 }
 

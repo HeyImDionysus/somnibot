@@ -311,7 +311,7 @@ export default function FraudPage() {
       {/* Signals Tab */}
       {tab === 'signals' && (
         <div className="space-y-3">
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {['', 'open', 'investigating', 'confirmed', 'dismissed'].map((s) => (
               <button
                 key={s}
@@ -377,7 +377,7 @@ export default function FraudPage() {
                     )}
 
                     {signal.status === 'open' || signal.status === 'investigating' ? (
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-2">
                         {signal.status === 'open' && (
                           <button
                             onClick={() => updateSignalStatus(signal.id, 'investigating')}
