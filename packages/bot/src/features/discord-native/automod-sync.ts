@@ -12,6 +12,7 @@ import { Guild, AutoModerationRuleManager, AutoModerationActionType, AutoModerat
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
+import type { ConfigChangedData, PlatformEvent } from '@somnibot/shared';
 
 const log = createLogger('AutoModSync');
 
@@ -100,7 +101,12 @@ export function buildDiscordTriggerMetadata(
 export class AutoModSync {
   private syncInterval: NodeJS.Timeout | null = null;
   private started = false;
-  private readonly handleConfigChanged = (event: { data: { section: string } }): void => {
+  private stopping = false;
+  private syncQueue: Promise<void> = Promise.resolve();
+  private readonly handleConfigChanged = (
+    event: PlatformEvent<'config.changed', ConfigChangedData>,
+  ): void => {
+    if (event.guildId !== this.guild.id) return;
     if (event.data.section !== 'moderation') return;
     this.syncRules().catch((error: unknown) => log.error('Sync failed:', { error: String(error) }));
   };
@@ -117,6 +123,7 @@ export class AutoModSync {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.stopping = false;
     this.eventBus.on('config.changed', this.handleConfigChanged);
 
     // Initial sync on startup
@@ -132,20 +139,31 @@ export class AutoModSync {
     log.info('AutoMod sync service started');
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (!this.started) return;
     this.started = false;
+    this.stopping = true;
     this.eventBus.off('config.changed', this.handleConfigChanged);
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
       this.syncInterval = null;
     }
+    await this.syncQueue;
   }
 
   /**
    * Push dashboard automod rules to Discord's native AutoMod API.
    */
-  async syncRules(): Promise<void> {
+  syncRules(): Promise<void> {
+    const run = this.syncQueue.then(async () => {
+      if (this.stopping) return;
+      await this.performSync();
+    });
+    this.syncQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async performSync(): Promise<void> {
     const { data: dbRules, error } = await this.supabase
       .from('automod_rules')
       .select('*')

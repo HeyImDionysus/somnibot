@@ -56,9 +56,9 @@ function makeEventBus() {
       if (!listeners[event]) listeners[event] = [];
       listeners[event].push(handler);
     }),
-    _emit: (type: string, data: Record<string, unknown>) => {
+    _emit: (type: string, data: Record<string, unknown>, guildId = 'g1') => {
       for (const h of listeners[type] ?? []) {
-        h({ type, guildId: 'g1', data });
+        h({ type, guildId, data });
       }
     },
     _listeners: listeners,
@@ -111,6 +111,19 @@ describe('OwnerNotificationService', () => {
       expect(eventBus.on).toHaveBeenCalledWith('incident.created', expect.any(Function));
       expect(eventBus.on).toHaveBeenCalledWith('moderation.action', expect.any(Function));
       expect(eventBus.on).toHaveBeenCalledWith('payment.failed', expect.any(Function));
+    });
+
+    it('ignores events emitted for another guild', async () => {
+      await service.start();
+
+      eventBus._emit('incident.created', {
+        severity: 'critical',
+        title: 'Other server incident',
+        category: 'infrastructure',
+      }, 'g2');
+      await new Promise((resolve) => process.nextTick(resolve));
+
+      expect(client._sendMock).not.toHaveBeenCalled();
     });
 
     it('handles null config values', async () => {

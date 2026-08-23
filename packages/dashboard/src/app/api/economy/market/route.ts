@@ -1,7 +1,7 @@
 /**
  * /api/economy/market — Market config endpoint (no CRUD; listings are player-managed).
  *
- * GET — Returns market status (placeholder for dashboard)
+ * GET — Returns the guild's live active-listing count for the dashboard.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';

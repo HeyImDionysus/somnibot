@@ -40,6 +40,7 @@ const CUSTOMERS: Record<string, { id: string; guild_id: string; discord_id: stri
 
 let insertedSession: Record<string, unknown> | null = null;
 const originalHops = process.env[TRUSTED_PROXY_HOPS_ENV];
+const originalPublicCallbackBase = process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
 
 function makeAdmin() {
   const guildConfigChain: any = {
@@ -121,6 +122,7 @@ beforeEach(() => {
   process.env.DISCORD_APPLICATION_ID = 'app-id';
   process.env.DISCORD_CLIENT_SECRET = 'secret';
   process.env[TRUSTED_PROXY_HOPS_ENV] = '1';
+  delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
   // Discord OAuth: token exchange, then /users/@me → the same identity.
   global.fetch = vi.fn(async (url: any) => {
     const u = String(url);
@@ -133,6 +135,8 @@ beforeEach(() => {
 afterEach(() => {
   if (originalHops === undefined) delete process.env[TRUSTED_PROXY_HOPS_ENV];
   else process.env[TRUSTED_PROXY_HOPS_ENV] = originalHops;
+  if (originalPublicCallbackBase === undefined) delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
+  else process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = originalPublicCallbackBase;
 });
 
 describe('POST /api/portal/auth guild scoping', () => {
@@ -172,6 +176,33 @@ describe('POST /api/portal/auth guild scoping', () => {
 
     expect(res.status).toBe(200);
     expect(fetchSpy).not.toHaveBeenCalled();
+    expect(insertedSession).toMatchObject({
+      guild_id: 'guild-B',
+      customer_id: 'cust-B',
+      discord_id: 'discord-user-1',
+    });
+  });
+
+  it('accepts the configured public origin behind the trusted reverse proxy', async () => {
+    process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL = 'https://somni.example.com';
+    vi.mocked(requireAuth).mockResolvedValue({
+      ok: true,
+      userId: 'dashboard-user-1',
+      discordId: 'discord-user-1',
+    });
+
+    const res = await POST(new NextRequest('http://localhost:3456/api/portal/auth', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://somni.example.com',
+        host: 'somni.example.com',
+        'x-forwarded-for': '198.51.100.2',
+      },
+      body: JSON.stringify({ action: 'dashboard_session', guild_id: 'guild-B' }),
+    }));
+
+    expect(res.status).toBe(200);
     expect(insertedSession).toMatchObject({
       guild_id: 'guild-B',
       customer_id: 'cust-B',

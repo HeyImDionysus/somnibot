@@ -26,6 +26,7 @@ import {
   loginDependencyFailure,
 } from '@/lib/api/portal-login-dependency';
 import { requireAuth } from '@/lib/api/require-owner';
+import { getTrustedRedirectOrigin } from '@/lib/public-redirect-origin';
 
 const portalGuildIdSchema = z.string().min(1).max(64);
 const portalAuthSchema = z.discriminatedUnion('action', [
@@ -82,7 +83,7 @@ export async function POST(request: NextRequest) {
       if (body.action === 'dashboard_session') {
         const origin = request.headers.get('origin');
         const contentType = request.headers.get('content-type')?.split(';', 1)[0]?.trim();
-        if (origin !== request.nextUrl.origin || contentType !== 'application/json') {
+        if (origin !== getTrustedRedirectOrigin(request) || contentType !== 'application/json') {
           await writeCommerceAudit(admin, {
             guildId: body.guild_id,
             actorType: 'user',

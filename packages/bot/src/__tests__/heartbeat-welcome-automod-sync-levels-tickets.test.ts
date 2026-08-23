@@ -356,11 +356,45 @@ describe('AutoModSync', () => {
 
     sync.start();
     sync.start();
-    sync.stop();
-    sync.stop();
+    await sync.stop();
+    await sync.stop();
 
     expect(bus.on).toHaveBeenCalledTimes(1);
     expect(bus.off).toHaveBeenCalledTimes(1);
+  });
+
+  it('syncs only the guild whose moderation config changed', async () => {
+    const { AutoModSync } = await import('../features/discord-native/automod-sync.js');
+    type ConfigListener = (event: {
+      guildId: string;
+      data: { section: string };
+    }) => void;
+    const listeners: ConfigListener[] = [];
+    const bus = {
+      emit: vi.fn(),
+      on: vi.fn((_type: string, handler: ConfigListener) => { listeners.push(handler); }),
+      off: vi.fn(),
+      onAny: vi.fn(),
+    };
+    const sync = new AutoModSync(
+      guild('g1'),
+      { from: vi.fn(() => chainAsync([])) } as unknown as ConstructorParameters<typeof AutoModSync>[1],
+      bus as unknown as ConstructorParameters<typeof AutoModSync>[2],
+    );
+    const syncSpy = vi.spyOn(sync, 'syncRules').mockResolvedValue(undefined);
+
+    sync.start();
+    expect(syncSpy).toHaveBeenCalledTimes(1);
+    const listener = listeners[0];
+    if (!listener) throw new Error('AutoModSync did not register its config listener');
+
+    listener({ guildId: 'g2', data: { section: 'moderation' } });
+    expect(syncSpy).toHaveBeenCalledTimes(1);
+
+    listener({ guildId: 'g1', data: { section: 'moderation' } });
+    expect(syncSpy).toHaveBeenCalledTimes(2);
+
+    await sync.stop();
   });
 });
 
