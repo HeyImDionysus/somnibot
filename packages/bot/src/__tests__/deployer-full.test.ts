@@ -540,6 +540,45 @@ describe('deployServerState — role creation', () => {
     expect(guild.channels.create).not.toHaveBeenCalled();
   });
 
+  it('renews ownership immediately before each Discord mutation', async () => {
+    const abortController = new AbortController();
+    const guild = makeGuild();
+    const supabase = { from: vi.fn(() => supaChain()) };
+    let ownershipChecks = 0;
+    const assertOwnership = vi.fn(async () => {
+      ownershipChecks++;
+      if (ownershipChecks === 2) {
+        const error = new Error('deployment ownership renewal refused');
+        abortController.abort(error);
+        throw error;
+      }
+    });
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild as unknown as Parameters<typeof deployServerState>[0],
+      supabase as unknown as Parameters<typeof deployServerState>[1],
+      desiredState as unknown as Parameters<typeof deployServerState>[2],
+      {
+        cleanExisting: false,
+        dryRun: false,
+        abortSignal: abortController.signal,
+        assertOwnership,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.at(-1)?.error).toContain('deployment ownership renewal refused');
+    expect(guild.roles.create).toHaveBeenCalledTimes(1);
+    expect(guild.channels.create).not.toHaveBeenCalled();
+  });
+
   it('reports honestly when a role Discord did not displace remains inside the band', async () => {
     // Outcome verification: if the reorder does NOT actually raise the
     // created roles above an interloper, step 4 must fail loudly instead of

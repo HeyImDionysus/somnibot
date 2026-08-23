@@ -66,6 +66,7 @@ export interface DeployOptions {
   /** Progress callback */
   onProgress?: (step: number, total: number, action: string) => void;
   abortSignal?: AbortSignal;
+  assertOwnership?: () => Promise<void>;
 }
 
 type DiscordIdMappingRow = {
@@ -73,6 +74,12 @@ type DiscordIdMappingRow = {
   readonly template_key?: unknown;
   readonly discord_id?: unknown;
 };
+
+async function assertMutationOwnership(options: DeployOptions): Promise<void> {
+  options.abortSignal?.throwIfAborted();
+  await options.assertOwnership?.();
+  options.abortSignal?.throwIfAborted();
+}
 
 /** Canonical key written by the deploy path. Legacy bare keys are accepted when reading. */
 export function canonicalTemplateKey(entityType: string, key: string): string {
@@ -248,7 +255,7 @@ export async function deployServerState(
       report('Setting @everyone to zero permissions');
       try {
         const everyoneRole = guild.roles.everyone;
-        options.abortSignal?.throwIfAborted();
+        await assertMutationOwnership(options);
         await everyoneRole.setPermissions(0n, 'SomniBot deployment — @everyone = 0');
         actions.push({
           step, action: 'set', entityType: 'everyone',
@@ -282,14 +289,18 @@ export async function deployServerState(
             const messages = await (channel as TextChannel).messages.fetch({ limit: 100 });
             const botMessages = messages.filter((m: Message) => m.author.id === botId);
             for (const [, msg] of botMessages) {
-              options.abortSignal?.throwIfAborted();
+              await assertMutationOwnership(options);
               try {
                 await msg.delete();
                 purgedCount++;
                 await sleep(300);
-              } catch { /* skip undeletable messages */ }
+              } catch (error) {
+                if (options.abortSignal?.aborted) throw error;
+              }
             }
-          } catch { /* skip channels we can't read */ }
+          } catch (error) {
+            if (options.abortSignal?.aborted) throw error;
+          }
         }
         actions.push({
           step, action: 'delete', entityType: 'channel',
@@ -310,7 +321,7 @@ export async function deployServerState(
         step++;
         report(`Deleting channel: ${channel.name}`);
         try {
-          options.abortSignal?.throwIfAborted();
+          await assertMutationOwnership(options);
           await channel.delete('SomniBot deployment — cleaning old channels');
           actions.push({
             step, action: 'delete', entityType: 'channel',
@@ -337,7 +348,7 @@ export async function deployServerState(
         step++;
         report(`Deleting role: ${role.name}`);
         try {
-          options.abortSignal?.throwIfAborted();
+          await assertMutationOwnership(options);
           await role.delete('SomniBot deployment — cleaning old roles');
           actions.push({
             step, action: 'delete', entityType: 'role',
@@ -366,7 +377,7 @@ export async function deployServerState(
       const existingRole = mappedId ? guild.roles.cache.get(mappedId) : undefined;
       report(`${existingRole ? 'Updating' : 'Creating'} role: ${desired.name}`);
       try {
-        options.abortSignal?.throwIfAborted();
+        await assertMutationOwnership(options);
         if (existingRole?.managed || existingRole?.editable === false) {
           throw new Error(`Mapped role cannot be edited by the bot: ${existingRole.name}`);
         }
@@ -407,6 +418,7 @@ export async function deployServerState(
           guild,
           targetRoles.map(({ discordId }) => discordId),
           options.abortSignal,
+          options.assertOwnership,
         );
       }
       actions.push({
@@ -442,14 +454,14 @@ export async function deployServerState(
           if (communityChannelIdsForGuild(guild).has(mappedCategory.id)) {
             throw new Error(`Mapped category points to a protected Discord channel: ${mappedCategory.name}`);
           }
-          options.abortSignal?.throwIfAborted();
+          await assertMutationOwnership(options);
           await mappedCategory.delete('SomniBot deployment — replace changed category type');
           actions.push({
             step, action: 'delete', entityType: 'channel',
             entityName: mappedCategory.name, discordId: mappedCategory.id, success: true,
           });
         }
-        options.abortSignal?.throwIfAborted();
+        await assertMutationOwnership(options);
         const channel = existingCategory && existingCategory.type === ChannelType.GuildCategory
           ? await existingCategory.edit({
             name: desired.name,
@@ -525,7 +537,7 @@ export async function deployServerState(
           const parentId = desired.categoryKey
             ? categoryKeyToDiscordId.get(desired.categoryKey)
             : undefined;
-          options.abortSignal?.throwIfAborted();
+          await assertMutationOwnership(options);
           await existingCommunity.edit({
             topic: desired.topic ?? undefined,
             rateLimitPerUser: desired.slowmode,
@@ -564,14 +576,14 @@ export async function deployServerState(
             if (communityChannelIds.has(mappedChannel.id)) {
               throw new Error(`Mapped channel is protected by Discord: ${mappedChannel.name}`);
             }
-            options.abortSignal?.throwIfAborted();
+            await assertMutationOwnership(options);
             await mappedChannel.delete('SomniBot deployment — replace changed channel type');
             actions.push({
               step, action: 'delete', entityType: 'channel',
               entityName: mappedChannel.name, discordId: mappedChannel.id, success: true,
             });
           }
-          options.abortSignal?.throwIfAborted();
+          await assertMutationOwnership(options);
           const channelId = existingChannel
             ? await updateChannel(
               guild,
@@ -610,7 +622,7 @@ export async function deployServerState(
           (channel) => channel.categoryKey === 'cat-staff' && channel.templateId === 'staff',
         );
         if (staffCatId && staffChannel) {
-          options.abortSignal?.throwIfAborted();
+          await assertMutationOwnership(options);
           await guild.channels.edit(modOnlyChannel.id, {
             parent: staffCatId,
             permissionOverwrites: permissionOverwritesForExistingChannel(
@@ -657,7 +669,7 @@ export async function deployServerState(
           step++;
           report(`Deleting removed ${entityType}: ${entity.name}`);
           try {
-            options.abortSignal?.throwIfAborted();
+            await assertMutationOwnership(options);
             if (entityType === 'role') {
               const role = entity as Role;
               if (role.managed || role.editable === false) {
@@ -692,6 +704,7 @@ export async function deployServerState(
     report('Storing ID mappings');
     try {
       if (options.cleanExisting) {
+        await assertMutationOwnership(options);
         const { error: deleteMappingsError } = await supabase
           .from('discord_id_map')
           .delete()
@@ -700,6 +713,7 @@ export async function deployServerState(
           throw new Error(`Failed to clear Discord ID mappings: ${deleteMappingsError.message}`);
         }
       } else if (deletedMappedDiscordIds.size > 0) {
+        await assertMutationOwnership(options);
         const { error: deleteMappingsError } = await supabase
           .from('discord_id_map')
           .delete()
@@ -719,6 +733,7 @@ export async function deployServerState(
           discord_id: m.discordId,
         }));
 
+        await assertMutationOwnership(options);
         const { error: insertMappingsError } = await supabase
           .from('discord_id_map')
           .upsert(rows, { onConflict: 'guild_id,entity_type,template_key' });
@@ -728,6 +743,7 @@ export async function deployServerState(
       }
 
       // Update guild record — setup_completed stays false until owner confirms (Step 7 of wizard)
+      await assertMutationOwnership(options);
       const { error: guildUpdateError } = await supabase
         .from('guild')
         .update({
@@ -753,6 +769,7 @@ export async function deployServerState(
 
     // === Step 8: Write audit log ===
     try {
+      await assertMutationOwnership(options);
       await supabase.from('audit_logs').insert({
         guild_id: guild.id,
         actor_type: 'bot',
@@ -770,7 +787,7 @@ export async function deployServerState(
         },
       });
     } catch {
-      // Non-critical — don't fail deployment for audit log
+      options.abortSignal?.throwIfAborted();
     }
 
     return {

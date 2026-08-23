@@ -88,6 +88,8 @@ function makeClient() {
   let claimResultOverride: Record<string, unknown> | null = null;
   let settleResult = true;
   let renewResult = true;
+  let renewResults: boolean[] = [];
+  let renewHandler: (() => Promise<{ data: boolean; error: null }>) | null = null;
   const guilds = new Map([
     ['g1', makeGuild('g1')],
     ['g2', makeGuild('g2')],
@@ -141,7 +143,8 @@ function makeClient() {
           return Promise.resolve({ data: 0, error: null });
         }
         if (name === 'renew_deploy_request_claim') {
-          return Promise.resolve({ data: renewResult, error: null });
+          if (renewHandler) return renewHandler();
+          return Promise.resolve({ data: renewResults.shift() ?? renewResult, error: null });
         }
         return Promise.resolve({ data: settleResult, error: null });
       }),
@@ -189,6 +192,12 @@ function makeClient() {
     },
     _setRenewResult: (value: boolean) => {
       renewResult = value;
+    },
+    _setRenewResults: (values: boolean[]) => {
+      renewResults = [...values];
+    },
+    _setRenewHandler: (handler: () => Promise<{ data: boolean; error: null }>) => {
+      renewHandler = handler;
     },
     _setClaimResult: (value: Record<string, unknown>) => {
       claimResultOverride = value;
@@ -506,6 +515,78 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       duration: 30_000,
     });
     await deployment;
+  });
+
+  it('rejects a renewal response that arrives after the local safety deadline', async () => {
+    vi.useFakeTimers();
+    let renewalStarted!: () => void;
+    let finishRenewal!: (result: { data: boolean; error: null }) => void;
+    const started = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    const client = makeClient();
+    client._setRenewHandler(() => new Promise((resolve) => {
+      finishRenewal = resolve;
+      renewalStarted();
+    }));
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback()!;
+
+    const deployment = cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+    await started;
+    await vi.advanceTimersByTimeAsync(90_001);
+    finishRenewal({ data: true, error: null });
+    await deployment;
+
+    expect(mockDeployServerState).not.toHaveBeenCalled();
+    expect(mockWriteAuditBatch).not.toHaveBeenCalled();
+    expect(mockWriteGuildSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('requires a live claim before every deployment mutation', async () => {
+    const client = makeClient();
+    mockDeployServerState.mockImplementationOnce(async (...args: unknown[]) => {
+      client._setRenewResult(false);
+      const options = args[3] as { assertOwnership?: () => Promise<void> };
+      await options.assertOwnership?.();
+      throw new Error('ownership assertion unexpectedly returned');
+    });
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+
+    expect(mockWriteAuditBatch).not.toHaveBeenCalled();
+    expect(mockWriteGuildSnapshot).not.toHaveBeenCalled();
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'server.deployed',
+      'g1',
+      expect.anything(),
+    );
+  });
+
+  it('suppresses post-deploy writes when final ownership verification fails', async () => {
+    const client = makeClient();
+    client._setRenewResults([true, false]);
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+
+    expect(mockDeployServerState).toHaveBeenCalledOnce();
+    expect(mockWriteAuditBatch).not.toHaveBeenCalled();
+    expect(mockWriteGuildSnapshot).not.toHaveBeenCalled();
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'server.deployed',
+      'g1',
+      expect.anything(),
+    );
   });
 
   it('leaves ID mapping persistence to the deployer', async () => {

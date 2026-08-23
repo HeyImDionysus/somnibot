@@ -10,9 +10,12 @@ import { writeGuildSnapshot } from '../services/guild-snapshot.js';
 
 const log = createLogger('DeployListener');
 const LEASE_RENEWAL_INTERVAL_MS = 30_000;
+const LEASE_LOCAL_SAFETY_WINDOW_MS = 90_000;
 
 type DeployLeaseHeartbeat = {
   signal: AbortSignal;
+  verify(): Promise<void>;
+  stopAndVerify(): Promise<Error | null>;
   stop(): Promise<Error | null>;
 };
 
@@ -24,25 +27,61 @@ function startDeployLeaseHeartbeat(
   let stopped = false;
   let failure: Error | null = null;
   let renewal = Promise.resolve();
+  let localSafetyDeadline = 0;
 
-  const renew = (): void => {
+  const fail = (error: unknown): Error => {
+    const nextFailure = error instanceof Error ? error : new Error(String(error));
+    if (!failure) {
+      failure = nextFailure;
+      abortController.abort(nextFailure);
+    }
+    return failure;
+  };
+
+  const assertCurrent = (): void => {
+    if (failure) throw failure;
+    if (localSafetyDeadline > 0 && performance.now() >= localSafetyDeadline) {
+      throw fail(new Error('Deployment claim lease exceeded its local safety deadline'));
+    }
+  };
+
+  const verify = async (): Promise<void> => {
+    if (stopped) throw new Error('Deployment claim heartbeat is already stopped');
     renewal = renewal.then(async () => {
       if (stopped || failure) return;
+      const renewalStartedAt = performance.now();
       try {
         const renewed = await renewDeployRequestClaim(client, request);
         if (!renewed) throw new Error('Deployment claim lease is no longer owned by this executor');
+        localSafetyDeadline = renewalStartedAt + LEASE_LOCAL_SAFETY_WINDOW_MS;
+        assertCurrent();
       } catch (error) {
-        failure = error instanceof Error ? error : new Error(String(error));
-        abortController.abort(failure);
+        fail(error);
       }
     });
+    await renewal;
+    assertCurrent();
   };
 
-  const timer = setInterval(renew, LEASE_RENEWAL_INTERVAL_MS);
+  const timer = setInterval(() => {
+    void verify().catch(() => undefined);
+  }, LEASE_RENEWAL_INTERVAL_MS);
   timer.unref();
 
   return {
     signal: abortController.signal,
+    verify,
+    async stopAndVerify(): Promise<Error | null> {
+      clearInterval(timer);
+      try {
+        await verify();
+      } catch (error) {
+        fail(error);
+      }
+      stopped = true;
+      await renewal;
+      return failure;
+    },
     async stop(): Promise<Error | null> {
       if (!stopped) {
         stopped = true;
@@ -121,6 +160,7 @@ export async function executeClaimedDeployment(
     dryRun: false,
     ...optionOverrides,
     abortSignal: heartbeat.signal,
+    assertOwnership: heartbeat.verify,
     onProgress: (step, total, action) => {
       const activeStatus = deployStatuses.get(guildId);
       if (activeStatus?.deployId === deployId) {
@@ -134,6 +174,7 @@ export async function executeClaimedDeployment(
   };
 
   try {
+    await heartbeat.verify();
     await writeAuditLog(client.supabase, {
       guildId,
       actorType: 'bot',
@@ -151,6 +192,7 @@ export async function executeClaimedDeployment(
     log.info('Starting deployment:', deployId);
     const result = await deployServerState(guild, client.supabase, desiredState, options);
 
+    await heartbeat.verify();
     await writeAuditBatch(
       client.supabase,
       guildId,
@@ -164,16 +206,18 @@ export async function executeClaimedDeployment(
         error: action.error,
       })),
     );
-    await recordCreatedResourceChanges(client, guildId, result);
+    await heartbeat.verify();
+    await recordCreatedResourceChanges(client, guildId, result, heartbeat.verify);
 
     try {
-      await writeGuildSnapshot(guild, client.supabase);
+      await heartbeat.verify();
+      await writeGuildSnapshot(guild, client.supabase, heartbeat.verify);
       log.info('Guild live state snapshot updated');
     } catch (snapshotError) {
       log.error('Failed to write post-deploy snapshot:', snapshotError);
     }
 
-    const leaseFailure = await heartbeat.stop();
+    const leaseFailure = await heartbeat.stopAndVerify();
     if (leaseFailure) throw leaseFailure;
 
     const resultError = result.errors

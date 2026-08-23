@@ -105,6 +105,7 @@ export interface MemberSnapshot {
 export async function writeGuildSnapshot(
   guild: Guild,
   supabase: SupabaseClient,
+  assertOwnership?: () => Promise<void>,
 ): Promise<void> {
   // Ensure cache is fresh
   await guild.roles.fetch();
@@ -328,6 +329,7 @@ export async function writeGuildSnapshot(
   // plain data objects built from scratch above — no BigInt, no circular refs.
   // The previous JSON.parse(JSON.stringify()) round-trip was unnecessary and
   // doubled memory allocation on large payloads.
+  await assertOwnership?.();
   const { error } = await supabase.from('guild_live_state').upsert(
     {
       guild_id: guild.id,

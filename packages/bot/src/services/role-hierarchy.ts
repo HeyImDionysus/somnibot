@@ -21,6 +21,7 @@ export async function placeRolesDirectlyBelowBot(
   guild: Guild,
   orderedRoleIds: readonly string[],
   abortSignal?: AbortSignal,
+  assertOwnership?: () => Promise<void>,
 ): Promise<void> {
   if (orderedRoleIds.length === 0) return;
 
@@ -48,6 +49,8 @@ export async function placeRolesDirectlyBelowBot(
         `Desired role ${liveRole.name} is not movable below the bot (${hierarchyContext(guild, roles)})`,
       );
     }
+    abortSignal?.throwIfAborted();
+    await assertOwnership?.();
     abortSignal?.throwIfAborted();
     await liveRole.setPosition(botPosition - 1, {
       reason: 'SomniBot — apply reviewed role hierarchy',

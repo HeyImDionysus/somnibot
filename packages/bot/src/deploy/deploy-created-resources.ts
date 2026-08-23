@@ -6,6 +6,7 @@ export async function recordCreatedResourceChanges(
   client: SomniClient,
   guildId: string,
   result: DeployResult,
+  assertOwnership?: () => Promise<void>,
 ): Promise<void> {
   for (const action of result.actions) {
     if (action.action !== 'create' || !action.success || !action.discordId) continue;
@@ -13,6 +14,7 @@ export async function recordCreatedResourceChanges(
       && action.entityType !== 'channel'
       && action.entityType !== 'category') continue;
 
+    await assertOwnership?.();
     await recordAdminChange(client.supabase, {
       guildId,
       actorId: 'deployer',
