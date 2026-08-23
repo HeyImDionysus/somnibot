@@ -529,6 +529,13 @@ export interface DbGuildDesiredState {
   categories: Record<string, unknown>[];
   permission_map: Record<string, unknown>;
   deploy_mode: 'safe' | 'destructive';
+  deploy_request_id: string | null;
+  deploy_status: 'idle' | 'requested' | 'running' | 'success' | 'failed';
+  deploy_claim_token: string | null;
+  deploy_claimed_at: string | null;
+  deploy_started_at: string | null;
+  deploy_completed_at: string | null;
+  deploy_error: string | null;
   applied_at: string | null;
   last_sync_at: string | null;
   drift_detected: boolean;

@@ -54,7 +54,19 @@ function makeSupabase(
     builders.set(table, builder);
     return builder;
   });
-  return { client: { from }, writes, builders };
+  const rpc = vi.fn((name: string, payload: unknown) => {
+    writes.push({ table: `rpc:${name}`, payload });
+    const error = errors[`rpc:${name}`] ?? null;
+    const result = rows[`rpc:${name}`] ?? {
+      disposition: 'accepted',
+      state: {
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
+      },
+    };
+    return Promise.resolve({ data: result, error });
+  });
+  return { client: { from, rpc }, writes, builders };
 }
 
 beforeEach(() => {
@@ -83,13 +95,43 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(200);
-    const desiredWrite = supabase.writes.find((write) => write.table === 'guild_desired_state');
+    const desiredWrite = supabase.writes.find(
+      (write) => write.table === 'rpc:request_server_deployment',
+    );
     expect(desiredWrite?.payload).toMatchObject({
-      categories,
-      applied_at: null,
-      deploy_mode: 'safe',
+      p_categories: categories,
+      p_deploy_mode: 'safe',
+    });
+    expect(desiredWrite?.payload).toMatchObject({
+      p_request_id: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
     });
     expect(supabase.writes.some((write) => write.table === 'audit_logs')).toBe(true);
+  });
+
+  it('rejects a second request while the previous deployment is running', async () => {
+    const supabase = makeSupabase({
+      guild_desired_state: {
+        applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'running',
+      },
+      guild: { setup_completed: false },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await POST(request({
+      action: 'deploy',
+      roles: [{ key: 'member' }],
+      channels: [{ key: 'general', categoryKey: 'cat-general' }],
+      categories,
+    }));
+
+    expect(response.status).toBe(409);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('rejects a destructive deployment without an explicit confirmation', async () => {
@@ -105,7 +147,9 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('persists destructive mode only when explicitly requested and confirmed', async () => {
@@ -122,11 +166,12 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(200);
-    const desiredWrite = supabase.writes.find((write) => write.table === 'guild_desired_state');
+    const desiredWrite = supabase.writes.find(
+      (write) => write.table === 'rpc:request_server_deployment',
+    );
     expect(desiredWrite?.payload).toMatchObject({
-      categories,
-      applied_at: null,
-      deploy_mode: 'destructive',
+      p_categories: categories,
+      p_deploy_mode: 'destructive',
     });
   });
 
@@ -142,7 +187,9 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('rejects a request that does not explicitly name the deploy action', async () => {
@@ -156,7 +203,9 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('fails closed when prior deployment state cannot be read', async () => {
@@ -174,6 +223,8 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(500);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 });

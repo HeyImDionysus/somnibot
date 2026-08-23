@@ -10,6 +10,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { computeStateDiff, classifyDrift, type DesiredState, type DriftItem , createLogger } from '@somnibot/shared';
 import { takeSnapshot } from './snapshot.js';
 import type { PlatformEventBus } from '../services/event-bus.js';
+import { placeRolesDirectlyBelowBot } from '../services/role-hierarchy.js';
 
 const log = createLogger('SyncEngine');
 
@@ -682,13 +683,6 @@ async function reorderRolesToDesired(
     return { success: false, action: 'manual_required', reason: 'No movable roles resolved from desired state' };
   }
 
-  // Target absolute positions: contiguous band immediately below the bot,
-  // preserving desired relative order (lowest desired position → lowest slot).
-  const positionUpdates = movable.map((entry, index) => ({
-    role: entry.id,
-    position: Math.max(1, botHighest - movable.length + index),
-  }));
-
   // Idempotent: skip the API call when the current relative ordering already
   // matches the desired ordering. The diff engine treats equal actual positions
   // as ordered (Discord positions are not guaranteed unique), so a tie is not an
@@ -701,8 +695,8 @@ async function reorderRolesToDesired(
     return { success: true, action: 'Role hierarchy already matches desired order' };
   }
 
-  await guild.roles.setPositions(positionUpdates);
-  return { success: true, action: `Reordered ${positionUpdates.length} role(s) to desired hierarchy` };
+  await placeRolesDirectlyBelowBot(guild, movable.map((entry) => entry.id));
+  return { success: true, action: `Reordered ${movable.length} role(s) to desired hierarchy` };
 }
 
 /**

@@ -13,39 +13,18 @@
  */
 
 import type { SomniClient } from '../client.js';
-import { deployServerState, type DeployOptions, type DeployResult } from './deployer.js';
-import { writeAuditLog, writeAuditBatch } from '../services/audit.js';
-import { recordAdminChange, undoByDeleting } from '../services/admin-changes.js';
-import { writeGuildSnapshot } from '../services/guild-snapshot.js';
-import type { DesiredState, DesiredRole, DesiredChannel, DesiredCategory } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import {
+  claimDeployRequest,
+  desiredStateFromDeployRow,
+  failInterruptedDeployRequests,
+  parseRequestedDeployRow,
+  type RequestedDeployRow,
+} from './deploy-request-lifecycle.js';
+import { executeClaimedDeployment } from './deploy-executor.js';
+export { getDeployStatus } from './deploy-executor.js';
 
 const log = createLogger('DeployListener');
-
-// ============================================================
-// Deploy Status Tracking
-// ============================================================
-
-interface DeployStatus {
-  guildId: string;
-  deployId: string;
-  status: 'pending' | 'running' | 'success' | 'failed';
-  currentStep: number;
-  totalSteps: number;
-  currentAction: string;
-  startedAt: string;
-  completedAt?: string;
-  result?: DeployResult;
-}
-
-const deployStatuses = new Map<string, DeployStatus>();
-let latestDeployGuildId: string | null = null;
-
-export function getDeployStatus(guildId?: string): DeployStatus | null {
-  if (guildId) return deployStatuses.get(guildId) ?? null;
-  if (latestDeployGuildId) return deployStatuses.get(latestDeployGuildId) ?? null;
-  return null;
-}
 
 // ============================================================
 // Listener Setup
@@ -56,6 +35,7 @@ export function getDeployStatus(guildId?: string): DeployStatus | null {
  */
 export function startDeployListener(client: SomniClient): void {
   const primaryGuildId = client.guildId;
+  let recoveryStarted = false;
 
   log.info('Starting deploy listener for all guilds', { primaryGuildId });
 
@@ -70,24 +50,19 @@ export function startDeployListener(client: SomniClient): void {
         table: 'guild_desired_state',
       },
       async (payload) => {
-        const newState = payload.new as Record<string, unknown>;
-        const guildId = getGuildIdFromRow(newState, primaryGuildId);
-
-        // Deploy is requested when applied_at is cleared and there's data
-        if (
-          newState &&
-          newState.applied_at === null &&
-          Array.isArray(newState.roles) &&
-          Array.isArray(newState.channels)
-        ) {
-          log.info('Detected deploy request via Realtime', { guildId });
-          await executeDeploy(client, newState, guildId);
-        }
+        const request = parseRequestedDeployRow(payload.new, primaryGuildId);
+        if (!request) return;
+        log.info('Detected deploy request via Realtime', {
+          guildId: request.guild_id,
+          requestId: request.deploy_request_id,
+        });
+        await executeDeploy(client, request);
       },
     )
     .subscribe((status) => {
       log.info(`Realtime subscription: ${status}`);
-      if (status === 'SUBSCRIBED') {
+      if (status === 'SUBSCRIBED' && !recoveryStarted) {
+        recoveryStarted = true;
         void recoverPendingDeploys(client);
       }
     });
@@ -104,10 +79,11 @@ export function startDeployListener(client: SomniClient): void {
       .eq('guild_id', guildId)
       .single();
 
-    if (stateRow) {
-      await executeDeploy(client, stateRow as Record<string, unknown>, guildId);
+    const request = parseRequestedDeployRow(stateRow, guildId);
+    if (request) {
+      await executeDeploy(client, request);
     } else {
-      log.error('No desired state found for guild:', guildId);
+      log.error('No requested deployment found for guild:', guildId);
     }
   });
 
@@ -115,10 +91,17 @@ export function startDeployListener(client: SomniClient): void {
 }
 
 async function recoverPendingDeploys(client: SomniClient): Promise<void> {
+  try {
+    const interrupted = await failInterruptedDeployRequests(client);
+    if (interrupted > 0) log.warn('Marked interrupted deployments as failed', { interrupted });
+  } catch (error) {
+    log.error('Failed to reconcile interrupted deployments:', error);
+    return;
+  }
   const { data, error } = await client.supabase
     .from('guild_desired_state')
     .select('*')
-    .is('applied_at', null);
+    .eq('deploy_status', 'requested');
 
   if (error) {
     log.error('Failed to recover pending deploy requests:', error.message);
@@ -128,10 +111,8 @@ async function recoverPendingDeploys(client: SomniClient): Promise<void> {
   if (!Array.isArray(data)) return;
 
   for (const row of data) {
-    const stateRow = row as Record<string, unknown>;
-    if (Array.isArray(stateRow.roles) && Array.isArray(stateRow.channels)) {
-      await executeDeploy(client, stateRow);
-    }
+    const request = parseRequestedDeployRow(row, client.guildId);
+    if (request) await executeDeploy(client, request);
   }
 }
 
@@ -139,279 +120,19 @@ async function recoverPendingDeploys(client: SomniClient): Promise<void> {
 // Deploy Execution
 // ============================================================
 
-/**
- * Build a DesiredState from a Supabase Realtime row payload.
- */
-function parseDesiredState(row: Record<string, unknown>): DesiredState {
-  const roles = (row.roles as DesiredRole[]) ?? [];
-  const channels = (row.channels as DesiredChannel[]) ?? [];
-  const storedCategories = Array.isArray(row.categories)
-    ? row.categories as DesiredCategory[]
-    : [];
-
-  const categories: DesiredCategory[] = storedCategories.length > 0
-    ? storedCategories
-    : [];
-  if (categories.length === 0) {
-    const seenCats = new Set<string>();
-    for (const ch of channels) {
-      if (ch.categoryKey && !seenCats.has(ch.categoryKey)) {
-        seenCats.add(ch.categoryKey);
-        categories.push({
-          key: ch.categoryKey,
-          name: ch.categoryKey
-            .replace(/^cat-/, '')
-            .replace(/-/g, ' ')
-            .replace(/\b\w/g, (c) => c.toUpperCase()),
-          position: categories.length,
-        });
-      }
-    }
-  }
-
-  return {
-    everyonePermissions: '0',
-    roles,
-    categories,
-    channels,
-  };
-}
-
-function getGuildIdFromRow(row: Record<string, unknown>, fallbackGuildId: string): string {
-  return typeof row.guild_id === 'string' && row.guild_id.length > 0
-    ? row.guild_id
-    : fallbackGuildId;
-}
-
-/**
- * Execute a deployment from a Supabase Realtime payload.
- */
 async function executeDeploy(
   client: SomniClient,
-  stateRow: Record<string, unknown>,
-  requestedGuildId?: string,
+  request: RequestedDeployRow,
 ): Promise<void> {
-  const guildId = getGuildIdFromRow(stateRow, requestedGuildId ?? client.guildId);
-  const desiredState = parseDesiredState(stateRow);
-  await executeDeployDirect(client, desiredState, guildId, {
-    cleanExisting: stateRow.deploy_mode === 'destructive',
-  });
-}
-
-/**
- * Execute a deployment with a pre-built desired state.
- */
-async function executeDeployDirect(
-  client: SomniClient,
-  desiredState: DesiredState,
-  guildId: string,
-  optionOverrides?: Partial<DeployOptions>,
-): Promise<void> {
-  const existingDeploy = deployStatuses.get(guildId);
-  if (existingDeploy?.status === 'running') {
-    log.warn('Deployment already in progress for guild — ignoring', { guildId });
+  const claimed = await claimDeployRequest(client, request);
+  if (!claimed) {
+    log.info('Deployment request was already claimed or settled', {
+      guildId: request.guild_id,
+      requestId: request.deploy_request_id,
+    });
     return;
   }
-
-  const deployId = `deploy_${Date.now()}`;
-  const guild = client.guilds.cache.get(guildId);
-
-  if (!guild) {
-    log.error('Guild not found:', guildId);
-    return;
-  }
-
-  const deployStatus: DeployStatus = {
-    guildId,
-    deployId,
-    status: 'running',
-    currentStep: 0,
-    totalSteps: 0,
-    currentAction: 'Initializing...',
-    startedAt: new Date().toISOString(),
-  };
-  deployStatuses.set(guildId, deployStatus);
-  latestDeployGuildId = guildId;
-
-  // Audit: deploy started
-  await writeAuditLog(client.supabase, {
-    guildId: guildId,
-    actorType: 'bot',
-    actorId: 'deployer',
-    action: 'deploy.started',
-    category: 'sync',
-    details: {
-      deployId,
-      roleCount: desiredState.roles.length,
-      channelCount: desiredState.channels.length,
-      categoryCount: desiredState.categories.length,
-    },
+  await executeClaimedDeployment(client, desiredStateFromDeployRow(claimed), claimed, {
+    cleanExisting: claimed.deploy_mode === 'destructive',
   });
-
-  const options: DeployOptions = {
-    cleanExisting: false,
-    dryRun: false,
-    onProgress: (step, total, action) => {
-      const activeStatus = deployStatuses.get(guildId);
-      if (activeStatus?.deployId === deployId) {
-        activeStatus.currentStep = step;
-        activeStatus.totalSteps = total;
-        activeStatus.currentAction = action;
-      }
-      log.info(`[${step}/${total}] ${action}`);
-    },
-    ...optionOverrides,
-  };
-
-  try {
-    log.info('Starting deployment:', deployId);
-    const result = await deployServerState(
-      guild,
-      client.supabase,
-      desiredState,
-      options,
-    );
-
-    // Mark desired state as applied
-    if (result.success) {
-      const { error: updateError } = await client.supabase
-        .from('guild_desired_state')
-        .update({
-          applied_at: new Date().toISOString(),
-          drift_detected: false,
-          drift_details: null,
-        })
-        .eq('guild_id', guildId);
-
-      if (updateError) {
-        log.error('Failed to update desired state:', updateError.message);
-        result.success = false;
-        result.errors.push({
-          step: result.actions.length + 1,
-          entityType: 'system',
-          entityName: 'Deployment completion',
-          error: `Failed to mark the reviewed plan as applied: ${updateError.message}`,
-        });
-      }
-    }
-
-    deployStatus.status = result.success ? 'success' : 'failed';
-    deployStatus.completedAt = new Date().toISOString();
-    deployStatus.result = result;
-
-    // Audit: batch log all individual actions
-    await writeAuditBatch(
-      client.supabase,
-      guildId,
-      deployId,
-      result.actions.map((a) => ({
-        action: a.action,
-        entityType: a.entityType,
-        entityName: a.entityName,
-        discordId: a.discordId,
-        success: a.success,
-        error: a.error,
-      })),
-    );
-
-    // Audit: deploy completed
-    await writeAuditLog(client.supabase, {
-      guildId: guildId,
-      actorType: 'bot',
-      actorId: 'deployer',
-      action: result.success ? 'deploy.completed' : 'deploy.failed',
-      category: 'sync',
-      details: {
-        deployId,
-        duration: result.duration,
-        actionCount: result.actions.length,
-        errorCount: result.errors.length,
-      },
-      success: result.success,
-      errorMessage:
-        result.errors.length > 0
-          ? result.errors.map((e) => `${e.entityName}: ${e.error}`).join('; ')
-          : undefined,
-    });
-
-    // Record each created object as its own admin change.
-    //
-    // The audit row above says "deploy.completed, 14 actions", which is a
-    // receipt, not an explanation: it does not tell the owner WHICH roles and
-    // channels appeared in their server, and offers no way to reverse them.
-    // One row per object gives the Admin Changes page something readable and,
-    // because we know the id of everything we created, a genuine undo.
-    for (const action of result.actions) {
-      if (action.action !== 'create' || !action.success || !action.discordId) continue;
-      if (action.entityType !== 'role'
-        && action.entityType !== 'channel'
-        && action.entityType !== 'category') continue;
-
-      await recordAdminChange(client.supabase, {
-        guildId,
-        actorId: 'deployer',
-        action: `server_deploy.${action.entityType}_created`,
-        targetType: action.entityType,
-        targetId: action.discordId,
-        description: `Server setup created the ${action.entityType} "${action.entityName}".`,
-        // It did not exist before, so there is no prior state to show.
-        before: null,
-        after: { name: action.entityName, discord_id: action.discordId },
-        // Deleting a channel the bot just made destroys nothing of the
-        // operator's, but it is still structural — worth a confirmation.
-        blastRadius: action.entityType === 'role' ? 'medium' : 'high',
-        undo: undoByDeleting(action.entityType, action.discordId),
-      });
-    }
-
-    // Write live state snapshot after deployment so dashboard sees the result immediately
-    try {
-      await writeGuildSnapshot(guild, client.supabase);
-      log.info('Guild live state snapshot updated');
-    } catch (snapshotErr) {
-      log.error('Failed to write post-deploy snapshot:', snapshotErr);
-    }
-
-    // Emit event
-    if (result.success) {
-      client.eventBus.emit('server.deployed', guildId, {
-        deployId,
-        rolesCreated: result.actions.filter(a => a.entityType === 'role' && a.action === 'create').length,
-        channelsCreated: result.actions.filter(a => a.entityType === 'channel' && a.action === 'create').length,
-        categoriesCreated: result.actions.filter(a => a.entityType === 'category' && a.action === 'create').length,
-        overridesApplied: result.actions.filter(a => a.entityType === 'override').length,
-        duration: result.duration,
-      });
-    } else {
-      client.eventBus.emit('deploy.failed', guildId, {
-        deployId,
-        error: result.errors.map(e => `${e.entityName}: ${e.error}`).join('; '),
-        duration: result.duration,
-      });
-    }
-
-    log.info(
-      `[Deploy] ${result.success ? '✅ Succeeded' : '❌ Failed'} — ` +
-        `${result.duration}ms, ${result.actions.length} actions, ` +
-        `${result.errors.length} errors`,
-    );
-  } catch (error) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    log.error('Fatal deployment error:', errMsg);
-
-    deployStatus.status = 'failed';
-    deployStatus.completedAt = new Date().toISOString();
-    deployStatus.currentAction = `Fatal error: ${errMsg}`;
-
-    await writeAuditLog(client.supabase, {
-      guildId: guildId,
-      actorType: 'bot',
-      actorId: 'deployer',
-      action: 'deploy.fatal',
-      category: 'sync',
-      details: { deployId },
-      success: false,
-      errorMessage: errMsg,
-    });
-  }
 }

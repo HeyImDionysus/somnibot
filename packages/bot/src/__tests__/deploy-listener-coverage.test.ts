@@ -82,7 +82,11 @@ function makeGuild(id: string) {
 
 function makeClient() {
   let realtimeCallback: ((payload: Record<string, unknown>) => Promise<void>) | null = null;
+  let subscriptionCallback: ((status: string) => void) | null = null;
   let eventBusListeners: Record<string, Function[]> = {};
+  let latestRequestRow: Record<string, unknown> | null = null;
+  let claimResultOverride: Record<string, unknown> | null = null;
+  let settleResult = true;
   const guilds = new Map([
     ['g1', makeGuild('g1')],
     ['g2', makeGuild('g2')],
@@ -93,7 +97,10 @@ function makeClient() {
       realtimeCallback = cb as any;
       return channelObj;
     }),
-    subscribe: vi.fn().mockImplementation((cb: Function) => { cb('SUBSCRIBED'); }),
+    subscribe: vi.fn().mockImplementation((cb: (status: string) => void) => {
+      subscriptionCallback = cb;
+      cb('SUBSCRIBED');
+    }),
   };
 
   return {
@@ -106,6 +113,33 @@ function makeClient() {
     supabase: {
       channel: vi.fn().mockReturnValue(channelObj),
       from: vi.fn().mockReturnValue(chainBuilder()),
+      rpc: vi.fn().mockImplementation((name: string, params?: Record<string, unknown>) => {
+        if (name === 'claim_deploy_request') {
+          const guildId = typeof params?.p_guild_id === 'string' ? params.p_guild_id : 'g1';
+          const requestId = typeof params?.p_request_id === 'string'
+            ? params.p_request_id
+            : '11111111-1111-4111-8111-111111111111';
+          return Promise.resolve({
+            data: {
+              guild_id: guildId,
+              applied_at: null,
+              deploy_request_id: requestId,
+              roles: [],
+              channels: [],
+              categories: [],
+              ...latestRequestRow,
+              deploy_claim_token: '22222222-2222-4222-8222-222222222222',
+              deploy_status: 'running',
+              ...claimResultOverride,
+            },
+            error: null,
+          });
+        }
+        if (name === 'fail_interrupted_deploy_requests') {
+          return Promise.resolve({ data: 0, error: null });
+        }
+        return Promise.resolve({ data: settleResult, error: null });
+      }),
     },
     eventBus: {
       on: vi.fn().mockImplementation((event: string, cb: Function) => {
@@ -114,13 +148,43 @@ function makeClient() {
       }),
       emit: vi.fn(),
     },
-    _realtimeCallback: () => realtimeCallback,
+    _realtimeCallback: () => {
+      const callback = realtimeCallback;
+      return callback
+        ? async (payload: Record<string, unknown>) => {
+          const incoming = typeof payload.new === 'object'
+            && payload.new !== null
+            && !Array.isArray(payload.new)
+            ? payload.new
+            : {};
+          const enriched = {
+            guild_id: 'g1',
+            applied_at: null,
+            deploy_request_id: '11111111-1111-4111-8111-111111111111',
+            deploy_status: 'requested',
+            roles: [],
+            channels: [],
+            categories: [],
+            ...incoming,
+          };
+          latestRequestRow = enriched;
+            await callback({ ...payload, new: enriched });
+          }
+        : null;
+    },
     _fireEvent: async (event: string, data?: unknown, guildId = 'g1') => {
       for (const cb of eventBusListeners[event] || []) {
         await cb({ type: event, guildId, timestamp: Date.now(), data: data ?? {} });
       }
     },
     _channelObj: channelObj,
+    _resubscribe: () => subscriptionCallback?.('SUBSCRIBED'),
+    _setSettleResult: (value: boolean) => {
+      settleResult = value;
+    },
+    _setClaimResult: (value: Record<string, unknown>) => {
+      claimResultOverride = value;
+    },
   };
 }
 
@@ -151,6 +215,8 @@ describe('startDeployListener', () => {
       data: [{
         guild_id: 'g1',
         applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
         roles: [{ name: 'Admin', permissions: '8' }],
         channels: [{ name: 'general', type: 'text', categoryKey: 'cat-text' }],
       }],
@@ -202,6 +268,86 @@ describe('startDeployListener', () => {
 
     expect(mockDeployServerState).toHaveBeenCalled();
     expect(mockWriteAuditLog).toHaveBeenCalled();
+  });
+
+  it('reconciles interrupted requests only once across realtime reconnects', async () => {
+    const client = makeClient();
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+
+    client._resubscribe();
+    client._resubscribe();
+    await vi.waitFor(() => expect(client.supabase.rpc).toHaveBeenCalled());
+
+    expect(client.supabase.rpc.mock.calls.filter(([name]) =>
+      name === 'fail_interrupted_deploy_requests',
+    )).toHaveLength(1);
+  });
+
+  it('claims one requested deployment and ignores the running-state echo', async () => {
+    const client = makeClient();
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const callback = client._realtimeCallback();
+    const requestId = '11111111-1111-4111-8111-111111111111';
+
+    await callback!({
+      new: {
+        guild_id: 'g1',
+        applied_at: null,
+        deploy_request_id: requestId,
+        deploy_status: 'requested',
+        roles: [],
+        channels: [],
+        categories: [],
+      },
+    });
+    await callback!({
+      new: {
+        guild_id: 'g1',
+        applied_at: null,
+        deploy_request_id: requestId,
+        deploy_claim_token: '22222222-2222-4222-8222-222222222222',
+        deploy_status: 'running',
+        roles: [],
+        channels: [],
+        categories: [],
+      },
+    });
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('claim_deploy_request', {
+      p_guild_id: 'g1',
+      p_request_id: requestId,
+    });
+    expect(client.supabase.rpc.mock.calls.filter(([name]) =>
+      name === 'claim_deploy_request',
+    )).toHaveLength(1);
+    expect(mockDeployServerState).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles a claimed request as failed when its desired state is malformed', async () => {
+    const client = makeClient();
+    client._setClaimResult({ roles: null });
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const callback = client._realtimeCallback();
+
+    await expect(callback!({
+      new: {
+        guild_id: 'g1',
+        applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
+        roles: [],
+        channels: [],
+        categories: [],
+      },
+    })).rejects.toThrow('Claimed deployment request is malformed');
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('settle_deploy_request', expect.objectContaining({
+      p_guild_id: 'g1',
+      p_request_id: '11111111-1111-4111-8111-111111111111',
+      p_claim_token: '22222222-2222-4222-8222-222222222222',
+      p_success: false,
+    }));
+    expect(mockDeployServerState).not.toHaveBeenCalled();
   });
 
   it('uses destructive mode only when the reviewed row explicitly requests it', async () => {
@@ -282,6 +428,9 @@ describe('startDeployListener', () => {
     const desiredStateQuery = chainBuilder({
       data: {
         guild_id: 'g2',
+        applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
         roles: [{ name: 'Mod', permissions: '0' }],
         channels: [],
       },
@@ -328,7 +477,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(client.supabase.from).not.toHaveBeenCalledWith('discord_id_map');
   });
 
-  it('marks desired state as applied', async () => {
+  it('settles the claimed desired state as successful', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
     startDeployListener(client as any);
@@ -338,7 +487,31 @@ describe('executeDeployDirect (via realtime trigger)', () => {
       new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
     });
 
-    expect(client.supabase.from).toHaveBeenCalledWith('guild_desired_state');
+    expect(client.supabase.rpc).toHaveBeenCalledWith(
+      'settle_deploy_request',
+      expect.objectContaining({ p_success: true }),
+    );
+  });
+
+  it('settles as failed instead of recording success when required audit persistence fails', async () => {
+    mockWriteAuditBatch.mockRejectedValueOnce(new Error('audit unavailable'));
+    const client = makeClient();
+    client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
+    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+
+    const settlementCalls = client.supabase.rpc.mock.calls.filter(([name]) =>
+      name === 'settle_deploy_request',
+    );
+    expect(settlementCalls).toHaveLength(1);
+    expect(settlementCalls[0]?.[1]).toEqual(expect.objectContaining({
+      p_success: false,
+      p_error: 'audit unavailable',
+    }));
   });
 
   it('emits server.deployed event', async () => {
@@ -426,9 +599,9 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(mockWriteAuditLog).toHaveBeenCalled();
   });
 
-  it('reports failure when the applied timestamp cannot be persisted', async () => {
+  it('reports failure when the claimed request cannot be settled', async () => {
     const client = makeClient();
-    client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: { message: 'upsert fail' } }));
+    client._setSettleResult(false);
     startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
     const cb = client._realtimeCallback()!;
 
@@ -439,7 +612,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(client.eventBus.emit).toHaveBeenCalledWith(
       'deploy.failed',
       'g1',
-      expect.objectContaining({ error: expect.stringContaining('Failed to mark the reviewed plan as applied') }),
+      expect.objectContaining({ error: expect.stringContaining('Failed to settle the claimed deployment request') }),
     );
     expect(client.eventBus.emit).not.toHaveBeenCalledWith(
       'server.deployed',

@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 299 migration files in packages/supabase/migrations/
+ * Source: 300 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -566,6 +566,13 @@ export interface DbGuildDesiredState {
   updated_at: string;
   categories: Json;
   deploy_mode: string;
+  deploy_request_id: string | null;
+  deploy_status: string;
+  deploy_claim_token: string | null;
+  deploy_claimed_at: string | null;
+  deploy_started_at: string | null;
+  deploy_completed_at: string | null;
+  deploy_error: string | null;
 }
 
 export interface DbDiscordIdMap {

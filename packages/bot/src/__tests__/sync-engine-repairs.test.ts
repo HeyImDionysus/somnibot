@@ -88,7 +88,7 @@ class MockCollection extends Map {
 }
 
 function makeGuild(opts: {
-  roles?: Array<{ id: string; name: string; position: number; managed?: boolean; edit?: any }>;
+  roles?: Array<{ id: string; name: string; position: number; managed?: boolean; edit?: any; setPosition?: any }>;
   botHighestPosition?: number;
   setPositions?: ReturnType<typeof vi.fn>;
   createRole?: ReturnType<typeof vi.fn>;
@@ -103,20 +103,38 @@ function makeGuild(opts: {
   const everyone = { id: 'g1', name: '@everyone', setPermissions: vi.fn(async () => {}) };
   cache.set('g1', everyone);
   for (const r of roles) {
-    cache.set(r.id, {
+    const role = {
       managed: false,
+      editable: true,
       edit: vi.fn(async () => {}),
       ...r,
-    });
+      setPosition: r.setPosition ?? vi.fn(async (nextPosition: number) => {
+        const currentPosition = role.position;
+        for (const other of cache.values()) {
+          if (other === role || typeof other.position !== 'number') continue;
+          if (currentPosition < nextPosition && other.position > currentPosition && other.position <= nextPosition) {
+            other.position -= 1;
+          } else if (currentPosition > nextPosition && other.position >= nextPosition && other.position < currentPosition) {
+            other.position += 1;
+          }
+        }
+        role.position = nextPosition;
+        return role;
+      }),
+    };
+    cache.set(r.id, role);
   }
 
   return {
     id: 'g1',
-    roles: { cache, everyone, setPositions, create: createRole },
+    roles: { cache, everyone, setPositions, create: createRole, fetch: vi.fn(async () => cache) },
     channels: { cache: new MockCollection() },
     rulesChannelId: null,
     publicUpdatesChannelId: null,
-    members: { me: { roles: { highest: { id: 'bot-role', position: botHighestPosition } } } },
+    members: { me: {
+      roles: { highest: { id: 'bot-role', position: botHighestPosition }, cache: new Map([['bot-role', {}]]) },
+      permissions: { has: vi.fn(() => true) },
+    } },
     client: { user: { id: 'bot1' } },
   } as any;
 }
@@ -173,7 +191,7 @@ describe('auto-repair: MISSING_RESOURCE', () => {
 // HIERARCHY_DRIFT
 // =========================================================
 describe('auto-repair: HIERARCHY_DRIFT', () => {
-  it('reorders roles to desired relative positions via setPositions', async () => {
+  it('reorders roles with verified single-role moves below the bot', async () => {
     // Desired order (by position field): member(0) < mod(1) < admin(2).
     // Actual Discord positions are scrambled.
     const desired = {
@@ -216,17 +234,16 @@ describe('auto-repair: HIERARCHY_DRIFT', () => {
     const supabase = makeSupabase({ desired, mappings });
     const result = await runSyncCycle(guild, supabase, bus, makeConfig());
 
-    expect(setPositions).toHaveBeenCalledTimes(1);
-    const updates = setPositions.mock.calls[0][0];
-    // All three mapped roles are ordered; positions must reflect desired order
-    // (member lowest, admin highest) and every position must be below the bot (50).
-    const byRole = new Map(updates.map((u) => [u.role, u.position]));
-    expect(byRole.get('r-member')!).toBeLessThan(byRole.get('r-mod')!);
-    expect(byRole.get('r-mod')!).toBeLessThan(byRole.get('r-admin')!);
-    for (const u of updates) {
-      expect(u.position).toBeGreaterThanOrEqual(1);
-      expect(u.position).toBeLessThan(50);
-    }
+    expect(setPositions).not.toHaveBeenCalled();
+    const member = guild.roles.cache.get('r-member');
+    const mod = guild.roles.cache.get('r-mod');
+    const admin = guild.roles.cache.get('r-admin');
+    expect(member.setPosition).toHaveBeenCalled();
+    expect(mod.setPosition).toHaveBeenCalled();
+    expect(admin.setPosition).toHaveBeenCalled();
+    expect(member.position).toBeLessThan(mod.position);
+    expect(mod.position).toBeLessThan(admin.position);
+    expect(admin.position).toBeLessThan(50);
     expect(result.repaired).toBe(1);
   });
 
@@ -273,6 +290,9 @@ describe('auto-repair: HIERARCHY_DRIFT', () => {
     const result = await runSyncCycle(guild, supabase, bus, makeConfig());
 
     expect(setPositions).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').setPosition).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-mod').setPosition).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-admin').setPosition).not.toHaveBeenCalled();
     expect(result.repaired).toBe(1); // idempotent no-op still counts as repaired/consistent
   });
 

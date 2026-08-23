@@ -26,6 +26,7 @@ import type {
   DesiredCategory,
 } from '@somnibot/shared';
 import { checkBotRolePosition, checkBotPermissions } from '../guards/bot-role-guard.js';
+import { placeRolesDirectlyBelowBot } from '../services/role-hierarchy.js';
 
 // ============================================================
 // Types
@@ -139,7 +140,7 @@ export async function deployServerState(
   let persistedMappings: DiscordIdMappingRow[] = [];
   let step = 0;
 
-  const totalSteps = estimateTotalSteps(desiredState, options);
+  let totalSteps = 0;
   const report = (action: string) => {
     options.onProgress?.(step, totalSteps, action);
   };
@@ -228,7 +229,16 @@ export async function deployServerState(
       canonicalTemplateKey('channel', 'moderator-only'),
     ) ?? guild.safetyAlertsChannelId;
     if (moderatorOnlyChannelId) communityChannelIds.add(moderatorOnlyChannelId);
+    const attemptedMappedDiscordIds = new Set<string>();
     const deletedMappedDiscordIds = new Set<string>();
+    totalSteps = estimateTotalSteps(
+      desiredState,
+      options,
+      guild,
+      persistedMappings,
+      communityChannelIds,
+      moderatorOnlyChannelId,
+    );
 
     // === Step 1: Zero @everyone during an explicitly destructive deployment ===
     if (options.cleanExisting) {
@@ -371,7 +381,6 @@ export async function deployServerState(
     // === Step 4: Set role positions (hierarchy) ===
     step++;
     report('Setting role hierarchy positions');
-    let hierarchyContext = 'hierarchy context unavailable';
     try {
       const targetRoles = sortedRoles
         .map((desired) => {
@@ -381,96 +390,17 @@ export async function deployServerState(
         .filter((role): role is NonNullable<typeof role> => role !== null);
 
       if (targetRoles.length > 0) {
-        // Role creation changes every role above the insertion point. Fetch the
-        // authoritative hierarchy before calculating positions; using the
-        // pre-create cache can target the bot's own position and Discord rejects
-        // that batch with Missing Permissions.
-        await guild.roles.fetch();
-
-        const botHighest = guild.members.me?.roles.highest.position;
-        if (botHighest === undefined) {
-          throw new Error('Bot member is unavailable after refreshing the role hierarchy');
-        }
-
-        const targetRoleObjects = targetRoles.map(({ discordId }) => {
-          const role = guild.roles.cache.get(discordId);
-          if (!role) {
-            throw new Error(`Created role is missing after refreshing the hierarchy`);
-          }
-          return role;
-        });
-        // The desired list is ordered low-to-high. Put it directly beneath the
-        // bot so newly deployed moderators remain above surviving member
-        // roles. Managed integration roles are not treated as barriers here:
-        // raising the created (editable) roles displaces them downward
-        // implicitly, so the batch below lands even in guilds full of other
-        // bots' roles. Whether it actually landed is verified AFTER the move.
-        const lowestTargetPosition = botHighest - targetRoles.length;
-        const availablePositions = targetRoles.map(
-          (_, index) => lowestTargetPosition + index,
+        await placeRolesDirectlyBelowBot(
+          guild,
+          targetRoles.map(({ discordId }) => discordId),
         );
-        const positionUpdates = targetRoles.map(({ discordId }, index) => ({
-          role: discordId,
-          position: availablePositions[index],
-        }));
-        const targetRoleStates = targetRoleObjects.map((role) => {
-          return `${role?.position ?? 'missing'}:${role?.editable ?? 'unknown'}:${role?.managed ?? 'unknown'}`;
-        });
-        hierarchyContext = [
-          `botPosition=${botHighest}`,
-          `botManageRoles=${guild.members.me?.permissions.has('ManageRoles') ?? false}`,
-          `botAdministrator=${guild.members.me?.permissions.has('Administrator') ?? false}`,
-          `targetPositions=${positionUpdates.map(({ position }) => position).join(',')}`,
-          `targetStates=${targetRoleStates.join(',')}`,
-        ].join('; ');
-
-        if (positionUpdates.some(({ position }) => position < 1 || position >= botHighest)) {
-          throw new Error(
-            `Cannot place ${positionUpdates.length} created roles below bot role position ${botHighest}`,
-          );
-        }
-
-        const uneditableRole = targetRoleObjects.find((role) => role.editable === false);
-        if (uneditableRole) {
-          throw new Error(`Created role is not editable by the bot: ${uneditableRole.name}`);
-        }
-
-        await guild.roles.setPositions(positionUpdates);
-
-        // Outcome verification: the created roles must now be the top block
-        // directly beneath the bot. A role Discord did NOT displace is
-        // reported honestly instead of claiming success with an ineffective
-        // hierarchy.
-        await guild.roles.fetch();
-        const verifiedBotHighest = guild.members.me?.roles.highest.position;
-        if (verifiedBotHighest === undefined) {
-          throw new Error('Bot member is unavailable after setting the role hierarchy');
-        }
-        const targetIds = new Set(targetRoles.map(({ discordId }) => discordId));
-        const meRoleCache = guild.members.me?.roles.cache;
-        const botOwnRoleIds = new Set<string>(meRoleCache ? [...meRoleCache.keys()] : []);
-        const interloper = [...guild.roles.cache.values()]
-          .filter((role) =>
-            role.id !== guild.id
-            && !botOwnRoleIds.has(role.id)
-            && role.position < verifiedBotHighest)
-          .sort((a, b) => b.position - a.position)
-          .slice(0, targetRoles.length)
-          .find((role) => !targetIds.has(role.id));
-        if (interloper) {
-          throw new Error(
-            `Cannot preserve the requested hierarchy because role ${interloper.name} `
-            + `at position ${interloper.position} remains between the bot and the deployed roles`,
-          );
-        }
       }
       actions.push({
         step, action: 'set', entityType: 'role',
         entityName: 'Role hierarchy', success: true,
       });
     } catch (err) {
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      const msg = `${rawMessage} (${hierarchyContext})`;
+      const msg = err instanceof Error ? err.message : String(err);
       errors.push({ step, entityType: 'role', entityName: 'Role hierarchy', error: msg });
       actions.push({
         step, action: 'set', entityType: 'role',
@@ -690,7 +620,7 @@ export async function deployServerState(
             || typeof row.template_key !== 'string'
             || typeof row.discord_id !== 'string') continue;
           if (desiredMappingKeys.has(canonicalTemplateKey(entityType, row.template_key))) continue;
-          if (deletedMappedDiscordIds.has(row.discord_id)) continue;
+          if (attemptedMappedDiscordIds.has(row.discord_id)) continue;
 
           const entity = entityType === 'role'
             ? guild.roles.cache.get(row.discord_id)
@@ -698,6 +628,7 @@ export async function deployServerState(
           if (!entity) continue;
           if (entityType !== 'role' && communityChannelIds.has(entity.id)) continue;
 
+          attemptedMappedDiscordIds.add(row.discord_id);
           step++;
           report(`Deleting removed ${entityType}: ${entity.name}`);
           try {
@@ -767,24 +698,6 @@ export async function deployServerState(
         if (insertMappingsError) {
           throw new Error(`Failed to store Discord ID mappings: ${insertMappingsError.message}`);
         }
-      }
-
-      // Update desired state
-      const { error: desiredStateError } = await supabase
-        .from('guild_desired_state')
-        .upsert({
-          guild_id: guild.id,
-          roles: JSON.parse(JSON.stringify(desiredState.roles)),
-          channels: JSON.parse(JSON.stringify(desiredState.channels)),
-          categories: JSON.parse(JSON.stringify(desiredState.categories)),
-          permission_map: {},
-          deploy_mode: options.cleanExisting ? 'destructive' : 'safe',
-          last_sync_at: new Date().toISOString(),
-          drift_detected: false,
-          drift_details: null,
-        });
-      if (desiredStateError) {
-        throw new Error(`Failed to store desired state: ${desiredStateError.message}`);
       }
 
       // Update guild record — setup_completed stays false until owner confirms (Step 7 of wizard)
@@ -966,17 +879,64 @@ async function createChannel(
   return channel.id;
 }
 
-function estimateTotalSteps(state: DesiredState, options: DeployOptions): number {
-  let steps = options.cleanExisting ? 1 : 0; // @everyone
+function estimateTotalSteps(
+  state: DesiredState,
+  options: DeployOptions,
+  guild: Guild,
+  mappings: readonly DiscordIdMappingRow[],
+  communityChannelIds: ReadonlySet<string>,
+  moderatorOnlyChannelId: string | null | undefined,
+): number {
+  let steps = 0;
+  if (options.cleanExisting) {
+    steps += 2;
+    steps += guild.channels.cache.filter((channel) => !communityChannelIds.has(channel.id)).size;
+    steps += guild.roles.cache.filter((role) =>
+      !role.managed
+      && role.id !== guild.id
+      && role.position < (guild.members.me?.roles.highest.position ?? 0),
+    ).size;
+  } else {
+    steps += countRemovedMappings(state, guild, mappings, communityChannelIds);
+  }
   steps += state.roles.length; // Create roles
   steps += 1; // Set positions
   steps += state.categories.length; // Create categories
   steps += state.channels.length; // Create channels
+  if (moderatorOnlyChannelId && guild.channels.cache.has(moderatorOnlyChannelId)) steps += 1;
   steps += 1; // Store mappings
-  if (options.cleanExisting) {
-    steps += 20; // Rough estimate for deletion
-  }
   return steps;
+}
+
+function countRemovedMappings(
+  state: DesiredState,
+  guild: Guild,
+  mappings: readonly DiscordIdMappingRow[],
+  communityChannelIds: ReadonlySet<string>,
+): number {
+  const desiredKeys = new Set<string>([
+    ...state.roles.map((role) => canonicalTemplateKey('role', role.key)),
+    ...state.categories.map((category) => canonicalTemplateKey('category', category.key)),
+    ...state.channels.map((channel) => canonicalTemplateKey('channel', channel.key)),
+  ]);
+  const countedDiscordIds = new Set<string>();
+  let count = 0;
+  for (const entityType of ['channel', 'category', 'role'] as const) {
+    for (const row of mappings) {
+      if (row.entity_type !== entityType
+        || typeof row.template_key !== 'string'
+        || typeof row.discord_id !== 'string'
+        || desiredKeys.has(canonicalTemplateKey(entityType, row.template_key))
+        || countedDiscordIds.has(row.discord_id)) continue;
+      const entity = entityType === 'role'
+        ? guild.roles.cache.get(row.discord_id)
+        : guild.channels.cache.get(row.discord_id);
+      if (!entity || (entityType !== 'role' && communityChannelIds.has(entity.id))) continue;
+      countedDiscordIds.add(row.discord_id);
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function sleep(ms: number): Promise<void> {
