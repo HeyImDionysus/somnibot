@@ -1318,6 +1318,13 @@ async function handleConfigReload(
       retryable: false,
     };
   }
+  if (syncRequestId && section !== 'onboarding') {
+    return {
+      success: false,
+      error: 'Config reload synchronization request IDs are only valid for onboarding',
+      retryable: false,
+    };
+  }
 
   const configEvent = {
     section: section ?? 'unknown',

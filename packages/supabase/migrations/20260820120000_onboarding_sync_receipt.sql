@@ -134,7 +134,84 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.renew_onboarding_sync_lease(
+  p_guild_id TEXT,
+  p_request_id UUID,
+  p_lease_token UUID,
+  p_lease_seconds INTEGER DEFAULT 90
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF p_lease_seconds < 15 OR p_lease_seconds > 300 THEN
+    RAISE EXCEPTION USING ERRCODE = '22023',
+      MESSAGE = 'onboarding synchronization lease duration is out of range';
+  END IF;
+
+  UPDATE public.onboarding_sync_leases AS lease
+     SET expires_at = clock_timestamp() + make_interval(secs => p_lease_seconds)
+   WHERE lease.guild_id = p_guild_id
+     AND lease.request_id = p_request_id
+     AND lease.lease_token = p_lease_token
+     AND lease.expires_at > clock_timestamp()
+     AND EXISTS (
+       SELECT 1
+         FROM public.guild_config AS config
+        WHERE config.guild_id = p_guild_id
+          AND config.onboarding_sync_state->>'request_id' = p_request_id::TEXT
+     );
+  RETURN FOUND;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.persist_onboarding_sync_state_if_leased(
+  p_guild_id TEXT,
+  p_request_id UUID,
+  p_lease_token UUID,
+  p_state JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF jsonb_typeof(p_state) IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION USING ERRCODE = '22023',
+      MESSAGE = 'onboarding synchronization state must be an object';
+  END IF;
+  IF p_state->>'request_id' IS DISTINCT FROM p_request_id::TEXT THEN
+    RAISE EXCEPTION USING ERRCODE = '22023',
+      MESSAGE = 'onboarding synchronization state request does not match its lease';
+  END IF;
+
+  PERFORM 1
+    FROM public.onboarding_sync_leases AS lease
+   WHERE lease.guild_id = p_guild_id
+     AND lease.request_id = p_request_id
+     AND lease.lease_token = p_lease_token
+     AND lease.expires_at > clock_timestamp()
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN FALSE;
+  END IF;
+
+  UPDATE public.guild_config AS config
+     SET onboarding_sync_state = p_state
+   WHERE config.guild_id = p_guild_id
+     AND config.onboarding_sync_state->>'request_id' = p_request_id::TEXT;
+  RETURN FOUND;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.acquire_onboarding_sync_lease(TEXT, UUID, INTEGER) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.release_onboarding_sync_lease(TEXT, UUID) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.renew_onboarding_sync_lease(TEXT, UUID, UUID, INTEGER) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.persist_onboarding_sync_state_if_leased(TEXT, UUID, UUID, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.acquire_onboarding_sync_lease(TEXT, UUID, INTEGER) TO service_role;
 GRANT EXECUTE ON FUNCTION public.release_onboarding_sync_lease(TEXT, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.renew_onboarding_sync_lease(TEXT, UUID, UUID, INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION public.persist_onboarding_sync_state_if_leased(TEXT, UUID, UUID, JSONB) TO service_role;

@@ -287,7 +287,8 @@ describe('GuildOnboardingSync', () => {
           default_channel_ids: ['ch1'],
         },
       });
-    const supa = { from: vi.fn(() => db), rpc: leaseRpc() } as unknown as SupabaseClient;
+    const rpc = leaseRpc();
+    const supa = { from: vi.fn(() => db), rpc } as unknown as SupabaseClient;
     const g = guild();
     g.editOnboarding = vi.fn(async () => ({
       enabled: true,
@@ -327,8 +328,8 @@ describe('GuildOnboardingSync', () => {
       }],
       defaultChannels: ['ch1'],
     });
-    expect(db.update).toHaveBeenCalledWith({
-      onboarding_sync_state: expect.objectContaining({
+    expect(rpc).toHaveBeenCalledWith('persist_onboarding_sync_state_if_leased', expect.objectContaining({
+      p_state: expect.objectContaining({
         status: 'synced',
         request_id: '11111111-1111-4111-8111-111111111111',
         live_config: expect.objectContaining({
@@ -336,10 +337,7 @@ describe('GuildOnboardingSync', () => {
           default_channel_ids: ['ch1'],
         }),
       }),
-    });
-    expect(db.contains).toHaveBeenCalledWith('onboarding_sync_state', {
-      request_id: '11111111-1111-4111-8111-111111111111',
-    });
+    }));
   });
 
   it('does not attempt a native onboarding edit when the preflight readback fails', async () => {
@@ -352,26 +350,28 @@ describe('GuildOnboardingSync', () => {
       },
       onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
     });
-    const supa = { from: vi.fn(() => db), rpc: leaseRpc() } as unknown as SupabaseClient;
+    const rpc = leaseRpc();
+    const supa = { from: vi.fn(() => db), rpc } as unknown as SupabaseClient;
     const g = guild();
     g.fetchOnboarding.mockRejectedValueOnce(new Error('Community onboarding unavailable'));
     g.editOnboarding = vi.fn(async () => ({}));
 
     const eventBus = eb();
-    await new GuildOnboardingSync(g, supa, eventBus).syncOnboarding();
+    await expect(new GuildOnboardingSync(g, supa, eventBus).syncOnboarding())
+      .rejects.toThrow('Community onboarding unavailable');
 
     expect(g.editOnboarding).not.toHaveBeenCalled();
     expect(eventBus.emit).toHaveBeenCalledWith('sync.failed', 'g1', {
       stage: 'discord-native-onboarding',
       error: 'Error: Community onboarding unavailable',
     });
-    expect(db.update).toHaveBeenCalledWith({
-      onboarding_sync_state: expect.objectContaining({
+    expect(rpc).toHaveBeenCalledWith('persist_onboarding_sync_state_if_leased', expect.objectContaining({
+      p_state: expect.objectContaining({
         status: 'failed',
         request_id: '22222222-2222-4222-8222-222222222222',
         error: 'Error: Community onboarding unavailable',
       }),
-    });
+    }));
   });
 
   it('reports a configuration read failure without touching Discord', async () => {
@@ -421,7 +421,7 @@ describe('GuildOnboardingSync', () => {
     }) } as unknown as SupabaseClient;
     const g = guild();
     g.editOnboarding = vi.fn();
-    g.fetchOnboarding.mockResolvedValueOnce({
+    g.fetchOnboarding.mockResolvedValue({
       enabled: true,
       prompts: new Collection(),
       defaultChannels: new Collection([['legacy', { id: 'legacy' }]]),
@@ -453,7 +453,8 @@ describe('GuildOnboardingSync', () => {
         request_id: '33333333-3333-4333-8333-333333333333',
       },
     });
-    const supa = { from: vi.fn(() => db), rpc: leaseRpc() } as unknown as SupabaseClient;
+    const rpc = leaseRpc();
+    const supa = { from: vi.fn(() => db), rpc } as unknown as SupabaseClient;
     const g = guild();
     g.editOnboarding = vi.fn(async () => ({
       enabled: false,
@@ -464,13 +465,13 @@ describe('GuildOnboardingSync', () => {
     await sync.syncOnboarding();
 
     expect(g.editOnboarding).toHaveBeenCalledWith({ enabled: false });
-    expect(db.update).toHaveBeenCalledWith({
-      onboarding_sync_state: expect.objectContaining({
+    expect(rpc).toHaveBeenCalledWith('persist_onboarding_sync_state_if_leased', expect.objectContaining({
+      p_state: expect.objectContaining({
         status: 'synced',
         request_id: '33333333-3333-4333-8333-333333333333',
         live_config: expect.objectContaining({ enabled: false }),
       }),
-    });
+    }));
   });
 
   it('records drift when Discord remains enabled after a disable request', async () => {
@@ -482,7 +483,8 @@ describe('GuildOnboardingSync', () => {
         request_id: '44444444-4444-4444-8444-444444444444',
       },
     });
-    const supa = { from: vi.fn(() => db), rpc: leaseRpc() } as unknown as SupabaseClient;
+    const rpc = leaseRpc();
+    const supa = { from: vi.fn(() => db), rpc } as unknown as SupabaseClient;
     const g = guild();
     g.editOnboarding = vi.fn(async () => ({
       enabled: true,
@@ -492,12 +494,12 @@ describe('GuildOnboardingSync', () => {
 
     await new GuildOnboardingSync(g, supa, eb()).syncOnboarding();
 
-    expect(db.update).toHaveBeenCalledWith({
-      onboarding_sync_state: expect.objectContaining({
+    expect(rpc).toHaveBeenCalledWith('persist_onboarding_sync_state_if_leased', expect.objectContaining({
+      p_state: expect.objectContaining({
         status: 'drifted',
         live_config: expect.objectContaining({ enabled: true }),
       }),
-    });
+    }));
   });
 
   it('serializes overlapping changes so the newest request is the final Discord edit', async () => {
@@ -512,9 +514,7 @@ describe('GuildOnboardingSync', () => {
       onboarding_sync_state: { status: 'pending', request_id: '66666666-6666-4666-8666-666666666666' },
       onboarding_config: { enabled: true, prompts: [], default_channel_ids: ['second'] },
     });
-    const firstWrite = chain({ guild_id: 'g1' });
-    const secondWrite = chain({ guild_id: 'g1' });
-    const queries = [firstRead, firstWrite, secondRead, secondWrite];
+    const queries = [firstRead, secondRead];
     const supa = {
       from: vi.fn(() => {
         const query = queries.shift();
@@ -548,9 +548,117 @@ describe('GuildOnboardingSync', () => {
 
     expect(g.editOnboarding).toHaveBeenCalledTimes(2);
     expect(g.editOnboarding).toHaveBeenLastCalledWith(expect.objectContaining({ defaultChannels: ['second'] }));
-    expect(secondWrite.contains).toHaveBeenCalledWith('onboarding_sync_state', {
-      request_id: '66666666-6666-4666-8666-666666666666',
+  });
+
+  it('observes a terminal managed receipt on restart without replaying its Discord edit', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const db = chain({
+      onboarding_enabled: true,
+      onboarding_sync_state: {
+        status: 'drifted',
+        managed: true,
+        request_id: '88888888-8888-4888-8888-888888888888',
+      },
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: [] },
     });
+    const rpc = leaseRpc();
+    const supa = { from: vi.fn(() => db), rpc } as unknown as SupabaseClient;
+    const g = guild();
+    g.fetchOnboarding.mockResolvedValue({
+      enabled: false,
+      prompts: new Collection(),
+      defaultChannels: new Collection(),
+    });
+    g.editOnboarding = vi.fn();
+
+    await new GuildOnboardingSync(g, supa, eb()).syncOnboarding();
+
+    expect(g.editOnboarding).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalledWith('acquire_onboarding_sync_lease', expect.anything());
+    expect(db.update).toHaveBeenCalledWith({
+      onboarding_sync_state: expect.objectContaining({
+        status: 'drifted',
+        managed: true,
+        request_id: '88888888-8888-4888-8888-888888888888',
+      }),
+    });
+  });
+
+  it('reapplies the newest request when an expired worker finishes its Discord edit last', async () => {
+    const { GuildOnboardingSync } = await import('../features/discord-native/guild-onboarding-sync.js');
+    const firstRequestId = '99999999-9999-4999-8999-999999999991';
+    const secondRequestId = '99999999-9999-4999-8999-999999999992';
+    let current = {
+      onboarding_enabled: true,
+      onboarding_sync_state: { status: 'pending', request_id: firstRequestId },
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: ['first'] },
+    };
+    let leaseOwner: string | null = null;
+    let nextToken = 1;
+    const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'acquire_onboarding_sync_lease') {
+        if (leaseOwner) return { data: { disposition: 'busy', lease_token: null }, error: null };
+        leaseOwner = `lease-${nextToken++}`;
+        return { data: { disposition: 'acquired', lease_token: leaseOwner }, error: null };
+      }
+      if (name === 'renew_onboarding_sync_lease') {
+        return { data: args.p_lease_token === leaseOwner, error: null };
+      }
+      if (name === 'persist_onboarding_sync_state_if_leased') {
+        if (args.p_lease_token !== leaseOwner) return { data: false, error: null };
+        current = {
+          ...current,
+          onboarding_sync_state: args.p_state as typeof current.onboarding_sync_state,
+        };
+        return { data: true, error: null };
+      }
+      if (name === 'release_onboarding_sync_lease') {
+        if (args.p_lease_token === leaseOwner) leaseOwner = null;
+        return { data: true, error: null };
+      }
+      return { data: null, error: null };
+    });
+    const supa = {
+      from: vi.fn(() => chain(current)),
+      rpc,
+    } as unknown as SupabaseClient;
+    const g = guild();
+    let finishExpiredEdit: ((value: unknown) => void) | undefined;
+    const expiredEdit = new Promise((resolve) => { finishExpiredEdit = resolve; });
+    g.editOnboarding = vi.fn()
+      .mockImplementationOnce(() => expiredEdit)
+      .mockResolvedValue({
+        enabled: true,
+        prompts: new Collection(),
+        defaultChannels: new Collection([['second', { id: 'second' }]]),
+      });
+    const expiredWorker = new GuildOnboardingSync(g, supa, eb());
+    const successor = new GuildOnboardingSync(g, supa, eb());
+
+    const oldRun = expiredWorker.syncOnboarding(firstRequestId);
+    await vi.waitFor(() => expect(g.editOnboarding).toHaveBeenCalledTimes(1));
+    leaseOwner = null;
+    current = {
+      onboarding_enabled: true,
+      onboarding_sync_state: { status: 'pending', request_id: secondRequestId },
+      onboarding_config: { enabled: true, prompts: [], default_channel_ids: ['second'] },
+    };
+    await successor.syncOnboarding(secondRequestId);
+    finishExpiredEdit?.({
+      enabled: true,
+      prompts: new Collection(),
+      defaultChannels: new Collection([['first', { id: 'first' }]]),
+    });
+    await oldRun;
+
+    expect(g.editOnboarding).toHaveBeenCalledTimes(3);
+    expect(g.editOnboarding).toHaveBeenLastCalledWith(expect.objectContaining({
+      defaultChannels: ['second'],
+    }));
+    expect(current.onboarding_sync_state).toEqual(expect.objectContaining({
+      status: 'synced',
+      request_id: secondRequestId,
+    }));
   });
 
   it('does not edit Discord while another instance owns the guild synchronization lease', async () => {

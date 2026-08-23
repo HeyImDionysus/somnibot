@@ -17,6 +17,8 @@ import type { PlatformEvent, ConfigChangedData } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('OnboardingSync');
+const LEASE_SECONDS = 90;
+const LEASE_RENEWAL_MS = 30_000;
 
 export interface OnboardingConfig {
   enabled: boolean;
@@ -153,17 +155,20 @@ export class GuildOnboardingSync {
   /**
    * Push dashboard onboarding config to Discord's Guild Onboarding API.
    */
-  syncOnboarding(expectedRequestId?: string): Promise<void> {
-    const run = this.syncQueue.then(() => this.performSync(expectedRequestId));
+  syncOnboarding(expectedRequestId?: string, forceManagedReconciliation = false): Promise<void> {
+    const run = this.syncQueue.then(() => this.performSync(expectedRequestId, forceManagedReconciliation));
     this.syncQueue = run.then(() => undefined, () => undefined);
     return run.then(async (needsReconciliation) => {
       if (needsReconciliation) {
-        await this.syncOnboarding();
+        await this.syncOnboarding(undefined, true);
       }
     });
   }
 
-  private async performSync(expectedRequestId?: string): Promise<boolean> {
+  private async performSync(
+    expectedRequestId?: string,
+    forceManagedReconciliation = false,
+  ): Promise<boolean> {
     const { data: config, error: configError } = await this.supabase
       .from('guild_config')
       .select('onboarding_config, onboarding_enabled, interest_role_mapping, onboarding_sync_state')
@@ -206,14 +211,23 @@ export class GuildOnboardingSync {
     }
     let observed: GuildOnboarding | null = null;
     let leaseToken: string | null = null;
+    let leaseRenewalTimer: ReturnType<typeof setInterval> | undefined;
+    let leaseLost = false;
+    let leaseRenewalError: Error | null = null;
+    const managedRequest = syncState.managed !== false && Boolean(syncState.request_id);
+    const shouldMutate = managedRequest && (
+      syncState.status === 'pending'
+      || forceManagedReconciliation
+      || (Boolean(expectedRequestId) && syncState.status === 'failed')
+    );
 
-    if (syncState.status !== 'idle' && syncState.managed !== false && syncState.request_id) {
+    if (shouldMutate && syncState.request_id) {
       const { data: lease, error: leaseError } = await this.supabase.rpc(
         'acquire_onboarding_sync_lease',
         {
           p_guild_id: this.guild.id,
           p_request_id: syncState.request_id,
-          p_lease_seconds: 90,
+          p_lease_seconds: LEASE_SECONDS,
         },
       );
       if (leaseError) {
@@ -230,7 +244,17 @@ export class GuildOnboardingSync {
       if (disposition !== 'acquired' || typeof lease.lease_token !== 'string') {
         throw new Error('Onboarding synchronization lease returned malformed evidence');
       }
-      leaseToken = lease.lease_token;
+      const renewalLeaseToken = lease.lease_token;
+      leaseToken = renewalLeaseToken;
+      const renewalRequestId = syncState.request_id;
+      leaseRenewalTimer = setInterval(() => {
+        void this.renewLease(renewalRequestId, renewalLeaseToken).then((renewed) => {
+          if (!renewed) leaseLost = true;
+        }).catch((error: unknown) => {
+          leaseRenewalError = error instanceof Error ? error : new Error(String(error));
+        });
+      }, LEASE_RENEWAL_MS);
+      leaseRenewalTimer.unref?.();
     }
 
     try {
@@ -239,7 +263,7 @@ export class GuildOnboardingSync {
       // This also proves the edit is targeting a real Discord onboarding object.
       observed = await this.guild.fetchOnboarding();
 
-      if (syncState.status === 'idle' || syncState.managed === false) {
+      if (!shouldMutate) {
         const liveConfig = serializeOnboarding(observed);
         const requested = config.onboarding_enabled && onboardingConfig
           ? requestedConfig(onboardingConfig, interestRoleMapping)
@@ -248,23 +272,32 @@ export class GuildOnboardingSync {
           ? requested !== null && JSON.stringify(liveConfig) === JSON.stringify(requested)
           : !liveConfig.enabled;
         const persisted = await this.persistSyncState(syncState, {
+          ...syncState,
           status: matchesSaved ? 'synced' : 'drifted',
-          managed: false,
+          managed: syncState.status === 'idle' || syncState.managed === false ? false : true,
           observed_at: new Date().toISOString(),
           live_config: liveConfig,
         });
         return !persisted;
       }
 
+      if (!leaseToken || !syncState.request_id) {
+        throw new Error('Onboarding synchronization lease is unavailable');
+      }
+      if (leaseRenewalError) throw leaseRenewalError;
+      if (leaseLost || !(await this.renewLease(syncState.request_id, leaseToken))) return true;
+
       if (!config.onboarding_enabled) {
         const edited = await this.guild.editOnboarding({ enabled: false });
+        if (leaseRenewalError) throw leaseRenewalError;
+        if (leaseLost || !(await this.renewLease(syncState.request_id, leaseToken))) return true;
         const liveConfig = serializeOnboarding(edited);
         const persisted = await this.persistSyncState(syncState, {
           ...syncState,
           status: liveConfig.enabled ? 'drifted' : 'synced',
           observed_at: new Date().toISOString(),
           live_config: liveConfig,
-        });
+        }, leaseToken);
         if (persisted) {
           log.info(liveConfig.enabled
             ? 'Discord onboarding remained enabled after disable request'
@@ -307,6 +340,8 @@ export class GuildOnboardingSync {
         prompts,
         defaultChannels: normalizedRequest.default_channel_ids,
       });
+      if (leaseRenewalError) throw leaseRenewalError;
+      if (leaseLost || !(await this.renewLease(syncState.request_id, leaseToken))) return true;
 
       const liveConfig = serializeOnboarding(edited);
       const matchesRequested = JSON.stringify(liveConfig) === JSON.stringify(normalizedRequest);
@@ -315,7 +350,7 @@ export class GuildOnboardingSync {
         status: matchesRequested ? 'synced' : 'drifted',
         observed_at: new Date().toISOString(),
         live_config: liveConfig,
-      });
+      }, leaseToken);
 
       if (persisted) {
         log.info(`Synced ${prompts.length} onboarding prompts to Discord`);
@@ -331,7 +366,7 @@ export class GuildOnboardingSync {
           observed_at: new Date().toISOString(),
           error,
           ...(observed ? { live_config: serializeOnboarding(observed) } : {}),
-        });
+        }, leaseToken);
       } catch (persistError) {
         throw new Error(`${error}; receipt write failed: ${String(persistError)}`);
       }
@@ -340,8 +375,10 @@ export class GuildOnboardingSync {
         stage: 'discord-native-onboarding',
         error,
       });
-      return !persisted;
+      if (!persisted) return true;
+      throw err instanceof Error ? err : new Error(error);
     } finally {
+      if (leaseRenewalTimer) clearInterval(leaseRenewalTimer);
       if (leaseToken) {
         const { error: releaseError } = await this.supabase.rpc('release_onboarding_sync_lease', {
           p_guild_id: this.guild.id,
@@ -359,7 +396,29 @@ export class GuildOnboardingSync {
   private async persistSyncState(
     previous: OnboardingSyncState,
     next: OnboardingSyncState,
+    leaseToken?: string | null,
   ): Promise<boolean> {
+    if (previous.request_id && leaseToken) {
+      const { data, error } = await this.supabase.rpc(
+        'persist_onboarding_sync_state_if_leased',
+        {
+          p_guild_id: this.guild.id,
+          p_request_id: previous.request_id,
+          p_lease_token: leaseToken,
+          p_state: next,
+        },
+      );
+      if (error) {
+        throw new Error(`Onboarding sync receipt write failed: ${error.message}`);
+      }
+      if (data !== true) {
+        log.info('Skipped stale onboarding sync receipt', {
+          requestId: previous.request_id,
+        });
+        return false;
+      }
+      return true;
+    }
     let query = this.supabase
       .from('guild_config')
       .update({ onboarding_sync_state: next })
@@ -380,5 +439,18 @@ export class GuildOnboardingSync {
       return false;
     }
     return true;
+  }
+
+  private async renewLease(requestId: string, leaseToken: string): Promise<boolean> {
+    const { data, error } = await this.supabase.rpc('renew_onboarding_sync_lease', {
+      p_guild_id: this.guild.id,
+      p_request_id: requestId,
+      p_lease_token: leaseToken,
+      p_lease_seconds: LEASE_SECONDS,
+    });
+    if (error) {
+      throw new Error(`Onboarding synchronization lease renewal failed: ${error.message}`);
+    }
+    return data === true;
   }
 }
