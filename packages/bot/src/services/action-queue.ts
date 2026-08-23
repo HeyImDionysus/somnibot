@@ -271,12 +271,26 @@ async function handleCreateRole(
     reason: `SomniBot dashboard — created ${tier} role`,
   });
 
-  // Set position if specified
   if (position !== undefined) {
     try {
       await role.setPosition(position, { reason: 'SomniBot dashboard — set role position' });
-    } catch {
-      // Position conflicts aren't fatal
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        await role.delete('SomniBot dashboard — roll back failed role creation');
+      } catch (cleanupError) {
+        const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        return {
+          success: false,
+          error: `Could not set the new role position: ${message}; rollback also failed: ${cleanupMessage}`,
+          retryable: false,
+        };
+      }
+      return {
+        success: false,
+        error: `Could not set the new role position: ${message}; the new role was rolled back`,
+        retryable: false,
+      };
     }
   }
 
@@ -338,8 +352,9 @@ async function handleUpdateRole(
       await role.setPosition(payload.position as number, {
         reason: 'SomniBot dashboard — position updated',
       });
-    } catch {
-      // Position conflicts aren't fatal
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: `Could not update the role position: ${message}`, retryable: false };
     }
   }
 

@@ -4,7 +4,8 @@
  * Tests: getDeployStatus, startDeployListener, executeDeploy,
  * parseDesiredState, executeDeployDirect
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { SomniClient } from '../client.js';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -82,7 +83,14 @@ function makeGuild(id: string) {
 
 function makeClient() {
   let realtimeCallback: ((payload: Record<string, unknown>) => Promise<void>) | null = null;
+  let subscriptionCallback: ((status: string) => void) | null = null;
   let eventBusListeners: Record<string, Function[]> = {};
+  let latestRequestRow: Record<string, unknown> | null = null;
+  let claimResultOverride: Record<string, unknown> | null = null;
+  let settleResult = true;
+  let renewResult = true;
+  let renewResults: boolean[] = [];
+  let renewHandler: (() => Promise<{ data: boolean; error: null }>) | null = null;
   const guilds = new Map([
     ['g1', makeGuild('g1')],
     ['g2', makeGuild('g2')],
@@ -93,10 +101,13 @@ function makeClient() {
       realtimeCallback = cb as any;
       return channelObj;
     }),
-    subscribe: vi.fn().mockImplementation((cb: Function) => { cb('SUBSCRIBED'); }),
+    subscribe: vi.fn().mockImplementation((cb: (status: string) => void) => {
+      subscriptionCallback = cb;
+      cb('SUBSCRIBED');
+    }),
   };
 
-  return {
+  const client = {
     guildId: 'g1',
     guilds: {
       cache: {
@@ -106,6 +117,38 @@ function makeClient() {
     supabase: {
       channel: vi.fn().mockReturnValue(channelObj),
       from: vi.fn().mockReturnValue(chainBuilder()),
+      rpc: vi.fn().mockImplementation((name: string, params?: Record<string, unknown>) => {
+        if (name === 'claim_deploy_request') {
+          const guildId = typeof params?.p_guild_id === 'string' ? params.p_guild_id : 'g1';
+          const requestId = typeof params?.p_request_id === 'string'
+            ? params.p_request_id
+            : '11111111-1111-4111-8111-111111111111';
+          return Promise.resolve({
+            data: {
+              guild_id: guildId,
+              applied_at: null,
+              deploy_request_id: requestId,
+              roles: [],
+              channels: [],
+              categories: [],
+              ...latestRequestRow,
+              deploy_claim_token: '22222222-2222-4222-8222-222222222222',
+              deploy_lease_expires_at: '2099-01-01T00:00:00.000Z',
+              deploy_status: 'running',
+              ...claimResultOverride,
+            },
+            error: null,
+          });
+        }
+        if (name === 'fail_interrupted_deploy_requests') {
+          return Promise.resolve({ data: 0, error: null });
+        }
+        if (name === 'renew_deploy_request_claim') {
+          if (renewHandler) return renewHandler();
+          return Promise.resolve({ data: renewResults.shift() ?? renewResult, error: null });
+        }
+        return Promise.resolve({ data: settleResult, error: null });
+      }),
     },
     eventBus: {
       on: vi.fn().mockImplementation((event: string, cb: Function) => {
@@ -114,14 +157,54 @@ function makeClient() {
       }),
       emit: vi.fn(),
     },
-    _realtimeCallback: () => realtimeCallback,
+    _realtimeCallback: () => {
+      const callback = realtimeCallback;
+      return callback
+        ? async (payload: Record<string, unknown>) => {
+          const incoming = typeof payload.new === 'object'
+            && payload.new !== null
+            && !Array.isArray(payload.new)
+            ? payload.new
+            : {};
+          const enriched = {
+            guild_id: 'g1',
+            applied_at: null,
+            deploy_request_id: '11111111-1111-4111-8111-111111111111',
+            deploy_status: 'requested',
+            roles: [],
+            channels: [],
+            categories: [],
+            ...incoming,
+          };
+          latestRequestRow = enriched;
+            await callback({ ...payload, new: enriched });
+          }
+        : null;
+    },
     _fireEvent: async (event: string, data?: unknown, guildId = 'g1') => {
       for (const cb of eventBusListeners[event] || []) {
         await cb({ type: event, guildId, timestamp: Date.now(), data: data ?? {} });
       }
     },
     _channelObj: channelObj,
+    _resubscribe: () => subscriptionCallback?.('SUBSCRIBED'),
+    _setSettleResult: (value: boolean) => {
+      settleResult = value;
+    },
+    _setRenewResult: (value: boolean) => {
+      renewResult = value;
+    },
+    _setRenewResults: (values: boolean[]) => {
+      renewResults = [...values];
+    },
+    _setRenewHandler: (handler: () => Promise<{ data: boolean; error: null }>) => {
+      renewHandler = handler;
+    },
+    _setClaimResult: (value: Record<string, unknown>) => {
+      claimResultOverride = value;
+    },
   };
+  return client as SomniClient & typeof client;
 }
 
 describe('getDeployStatus', () => {
@@ -140,7 +223,7 @@ describe('startDeployListener', () => {
 
   it('subscribes to realtime channel', () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     expect(client.supabase.channel).toHaveBeenCalledWith('deploy-listener');
     expect(client._channelObj.subscribe).toHaveBeenCalled();
   });
@@ -151,19 +234,21 @@ describe('startDeployListener', () => {
       data: [{
         guild_id: 'g1',
         applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
         roles: [{ name: 'Admin', permissions: '8' }],
         channels: [{ name: 'general', type: 'text', categoryKey: 'cat-text' }],
       }],
       error: null,
     }));
 
-    startDeployListener(client as any);
+    startDeployListener(client);
     await vi.waitFor(() => expect(mockDeployServerState).toHaveBeenCalled());
   });
 
   it('subscribes to all guild desired-state updates', () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     expect(client._channelObj.on).toHaveBeenCalledWith(
       'postgres_changes',
@@ -179,13 +264,13 @@ describe('startDeployListener', () => {
 
   it('registers event bus listener for deploy.requested', () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     expect(client.eventBus.on).toHaveBeenCalledWith('deploy.requested', expect.any(Function));
   });
 
   it('handles realtime deploy trigger', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     // Get the realtime callback
     const cb = client._realtimeCallback();
@@ -204,9 +289,89 @@ describe('startDeployListener', () => {
     expect(mockWriteAuditLog).toHaveBeenCalled();
   });
 
+  it('reconciles interrupted requests only once across realtime reconnects', async () => {
+    const client = makeClient();
+    startDeployListener(client);
+
+    client._resubscribe();
+    client._resubscribe();
+    await vi.waitFor(() => expect(client.supabase.rpc).toHaveBeenCalled());
+
+    expect(client.supabase.rpc.mock.calls.filter(([name]) =>
+      name === 'fail_interrupted_deploy_requests',
+    )).toHaveLength(1);
+  });
+
+  it('claims one requested deployment and ignores the running-state echo', async () => {
+    const client = makeClient();
+    startDeployListener(client);
+    const callback = client._realtimeCallback();
+    const requestId = '11111111-1111-4111-8111-111111111111';
+
+    await callback!({
+      new: {
+        guild_id: 'g1',
+        applied_at: null,
+        deploy_request_id: requestId,
+        deploy_status: 'requested',
+        roles: [],
+        channels: [],
+        categories: [],
+      },
+    });
+    await callback!({
+      new: {
+        guild_id: 'g1',
+        applied_at: null,
+        deploy_request_id: requestId,
+        deploy_claim_token: '22222222-2222-4222-8222-222222222222',
+        deploy_status: 'running',
+        roles: [],
+        channels: [],
+        categories: [],
+      },
+    });
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('claim_deploy_request', {
+      p_guild_id: 'g1',
+      p_request_id: requestId,
+    });
+    expect(client.supabase.rpc.mock.calls.filter(([name]) =>
+      name === 'claim_deploy_request',
+    )).toHaveLength(1);
+    expect(mockDeployServerState).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles a claimed request as failed when its desired state is malformed', async () => {
+    const client = makeClient();
+    client._setClaimResult({ roles: null });
+    startDeployListener(client);
+    const callback = client._realtimeCallback();
+
+    await expect(callback!({
+      new: {
+        guild_id: 'g1',
+        applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
+        roles: [],
+        channels: [],
+        categories: [],
+      },
+    })).rejects.toThrow('Claimed deployment request is malformed');
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('settle_deploy_request', expect.objectContaining({
+      p_guild_id: 'g1',
+      p_request_id: '11111111-1111-4111-8111-111111111111',
+      p_claim_token: '22222222-2222-4222-8222-222222222222',
+      p_success: false,
+    }));
+    expect(mockDeployServerState).not.toHaveBeenCalled();
+  });
+
   it('uses destructive mode only when the reviewed row explicitly requests it', async () => {
     const client = makeClient();
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback();
 
     await cb!({
@@ -229,7 +394,7 @@ describe('startDeployListener', () => {
 
   it('handles realtime deploy trigger for a non-primary guild', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     const cb = client._realtimeCallback();
     await cb!({
@@ -253,7 +418,7 @@ describe('startDeployListener', () => {
 
   it('ignores realtime updates when applied_at is set', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback();
 
     await cb!({
@@ -265,7 +430,7 @@ describe('startDeployListener', () => {
 
   it('deploys a reviewed empty plan', async () => {
     const client = makeClient();
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback();
 
     await cb!({ new: { applied_at: null, roles: [], channels: [] } });
@@ -282,13 +447,16 @@ describe('startDeployListener', () => {
     const desiredStateQuery = chainBuilder({
       data: {
         guild_id: 'g2',
+        applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
         roles: [{ name: 'Mod', permissions: '0' }],
         channels: [],
       },
       error: null,
     });
     client.supabase.from.mockReturnValue(desiredStateQuery);
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     await client._fireEvent('deploy.requested', {}, 'g2');
     expect(desiredStateQuery.eq).toHaveBeenCalledWith('guild_id', 'g2');
@@ -303,10 +471,27 @@ describe('startDeployListener', () => {
   it('handles event bus deploy when no state found', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
 
     await client._fireEvent('deploy.requested', {});
     expect(mockDeployServerState).not.toHaveBeenCalled();
+  });
+
+  it('does not misclassify an event-bus database failure as a missing request', async () => {
+    const client = makeClient();
+    client.supabase.from.mockReturnValue(chainBuilder({
+      data: null,
+      error: { message: 'desired-state read failed' },
+    }));
+    startDeployListener(client);
+
+    await client._fireEvent('deploy.requested', {});
+
+    expect(mockDeployServerState).not.toHaveBeenCalled();
+    expect(client.supabase.rpc).not.toHaveBeenCalledWith(
+      'claim_deploy_request',
+      expect.anything(),
+    );
   });
 });
 
@@ -315,10 +500,118 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     resetDeployMocks();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('renews the claim lease while Discord deployment remains in progress', async () => {
+    vi.useFakeTimers();
+    let finishDeployment: ((result: Awaited<ReturnType<typeof mockDeployServerState>>) => void)
+      | undefined;
+    mockDeployServerState.mockImplementationOnce(() => new Promise((resolve) => {
+      finishDeployment = resolve;
+    }));
+    const client = makeClient();
+    startDeployListener(client);
+    const cb = client._realtimeCallback()!;
+
+    const deployment = cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith('renew_deploy_request_claim', {
+      p_guild_id: 'g1',
+      p_request_id: '11111111-1111-4111-8111-111111111111',
+      p_claim_token: '22222222-2222-4222-8222-222222222222',
+    });
+
+    finishDeployment?.({
+      success: true,
+      actions: [],
+      errors: [],
+      idMappings: [],
+      duration: 30_000,
+    });
+    await deployment;
+  });
+
+  it('rejects a renewal response that arrives after the local safety deadline', async () => {
+    vi.useFakeTimers();
+    let renewalStarted!: () => void;
+    let finishRenewal!: (result: { data: boolean; error: null }) => void;
+    const started = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    const client = makeClient();
+    client._setRenewHandler(() => new Promise((resolve) => {
+      finishRenewal = resolve;
+      renewalStarted();
+    }));
+    startDeployListener(client);
+    const cb = client._realtimeCallback()!;
+
+    const deployment = cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+    await started;
+    await vi.advanceTimersByTimeAsync(90_001);
+    finishRenewal({ data: true, error: null });
+    await deployment;
+
+    expect(mockDeployServerState).not.toHaveBeenCalled();
+    expect(mockWriteAuditBatch).not.toHaveBeenCalled();
+    expect(mockWriteGuildSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('requires a live claim before every deployment mutation', async () => {
+    const client = makeClient();
+    mockDeployServerState.mockImplementationOnce(async (...args: unknown[]) => {
+      client._setRenewResult(false);
+      const options = args[3] as { assertOwnership?: () => Promise<void> };
+      await options.assertOwnership?.();
+      throw new Error('ownership assertion unexpectedly returned');
+    });
+    startDeployListener(client);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+
+    expect(mockWriteAuditBatch).not.toHaveBeenCalled();
+    expect(mockWriteGuildSnapshot).not.toHaveBeenCalled();
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'server.deployed',
+      'g1',
+      expect.anything(),
+    );
+  });
+
+  it('suppresses post-deploy writes when final ownership verification fails', async () => {
+    const client = makeClient();
+    client._setRenewResults([true, false]);
+    startDeployListener(client);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+
+    expect(mockDeployServerState).toHaveBeenCalledOnce();
+    expect(mockWriteAuditBatch).not.toHaveBeenCalled();
+    expect(mockWriteGuildSnapshot).not.toHaveBeenCalled();
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
+      'server.deployed',
+      'g1',
+      expect.anything(),
+    );
+  });
+
   it('leaves ID mapping persistence to the deployer', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -328,23 +621,47 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(client.supabase.from).not.toHaveBeenCalledWith('discord_id_map');
   });
 
-  it('marks desired state as applied', async () => {
+  it('settles the claimed desired state as successful', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
       new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
     });
 
-    expect(client.supabase.from).toHaveBeenCalledWith('guild_desired_state');
+    expect(client.supabase.rpc).toHaveBeenCalledWith(
+      'settle_deploy_request',
+      expect.objectContaining({ p_success: true }),
+    );
+  });
+
+  it('settles as failed instead of recording success when required audit persistence fails', async () => {
+    mockWriteAuditBatch.mockRejectedValueOnce(new Error('audit unavailable'));
+    const client = makeClient();
+    client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
+    startDeployListener(client);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'Admin' }], channels: [] },
+    });
+
+    const settlementCalls = client.supabase.rpc.mock.calls.filter(([name]) =>
+      name === 'settle_deploy_request',
+    );
+    expect(settlementCalls).toHaveLength(1);
+    expect(settlementCalls[0]?.[1]).toEqual(expect.objectContaining({
+      p_success: false,
+      p_error: 'audit unavailable',
+    }));
   });
 
   it('emits server.deployed event', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -359,7 +676,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('writes guild snapshot after deploy', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -380,7 +697,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -397,7 +714,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -415,7 +732,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -426,26 +743,60 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     expect(mockWriteAuditLog).toHaveBeenCalled();
   });
 
-  it('reports failure when the applied timestamp cannot be persisted', async () => {
+  it('publishes no terminal result when the claimed request cannot be settled', async () => {
     const client = makeClient();
-    client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: { message: 'upsert fail' } }));
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    client._setSettleResult(false);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
       new: { applied_at: null, roles: [{ name: 'x' }], channels: [] },
     });
 
-    expect(client.eventBus.emit).toHaveBeenCalledWith(
+    expect(client.eventBus.emit).not.toHaveBeenCalledWith(
       'deploy.failed',
       'g1',
-      expect.objectContaining({ error: expect.stringContaining('Failed to mark the reviewed plan as applied') }),
+      expect.anything(),
     );
     expect(client.eventBus.emit).not.toHaveBeenCalledWith(
       'server.deployed',
       'g1',
       expect.anything(),
     );
+    expect(mockWriteAuditLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'deploy.failed',
+      }),
+    );
+    expect(mockWriteAuditLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'deploy.completed' }),
+    );
+  });
+
+  it('keeps a settled success authoritative when terminal audit reporting throws', async () => {
+    mockWriteAuditLog
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('terminal audit unavailable'));
+    const client = makeClient();
+    startDeployListener(client);
+    const cb = client._realtimeCallback()!;
+
+    await cb({
+      new: { applied_at: null, roles: [{ name: 'x' }], channels: [] },
+    });
+
+    expect(client.supabase.rpc).toHaveBeenCalledWith(
+      'settle_deploy_request',
+      expect.objectContaining({ p_success: true }),
+    );
+    expect(client.eventBus.emit).toHaveBeenCalledWith(
+      'server.deployed',
+      'g1',
+      expect.anything(),
+    );
+    expect(getDeployStatus('g1')).toEqual(expect.objectContaining({ status: 'success' }));
   });
 
   it('parses categories from channel categoryKeys', async () => {
@@ -459,7 +810,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
 
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -485,7 +836,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
   it('preserves stored category names exactly', async () => {
     const client = makeClient();
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as unknown as Parameters<typeof startDeployListener>[0]);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({
@@ -506,7 +857,7 @@ describe('executeDeployDirect (via realtime trigger)', () => {
     const client = makeClient();
     client.guilds.cache.get.mockReturnValue(undefined);
     client.supabase.from.mockReturnValue(chainBuilder({ data: null, error: null }));
-    startDeployListener(client as any);
+    startDeployListener(client);
     const cb = client._realtimeCallback()!;
 
     await cb({

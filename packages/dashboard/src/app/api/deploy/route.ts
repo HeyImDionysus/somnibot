@@ -2,8 +2,8 @@
  * POST /api/deploy — Store a reviewed plan and trigger an explicit deployment.
  * GET /api/deploy — Get deployment status and recent actions.
  *
- * The dashboard stores the desired state in Supabase's `guild_desired_state` table.
- * Setting `applied_at = null` signals to the bot (via Realtime subscription) to deploy.
+ * The dashboard atomically records a requested lifecycle row in
+ * `guild_desired_state`. The bot claims that exact request before deployment.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -12,7 +12,25 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { recordAdminChange } from '@/lib/admin-changes';
+import {
+  PUBLIC_DESIRED_STATE_COLUMNS,
+  toPublicDesiredState,
+} from '@/lib/public-desired-state';
+import { z } from 'zod';
 
+const deployRequestResultSchema = z.discriminatedUnion('disposition', [
+  z.object({
+    disposition: z.literal('accepted'),
+    state: z.object({
+      deploy_request_id: z.string().uuid(),
+      deploy_status: z.literal('requested'),
+    }).passthrough(),
+  }),
+  z.object({
+    disposition: z.literal('busy'),
+    status: z.string(),
+  }),
+]);
 
 export async function POST(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'bulk');
@@ -40,33 +58,49 @@ export async function POST(request: NextRequest) {
   // lines of JSON and the change log is not a backup of it.
   const { data: priorState, error: priorStateError } = await admin
     .from('guild_desired_state')
-    .select('guild_id, roles, channels, categories, applied_at, deploy_mode')
+    .select('guild_id, roles, channels, categories, applied_at, deploy_mode, deploy_request_id, deploy_status')
     .eq('guild_id', guildId)
     .maybeSingle();
   if (priorStateError) return dbError(priorStateError, 'deploy');
+  if (priorState?.deploy_status === 'requested' || priorState?.deploy_status === 'running') {
+    return NextResponse.json(
+      { error: 'A server deployment is already requested or running' },
+      { status: 409 },
+    );
+  }
   const priorRoles = Array.isArray(priorState?.roles) ? priorState.roles.length : null;
   const priorChannels = Array.isArray(priorState?.channels) ? priorState.channels.length : null;
   const categories = body.categories
     ?? (Array.isArray(priorState?.categories) ? priorState.categories : []);
 
   const deployMode = body.deployMode;
-  const desiredState: Record<string, unknown> = {
-    guild_id: guildId,
-    roles: body.roles,
-    channels: body.channels,
-    categories,
-    permission_map: body.permissionMap ?? {},
-    deploy_mode: deployMode,
-    applied_at: null,
-    updated_at: new Date().toISOString(),
-  };
+  const requestId = crypto.randomUUID();
+  const requestedAt = new Date().toISOString();
+  const { data: requestResultData, error } = await admin.rpc('request_server_deployment', {
+    p_guild_id: guildId,
+    p_request_id: requestId,
+    p_roles: body.roles,
+    p_channels: body.channels,
+    p_categories: categories,
+    p_permission_map: body.permissionMap ?? {},
+    p_deploy_mode: deployMode,
+    p_requested_at: requestedAt,
+  });
 
-  const { error } = await admin
-    .from('guild_desired_state')
-    .upsert(desiredState, { onConflict: 'guild_id' });
-
-  if (error)
-    return dbError(error, 'deploy');
+  if (error) return dbError(error, 'deploy');
+  const parsedRequestResult = deployRequestResultSchema.safeParse(requestResultData);
+  if (!parsedRequestResult.success) {
+    return NextResponse.json(
+      { error: 'Deployment request persistence returned an invalid result' },
+      { status: 500 },
+    );
+  }
+  if (parsedRequestResult.data.disposition === 'busy') {
+    return NextResponse.json(
+      { error: 'A server deployment is already requested or running' },
+      { status: 409 },
+    );
+  }
 
   // Audit: log the deploy request
   await admin.from('audit_logs').insert({
@@ -81,13 +115,14 @@ export async function POST(request: NextRequest) {
       channelCount: body.channels.length,
       categoryCount: categories.length,
       deployMode,
+      requestId,
     },
     success: true,
   });
 
   // A deploy is the single most far-reaching thing this dashboard can do: the
-  // bot's deploy listener watches guild_desired_state for `applied_at = null`
-  // and then creates, edits and (with cleanExisting) DELETES real Discord roles
+  // the bot claims this exact lifecycle request and then creates, edits and
+  // (with cleanExisting) DELETES real Discord roles
   // and channels. There is deliberately no `undo` — no db row update and no
   // allowlisted queue action can put a deleted channel and its message history
   // back, and offering a button that pretends otherwise would be the worst
@@ -116,6 +151,7 @@ export async function POST(request: NextRequest) {
       channel_count: body.channels.length,
       category_count: categories.length,
       deploy_mode: deployMode,
+      deploy_request_id: requestId,
     },
     blastRadius: 'critical',
     undoReason:
@@ -126,6 +162,7 @@ export async function POST(request: NextRequest) {
     success: true,
     message: 'Deploy request stored — bot will pick it up via Realtime',
     deployMode,
+    requestId,
   });
 }
 
@@ -137,11 +174,13 @@ export async function GET() {
   const admin = createAdminSupabase();
 
   // Get current desired state
-  const { data: desiredState } = await admin
+  const { data: desiredStateRow, error: desiredStateError } = await admin
     .from('guild_desired_state')
-    .select('*')
+    .select(PUBLIC_DESIRED_STATE_COLUMNS)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+  if (desiredStateError) return dbError(desiredStateError, 'deploy');
+  const desiredState = toPublicDesiredState(desiredStateRow);
 
   // Get guild setup status
   const { data: guild } = await admin
@@ -163,7 +202,8 @@ export async function GET() {
     desiredState,
     setupCompleted: guild?.setup_completed ?? false,
     setupConfirmedAt: guild?.setup_confirmed_at ?? null,
-    isDeploying: desiredState !== null && desiredState?.applied_at === null,
+    isDeploying: desiredState?.deploy_status === 'requested'
+      || desiredState?.deploy_status === 'running',
     recentActions: recentActions ?? [],
   });
 }

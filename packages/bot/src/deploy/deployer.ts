@@ -26,6 +26,7 @@ import type {
   DesiredCategory,
 } from '@somnibot/shared';
 import { checkBotRolePosition, checkBotPermissions } from '../guards/bot-role-guard.js';
+import { placeRolesDirectlyBelowBot } from '../services/role-hierarchy.js';
 
 // ============================================================
 // Types
@@ -64,6 +65,8 @@ export interface DeployOptions {
   dryRun: boolean;
   /** Progress callback */
   onProgress?: (step: number, total: number, action: string) => void;
+  abortSignal?: AbortSignal;
+  assertOwnership?: () => Promise<void>;
 }
 
 type DiscordIdMappingRow = {
@@ -71,6 +74,12 @@ type DiscordIdMappingRow = {
   readonly template_key?: unknown;
   readonly discord_id?: unknown;
 };
+
+async function assertMutationOwnership(options: DeployOptions): Promise<void> {
+  options.abortSignal?.throwIfAborted();
+  await options.assertOwnership?.();
+  options.abortSignal?.throwIfAborted();
+}
 
 /** Canonical key written by the deploy path. Legacy bare keys are accepted when reading. */
 export function canonicalTemplateKey(entityType: string, key: string): string {
@@ -139,8 +148,9 @@ export async function deployServerState(
   let persistedMappings: DiscordIdMappingRow[] = [];
   let step = 0;
 
-  const totalSteps = estimateTotalSteps(desiredState, options);
+  let totalSteps = 0;
   const report = (action: string) => {
+    options.abortSignal?.throwIfAborted();
     options.onProgress?.(step, totalSteps, action);
   };
 
@@ -228,7 +238,16 @@ export async function deployServerState(
       canonicalTemplateKey('channel', 'moderator-only'),
     ) ?? guild.safetyAlertsChannelId;
     if (moderatorOnlyChannelId) communityChannelIds.add(moderatorOnlyChannelId);
+    const attemptedMappedDiscordIds = new Set<string>();
     const deletedMappedDiscordIds = new Set<string>();
+    totalSteps = estimateTotalSteps(
+      desiredState,
+      options,
+      guild,
+      persistedMappings,
+      communityChannelIds,
+      moderatorOnlyChannelId,
+    );
 
     // === Step 1: Zero @everyone during an explicitly destructive deployment ===
     if (options.cleanExisting) {
@@ -236,12 +255,14 @@ export async function deployServerState(
       report('Setting @everyone to zero permissions');
       try {
         const everyoneRole = guild.roles.everyone;
+        await assertMutationOwnership(options);
         await everyoneRole.setPermissions(0n, 'SomniBot deployment — @everyone = 0');
         actions.push({
           step, action: 'set', entityType: 'everyone',
           entityName: '@everyone', discordId: everyoneRole.id, success: true,
         });
       } catch (err) {
+        options.abortSignal?.throwIfAborted();
         const msg = err instanceof Error ? err.message : String(err);
         errors.push({ step, entityType: 'everyone', entityName: '@everyone', error: msg });
         actions.push({
@@ -263,23 +284,30 @@ export async function deployServerState(
         );
         let purgedCount = 0;
         for (const [, channel] of textChannels) {
+          options.abortSignal?.throwIfAborted();
           try {
             const messages = await (channel as TextChannel).messages.fetch({ limit: 100 });
             const botMessages = messages.filter((m: Message) => m.author.id === botId);
             for (const [, msg] of botMessages) {
+              await assertMutationOwnership(options);
               try {
                 await msg.delete();
                 purgedCount++;
                 await sleep(300);
-              } catch { /* skip undeletable messages */ }
+              } catch (error) {
+                if (options.abortSignal?.aborted) throw error;
+              }
             }
-          } catch { /* skip channels we can't read */ }
+          } catch (error) {
+            if (options.abortSignal?.aborted) throw error;
+          }
         }
         actions.push({
           step, action: 'delete', entityType: 'channel',
           entityName: `Bot messages purged (${purgedCount})`, success: true,
         });
       } catch (err) {
+        if (options.abortSignal?.aborted) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         errors.push({ step, entityType: 'channel', entityName: 'Bot message purge', error: msg });
       }
@@ -293,12 +321,14 @@ export async function deployServerState(
         step++;
         report(`Deleting channel: ${channel.name}`);
         try {
+          await assertMutationOwnership(options);
           await channel.delete('SomniBot deployment — cleaning old channels');
           actions.push({
             step, action: 'delete', entityType: 'channel',
             entityName: channel.name, discordId: channel.id, success: true,
           });
         } catch (err) {
+          options.abortSignal?.throwIfAborted();
           const msg = err instanceof Error ? err.message : String(err);
           errors.push({ step, entityType: 'channel', entityName: channel.name, error: msg });
           actions.push({
@@ -318,12 +348,14 @@ export async function deployServerState(
         step++;
         report(`Deleting role: ${role.name}`);
         try {
+          await assertMutationOwnership(options);
           await role.delete('SomniBot deployment — cleaning old roles');
           actions.push({
             step, action: 'delete', entityType: 'role',
             entityName: role.name, discordId: role.id, success: true,
           });
         } catch (err) {
+          options.abortSignal?.throwIfAborted();
           const msg = err instanceof Error ? err.message : String(err);
           errors.push({ step, entityType: 'role', entityName: role.name, error: msg });
           actions.push({
@@ -345,6 +377,7 @@ export async function deployServerState(
       const existingRole = mappedId ? guild.roles.cache.get(mappedId) : undefined;
       report(`${existingRole ? 'Updating' : 'Creating'} role: ${desired.name}`);
       try {
+        await assertMutationOwnership(options);
         if (existingRole?.managed || existingRole?.editable === false) {
           throw new Error(`Mapped role cannot be edited by the bot: ${existingRole.name}`);
         }
@@ -358,6 +391,7 @@ export async function deployServerState(
           entityName: desired.name, discordId: role.id, success: true,
         });
       } catch (err) {
+        options.abortSignal?.throwIfAborted();
         const msg = err instanceof Error ? err.message : String(err);
         errors.push({ step, entityType: 'role', entityName: desired.name, error: msg });
         actions.push({
@@ -371,7 +405,6 @@ export async function deployServerState(
     // === Step 4: Set role positions (hierarchy) ===
     step++;
     report('Setting role hierarchy positions');
-    let hierarchyContext = 'hierarchy context unavailable';
     try {
       const targetRoles = sortedRoles
         .map((desired) => {
@@ -381,96 +414,20 @@ export async function deployServerState(
         .filter((role): role is NonNullable<typeof role> => role !== null);
 
       if (targetRoles.length > 0) {
-        // Role creation changes every role above the insertion point. Fetch the
-        // authoritative hierarchy before calculating positions; using the
-        // pre-create cache can target the bot's own position and Discord rejects
-        // that batch with Missing Permissions.
-        await guild.roles.fetch();
-
-        const botHighest = guild.members.me?.roles.highest.position;
-        if (botHighest === undefined) {
-          throw new Error('Bot member is unavailable after refreshing the role hierarchy');
-        }
-
-        const targetRoleObjects = targetRoles.map(({ discordId }) => {
-          const role = guild.roles.cache.get(discordId);
-          if (!role) {
-            throw new Error(`Created role is missing after refreshing the hierarchy`);
-          }
-          return role;
-        });
-        // The desired list is ordered low-to-high. Put it directly beneath the
-        // bot so newly deployed moderators remain above surviving member
-        // roles. Managed integration roles are not treated as barriers here:
-        // raising the created (editable) roles displaces them downward
-        // implicitly, so the batch below lands even in guilds full of other
-        // bots' roles. Whether it actually landed is verified AFTER the move.
-        const lowestTargetPosition = botHighest - targetRoles.length;
-        const availablePositions = targetRoles.map(
-          (_, index) => lowestTargetPosition + index,
+        await placeRolesDirectlyBelowBot(
+          guild,
+          targetRoles.map(({ discordId }) => discordId),
+          options.abortSignal,
+          options.assertOwnership,
         );
-        const positionUpdates = targetRoles.map(({ discordId }, index) => ({
-          role: discordId,
-          position: availablePositions[index],
-        }));
-        const targetRoleStates = targetRoleObjects.map((role) => {
-          return `${role?.position ?? 'missing'}:${role?.editable ?? 'unknown'}:${role?.managed ?? 'unknown'}`;
-        });
-        hierarchyContext = [
-          `botPosition=${botHighest}`,
-          `botManageRoles=${guild.members.me?.permissions.has('ManageRoles') ?? false}`,
-          `botAdministrator=${guild.members.me?.permissions.has('Administrator') ?? false}`,
-          `targetPositions=${positionUpdates.map(({ position }) => position).join(',')}`,
-          `targetStates=${targetRoleStates.join(',')}`,
-        ].join('; ');
-
-        if (positionUpdates.some(({ position }) => position < 1 || position >= botHighest)) {
-          throw new Error(
-            `Cannot place ${positionUpdates.length} created roles below bot role position ${botHighest}`,
-          );
-        }
-
-        const uneditableRole = targetRoleObjects.find((role) => role.editable === false);
-        if (uneditableRole) {
-          throw new Error(`Created role is not editable by the bot: ${uneditableRole.name}`);
-        }
-
-        await guild.roles.setPositions(positionUpdates);
-
-        // Outcome verification: the created roles must now be the top block
-        // directly beneath the bot. A role Discord did NOT displace is
-        // reported honestly instead of claiming success with an ineffective
-        // hierarchy.
-        await guild.roles.fetch();
-        const verifiedBotHighest = guild.members.me?.roles.highest.position;
-        if (verifiedBotHighest === undefined) {
-          throw new Error('Bot member is unavailable after setting the role hierarchy');
-        }
-        const targetIds = new Set(targetRoles.map(({ discordId }) => discordId));
-        const meRoleCache = guild.members.me?.roles.cache;
-        const botOwnRoleIds = new Set<string>(meRoleCache ? [...meRoleCache.keys()] : []);
-        const interloper = [...guild.roles.cache.values()]
-          .filter((role) =>
-            role.id !== guild.id
-            && !botOwnRoleIds.has(role.id)
-            && role.position < verifiedBotHighest)
-          .sort((a, b) => b.position - a.position)
-          .slice(0, targetRoles.length)
-          .find((role) => !targetIds.has(role.id));
-        if (interloper) {
-          throw new Error(
-            `Cannot preserve the requested hierarchy because role ${interloper.name} `
-            + `at position ${interloper.position} remains between the bot and the deployed roles`,
-          );
-        }
       }
       actions.push({
         step, action: 'set', entityType: 'role',
         entityName: 'Role hierarchy', success: true,
       });
     } catch (err) {
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      const msg = `${rawMessage} (${hierarchyContext})`;
+      if (options.abortSignal?.aborted) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
       errors.push({ step, entityType: 'role', entityName: 'Role hierarchy', error: msg });
       actions.push({
         step, action: 'set', entityType: 'role',
@@ -497,12 +454,14 @@ export async function deployServerState(
           if (communityChannelIdsForGuild(guild).has(mappedCategory.id)) {
             throw new Error(`Mapped category points to a protected Discord channel: ${mappedCategory.name}`);
           }
+          await assertMutationOwnership(options);
           await mappedCategory.delete('SomniBot deployment — replace changed category type');
           actions.push({
             step, action: 'delete', entityType: 'channel',
             entityName: mappedCategory.name, discordId: mappedCategory.id, success: true,
           });
         }
+        await assertMutationOwnership(options);
         const channel = existingCategory && existingCategory.type === ChannelType.GuildCategory
           ? await existingCategory.edit({
             name: desired.name,
@@ -522,6 +481,7 @@ export async function deployServerState(
           entityName: desired.name, discordId: channel.id, success: true,
         });
       } catch (err) {
+        options.abortSignal?.throwIfAborted();
         const msg = err instanceof Error ? err.message : String(err);
         errors.push({ step, entityType: 'category', entityName: desired.name, error: msg });
         actions.push({
@@ -577,6 +537,7 @@ export async function deployServerState(
           const parentId = desired.categoryKey
             ? categoryKeyToDiscordId.get(desired.categoryKey)
             : undefined;
+          await assertMutationOwnership(options);
           await existingCommunity.edit({
             topic: desired.topic ?? undefined,
             rateLimitPerUser: desired.slowmode,
@@ -595,6 +556,7 @@ export async function deployServerState(
             entityName: desired.name, discordId: existingCommunity.id, success: true,
           });
         } catch (err) {
+          options.abortSignal?.throwIfAborted();
           const msg = err instanceof Error ? err.message : String(err);
           errors.push({ step, entityType: 'channel', entityName: desired.name, error: msg });
           actions.push({
@@ -614,12 +576,14 @@ export async function deployServerState(
             if (communityChannelIds.has(mappedChannel.id)) {
               throw new Error(`Mapped channel is protected by Discord: ${mappedChannel.name}`);
             }
+            await assertMutationOwnership(options);
             await mappedChannel.delete('SomniBot deployment — replace changed channel type');
             actions.push({
               step, action: 'delete', entityType: 'channel',
               entityName: mappedChannel.name, discordId: mappedChannel.id, success: true,
             });
           }
+          await assertMutationOwnership(options);
           const channelId = existingChannel
             ? await updateChannel(
               guild,
@@ -637,6 +601,7 @@ export async function deployServerState(
             entityName: desired.name, discordId: channelId, success: true,
           });
         } catch (err) {
+          options.abortSignal?.throwIfAborted();
           const msg = err instanceof Error ? err.message : String(err);
           errors.push({ step, entityType: 'channel', entityName: desired.name, error: msg });
           actions.push({
@@ -657,6 +622,7 @@ export async function deployServerState(
           (channel) => channel.categoryKey === 'cat-staff' && channel.templateId === 'staff',
         );
         if (staffCatId && staffChannel) {
+          await assertMutationOwnership(options);
           await guild.channels.edit(modOnlyChannel.id, {
             parent: staffCatId,
             permissionOverwrites: permissionOverwritesForExistingChannel(
@@ -671,6 +637,7 @@ export async function deployServerState(
           });
         }
       } catch (err) {
+        options.abortSignal?.throwIfAborted();
         const msg = err instanceof Error ? err.message : String(err);
         errors.push({ step, entityType: 'channel', entityName: 'moderator-only', error: msg });
       }
@@ -690,7 +657,7 @@ export async function deployServerState(
             || typeof row.template_key !== 'string'
             || typeof row.discord_id !== 'string') continue;
           if (desiredMappingKeys.has(canonicalTemplateKey(entityType, row.template_key))) continue;
-          if (deletedMappedDiscordIds.has(row.discord_id)) continue;
+          if (attemptedMappedDiscordIds.has(row.discord_id)) continue;
 
           const entity = entityType === 'role'
             ? guild.roles.cache.get(row.discord_id)
@@ -698,9 +665,11 @@ export async function deployServerState(
           if (!entity) continue;
           if (entityType !== 'role' && communityChannelIds.has(entity.id)) continue;
 
+          attemptedMappedDiscordIds.add(row.discord_id);
           step++;
           report(`Deleting removed ${entityType}: ${entity.name}`);
           try {
+            await assertMutationOwnership(options);
             if (entityType === 'role') {
               const role = entity as Role;
               if (role.managed || role.editable === false) {
@@ -718,6 +687,7 @@ export async function deployServerState(
               entityName: entity.name, discordId: entity.id, success: true,
             });
           } catch (err) {
+            options.abortSignal?.throwIfAborted();
             const msg = err instanceof Error ? err.message : String(err);
             errors.push({ step, entityType, entityName: entity.name, error: msg });
             actions.push({
@@ -734,6 +704,7 @@ export async function deployServerState(
     report('Storing ID mappings');
     try {
       if (options.cleanExisting) {
+        await assertMutationOwnership(options);
         const { error: deleteMappingsError } = await supabase
           .from('discord_id_map')
           .delete()
@@ -742,6 +713,7 @@ export async function deployServerState(
           throw new Error(`Failed to clear Discord ID mappings: ${deleteMappingsError.message}`);
         }
       } else if (deletedMappedDiscordIds.size > 0) {
+        await assertMutationOwnership(options);
         const { error: deleteMappingsError } = await supabase
           .from('discord_id_map')
           .delete()
@@ -761,6 +733,7 @@ export async function deployServerState(
           discord_id: m.discordId,
         }));
 
+        await assertMutationOwnership(options);
         const { error: insertMappingsError } = await supabase
           .from('discord_id_map')
           .upsert(rows, { onConflict: 'guild_id,entity_type,template_key' });
@@ -769,25 +742,8 @@ export async function deployServerState(
         }
       }
 
-      // Update desired state
-      const { error: desiredStateError } = await supabase
-        .from('guild_desired_state')
-        .upsert({
-          guild_id: guild.id,
-          roles: JSON.parse(JSON.stringify(desiredState.roles)),
-          channels: JSON.parse(JSON.stringify(desiredState.channels)),
-          categories: JSON.parse(JSON.stringify(desiredState.categories)),
-          permission_map: {},
-          deploy_mode: options.cleanExisting ? 'destructive' : 'safe',
-          last_sync_at: new Date().toISOString(),
-          drift_detected: false,
-          drift_details: null,
-        });
-      if (desiredStateError) {
-        throw new Error(`Failed to store desired state: ${desiredStateError.message}`);
-      }
-
       // Update guild record — setup_completed stays false until owner confirms (Step 7 of wizard)
+      await assertMutationOwnership(options);
       const { error: guildUpdateError } = await supabase
         .from('guild')
         .update({
@@ -806,12 +762,14 @@ export async function deployServerState(
         entityName: 'ID mappings stored', success: true,
       });
     } catch (err) {
+      options.abortSignal?.throwIfAborted();
       const msg = err instanceof Error ? err.message : String(err);
       errors.push({ step, entityType: 'system', entityName: 'ID mappings', error: msg });
     }
 
     // === Step 8: Write audit log ===
     try {
+      await assertMutationOwnership(options);
       await supabase.from('audit_logs').insert({
         guild_id: guild.id,
         actor_type: 'bot',
@@ -829,7 +787,7 @@ export async function deployServerState(
         },
       });
     } catch {
-      // Non-critical — don't fail deployment for audit log
+      options.abortSignal?.throwIfAborted();
     }
 
     return {
@@ -966,17 +924,64 @@ async function createChannel(
   return channel.id;
 }
 
-function estimateTotalSteps(state: DesiredState, options: DeployOptions): number {
-  let steps = options.cleanExisting ? 1 : 0; // @everyone
+function estimateTotalSteps(
+  state: DesiredState,
+  options: DeployOptions,
+  guild: Guild,
+  mappings: readonly DiscordIdMappingRow[],
+  communityChannelIds: ReadonlySet<string>,
+  moderatorOnlyChannelId: string | null | undefined,
+): number {
+  let steps = 0;
+  if (options.cleanExisting) {
+    steps += 2;
+    steps += guild.channels.cache.filter((channel) => !communityChannelIds.has(channel.id)).size;
+    steps += guild.roles.cache.filter((role) =>
+      !role.managed
+      && role.id !== guild.id
+      && role.position < (guild.members.me?.roles.highest.position ?? 0),
+    ).size;
+  } else {
+    steps += countRemovedMappings(state, guild, mappings, communityChannelIds);
+  }
   steps += state.roles.length; // Create roles
   steps += 1; // Set positions
   steps += state.categories.length; // Create categories
   steps += state.channels.length; // Create channels
+  if (moderatorOnlyChannelId && guild.channels.cache.has(moderatorOnlyChannelId)) steps += 1;
   steps += 1; // Store mappings
-  if (options.cleanExisting) {
-    steps += 20; // Rough estimate for deletion
-  }
   return steps;
+}
+
+function countRemovedMappings(
+  state: DesiredState,
+  guild: Guild,
+  mappings: readonly DiscordIdMappingRow[],
+  communityChannelIds: ReadonlySet<string>,
+): number {
+  const desiredKeys = new Set<string>([
+    ...state.roles.map((role) => canonicalTemplateKey('role', role.key)),
+    ...state.categories.map((category) => canonicalTemplateKey('category', category.key)),
+    ...state.channels.map((channel) => canonicalTemplateKey('channel', channel.key)),
+  ]);
+  const countedDiscordIds = new Set<string>();
+  let count = 0;
+  for (const entityType of ['channel', 'category', 'role'] as const) {
+    for (const row of mappings) {
+      if (row.entity_type !== entityType
+        || typeof row.template_key !== 'string'
+        || typeof row.discord_id !== 'string'
+        || desiredKeys.has(canonicalTemplateKey(entityType, row.template_key))
+        || countedDiscordIds.has(row.discord_id)) continue;
+      const entity = entityType === 'role'
+        ? guild.roles.cache.get(row.discord_id)
+        : guild.channels.cache.get(row.discord_id);
+      if (!entity || (entityType !== 'role' && communityChannelIds.has(entity.id))) continue;
+      countedDiscordIds.add(row.discord_id);
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function sleep(ms: number): Promise<void> {

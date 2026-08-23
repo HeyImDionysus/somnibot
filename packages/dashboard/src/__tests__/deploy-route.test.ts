@@ -8,10 +8,11 @@ vi.mock('@/lib/admin-changes', () => ({
   recordAdminChange: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { POST } from '@/app/api/deploy/route';
+import { GET, POST } from '@/app/api/deploy/route';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { PUBLIC_DESIRED_STATE_COLUMNS } from '@/lib/public-desired-state';
 
 const categories = [
   { key: 'cat-information', name: 'Information', position: 0 },
@@ -36,7 +37,7 @@ function makeSupabase(
     const existing = builders.get(table);
     if (existing) return existing;
     const builder = {} as Record<string, ReturnType<typeof vi.fn>>;
-    for (const method of ['select', 'eq', 'order', 'limit']) {
+    for (const method of ['select', 'eq', 'like', 'order', 'limit']) {
       builder[method] = vi.fn(() => builder);
     }
     builder.upsert = vi.fn((payload: unknown) => {
@@ -54,7 +55,19 @@ function makeSupabase(
     builders.set(table, builder);
     return builder;
   });
-  return { client: { from }, writes, builders };
+  const rpc = vi.fn((name: string, payload: unknown) => {
+    writes.push({ table: `rpc:${name}`, payload });
+    const error = errors[`rpc:${name}`] ?? null;
+    const result = rows[`rpc:${name}`] ?? {
+      disposition: 'accepted',
+      state: {
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'requested',
+      },
+    };
+    return Promise.resolve({ data: result, error });
+  });
+  return { client: { from, rpc }, writes, builders };
 }
 
 beforeEach(() => {
@@ -83,13 +96,43 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(200);
-    const desiredWrite = supabase.writes.find((write) => write.table === 'guild_desired_state');
+    const desiredWrite = supabase.writes.find(
+      (write) => write.table === 'rpc:request_server_deployment',
+    );
     expect(desiredWrite?.payload).toMatchObject({
-      categories,
-      applied_at: null,
-      deploy_mode: 'safe',
+      p_categories: categories,
+      p_deploy_mode: 'safe',
+    });
+    expect(desiredWrite?.payload).toMatchObject({
+      p_request_id: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
     });
     expect(supabase.writes.some((write) => write.table === 'audit_logs')).toBe(true);
+  });
+
+  it('rejects a second request while the previous deployment is running', async () => {
+    const supabase = makeSupabase({
+      guild_desired_state: {
+        applied_at: null,
+        deploy_request_id: '11111111-1111-4111-8111-111111111111',
+        deploy_status: 'running',
+      },
+      guild: { setup_completed: false },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await POST(request({
+      action: 'deploy',
+      roles: [{ key: 'member' }],
+      channels: [{ key: 'general', categoryKey: 'cat-general' }],
+      categories,
+    }));
+
+    expect(response.status).toBe(409);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('rejects a destructive deployment without an explicit confirmation', async () => {
@@ -105,7 +148,9 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('persists destructive mode only when explicitly requested and confirmed', async () => {
@@ -122,11 +167,12 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(200);
-    const desiredWrite = supabase.writes.find((write) => write.table === 'guild_desired_state');
+    const desiredWrite = supabase.writes.find(
+      (write) => write.table === 'rpc:request_server_deployment',
+    );
     expect(desiredWrite?.payload).toMatchObject({
-      categories,
-      applied_at: null,
-      deploy_mode: 'destructive',
+      p_categories: categories,
+      p_deploy_mode: 'destructive',
     });
   });
 
@@ -142,7 +188,9 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('rejects a request that does not explicitly name the deploy action', async () => {
@@ -156,7 +204,9 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(400);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
   });
 
   it('fails closed when prior deployment state cannot be read', async () => {
@@ -174,6 +224,69 @@ describe('POST /api/deploy persistence', () => {
     }));
 
     expect(response.status).toBe(500);
-    expect(supabase.writes.some((write) => write.table === 'guild_desired_state')).toBe(false);
+    expect(supabase.writes.some(
+      (write) => write.table === 'rpc:request_server_deployment',
+    )).toBe(false);
+  });
+});
+
+describe('GET /api/deploy status', () => {
+  it('never returns internal deployment lease or error fields', async () => {
+    const supabase = makeSupabase({
+      guild_desired_state: {
+        guild_id: 'guild-1',
+        roles: [{ key: 'member' }],
+        channels: [{ key: 'general' }],
+        categories,
+        deploy_status: 'running',
+        deploy_claim_token: 'internal-claim-token',
+        deploy_claimed_at: '2026-08-23T09:38:00.000Z',
+        deploy_lease_expires_at: '2026-08-23T09:40:00.000Z',
+        deploy_error: 'internal stack details',
+      },
+      guild: { setup_completed: false, setup_confirmed_at: null },
+      audit_logs: [],
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.desiredState).toMatchObject({
+      guild_id: 'guild-1',
+      deploy_status: 'running',
+    });
+    expect(body.desiredState).not.toHaveProperty('deploy_claim_token');
+    expect(body.desiredState).not.toHaveProperty('deploy_claimed_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_lease_expires_at');
+    expect(body.desiredState).not.toHaveProperty('deploy_error');
+    expect(supabase.builders.get('guild_desired_state')?.select)
+      .toHaveBeenCalledWith(PUBLIC_DESIRED_STATE_COLUMNS);
+  });
+
+  it('fails closed when deployment status cannot be read', async () => {
+    const supabase = makeSupabase(
+      { guild: { setup_completed: false, setup_confirmed_at: null } },
+      { guild_desired_state: { message: 'invalid projection' } },
+    );
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await GET();
+
+    expect(response.status).toBe(500);
+  });
+
+  it('returns an empty status when a fresh guild has no desired state yet', async () => {
+    const supabase = makeSupabase({
+      guild: { setup_completed: false, setup_confirmed_at: null },
+    });
+    vi.mocked(createAdminSupabase).mockReturnValue(supabase.client as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.desiredState).toBeNull();
   });
 });

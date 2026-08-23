@@ -678,7 +678,11 @@ function makeGuild() {
         ['role-1', mockRole],
         ['role-managed', managedRole],
       ]),
-      create: vi.fn().mockResolvedValue({ id: 'new-role', name: 'NewRole', position: 3 }),
+      create: vi.fn().mockResolvedValue({
+        id: 'new-role', name: 'NewRole', position: 3,
+        setPosition: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({}),
+      }),
     },
     channels: {
       cache: new Map<string, any>([
@@ -1655,6 +1659,30 @@ describe('action-queue deep routing', () => {
     expect(guild.roles.create.mock.calls[0][0]).not.toHaveProperty('color');
   });
 
+  it('rolls back a newly created role when Discord rejects its requested position', async () => {
+    const actions = [{
+      id: 'act-create-position-failure', guild_id: 'guild-1', action: 'create_role', status: 'pending',
+      payload: { name: 'NewRole', tier: 'custom', position: 10 },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const createdRole = {
+      id: 'new-role', name: 'NewRole', position: 3,
+      setPosition: vi.fn().mockRejectedValue(new Error('Missing Permissions')),
+      delete: vi.fn().mockResolvedValue({}),
+    };
+    const guild = makeGuild();
+    guild.roles.create.mockResolvedValue(createdRole);
+    const supa = makeSupa(actions);
+
+    await startActionQueueListener(guild, supa);
+
+    expect(createdRole.delete).toHaveBeenCalled();
+    expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      error_message: expect.stringContaining('Missing Permissions'),
+    }));
+  });
+
   it('startActionQueueListener processes pending update_role action', async () => {
     const actions = [{
       id: 'act-2', guild_id: 'guild-1', action: 'update_role', status: 'pending',
@@ -1666,6 +1694,24 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
     const role = guild.roles.cache.get('role-1');
     expect(role.edit).toHaveBeenCalled();
+  });
+
+  it('fails an update_role action when Discord rejects its requested position', async () => {
+    const actions = [{
+      id: 'act-position-failure', guild_id: 'guild-1', action: 'update_role', status: 'pending',
+      payload: { roleId: 'role-1', position: 10 },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    guild.roles.cache.get('role-1').setPosition.mockRejectedValue(new Error('Missing Permissions'));
+    const supa = makeSupa(actions);
+
+    await startActionQueueListener(guild, supa);
+
+    expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      error_message: expect.stringContaining('Missing Permissions'),
+    }));
   });
 
   it('adopts an existing Discord role when an owner assigns its first tier', async () => {

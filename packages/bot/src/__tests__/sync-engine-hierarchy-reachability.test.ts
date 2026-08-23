@@ -82,15 +82,47 @@ function makeGuild(opts: {
   const everyone = { id: 'g1', name: '@everyone', setPermissions: vi.fn(async () => {}) };
   cache.set('g1', everyone);
   for (const r of roles) {
-    cache.set(r.id, { managed: false, edit: vi.fn(async () => {}), ...r });
+    const role = {
+      managed: false,
+      editable: r.managed !== true,
+      edit: vi.fn(async () => {}),
+      ...r,
+      setPosition: vi.fn(),
+    };
+    role.setPosition.mockImplementation(async (nextPosition: number) => {
+      const previousPosition = role.position;
+      for (const other of cache.values()) {
+        if (other.id === role.id || typeof other.position !== 'number') continue;
+        if (previousPosition < nextPosition
+          && other.position > previousPosition
+          && other.position <= nextPosition) {
+          other.position -= 1;
+        } else if (previousPosition > nextPosition
+          && other.position >= nextPosition
+          && other.position < previousPosition) {
+          other.position += 1;
+        }
+      }
+      role.position = nextPosition;
+      return role;
+    });
+    cache.set(r.id, role);
   }
   return {
     id: 'g1',
-    roles: { cache, everyone, setPositions },
+    roles: { cache, everyone, setPositions, fetch: vi.fn(async () => cache) },
     channels: { cache: new MockCollection() },
     rulesChannelId: null,
     publicUpdatesChannelId: null,
-    members: { me: { roles: { highest: { id: 'bot-role', position: botHighestPosition } } } },
+    members: {
+      me: {
+        roles: {
+          highest: { id: 'bot-role', position: botHighestPosition },
+          cache: new Map([['bot-role', { id: 'bot-role' }]]),
+        },
+        permissions: { has: vi.fn(() => true) },
+      },
+    },
     client: { user: { id: 'bot1' } },
   } as any;
 }
@@ -149,13 +181,14 @@ describe('HIERARCHY_DRIFT reachability via the real classifier', () => {
 
     const result = await runSyncCycle(guild, makeSupabase({ desired, mappings }), bus, makeConfig());
 
-    // Proof of reachability: the real classifier produced HIERARCHY_DRIFT, which
-    // reached reorderRolesToDesired and issued a setPositions call.
-    expect(setPositions).toHaveBeenCalledTimes(1);
-    const updates = setPositions.mock.calls[0][0] as Array<{ role: string; position: number }>;
-    const byRole = new Map(updates.map((u) => [u.role, u.position]));
-    expect(byRole.get('r-member')!).toBeLessThan(byRole.get('r-mod')!);
-    expect(byRole.get('r-mod')!).toBeLessThan(byRole.get('r-admin')!);
+    expect(setPositions).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-mod').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-admin').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').position)
+      .toBeLessThan(guild.roles.cache.get('r-mod').position);
+    expect(guild.roles.cache.get('r-mod').position)
+      .toBeLessThan(guild.roles.cache.get('r-admin').position);
     expect(result.repaired).toBeGreaterThanOrEqual(1);
   });
 
@@ -184,11 +217,11 @@ describe('HIERARCHY_DRIFT reachability via the real classifier', () => {
 
     const result = await runSyncCycle(guild, makeSupabase({ desired, mappings }), bus, makeConfig());
 
-    // Without key-normalization + unprefixed lookup this no-ops (0 movable roles).
-    expect(setPositions).toHaveBeenCalledTimes(1);
-    const updates = setPositions.mock.calls[0][0] as Array<{ role: string; position: number }>;
-    const byRole = new Map(updates.map((u) => [u.role, u.position]));
-    expect(byRole.get('r-member')!).toBeLessThan(byRole.get('r-admin')!);
+    expect(setPositions).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-admin').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').position)
+      .toBeLessThan(guild.roles.cache.get('r-admin').position);
     expect(result.repaired).toBeGreaterThanOrEqual(1);
   });
 
@@ -224,12 +257,11 @@ describe('HIERARCHY_DRIFT reachability via the real classifier', () => {
 
     const result = await runSyncCycle(guild, makeSupabase({ desired, mappings }), bus, makeConfig());
 
-    // The role resolved through the entity-typed map, so the inversion is found
-    // and reorderRolesToDesired issues the reorder.
-    expect(setPositions).toHaveBeenCalledTimes(1);
-    const updates = setPositions.mock.calls[0][0] as Array<{ role: string; position: number }>;
-    const byRole = new Map(updates.map((u) => [u.role, u.position]));
-    expect(byRole.get('r-member')!).toBeLessThan(byRole.get('r-staff')!);
+    expect(setPositions).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-staff').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').position)
+      .toBeLessThan(guild.roles.cache.get('r-staff').position);
     expect(result.repaired).toBeGreaterThanOrEqual(1);
   });
 

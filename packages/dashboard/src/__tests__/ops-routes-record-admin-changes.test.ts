@@ -139,7 +139,24 @@ function createAdminMock(config: Record<string, QueryResult[] | QueryResult> = {
     return chain;
   });
 
-  const client = { from, rpc: vi.fn().mockResolvedValue({ data: 7, error: null }) };
+  const client = {
+    from,
+    rpc: vi.fn(async (name: string, params?: Record<string, unknown>): Promise<QueryResult> => {
+      if (name === 'request_server_deployment') {
+        return {
+          data: {
+            disposition: 'accepted',
+            state: {
+              deploy_request_id: params?.p_request_id,
+              deploy_status: 'requested',
+            },
+          },
+          error: null,
+        };
+      }
+      return { data: 7, error: null };
+    }),
+  };
   vi.mocked(createAdminSupabase).mockReturnValue(client as never);
   return client;
 }

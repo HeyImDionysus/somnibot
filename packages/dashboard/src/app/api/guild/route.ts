@@ -16,6 +16,10 @@ import { parseBody } from '@/lib/api/validation';
 import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 import { guildConfigPatchSchema } from '@/lib/guild-config-schema';
+import {
+  PUBLIC_DESIRED_STATE_COLUMNS,
+  toPublicDesiredState,
+} from '@/lib/public-desired-state';
 
 function normalizeGuildConfig(config: unknown): unknown | null {
   if (Array.isArray(config)) return config[0] ?? null;
@@ -59,11 +63,13 @@ export async function GET() {
   }
 
   // Get desired state
-  const { data: desiredState } = await admin
+  const { data: desiredStateRow, error: desiredStateError } = await admin
     .from('guild_desired_state')
-    .select('*')
+    .select(PUBLIC_DESIRED_STATE_COLUMNS)
     .eq('guild_id', guildId)
-    .single();
+    .maybeSingle();
+  if (desiredStateError) return dbError(desiredStateError, 'guild');
+  const desiredState = toPublicDesiredState(desiredStateRow);
 
   const { data: liveState } = await admin
     .from('guild_live_state')

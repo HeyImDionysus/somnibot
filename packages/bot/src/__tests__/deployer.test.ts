@@ -83,7 +83,7 @@ function makeGuild() {
     members: {
       me: {
         id: 'bot-1',
-        roles: { highest: { position: 100 } },
+        roles: { highest: { position: 100 }, cache: new Map([['bot-role', {}]]) },
         permissions: { has: () => true },
       },
     },
@@ -97,7 +97,7 @@ function makeGuild() {
         id: `new-${opts.name}`, name: opts.name, position: 1,
         setPosition: vi.fn().mockResolvedValue({}),
       })),
-      fetch: vi.fn().mockResolvedValue(new Map()),
+      fetch: vi.fn(async () => guild.roles.cache),
       setPositions: vi.fn().mockImplementation(async (updates: Array<{ role: string; position: number }>) => {
         for (const update of updates) {
           const role = guild.roles.cache.get(update.role);
@@ -571,6 +571,50 @@ describe('deployer', () => {
       expect(moderatorOnly.delete).not.toHaveBeenCalled();
       expect(mappingChain.delete).toHaveBeenCalledOnce();
       expect(mappingChain.in).toHaveBeenCalledWith('discord_id', ['ch-1']);
+    });
+
+    it('attempts a duplicated stale Discord mapping once even when deletion fails', async () => {
+      const guild = makeGuild();
+      const channel = guild.channels.cache.get('ch-1');
+      channel.delete.mockRejectedValueOnce(new Error('missing permissions'));
+      const mappingChain = makeChain({
+        data: [
+          {
+            entity_type: 'channel',
+            template_key: 'channel:old-general',
+            discord_id: 'ch-1',
+          },
+          {
+            entity_type: 'channel',
+            template_key: 'channel:legacy-general',
+            discord_id: 'ch-1',
+          },
+        ],
+        error: null,
+      });
+      const writeChain = makeChain({ data: null, error: null });
+      const supabase = {
+        from: vi.fn((table: string) => table === 'discord_id_map' ? mappingChain : writeChain),
+      };
+      const onProgress = vi.fn();
+
+      const result = await deployServerState(
+        guild,
+        supabase as never,
+        {
+          everyonePermissions: '0',
+          roles: [],
+          categories: [],
+          channels: [],
+        },
+        { cleanExisting: false, dryRun: false, onProgress },
+      );
+
+      expect(result.success).toBe(false);
+      expect(channel.delete).toHaveBeenCalledOnce();
+      expect(mappingChain.delete).not.toHaveBeenCalled();
+      expect(onProgress.mock.calls.every(([step, total]) => step <= total)).toBe(true);
+      expect(onProgress.mock.calls.at(-1)?.slice(0, 2)).toEqual([3, 3]);
     });
   });
 });

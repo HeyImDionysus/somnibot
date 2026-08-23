@@ -13,6 +13,7 @@ import type { DriftItem } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
 import { recordAdminChange, undoByDeleting } from '../services/admin-changes.js';
+import { placeRolesDirectlyBelowBot } from '../services/role-hierarchy.js';
 
 const log = createLogger('RepairActions');
 
@@ -1008,11 +1009,6 @@ async function repairHierarchy(
     return { success: false, error: 'No movable roles resolved from desired state' };
   }
 
-  const positionUpdates = movable.map((entry, index) => ({
-    role: entry.id,
-    position: Math.max(1, botHighest - movable.length + index),
-  }));
-
   // Idempotent: equal actual positions count as ordered (Discord positions are
   // not guaranteed unique); only a strict decrease is a genuine inversion.
   const alreadyOrdered = movable.every((entry, index) => {
@@ -1024,7 +1020,7 @@ async function repairHierarchy(
     return { success: true };
   }
 
-  await guild.roles.setPositions(positionUpdates);
+  await placeRolesDirectlyBelowBot(guild, movable.map((entry) => entry.id));
 
   await removeDriftFromDb(supabase, guild.id, driftItem);
 
@@ -1036,7 +1032,7 @@ async function repairHierarchy(
     category: 'sync',
     targetType: 'role',
     targetId: driftItem.entityDiscordId ?? '',
-    details: { type: 'HIERARCHY_DRIFT', reordered: positionUpdates.length },
+    details: { type: 'HIERARCHY_DRIFT', reordered: movable.length },
   });
 
   return { success: true };

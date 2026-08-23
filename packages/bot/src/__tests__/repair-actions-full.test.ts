@@ -418,12 +418,50 @@ describe('repairDriftItem — HIERARCHY_DRIFT', () => {
   ): any {
     const cache = new MockCollection();
     cache.set('everyone', { id: 'everyone', name: '@everyone', position: 0 });
-    for (const r of roles) cache.set(r.id, { managed: false, ...r });
+    for (const r of roles) {
+      const role = {
+        managed: false,
+        editable: r.managed !== true,
+        ...r,
+        setPosition: vi.fn(),
+      };
+      role.setPosition.mockImplementation(async (nextPosition: number) => {
+        const previousPosition = role.position;
+        for (const other of cache.values()) {
+          if (other.id === role.id || typeof other.position !== 'number') continue;
+          if (previousPosition < nextPosition
+            && other.position > previousPosition
+            && other.position <= nextPosition) {
+            other.position -= 1;
+          } else if (previousPosition > nextPosition
+            && other.position >= nextPosition
+            && other.position < previousPosition) {
+            other.position += 1;
+          }
+        }
+        role.position = nextPosition;
+        return role;
+      });
+      cache.set(r.id, role);
+    }
     return {
       id: 'g1',
-      roles: { cache, everyone: cache.get('everyone'), setPositions },
+      roles: {
+        cache,
+        everyone: cache.get('everyone'),
+        setPositions,
+        fetch: vi.fn(async () => cache),
+      },
       channels: { cache: new MockCollection() },
-      members: { me: { roles: { highest: { id: 'bot-role', position: botHighestPosition } } } },
+      members: {
+        me: {
+          roles: {
+            highest: { id: 'bot-role', position: botHighestPosition },
+            cache: new Map([['bot-role', { id: 'bot-role' }]]),
+          },
+          permissions: { has: vi.fn(() => true) },
+        },
+      },
     };
   }
 
@@ -439,7 +477,7 @@ describe('repairDriftItem — HIERARCHY_DRIFT', () => {
     };
   }
 
-  it('reorders roles to desired relative positions via setPositions', async () => {
+  it('reorders roles to desired relative positions with verified single-role moves', async () => {
     const desiredRoles = [
       { template_key: 'role:admin', name: 'Admin', position: 2 },
       { template_key: 'role:mod', name: 'Mod', position: 1 },
@@ -471,11 +509,14 @@ describe('repairDriftItem — HIERARCHY_DRIFT', () => {
     } as any);
 
     expect(result.success).toBe(true);
-    expect(setPositions).toHaveBeenCalledTimes(1);
-    const updates = setPositions.mock.calls[0][0] as Array<{ role: string; position: number }>;
-    const byRole = new Map(updates.map((u) => [u.role, u.position]));
-    expect(byRole.get('r-member')!).toBeLessThan(byRole.get('r-mod')!);
-    expect(byRole.get('r-mod')!).toBeLessThan(byRole.get('r-admin')!);
+    expect(setPositions).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-mod').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-admin').setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('r-member').position)
+      .toBeLessThan(guild.roles.cache.get('r-mod').position);
+    expect(guild.roles.cache.get('r-mod').position)
+      .toBeLessThan(guild.roles.cache.get('r-admin').position);
     expect(writeAuditLog).toHaveBeenCalled();
   });
 

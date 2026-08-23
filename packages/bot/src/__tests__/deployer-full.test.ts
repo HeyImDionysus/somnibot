@@ -6,6 +6,9 @@
  * role creation, category creation, channel creation, error handling.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Guild } from 'discord.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { DesiredState } from '@somnibot/shared';
 
 const mockCheckBotRolePosition = vi.fn(async (): Promise<any> => ({
   isTopPosition: true,
@@ -77,11 +80,28 @@ function makeGuild(overrides: Record<string, any> = {}) {
       managed: false,
       ...opts,
     };
+    role.setPosition = vi.fn(async (nextPosition: number) => {
+      const previousPosition = role.position;
+      for (const other of roles.values()) {
+        if (other.id === role.id || other.id === 'g1' || typeof other.position !== 'number') continue;
+        if (previousPosition < nextPosition
+          && other.position > previousPosition
+          && other.position <= nextPosition) {
+          other.position -= 1;
+        } else if (previousPosition > nextPosition
+          && other.position >= nextPosition
+          && other.position < previousPosition) {
+          other.position += 1;
+        }
+      }
+      role.position = nextPosition;
+      return role;
+    });
     roles.set(role.id, role);
     return role;
   });
 
-  return {
+  const mockGuild = {
     id: 'g1',
     roles: {
       cache: roles,
@@ -106,13 +126,17 @@ function makeGuild(overrides: Record<string, any> = {}) {
     publicUpdatesChannelId: null,
     members: {
       me: {
-        roles: { highest: { position: 10 } },
+        roles: {
+          highest: { position: 10 },
+          cache: new Map([['bot-role', { id: 'bot-role' }]]),
+        },
         permissions: { has: vi.fn(() => true) },
       },
     },
     client: { user: { id: 'bot1' } },
     ...overrides,
   };
+  return mockGuild as typeof mockGuild & Guild;
 }
 
 function supaChain(data: any = null, error: any = null) {
@@ -127,7 +151,12 @@ function supaChain(data: any = null, error: any = null) {
   return c;
 }
 
-const defaultDesiredState = {
+function makeSupabase() {
+  const supabase = { from: vi.fn(() => supaChain()) };
+  return supabase as typeof supabase & SupabaseClient;
+}
+
+const defaultDesiredState: DesiredState = {
   everyonePermissions: '0',
   roles: [],
   categories: [],
@@ -208,14 +237,14 @@ describe('deployServerState — @everyone', () => {
 
   it('sets @everyone permissions to 0 during a destructive deploy', async () => {
     const guild = makeGuild();
-    const supabase = { from: vi.fn(() => supaChain()) };
+    const supabase = makeSupabase();
     const options: DeployOptions = { cleanExisting: true, dryRun: false };
 
     const desiredState = { ...defaultDesiredState };
     const result = await deployServerState(
-      guild as unknown as Parameters<typeof deployServerState>[0],
-      supabase as unknown as Parameters<typeof deployServerState>[1],
-      desiredState as unknown as Parameters<typeof deployServerState>[2],
+      guild,
+      supabase,
+      desiredState,
       options,
     );
 
@@ -249,7 +278,7 @@ describe('deployServerState — role creation', () => {
       ...defaultDesiredState,
       roles: [
         { key: 'mod', name: 'Moderator', color: 0x00FF00, permissions: '0', hoist: true, mentionable: false, position: 2 },
-        { key: 'member', name: 'Member', color: 0x0000FF, permissions: '0', hoist: false, mentionable: true, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0x0000FF, permissions: '0', hoist: false, mentionable: true, position: 1 },
       ],
     };
 
@@ -276,22 +305,23 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
     const result = await deployServerState(guild as any, supabase, desiredState as any, options);
 
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
-    // Preflight + pre-placement + post-placement outcome verification.
-    expect(guild.roles.fetch).toHaveBeenCalledTimes(3);
-    expect(guild.roles.setPositions).toHaveBeenCalledWith([
-      { role: 'new-role-Member', position: 1 },
-      { role: 'new-role-Admin', position: 2 },
-    ]);
+    expect(guild.roles.fetch).toHaveBeenCalledTimes(5);
+    expect(guild.roles.cache.get('new-role-Member')?.setPosition)
+      .toHaveBeenCalledWith(2, expect.objectContaining({ reason: expect.any(String) }));
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition)
+      .toHaveBeenCalledWith(2, expect.objectContaining({ reason: expect.any(String) }));
     expect(guild.roles.fetch.mock.invocationCallOrder[0])
-      .toBeLessThan(guild.roles.setPositions.mock.invocationCallOrder[0]);
+      .toBeLessThan(
+        guild.roles.cache.get('new-role-Member')?.setPosition.mock.invocationCallOrder[0],
+      );
   });
 
   it('places newly deployed staff above surviving ordinary member roles', async () => {
@@ -307,8 +337,8 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -320,10 +350,10 @@ describe('deployServerState — role creation', () => {
     );
 
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
-    expect(guild.roles.setPositions).toHaveBeenCalledWith([
-      { role: 'new-role-Member', position: 8 },
-      { role: 'new-role-Admin', position: 9 },
-    ]);
+    expect(guild.roles.cache.get('new-role-Member')?.setPosition)
+      .toHaveBeenCalledWith(9, expect.objectContaining({ reason: expect.any(String) }));
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition)
+      .toHaveBeenCalledWith(9, expect.objectContaining({ reason: expect.any(String) }));
   });
 
   it('ignores a managed role far below the target band even after creation (round 13 P1)', async () => {
@@ -344,8 +374,8 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -357,10 +387,8 @@ describe('deployServerState — role creation', () => {
     );
 
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
-    expect(guild.roles.setPositions).toHaveBeenCalledWith([
-      { role: 'new-role-Member', position: 8 },
-      { role: 'new-role-Admin', position: 9 },
-    ]);
+    expect(guild.roles.cache.get('new-role-Member')?.setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition).toHaveBeenCalled();
   });
 
   it('clean-existing deploy proceeds past a managed survivor and raises the created role above it (round 26 P1)', async () => {
@@ -395,7 +423,7 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
       ],
     };
 
@@ -408,9 +436,8 @@ describe('deployServerState — role creation', () => {
 
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
     expect(guild.roles.create).toHaveBeenCalledTimes(1);
-    expect(guild.roles.setPositions).toHaveBeenCalledWith([
-      { role: 'new-role-Admin', position: 9 },
-    ]);
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition)
+      .toHaveBeenCalledWith(9, expect.objectContaining({ reason: expect.any(String) }));
     // The managed survivor was displaced beneath the deployed role, not
     // treated as a barrier.
     expect(
@@ -431,8 +458,8 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -444,10 +471,121 @@ describe('deployServerState — role creation', () => {
     );
 
     expect(result.success, JSON.stringify(result.errors)).toBe(true);
-    expect(guild.roles.setPositions).toHaveBeenCalledWith([
-      { role: 'new-role-Member', position: 8 },
-      { role: 'new-role-Admin', position: 9 },
-    ]);
+    expect(guild.roles.cache.get('new-role-Member')?.setPosition)
+      .toHaveBeenCalledWith(9, expect.objectContaining({ reason: expect.any(String) }));
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition)
+      .toHaveBeenCalledWith(9, expect.objectContaining({ reason: expect.any(String) }));
+  });
+
+  it('moves each role below the bot without an absolute hierarchy batch', async () => {
+    const guild = makeGuild();
+    guild.roles.cache.set('managed-member', {
+      id: 'managed-member',
+      name: 'Integration Member',
+      position: 9,
+      managed: true,
+      editable: false,
+    });
+    const supabase = makeSupabase();
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild,
+      supabase,
+      desiredState,
+      { cleanExisting: false, dryRun: false },
+    );
+
+    expect(result.success, JSON.stringify(result.errors)).toBe(true);
+    expect(guild.roles.setPositions).not.toHaveBeenCalled();
+    expect(guild.roles.cache.get('new-role-Member')?.setPosition).toHaveBeenCalled();
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition).toHaveBeenCalled();
+  });
+
+  it('stops role moves immediately when the deployment lease is lost mid-hierarchy', async () => {
+    const abortController = new AbortController();
+    const guild = makeGuild();
+    const originalCreate = guild.roles.create;
+    let created = 0;
+    guild.roles.create = vi.fn(async (options) => {
+      const role = await originalCreate(options);
+      created++;
+      if (created === 1) {
+        const moveRole = role.setPosition;
+        role.setPosition = vi.fn(async (...args: Parameters<typeof moveRole>) => {
+          const moved = await moveRole(...args);
+          abortController.abort(new Error('deployment lease lost'));
+          return moved;
+        });
+      }
+      return role;
+    });
+    const supabase = makeSupabase();
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild,
+      supabase,
+      desiredState,
+      { cleanExisting: false, dryRun: false, abortSignal: abortController.signal },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.at(-1)?.error).toContain('deployment lease lost');
+    expect(guild.roles.cache.get('new-role-Member')?.setPosition).toHaveBeenCalledTimes(1);
+    expect(guild.roles.cache.get('new-role-Admin')?.setPosition).not.toHaveBeenCalled();
+    expect(guild.channels.create).not.toHaveBeenCalled();
+  });
+
+  it('renews ownership immediately before each Discord mutation', async () => {
+    const abortController = new AbortController();
+    const guild = makeGuild();
+    const supabase = makeSupabase();
+    let ownershipChecks = 0;
+    const assertOwnership = vi.fn(async () => {
+      ownershipChecks++;
+      if (ownershipChecks === 2) {
+        const error = new Error('deployment ownership renewal refused');
+        abortController.abort(error);
+        throw error;
+      }
+    });
+    const desiredState = {
+      ...defaultDesiredState,
+      roles: [
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+      ],
+    };
+
+    const result = await deployServerState(
+      guild,
+      supabase,
+      desiredState,
+      {
+        cleanExisting: false,
+        dryRun: false,
+        abortSignal: abortController.signal,
+        assertOwnership,
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.at(-1)?.error).toContain('deployment ownership renewal refused');
+    expect(guild.roles.create).toHaveBeenCalledTimes(1);
+    expect(guild.channels.create).not.toHaveBeenCalled();
   });
 
   it('reports honestly when a role Discord did not displace remains inside the band', async () => {
@@ -462,13 +600,16 @@ describe('deployServerState — role creation', () => {
       managed: true,
       editable: false,
     });
-    (guild.roles as { setPositions: unknown }).setPositions =
-      vi.fn(async () => undefined);
+    guild.roles.fetch.mockImplementation(async () => {
+      const role = guild.roles.cache.get('new-role-Admin');
+      if (role) role.setPosition = vi.fn(async () => role);
+      return guild.roles.cache;
+    });
     const supabase = { from: vi.fn(() => supaChain()) } as any;
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 0 },
       ],
     };
 
@@ -481,7 +622,7 @@ describe('deployServerState — role creation', () => {
 
     expect(result.success).toBe(false);
     expect(result.errors.some((error) =>
-      error.error.includes('remains between the bot and the deployed roles'),
+      error.error.includes('did not preserve the reviewed role hierarchy'),
     )).toBe(true);
   });
 
@@ -500,7 +641,7 @@ describe('deployServerState — role creation', () => {
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
@@ -519,6 +660,43 @@ describe('deployServerState — role creation', () => {
 });
 
 describe('deployServerState — clean existing', () => {
+  it('stops message deletions immediately when the deployment lease is lost mid-purge', async () => {
+    const abortController = new AbortController();
+    const messages = new MockCollection();
+    const firstDelete = vi.fn(async () => {
+      abortController.abort(new Error('deployment lease lost'));
+    });
+    const secondDelete = vi.fn(async () => {});
+    messages.set('m1', { id: 'm1', author: { id: 'bot1' }, delete: firstDelete });
+    messages.set('m2', { id: 'm2', author: { id: 'bot1' }, delete: secondDelete });
+    const channels = new MockCollection();
+    const channelDelete = vi.fn(async () => {});
+    channels.set('ch1', {
+      id: 'ch1',
+      name: 'old-channel',
+      type: 0,
+      delete: channelDelete,
+      messages: { fetch: vi.fn(async () => messages) },
+    });
+    const guild = makeGuild({
+      channels: { cache: channels, create: vi.fn() },
+    });
+    const supabase = makeSupabase();
+
+    const result = await deployServerState(
+      guild,
+      supabase,
+      defaultDesiredState,
+      { cleanExisting: true, dryRun: false, abortSignal: abortController.signal },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors.at(-1)?.error).toContain('deployment lease lost');
+    expect(firstDelete).toHaveBeenCalledTimes(1);
+    expect(secondDelete).not.toHaveBeenCalled();
+    expect(channelDelete).not.toHaveBeenCalled();
+  });
+
   it('deletes non-protected channels when cleanExisting is true', async () => {
     const channels = new MockCollection();
     const ch1 = { id: 'ch1', name: 'old-channel', type: 0, delete: vi.fn(async () => {}), messages: { fetch: vi.fn(async () => new MockCollection()) } };
@@ -570,6 +748,38 @@ describe('deployServerState — progress callback', () => {
 
     expect(onProgress).toHaveBeenCalled();
   });
+
+  it('never reports a step beyond the exact total when Discord has a moderator-only channel', async () => {
+    const channels = new MockCollection();
+    channels.set('moderator-only', {
+      id: 'moderator-only',
+      name: 'moderator-only',
+      type: 0,
+    });
+    const guild = makeGuild({
+      safetyAlertsChannelId: 'moderator-only',
+      channels: {
+        cache: channels,
+        create: vi.fn(),
+      },
+    });
+    const supabase = makeSupabase();
+    const onProgress = vi.fn();
+
+    await deployServerState(
+      guild,
+      supabase,
+      defaultDesiredState,
+      { cleanExisting: false, dryRun: false, onProgress },
+    );
+
+    const reported = onProgress.mock.calls.map(([step, total]) => ({
+      step: step as number,
+      total: total as number,
+    }));
+    expect(reported.every(({ step, total }) => step <= total)).toBe(true);
+    expect(reported.at(-1)).toEqual({ step: 3, total: 3 });
+  });
 });
 
 describe('deployServerState — result structure', () => {
@@ -607,8 +817,8 @@ describe('deployServerState — managed roles OUTSIDE the target band are not ba
     const desiredState = {
       ...defaultDesiredState,
       roles: [
-        { key: 'member', name: 'Member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
-        { key: 'admin', name: 'Admin', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
+        { key: 'member', name: 'Member', tier: 'member', color: 0, permissions: '0', hoist: false, mentionable: false, position: 0 },
+        { key: 'admin', name: 'Admin', tier: 'staff', color: 0, permissions: '8', hoist: true, mentionable: false, position: 1 },
       ],
     };
 
