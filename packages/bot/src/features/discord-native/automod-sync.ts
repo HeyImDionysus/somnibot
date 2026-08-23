@@ -105,13 +105,9 @@ export class AutoModSync {
   private stopPromise: Promise<void> | null = null;
   private lifecycleGeneration = 0;
   private syncQueue: Promise<void> = Promise.resolve();
-  private readonly handleConfigChanged = (
-    event: PlatformEvent<'config.changed', ConfigChangedData>,
-  ): void => {
-    if (event.guildId !== this.guild.id) return;
-    if (event.data.section !== 'moderation') return;
-    this.syncRules().catch((error: unknown) => log.error('Sync failed:', { error: String(error) }));
-  };
+  private configChangedListener: ((
+    event: PlatformEvent<'config.changed', ConfigChangedData>
+  ) => void) | null = null;
 
   constructor(
     private guild: Guild,
@@ -127,7 +123,17 @@ export class AutoModSync {
     this.started = true;
     this.stopping = false;
     this.lifecycleGeneration += 1;
-    this.eventBus.on('config.changed', this.handleConfigChanged);
+    const generation = this.lifecycleGeneration;
+    const configChangedListener = (
+      event: PlatformEvent<'config.changed', ConfigChangedData>,
+    ): void => {
+      if (!this.started || this.stopping || generation !== this.lifecycleGeneration) return;
+      if (event.guildId !== this.guild.id) return;
+      if (event.data.section !== 'moderation') return;
+      this.syncRules().catch((error: unknown) => log.error('Sync failed:', { error: String(error) }));
+    };
+    this.configChangedListener = configChangedListener;
+    this.eventBus.on('config.changed', configChangedListener);
 
     // Initial sync on startup
     this.syncRules().catch((err) =>
@@ -148,7 +154,11 @@ export class AutoModSync {
     this.started = false;
     this.stopping = true;
     this.lifecycleGeneration += 1;
-    this.eventBus.off('config.changed', this.handleConfigChanged);
+    const configChangedListener = this.configChangedListener;
+    this.configChangedListener = null;
+    if (configChangedListener) {
+      this.eventBus.off('config.changed', configChangedListener);
+    }
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
       this.syncInterval = null;

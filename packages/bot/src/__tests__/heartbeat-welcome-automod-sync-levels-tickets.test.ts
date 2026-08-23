@@ -409,6 +409,50 @@ describe('AutoModSync', () => {
     expect(bus.off).toHaveBeenCalledTimes(2);
   });
 
+  it('ignores a snapshotted config event dispatched after stop and restart', async () => {
+    const { AutoModSync } = await import('../features/discord-native/automod-sync.js');
+    type ConfigListener = (event: {
+      guildId: string;
+      data: { section: string };
+    }) => void;
+    let currentListener: ConfigListener | null = null;
+    const bus = {
+      emit: vi.fn((_type: string, guildId: string, data: { section: string }) => {
+        const snapshottedListener = currentListener;
+        if (snapshottedListener) {
+          setImmediate(() => snapshottedListener({ guildId, data }));
+        }
+      }),
+      on: vi.fn((_type: string, listener: ConfigListener) => {
+        currentListener = listener;
+      }),
+      off: vi.fn((_type: string, listener: ConfigListener) => {
+        if (currentListener === listener) currentListener = null;
+      }),
+      onAny: vi.fn(),
+    };
+    const sync = new AutoModSync(
+      guild('g1'),
+      { from: vi.fn(() => chainAsync([])) } as unknown as ConstructorParameters<typeof AutoModSync>[1],
+      bus as unknown as ConstructorParameters<typeof AutoModSync>[2],
+    );
+    const syncSpy = vi.spyOn(sync, 'syncRules').mockResolvedValue(undefined);
+
+    sync.start();
+    bus.emit('config.changed', 'g1', { section: 'moderation' });
+    await sync.stop();
+    sync.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(syncSpy).toHaveBeenCalledTimes(2);
+
+    bus.emit('config.changed', 'g1', { section: 'moderation' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(syncSpy).toHaveBeenCalledTimes(3);
+
+    await sync.stop();
+  });
+
   it('syncs only the guild whose moderation config changed', async () => {
     const { AutoModSync } = await import('../features/discord-native/automod-sync.js');
     type ConfigListener = (event: {
