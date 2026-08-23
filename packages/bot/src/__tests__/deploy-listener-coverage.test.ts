@@ -476,6 +476,23 @@ describe('startDeployListener', () => {
     await client._fireEvent('deploy.requested', {});
     expect(mockDeployServerState).not.toHaveBeenCalled();
   });
+
+  it('does not misclassify an event-bus database failure as a missing request', async () => {
+    const client = makeClient();
+    client.supabase.from.mockReturnValue(chainBuilder({
+      data: null,
+      error: { message: 'desired-state read failed' },
+    }));
+    startDeployListener(client);
+
+    await client._fireEvent('deploy.requested', {});
+
+    expect(mockDeployServerState).not.toHaveBeenCalled();
+    expect(client.supabase.rpc).not.toHaveBeenCalledWith(
+      'claim_deploy_request',
+      expect.anything(),
+    );
+  });
 });
 
 describe('executeDeployDirect (via realtime trigger)', () => {

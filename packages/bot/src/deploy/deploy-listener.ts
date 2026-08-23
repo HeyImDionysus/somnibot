@@ -86,11 +86,18 @@ export function startDeployListener(client: SomniClient): void {
 
     log.info('Received deploy request via event bus', { guildId });
     // For event-bus triggered deploys, fetch the desired state from Supabase
-    const { data: stateRow } = await client.supabase
+    const { data: stateRow, error: stateError } = await client.supabase
       .from('guild_desired_state')
       .select('*')
       .eq('guild_id', guildId)
       .single();
+    if (stateError) {
+      log.error('Failed to read requested deployment for event-bus trigger', {
+        guildId,
+        error: stateError.message,
+      });
+      return;
+    }
 
     const request = parseRequestedDeployRow(stateRow, guildId);
     if (request) {
