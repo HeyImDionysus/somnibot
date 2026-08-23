@@ -595,9 +595,21 @@ describe('GuildOnboardingSync', () => {
     };
     let leaseOwner: string | null = null;
     let nextToken = 1;
+    let reportSuccessorPersistStarted: (() => void) | undefined;
+    const successorPersistStarted = new Promise<void>((resolve) => {
+      reportSuccessorPersistStarted = resolve;
+    });
+    let finishSuccessorPersist: (() => void) | undefined;
+    const successorPersistGate = new Promise<void>((resolve) => {
+      finishSuccessorPersist = resolve;
+    });
+    let blockedReconciliationObserved = false;
     const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
       if (name === 'acquire_onboarding_sync_lease') {
-        if (leaseOwner) return { data: { disposition: 'busy', lease_token: null }, error: null };
+        if (leaseOwner) {
+          blockedReconciliationObserved = true;
+          return { data: { disposition: 'busy', lease_token: null }, error: null };
+        }
         leaseOwner = `lease-${nextToken++}`;
         return { data: { disposition: 'acquired', lease_token: leaseOwner }, error: null };
       }
@@ -606,6 +618,10 @@ describe('GuildOnboardingSync', () => {
       }
       if (name === 'persist_onboarding_sync_state_if_leased') {
         if (args.p_lease_token !== leaseOwner) return { data: false, error: null };
+        if (args.p_request_id === secondRequestId && current.onboarding_sync_state.status === 'pending') {
+          reportSuccessorPersistStarted?.();
+          await successorPersistGate;
+        }
         current = {
           ...current,
           onboarding_sync_state: args.p_state as typeof current.onboarding_sync_state,
@@ -643,13 +659,16 @@ describe('GuildOnboardingSync', () => {
       onboarding_sync_state: { status: 'pending', request_id: secondRequestId },
       onboarding_config: { enabled: true, prompts: [], default_channel_ids: ['second'] },
     };
-    await successor.syncOnboarding(secondRequestId);
+    const successorRun = successor.syncOnboarding(secondRequestId);
+    await successorPersistStarted;
     finishExpiredEdit?.({
       enabled: true,
       prompts: new Collection(),
       defaultChannels: new Collection([['first', { id: 'first' }]]),
     });
-    await oldRun;
+    await vi.waitFor(() => expect(blockedReconciliationObserved).toBe(true));
+    finishSuccessorPersist?.();
+    await Promise.all([oldRun, successorRun]);
 
     expect(g.editOnboarding).toHaveBeenCalledTimes(3);
     expect(g.editOnboarding).toHaveBeenLastCalledWith(expect.objectContaining({

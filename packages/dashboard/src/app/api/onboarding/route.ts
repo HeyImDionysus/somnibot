@@ -102,6 +102,7 @@ export async function PUT(req: NextRequest) {
     area: 'onboarding',
     updates: allowed,
     before,
+    revision: { onboarding_sync_state: syncState },
   }, supabase);
 
   const queued = await notifyBotForGuildWithResult(

@@ -21,6 +21,12 @@ const undoChangeSchema = z.object({
   id: z.string().uuid(),
 });
 
+const onboardingRevisionSchema = z.object({
+  onboarding_sync_state: z.object({
+    request_id: z.string().uuid(),
+  }),
+}).passthrough();
+
 export async function GET(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.undo_changes');
@@ -169,12 +175,37 @@ export async function POST(request: NextRequest) {
       const undoData = pendingState
         ? { ...validation.data, onboarding_sync_state: pendingState }
         : validation.data;
-      const { error: undoError } = await admin
-        .from(validation.table)
-        .update(undoData)
-        .match(validation.match);
-
-      if (undoError) return dbError(undoError, 'admin-changes');
+      if (pendingState) {
+        const revision = onboardingRevisionSchema.safeParse(change.after_state);
+        if (!revision.success) {
+          return NextResponse.json(
+            { error: 'Undo blocked: this onboarding change has no revision evidence.' },
+            { status: 409 },
+          );
+        }
+        const { data: undone, error: undoError } = await admin
+          .from(validation.table)
+          .update(undoData)
+          .match(validation.match)
+          .contains('onboarding_sync_state', {
+            request_id: revision.data.onboarding_sync_state.request_id,
+          })
+          .select('guild_id')
+          .maybeSingle();
+        if (undoError) return dbError(undoError, 'admin-changes');
+        if (!undone) {
+          return NextResponse.json(
+            { error: 'Undo blocked: onboarding has changed since this revision.' },
+            { status: 409 },
+          );
+        }
+      } else {
+        const { error: undoError } = await admin
+          .from(validation.table)
+          .update(undoData)
+          .match(validation.match);
+        if (undoError) return dbError(undoError, 'admin-changes');
+      }
 
       if (pendingState) {
         const queued = await notifyBotForGuildWithResult(

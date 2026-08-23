@@ -491,8 +491,9 @@ test.describe('Community self-service browser flow', () => {
     await page.getByRole('combobox', { name: 'Default channels' }).click();
     await page.getByRole('option', { name: 'welcome', exact: true }).click();
     await page.keyboard.press('Escape');
-    await page.getByRole('button', { name: 'Roles granted' }).click();
-    await expect(page.getByRole('option', { name: 'Member', exact: true })).toBeVisible();
+    const rolesGranted = page.getByRole('button', { name: 'Roles granted' });
+    await rolesGranted.click();
+    await expect(rolesGranted.locator('..').getByRole('button', { name: 'Member', exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
     await page.getByRole('combobox', { name: 'Channels added' }).click();
     await page.getByRole('option', { name: 'welcome', exact: true }).click();

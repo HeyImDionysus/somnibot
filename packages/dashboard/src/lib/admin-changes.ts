@@ -216,6 +216,7 @@ export async function recordGuildConfigChange(
     updates: Record<string, unknown>;
     /** Those same columns' prior values, or undefined if not readable. */
     before?: Record<string, unknown> | null;
+    revision?: Record<string, unknown>;
     blastRadius?: BlastRadius;
   },
   admin?: SupabaseClient,
@@ -244,7 +245,10 @@ export async function recordGuildConfigChange(
       targetId: opts.guildId,
       description: `${describeSettingChange(keys)} in ${opts.area}`,
       before: priorForKeys ?? undefined,
-      after: Object.fromEntries(keys.map((k) => [k, opts.updates[k]])),
+      after: {
+        ...Object.fromEntries(keys.map((k) => [k, opts.updates[k]])),
+        ...(opts.revision ?? {}),
+      },
       blastRadius: opts.blastRadius ?? 'low',
       ...(canRestore
         ? {

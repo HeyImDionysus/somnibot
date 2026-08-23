@@ -160,6 +160,10 @@ describe('PUT /api/onboarding', () => {
     const payload = upsert.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.returning_member_skip_welcome_dm).toBe(false);
     expect(payload).not.toHaveProperty('onboarding_config');
+    const [recorded] = vi.mocked(recordGuildConfigChange).mock.calls[0];
+    expect(recorded.revision).toEqual({
+      onboarding_sync_state: payload.onboarding_sync_state,
+    });
   });
 });
 
