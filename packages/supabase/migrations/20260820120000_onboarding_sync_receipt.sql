@@ -215,3 +215,169 @@ GRANT EXECUTE ON FUNCTION public.acquire_onboarding_sync_lease(TEXT, UUID, INTEG
 GRANT EXECUTE ON FUNCTION public.release_onboarding_sync_lease(TEXT, UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.renew_onboarding_sync_lease(TEXT, UUID, UUID, INTEGER) TO service_role;
 GRANT EXECUTE ON FUNCTION public.persist_onboarding_sync_state_if_leased(TEXT, UUID, UUID, JSONB) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.undo_onboarding_change(
+  p_change_id UUID,
+  p_guild_id TEXT,
+  p_actor_id TEXT,
+  p_expected_request_id UUID,
+  p_new_request_id UUID,
+  p_requested_at TIMESTAMPTZ,
+  p_undo_data JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_change public.admin_changes%ROWTYPE;
+  v_undo_record public.admin_changes%ROWTYPE;
+  v_sync_state JSONB;
+BEGIN
+  IF jsonb_typeof(p_undo_data) IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION USING ERRCODE = '22023',
+      MESSAGE = 'onboarding undo data must be an object';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+      FROM jsonb_object_keys(p_undo_data) AS key(name)
+     WHERE key.name NOT IN (
+       'member_role_id',
+       'onboarding_enabled',
+       'interest_role_mapping',
+       'returning_member_skip_welcome_dm',
+       'returning_member_restore_entitlements',
+       'returning_member_restore_levels',
+       'onboarding_config',
+       'fallback_mode',
+       'fallback_timeout_minutes'
+     )
+  ) THEN
+    RAISE EXCEPTION USING ERRCODE = '22023',
+      MESSAGE = 'onboarding undo data contains an unsupported field';
+  END IF;
+
+  SELECT *
+    INTO v_change
+    FROM public.admin_changes
+   WHERE id = p_change_id
+     AND guild_id = p_guild_id
+   FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('status', 'not_found');
+  END IF;
+  IF NOT v_change.is_undoable OR v_change.is_undone THEN
+    RETURN jsonb_build_object('status', 'unavailable');
+  END IF;
+  IF v_change.action IS DISTINCT FROM 'onboarding.updated'
+     OR v_change.after_state #>> '{onboarding_sync_state,request_id}'
+        IS DISTINCT FROM p_expected_request_id::TEXT THEN
+    RETURN jsonb_build_object('status', 'invalid_revision');
+  END IF;
+
+  v_sync_state := jsonb_build_object(
+    'status', 'pending',
+    'managed', TRUE,
+    'request_id', p_new_request_id,
+    'requested_at', p_requested_at
+  );
+
+  UPDATE public.guild_config AS config
+     SET member_role_id = CASE
+           WHEN p_undo_data ? 'member_role_id' THEN p_undo_data->>'member_role_id'
+           ELSE config.member_role_id
+         END,
+         onboarding_enabled = CASE
+           WHEN p_undo_data ? 'onboarding_enabled' THEN (p_undo_data->>'onboarding_enabled')::BOOLEAN
+           ELSE config.onboarding_enabled
+         END,
+         interest_role_mapping = CASE
+           WHEN p_undo_data ? 'interest_role_mapping' THEN p_undo_data->'interest_role_mapping'
+           ELSE config.interest_role_mapping
+         END,
+         returning_member_skip_welcome_dm = CASE
+           WHEN p_undo_data ? 'returning_member_skip_welcome_dm'
+             THEN (p_undo_data->>'returning_member_skip_welcome_dm')::BOOLEAN
+           ELSE config.returning_member_skip_welcome_dm
+         END,
+         returning_member_restore_entitlements = CASE
+           WHEN p_undo_data ? 'returning_member_restore_entitlements'
+             THEN (p_undo_data->>'returning_member_restore_entitlements')::BOOLEAN
+           ELSE config.returning_member_restore_entitlements
+         END,
+         returning_member_restore_levels = CASE
+           WHEN p_undo_data ? 'returning_member_restore_levels'
+             THEN (p_undo_data->>'returning_member_restore_levels')::BOOLEAN
+           ELSE config.returning_member_restore_levels
+         END,
+         onboarding_config = CASE
+           WHEN p_undo_data ? 'onboarding_config'
+             THEN NULLIF(p_undo_data->'onboarding_config', 'null'::JSONB)
+           ELSE config.onboarding_config
+         END,
+         fallback_mode = CASE
+           WHEN p_undo_data ? 'fallback_mode' THEN p_undo_data->>'fallback_mode'
+           ELSE config.fallback_mode
+         END,
+         fallback_timeout_minutes = CASE
+           WHEN p_undo_data ? 'fallback_timeout_minutes'
+             THEN (p_undo_data->>'fallback_timeout_minutes')::INTEGER
+           ELSE config.fallback_timeout_minutes
+         END,
+         onboarding_sync_state = v_sync_state
+   WHERE config.guild_id = p_guild_id
+     AND config.onboarding_sync_state->>'request_id' = p_expected_request_id::TEXT;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('status', 'stale');
+  END IF;
+
+  INSERT INTO public.admin_changes (
+    guild_id,
+    actor_id,
+    action,
+    target_type,
+    target_id,
+    description,
+    before_state,
+    after_state,
+    undo_payload,
+    is_undoable,
+    blast_radius
+  ) VALUES (
+    p_guild_id,
+    p_actor_id,
+    'undo:' || v_change.action,
+    v_change.target_type,
+    v_change.target_id,
+    'Undid: ' || v_change.description,
+    v_change.after_state,
+    v_change.before_state,
+    NULL,
+    FALSE,
+    v_change.blast_radius
+  )
+  RETURNING * INTO v_undo_record;
+
+  UPDATE public.admin_changes
+     SET is_undone = TRUE,
+         undone_at = clock_timestamp(),
+         undone_by = p_actor_id,
+         undo_change_id = v_undo_record.id
+   WHERE id = p_change_id
+     AND guild_id = p_guild_id;
+
+  RETURN jsonb_build_object(
+    'status', 'applied',
+    'sync_state', v_sync_state,
+    'undo_record', to_jsonb(v_undo_record)
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.undo_onboarding_change(UUID, TEXT, TEXT, UUID, UUID, TIMESTAMPTZ, JSONB)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.undo_onboarding_change(UUID, TEXT, TEXT, UUID, UUID, TIMESTAMPTZ, JSONB)
+  TO service_role;

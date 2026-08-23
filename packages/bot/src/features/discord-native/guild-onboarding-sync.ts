@@ -129,7 +129,16 @@ function requestedConfig(
 
 export class GuildOnboardingSync {
   private started = false;
+  private stopping = false;
   private syncQueue: Promise<void> = Promise.resolve();
+  private readonly handleConfigChanged = async (
+    event: PlatformEvent<'config.changed', ConfigChangedData>,
+  ): Promise<void> => {
+    if (event.guildId !== this.guild.id) return;
+    if (event.data.section === 'onboarding' || event.data.section === 'welcome') {
+      await this.syncOnboarding(event.data.syncRequestId);
+    }
+  };
 
   constructor(
     private guild: Guild,
@@ -140,19 +149,23 @@ export class GuildOnboardingSync {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.stopping = false;
 
-    // Listen for onboarding config changes
-    this.eventBus.on('config.changed', async (event: PlatformEvent<'config.changed', ConfigChangedData>) => {
-      if (event.data.section === 'onboarding' || event.data.section === 'welcome') {
-        await this.syncOnboarding(event.data.syncRequestId);
-      }
-    });
+    this.eventBus.on('config.changed', this.handleConfigChanged);
 
     void this.syncOnboarding().catch((err) =>
       log.error('Sync failed:', { error: String(err) }),
     );
 
     log.info('Guild onboarding sync started');
+  }
+
+  async stop(): Promise<void> {
+    if (!this.started) return;
+    this.started = false;
+    this.stopping = true;
+    this.eventBus.off('config.changed', this.handleConfigChanged);
+    await this.syncQueue;
   }
 
   /**
@@ -163,6 +176,7 @@ export class GuildOnboardingSync {
       let requestId = expectedRequestId;
       let forceManagedReconciliation = false;
       for (;;) {
+        if (this.stopping) return;
         const result = await this.performSync(requestId, forceManagedReconciliation);
         if (result === 'done') return;
         if (result === 'wait') {

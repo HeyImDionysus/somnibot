@@ -493,8 +493,12 @@ test.describe('Community self-service browser flow', () => {
     await page.keyboard.press('Escape');
     const rolesGranted = page.getByRole('button', { name: 'Roles granted' });
     await rolesGranted.click();
-    await expect(rolesGranted.locator('..').getByRole('button', { name: 'Member', exact: true })).toBeVisible();
+    const rolesListbox = page.getByRole('listbox', { name: 'Roles granted' });
+    await rolesListbox.getByRole('option', { name: 'Member', exact: true }).click();
+    await expect(rolesListbox.getByRole('option', { name: 'Member', exact: true })).toHaveAttribute('aria-selected', 'true');
     await page.keyboard.press('Escape');
+    await expect(rolesListbox).toBeHidden();
+    await expect(rolesGranted).toBeFocused();
     await page.getByRole('combobox', { name: 'Channels added' }).click();
     await page.getByRole('option', { name: 'welcome', exact: true }).click();
     await page.keyboard.press('Escape');

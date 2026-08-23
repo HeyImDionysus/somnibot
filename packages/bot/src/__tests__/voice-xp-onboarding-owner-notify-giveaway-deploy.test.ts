@@ -256,8 +256,16 @@ describe('GuildOnboardingSync', () => {
     expect(eventBus.on).toHaveBeenCalledTimes(1);
 
     const configChangedHandler = eventBus.on.mock.calls[0][1];
-    configChangedHandler({ data: { section: 'onboarding' } });
+    await configChangedHandler({ guildId: 'another-guild', data: { section: 'onboarding' } });
+    expect(g.editOnboarding).toHaveBeenCalledTimes(1);
+
+    await configChangedHandler({ guildId: g.id, data: { section: 'onboarding' } });
     await vi.waitFor(() => expect(g.editOnboarding).toHaveBeenCalledTimes(2));
+
+    await sync.stop();
+    expect(eventBus.off).toHaveBeenCalledWith('config.changed', configChangedHandler);
+    await configChangedHandler({ guildId: g.id, data: { section: 'onboarding' } });
+    expect(g.editOnboarding).toHaveBeenCalledTimes(2);
   });
 
   it('syncs native roles and channels, including a deduplicated interest-role mapping', async () => {

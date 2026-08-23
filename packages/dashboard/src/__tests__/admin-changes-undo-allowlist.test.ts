@@ -30,7 +30,8 @@ vi.mock('@/lib/api/validation', () => ({
   schemas: {},
 }));
 
-const mockSupabase = { from: vi.fn() };
+const mockRpc = vi.fn();
+const mockSupabase = { from: vi.fn(), rpc: mockRpc };
 vi.mock('@/lib/supabase/admin', () => ({
   createAdminSupabase: () => mockSupabase,
 }));
@@ -154,10 +155,25 @@ function okAuth(guildId = 'guild-1', discordId = '123', isOwner = true) {
 const validUndoBody = { action: 'undo', id: '00000000-0000-0000-0000-000000000001' };
 
 beforeEach(() => {
-    vi.resetAllMocks();
+  vi.resetAllMocks();
   mockRateLimit.mockResolvedValue(null); // not rate limited
   mockParseBody.mockResolvedValue({ ok: true, data: validUndoBody });
   mockNotifyBot.mockResolvedValue(true);
+  mockRpc.mockImplementation(async (name: string, args: Record<string, unknown>) => ({
+    data: name === 'undo_onboarding_change'
+      ? {
+          status: 'applied',
+          sync_state: {
+            status: 'pending',
+            managed: true,
+            request_id: args.p_new_request_id,
+            requested_at: args.p_requested_at,
+          },
+          undo_record: { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' },
+        }
+      : null,
+    error: null,
+  }));
 });
 
 // ── Unit tests: validateUndoPayload ─────────────────────────
@@ -866,7 +882,7 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
 
   it('creates a fresh sync receipt and notifies the bot when onboarding is undone', async () => {
     okAuth('guild-1', 'admin-42');
-    const { targetUpdate, targetContains } = wireSupabase({
+    wireSupabase({
       id: validUndoBody.id,
       guild_id: 'guild-1',
       is_undoable: true,
@@ -892,17 +908,15 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
     const json = await res.json();
 
     expect(res.status).toBe(200);
-    expect(targetUpdate).toHaveBeenCalledWith(expect.objectContaining({
-      onboarding_enabled: false,
-      onboarding_sync_state: expect.objectContaining({
-        status: 'pending',
-        managed: true,
-        request_id: expect.any(String),
-      }),
+    expect(mockRpc).toHaveBeenCalledWith('undo_onboarding_change', expect.objectContaining({
+      p_change_id: validUndoBody.id,
+      p_guild_id: 'guild-1',
+      p_actor_id: 'admin-42',
+      p_expected_request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      p_new_request_id: expect.any(String),
+      p_requested_at: expect.any(String),
+      p_undo_data: { onboarding_enabled: false },
     }));
-    expect(targetContains).toHaveBeenCalledWith('onboarding_sync_state', {
-      request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-    });
     expect(mockNotifyBot).toHaveBeenCalledWith(
       'guild-1',
       'onboarding',
@@ -951,7 +965,7 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
 
   it('rejects an onboarding undo after a newer revision has been saved', async () => {
     okAuth('guild-1', 'admin-42');
-    const { targetContains } = wireSupabase({
+    wireSupabase({
       id: validUndoBody.id,
       guild_id: 'guild-1',
       is_undoable: true,
@@ -971,17 +985,51 @@ describe('POST /api/admin-changes — undo apply-time allowlist', () => {
         data: { onboarding_enabled: false },
         match: { guild_id: 'guild-1' },
       },
-    }, undefined, null);
+    });
+    mockRpc.mockResolvedValue({ data: { status: 'stale' }, error: null });
 
     const res = await POST(buildRequest(validUndoBody));
     const json = await res.json();
 
     expect(res.status).toBe(409);
     expect(json.error).toContain('changed since this revision');
-    expect(targetContains).toHaveBeenCalledWith('onboarding_sync_state', {
-      request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-    });
     expect(mockNotifyBot).not.toHaveBeenCalled();
+  });
+
+  it('leaves config and audit unchanged when the atomic onboarding undo fails', async () => {
+    okAuth('guild-1', 'admin-42');
+    const { targetUpdate } = wireSupabase({
+      id: validUndoBody.id,
+      guild_id: 'guild-1',
+      is_undoable: true,
+      is_undone: false,
+      action: 'onboarding.updated',
+      target_type: 'config',
+      target_id: 'onboarding',
+      description: 'changed onboarding',
+      before_state: { onboarding_enabled: false },
+      after_state: {
+        onboarding_enabled: true,
+        onboarding_sync_state: { request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+      },
+      blast_radius: 'low',
+      undo_payload: {
+        table: 'guild_config',
+        data: { onboarding_enabled: false },
+        match: { guild_id: 'guild-1' },
+      },
+    });
+    mockRpc.mockResolvedValue({
+      data: null,
+      error: { message: 'transaction rolled back' },
+    });
+
+    const res = await POST(buildRequest(validUndoBody));
+
+    expect(res.status).toBe(500);
+    expect(targetUpdate).not.toHaveBeenCalled();
+    expect(mockNotifyBot).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledTimes(1);
   });
 
   it('rejects onboarding undo from a delegated non-owner administrator', async () => {

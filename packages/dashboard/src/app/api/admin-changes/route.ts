@@ -27,6 +27,22 @@ const onboardingRevisionSchema = z.object({
   }),
 }).passthrough();
 
+const onboardingUndoResultSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('applied'),
+    sync_state: z.object({
+      status: z.literal('pending'),
+      managed: z.literal(true),
+      request_id: z.string().uuid(),
+      requested_at: z.string(),
+    }).passthrough(),
+    undo_record: z.object({ id: z.string().uuid() }).passthrough(),
+  }),
+  z.object({
+    status: z.enum(['not_found', 'unavailable', 'invalid_revision', 'stale']),
+  }),
+]);
+
 export async function GET(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.undo_changes');
@@ -98,6 +114,8 @@ export async function POST(request: NextRequest) {
     const undo = change.undo_payload;
     let onboardingSync: Record<string, unknown> | null = null;
     let onboardingWarning: string | null = null;
+    let undoRecord: Record<string, unknown> | null = null;
+    let auditFinalized = false;
 
     // Discord-side undo. The row-update path below reverses a database edit; it
     // cannot delete a role or recreate a channel, so changes the BOT made to
@@ -172,9 +190,6 @@ export async function POST(request: NextRequest) {
         request_id: crypto.randomUUID(),
         requested_at: new Date().toISOString(),
       } : null;
-      const undoData = pendingState
-        ? { ...validation.data, onboarding_sync_state: pendingState }
-        : validation.data;
       if (pendingState) {
         const revision = onboardingRevisionSchema.safeParse(change.after_state);
         if (!revision.success) {
@@ -183,26 +198,42 @@ export async function POST(request: NextRequest) {
             { status: 409 },
           );
         }
-        const { data: undone, error: undoError } = await admin
-          .from(validation.table)
-          .update(undoData)
-          .match(validation.match)
-          .contains('onboarding_sync_state', {
-            request_id: revision.data.onboarding_sync_state.request_id,
-          })
-          .select('guild_id')
-          .maybeSingle();
+        const { data: undoResult, error: undoError } = await admin.rpc('undo_onboarding_change', {
+          p_change_id: body.id,
+          p_guild_id: ctx.guildId,
+          p_actor_id: ctx.discordId,
+          p_expected_request_id: revision.data.onboarding_sync_state.request_id,
+          p_new_request_id: pendingState.request_id,
+          p_requested_at: pendingState.requested_at,
+          p_undo_data: validation.data,
+        });
         if (undoError) return dbError(undoError, 'admin-changes');
-        if (!undone) {
+        const parsedUndoResult = onboardingUndoResultSchema.safeParse(undoResult);
+        if (!parsedUndoResult.success) {
           return NextResponse.json(
-            { error: 'Undo blocked: onboarding has changed since this revision.' },
+            { error: 'Undo failed: the database returned malformed transaction evidence.' },
+            { status: 500 },
+          );
+        }
+        if (parsedUndoResult.data.status !== 'applied') {
+          return NextResponse.json(
+            {
+              error: parsedUndoResult.data.status === 'not_found'
+                ? 'Change not found'
+                : parsedUndoResult.data.status === 'unavailable'
+                  ? 'Change is no longer undoable'
+                  : 'Undo blocked: onboarding has changed since this revision.',
+            },
             { status: 409 },
           );
         }
+        onboardingSync = parsedUndoResult.data.sync_state;
+        undoRecord = parsedUndoResult.data.undo_record;
+        auditFinalized = true;
       } else {
         const { error: undoError } = await admin
           .from(validation.table)
-          .update(undoData)
+          .update(validation.data)
           .match(validation.match);
         if (undoError) return dbError(undoError, 'admin-changes');
       }
@@ -218,7 +249,7 @@ export async function POST(request: NextRequest) {
           pendingState.request_id,
         );
         if (queued) {
-          onboardingSync = pendingState;
+          onboardingSync = onboardingSync ?? pendingState;
         } else {
           const failedState = {
             ...pendingState,
@@ -241,47 +272,46 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Mark as undone
-    // V52-L2: add guild_id filter for defense-in-depth
-    const { error: updateError } = await admin
-      .from('admin_changes')
-      .update({
-        is_undone: true,
-        undone_at: new Date().toISOString(),
-        undone_by: ctx.discordId,
-      })
-      .eq('id', body.id)
-      .eq('guild_id', ctx.guildId);
-
-    if (updateError) return dbError(updateError, 'admin-changes');
-
-    // Create a reverse change record
-    const { data: undoRecord } = await admin
-      .from('admin_changes')
-      .insert({
-        guild_id: ctx.guildId,
-        actor_id: ctx.discordId,
-        action: `undo:${change.action}`,
-        target_type: change.target_type,
-        target_id: change.target_id,
-        description: `Undid: ${change.description}`,
-        before_state: change.after_state,
-        after_state: change.before_state,
-        undo_payload: null,
-        is_undoable: false,
-        blast_radius: change.blast_radius,
-      })
-      .select()
-      .single();
-
-    // Link the undo record
-    if (undoRecord) {
+    if (!auditFinalized) {
       // V52-L2: add guild_id filter for defense-in-depth
-      await admin
+      const { error: updateError } = await admin
         .from('admin_changes')
-        .update({ undo_change_id: undoRecord.id })
+        .update({
+          is_undone: true,
+          undone_at: new Date().toISOString(),
+          undone_by: ctx.discordId,
+        })
         .eq('id', body.id)
         .eq('guild_id', ctx.guildId);
+
+      if (updateError) return dbError(updateError, 'admin-changes');
+
+      const { data: insertedUndoRecord } = await admin
+        .from('admin_changes')
+        .insert({
+          guild_id: ctx.guildId,
+          actor_id: ctx.discordId,
+          action: `undo:${change.action}`,
+          target_type: change.target_type,
+          target_id: change.target_id,
+          description: `Undid: ${change.description}`,
+          before_state: change.after_state,
+          after_state: change.before_state,
+          undo_payload: null,
+          is_undoable: false,
+          blast_radius: change.blast_radius,
+        })
+        .select()
+        .single();
+      undoRecord = insertedUndoRecord;
+
+      if (undoRecord && typeof undoRecord.id === 'string') {
+        await admin
+          .from('admin_changes')
+          .update({ undo_change_id: undoRecord.id })
+          .eq('id', body.id)
+          .eq('guild_id', ctx.guildId);
+      }
     }
 
     return NextResponse.json({
