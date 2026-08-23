@@ -527,9 +527,9 @@ describe('deployServerState — role creation', () => {
     };
 
     const result = await deployServerState(
-      guild,
-      supabase,
-      desiredState,
+      guild as unknown as Parameters<typeof deployServerState>[0],
+      supabase as unknown as Parameters<typeof deployServerState>[1],
+      desiredState as unknown as Parameters<typeof deployServerState>[2],
       { cleanExisting: false, dryRun: false, abortSignal: abortController.signal },
     );
 
@@ -636,9 +636,9 @@ describe('deployServerState — clean existing', () => {
     const supabase = { from: vi.fn(() => supaChain()) };
 
     const result = await deployServerState(
-      guild,
-      supabase,
-      defaultDesiredState,
+      guild as unknown as Parameters<typeof deployServerState>[0],
+      supabase as unknown as Parameters<typeof deployServerState>[1],
+      defaultDesiredState as unknown as Parameters<typeof deployServerState>[2],
       { cleanExisting: true, dryRun: false, abortSignal: abortController.signal },
     );
 
