@@ -3,7 +3,7 @@ import type { DeployResult } from './deployer.js';
 import { recordAdminChange, undoByDeleting } from '../services/admin-changes.js';
 
 export async function recordCreatedResourceChanges(
-  client: SomniClient,
+  client: Pick<SomniClient, 'supabase'>,
   guildId: string,
   result: DeployResult,
   assertOwnership?: () => Promise<void>,

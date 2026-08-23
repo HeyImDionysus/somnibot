@@ -12,6 +12,8 @@ const log = createLogger('DeployListener');
 const LEASE_RENEWAL_INTERVAL_MS = 30_000;
 const LEASE_LOCAL_SAFETY_WINDOW_MS = 90_000;
 
+export type DeployExecutionClient = Pick<SomniClient, 'guilds' | 'supabase' | 'eventBus'>;
+
 type DeployLeaseHeartbeat = {
   signal: AbortSignal;
   verify(): Promise<void>;
@@ -20,7 +22,7 @@ type DeployLeaseHeartbeat = {
 };
 
 function startDeployLeaseHeartbeat(
-  client: SomniClient,
+  client: DeployExecutionClient,
   request: ClaimedDeployRow,
 ): DeployLeaseHeartbeat {
   const abortController = new AbortController();
@@ -115,7 +117,7 @@ export function getDeployStatus(guildId?: string): DeployStatus | null {
 }
 
 export async function executeClaimedDeployment(
-  client: SomniClient,
+  client: DeployExecutionClient,
   desiredState: DesiredState,
   request: ClaimedDeployRow,
   optionOverrides?: Partial<DeployOptions>,

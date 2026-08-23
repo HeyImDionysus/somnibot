@@ -361,18 +361,28 @@ async function main() {
     assert(!guildErr, 'Guild table accessible');
 
     // Test 2: Write desired state
-    console.log('\nTest 2: Write Desired State');
-    const { error: writeErr } = await supabase.from('guild_desired_state').upsert({
-      guild_id: DISCORD_GUILD_ID,
-      roles: TEST_DESIRED_STATE.roles,
-      channels: TEST_DESIRED_STATE.channels,
-      permission_map: {},
-      applied_at: null,
-    }, { onConflict: 'guild_id' });
-    assert(!writeErr, `Desired state written`);
+    console.log('\nTest 2: Request Desired State Deployment');
+    const requestId = crypto.randomUUID();
+    const { data: requestResult, error: writeErr } = await supabase.rpc(
+      'request_server_deployment',
+      {
+        p_guild_id: DISCORD_GUILD_ID,
+        p_request_id: requestId,
+        p_roles: TEST_DESIRED_STATE.roles,
+        p_channels: TEST_DESIRED_STATE.channels,
+        p_categories: TEST_DESIRED_STATE.categories,
+        p_permission_map: {},
+        p_deploy_mode: 'safe',
+        p_requested_at: new Date().toISOString(),
+      },
+    );
+    requireSupabaseOk(writeErr, 'Request desired-state deployment');
+    assert(requestResult?.disposition === 'accepted', 'Deployment request accepted');
 
     const { data: readBack } = await supabase.from('guild_desired_state').select('*').eq('guild_id', DISCORD_GUILD_ID).single();
-    assert(readBack?.applied_at === null, 'applied_at is null (deploy pending)');
+    assert(readBack?.deploy_request_id === requestId, 'Requested lifecycle row stores the exact request ID');
+    assert(readBack?.deploy_status === 'requested', 'Desired state is pending an atomic claim');
+    assert(readBack?.applied_at === null, 'applied_at remains null before settlement');
     assert(Array.isArray(readBack?.roles) && readBack.roles.length === 2, '2 roles in desired state');
     assert(Array.isArray(readBack?.channels) && readBack.channels.length === 2, '2 channels in desired state');
 
@@ -385,18 +395,37 @@ async function main() {
     assert(permCheck.hasRequired, 'Bot has required permissions');
 
     // Test 4: Deploy with cleanExisting=false (additive only, safe for test server)
-    console.log('\nTest 4: Live Deploy (additive, no cleanup)');
-    const { deployServerState } = await import('../src/deploy/deployer.js');
+    console.log('\nTest 4: Live Claimed Deploy (additive, no cleanup)');
+    const lifecycle = await import('../src/deploy/deploy-request-lifecycle.js');
+    const executor = await import('../src/deploy/deploy-executor.js');
+    const { eventBus } = await import('../src/services/event-bus.js');
+    const deployClient = Object.assign(client, { supabase, eventBus });
+    const requested = lifecycle.parseRequestedDeployRow(readBack, DISCORD_GUILD_ID);
+    if (!requested) throw new Error('Stored deployment request did not satisfy the production request schema');
+    const claimed = await lifecycle.claimDeployRequest(deployClient, requested);
+    if (!claimed) throw new Error('Deployment request could not be claimed');
+    assert(claimed.deploy_status === 'running', 'Deployment request claimed as running');
+    assert(claimed.deploy_request_id === requestId, 'Claim preserved the exact request ID');
+    assert(Boolean(claimed.deploy_claim_token), 'Claim received a private lease token');
 
-    const result = await deployServerState(guild, supabase, TEST_DESIRED_STATE, {
-      cleanExisting: false,
-      dryRun: false,
-      onProgress: (step, total, action) => {
-        console.log(`    [${step}/${total}] ${action}`);
+    await executor.executeClaimedDeployment(
+      deployClient,
+      lifecycle.desiredStateFromDeployRow(claimed),
+      claimed,
+      {
+        cleanExisting: false,
+        dryRun: false,
+        onProgress: (step, total, action) => {
+          console.log(`    [${step}/${total}] ${action}`);
+        },
       },
-    });
+    );
+    const deployStatus = executor.getDeployStatus(DISCORD_GUILD_ID);
+    const result = deployStatus?.result;
+    if (!result) throw new Error('Lifecycle executor did not publish a deployment result');
 
     idMappings = result.idMappings;
+    assert(deployStatus?.status === 'success', 'Lifecycle executor reported success');
     assert(result.success, `Deploy succeeded (${result.duration}ms)`);
     console.log(`  Actions: ${result.actions.length}, Errors: ${result.errors.length}, ID mappings: ${result.idMappings.length}`);
 
@@ -408,6 +437,18 @@ async function main() {
     }
 
     assert(result.idMappings.length > 0, `ID mappings created (${result.idMappings.length})`);
+    const { data: settledState, error: settledStateErr } = await supabase
+      .from('guild_desired_state')
+      .select('deploy_request_id, deploy_status, deploy_claim_token, deploy_lease_expires_at, deploy_completed_at, applied_at')
+      .eq('guild_id', DISCORD_GUILD_ID)
+      .single();
+    requireSupabaseOk(settledStateErr, 'Read settled deployment lifecycle');
+    assert(settledState?.deploy_request_id === requestId, 'Settlement preserved the exact request ID');
+    assert(settledState?.deploy_status === 'success', 'Claim settled as success');
+    assert(settledState?.deploy_claim_token === null, 'Private claim token cleared on settlement');
+    assert(settledState?.deploy_lease_expires_at === null, 'Lease cleared on settlement');
+    assert(Boolean(settledState?.deploy_completed_at), 'Completion timestamp persisted');
+    assert(Boolean(settledState?.applied_at), 'Successful settlement marked desired state applied');
 
     // Test 5: Audit log
     console.log('\nTest 5: Audit Log');
@@ -456,7 +497,6 @@ async function main() {
 
     // Test 7: Setup confirm flow
     console.log('\nTest 7: Setup Confirmation');
-    await supabase.from('guild_desired_state').update({ applied_at: new Date().toISOString(), drift_detected: false }).eq('guild_id', DISCORD_GUILD_ID);
     const { error: confirmErr } = await supabase.from('guild').update({ setup_completed: true, setup_confirmed_at: new Date().toISOString() }).eq('id', DISCORD_GUILD_ID);
     assert(!confirmErr, 'Setup confirmed');
 
@@ -468,7 +508,7 @@ async function main() {
     const listener = await import('../src/deploy/deploy-listener.js');
     assert(typeof listener.startDeployListener === 'function', 'startDeployListener exported');
     assert(typeof listener.getDeployStatus === 'function', 'getDeployStatus exported');
-    assert(listener.getDeployStatus() === null, 'No deploy in progress initially');
+    assert(listener.getDeployStatus(DISCORD_GUILD_ID)?.status === 'success', 'Listener status exposes the settled deployment');
 
     // Test 9: Shared engine exports
     console.log('\nTest 9: Shared Engine');

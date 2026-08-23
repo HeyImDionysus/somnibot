@@ -76,6 +76,7 @@ const claimedDeployIdentitySchema = z.object({
 
 export type RequestedDeployRow = z.infer<typeof requestedDeployRowSchema>;
 export type ClaimedDeployRow = z.infer<typeof claimedDeployRowSchema>;
+export type DeployRequestClient = Pick<SomniClient, 'supabase'>;
 
 function withFallbackGuildId(value: unknown, fallbackGuildId: string): unknown {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
@@ -119,7 +120,7 @@ export function desiredStateFromDeployRow(row: ClaimedDeployRow): DesiredState {
 }
 
 export async function claimDeployRequest(
-  client: SomniClient,
+  client: DeployRequestClient,
   request: RequestedDeployRow,
 ): Promise<ClaimedDeployRow | null> {
   const { data, error } = await client.supabase.rpc('claim_deploy_request', {
@@ -150,7 +151,7 @@ export async function claimDeployRequest(
 }
 
 export async function settleDeployRequest(
-  client: SomniClient,
+  client: DeployRequestClient,
   request: ClaimedDeployRow,
   success: boolean,
   errorMessage?: string,
@@ -167,7 +168,7 @@ export async function settleDeployRequest(
 }
 
 export async function renewDeployRequestClaim(
-  client: SomniClient,
+  client: DeployRequestClient,
   request: ClaimedDeployRow,
 ): Promise<boolean> {
   const { data, error } = await client.supabase.rpc('renew_deploy_request_claim', {
@@ -179,7 +180,7 @@ export async function renewDeployRequestClaim(
   return z.boolean().parse(data);
 }
 
-export async function failInterruptedDeployRequests(client: SomniClient): Promise<number> {
+export async function failInterruptedDeployRequests(client: DeployRequestClient): Promise<number> {
   const { data, error } = await client.supabase.rpc('fail_interrupted_deploy_requests');
   if (error) throw new Error(`Failed to reconcile interrupted deployments: ${error.message}`);
   return z.number().int().min(0).parse(data);
