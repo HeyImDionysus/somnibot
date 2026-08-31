@@ -10,6 +10,8 @@ import {
 } from '@/lib/dashboard/adoption-map';
 import { authErrorResponse, requirePermission } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { adoptionVerificationSchema, currentVerifiedTrackIds } from '@/lib/dashboard/adoption-verification';
+import { readAdoptionServerContext } from '@/lib/dashboard/adoption-server-context';
 
 const adoptionRowSchema = z.object({
   mode: z.enum(['guided', 'expert']),
@@ -18,12 +20,6 @@ const adoptionRowSchema = z.object({
   track_states: z.unknown(),
   revision: z.number().int().nonnegative(),
   updated_at: z.string(),
-});
-
-const verificationRowSchema = z.object({
-  track_id: z.string().min(1),
-  verified_at: z.string().datetime({ offset: true }),
-  expires_at: z.string().datetime({ offset: true }).nullable(),
 });
 
 const publishResultSchema = z.object({
@@ -53,33 +49,24 @@ function desiredFromRow(row: z.infer<typeof adoptionRowSchema> | null) {
   });
 }
 
-function currentVerifiedTrackIds(rows: unknown, nowMs: number): readonly string[] {
-  const parsed = z.array(verificationRowSchema).safeParse(rows ?? []);
-  if (!parsed.success) return [];
-  return [...new Set(parsed.data
-    .filter((row) => row.expires_at === null || Date.parse(row.expires_at) > nowMs)
-    .map((row) => row.track_id))];
-}
-
-async function readAdoptionState(guildId: string) {
+async function readAdoptionState(guildId: string, serverContext: Awaited<ReturnType<typeof readAdoptionServerContext>>) {
   const admin = createAdminSupabase();
   const [mapResult, evidenceResult] = await Promise.all([
     admin.from('dashboard_adoption_maps')
       .select('mode, tutorial_visible, selected_track_ids, track_states, revision, updated_at')
       .eq('guild_id', guildId)
       .maybeSingle(),
-    admin.from('dashboard_adoption_verifications')
-      .select('track_id, verified_at, expires_at')
-      .eq('guild_id', guildId)
-      .eq('result', 'pass')
-      .limit(100),
+    admin.rpc('read_dashboard_adoption_verifications', { p_guild_id: guildId, p_server_context: serverContext }),
   ]);
   if (mapResult.error || evidenceResult.error) return null;
   const row = mapResult.data === null ? null : adoptionRowSchema.safeParse(mapResult.data);
   if (row !== null && !row.success) return null;
   const desired = desiredFromRow(row?.data ?? null);
+  const verifications = z.array(adoptionVerificationSchema).max(13).safeParse(evidenceResult.data);
+  if (!verifications.success) return null;
   return {
     state: withVerifiedTracks(desired, currentVerifiedTrackIds(evidenceResult.data, Date.now())),
+    verifications: verifications.data,
     updatedAt: row?.data.updated_at ?? null,
     revision: row?.data.revision ?? 0,
   };
@@ -88,7 +75,7 @@ async function readAdoptionState(guildId: string) {
 export async function GET() {
   try {
     const context = await requirePermission(null);
-    const result = await readAdoptionState(context.guildId);
+    const result = await readAdoptionState(context.guildId, await readAdoptionServerContext(context.guildId));
     if (!result) return NextResponse.json({ error: 'Adoption map could not be loaded.' }, { status: 500 });
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
@@ -104,10 +91,11 @@ export async function PATCH(request: NextRequest) {
     if (!body.success) {
       return NextResponse.json({ error: 'Invalid adoption-map state.', fieldErrors: body.error.flatten().fieldErrors }, { status: 400 });
     }
-    const current = await readAdoptionState(context.guildId);
+    const serverContext = await readAdoptionServerContext(context.guildId);
+    const current = await readAdoptionState(context.guildId, serverContext);
     if (!current) return NextResponse.json({ error: 'Adoption verification evidence could not be read.' }, { status: 500 });
     const requested = withVerifiedTracks(body.data, current.state.verifiedTrackIds);
-    const transitionErrors = adoptionStateErrors(requested);
+    const transitionErrors = adoptionStateErrors(requested, current.state);
     if (transitionErrors.length > 0) {
       return NextResponse.json({ error: 'Adoption-map state violates track requirements.', transitionErrors }, { status: 409 });
     }
@@ -123,6 +111,7 @@ export async function PATCH(request: NextRequest) {
       p_actor_id: context.discordId,
       p_idempotency_key: idempotencyKey.data,
       p_state: body.data,
+      p_server_context: serverContext,
     });
     if (result.error) return NextResponse.json({ error: 'Adoption map publication failed.', operationId }, { status: 500 });
     const published = publishResultSchema.safeParse(result.data);

@@ -131,6 +131,7 @@ import {
   validateRdbFile,
 } from './local-backup-manager.js';
 import { buildLocalBackupAuditEntry } from './backup-audit.js';
+import { registerDatabaseRecoveryIpc } from './database-recovery-ipc.js';
 import {
   hasSupabaseProjectOriginChanged,
   readRuntimeLeaseStatus,
@@ -1740,6 +1741,7 @@ async function createWindow(showWhenReady = true): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 function registerIpcHandlers(): void {
+  registerDatabaseRecoveryIpc();
   // ── Config ──
   ipcMain.handle('wait-for-startup-ready', async () => {
     await startupReady;

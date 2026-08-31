@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/rbac', () => ({ requirePermission: mocks.requirePermission, authErrorResponse: mocks.authErrorResponse }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: mocks.createAdminSupabase }));
+vi.mock('@/lib/dashboard/adoption-server-context', () => ({ readAdoptionServerContext: async () => null }));
 
 import { GET, PATCH } from '@/app/api/dashboard/adoption/route';
 
@@ -32,9 +33,8 @@ describe('dashboard adoption API', () => {
   it('returns a default plan for an authenticated guild without saved state', async () => {
     const supabase = createMockSupabase();
     const adoption = registerTable(supabase, 'dashboard_adoption_maps');
-    const evidence = registerTable(supabase, 'dashboard_adoption_verifications');
     adoption.maybeSingle.mockResolvedValue({ data: null, error: null });
-    evidence.then.mockImplementation((resolve) => resolve({ data: [], error: null }));
+    supabase.rpc.mockResolvedValue({ data: [], error: null });
     mocks.createAdminSupabase.mockReturnValue(supabase);
 
     const response = await GET();
@@ -60,9 +60,8 @@ describe('dashboard adoption API', () => {
   it('rejects an unverified active track before persistence', async () => {
     const supabase = createMockSupabase();
     const adoption = registerTable(supabase, 'dashboard_adoption_maps');
-    const evidence = registerTable(supabase, 'dashboard_adoption_verifications');
     adoption.maybeSingle.mockResolvedValue({ data: null, error: null });
-    evidence.then.mockImplementation((resolve) => resolve({ data: [], error: null }));
+    supabase.rpc.mockResolvedValue({ data: [], error: null });
     mocks.createAdminSupabase.mockReturnValue(supabase);
     const response = await PATCH(patchRequest({
       mode: 'guided', tutorialVisible: true, selectedTrackIds: ['core', 'recovery'], trackStates: { core: 'active' },
@@ -71,18 +70,17 @@ describe('dashboard adoption API', () => {
 
     expect(response.status).toBe(409);
     expect(body.transitionErrors).toContain('core:verification_required');
-    expect(supabase.rpc).not.toHaveBeenCalled();
+    expect(supabase.rpc).not.toHaveBeenCalledWith('publish_dashboard_adoption_map', expect.anything());
   });
 
   it('publishes through one durable operation and returns authoritative readback', async () => {
     const supabase = createMockSupabase();
     const adoption = registerTable(supabase, 'dashboard_adoption_maps');
-    const evidence = registerTable(supabase, 'dashboard_adoption_verifications');
     adoption.maybeSingle.mockResolvedValue({ data: null, error: null });
-    evidence.then.mockImplementation((resolve) => resolve({ data: [
-      { track_id: 'core', verified_at: '2026-08-23T14:00:00.000Z', expires_at: null },
-      { track_id: 'recovery', verified_at: '2026-08-23T14:00:00.000Z', expires_at: null },
-    ], error: null }));
+    supabase.rpc.mockResolvedValueOnce({ data: ['core', 'recovery'].map((trackId) => ({
+      trackId, result: 'pass', eligible: true, checkedAt: new Date(Date.now() - 60_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), reason: 'observed', evidenceIds: [],
+    })), error: null });
     supabase.rpc.mockResolvedValue({ data: {
       state: { mode: 'expert', tutorialVisible: false, selectedTrackIds: ['core', 'recovery'], verifiedTrackIds: ['core', 'recovery'], trackStates: { core: 'active', recovery: 'active' } },
       updatedAt: '2026-08-23T14:30:00.000Z', revision: 1,

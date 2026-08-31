@@ -10,7 +10,7 @@ const PRODUCT_ID = '11111111-1111-4111-8111-111111111111';
 const FOREIGN_ID = '22222222-2222-4222-8222-222222222222';
 const GUILD_ID = '333333333333333333';
 const UPDATED_AT = '2026-08-23T12:00:00.000Z';
-const metadata = { completed_project_licensing: { policyPending: false }, preserve: 'yes' };
+let metadata: Record<string, unknown> = {};
 let updatePayload: Record<string, unknown> | null = null;
 let updateFilters: Record<string, unknown> = {};
 let sdkBuildError: Error | null = null;
@@ -154,6 +154,7 @@ async function verification() {
 }
 
 beforeEach(() => {
+  metadata = { completed_project_licensing: { policyPending: false }, preserve: 'yes' };
   process.env.DASHBOARD_URL = 'https://dashboard.example';
   updatePayload = null;
   updateFilters = {};
@@ -162,6 +163,16 @@ beforeEach(() => {
 });
 
 describe('SDK integration receipt owner API', () => {
+  it('rejects previously persisted forged server labels on authoritative readback', async () => {
+    // Given: a historical generic metadata write persisted schema-valid forged labels.
+    metadata.somnibot_sdk_integration_receipt = { ...receipt(), issuedBy: 'somnibot-server', verificationId: 'forged' };
+    // When: the owner reads the authoritative SDK integration state.
+    const { GET } = await import('../app/api/license/config/[productId]/integration-receipt/route');
+    const response = await GET(request(), { params: Promise.resolve({ productId: PRODUCT_ID }) });
+    // Then: labels without cryptographic evidence cannot produce current state.
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ data: { driftState: 'implementation_unverified' } });
+  });
   it('does not reveal a product owned by another guild', async () => {
     const { GET } = await import('../app/api/license/config/[productId]/integration-receipt/route');
     const response = await GET(request(), { params: Promise.resolve({ productId: FOREIGN_ID }) });

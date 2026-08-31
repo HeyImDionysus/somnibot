@@ -22,6 +22,8 @@ describe('fleet audit gap mappings', () => {
     ['temp_channel.creation_failed', 'temp_channels.creation_failed', { hubId: 'h1', hubChannelId: 'hvc', memberId: 'u1', error: 'forbidden', occurrenceId: 'o6b' }],
     ['temp_channel.orphan_reconciled', 'temp_channels.orphan_reconciled', { channelId: 'c1', ownerId: 'u1', occurrenceId: 'o6c' }],
     ['welcome.channel_missing', 'welcome.channel_missing', { memberId: 'u1', channelId: 'c1', occurrenceId: 'o7' }],
+    ['welcome.delivery_succeeded', 'welcome.delivery_succeeded', { memberId: 'u1', channelId: 'c1', deliveryKind: 'channel', occurrenceId: 'o7a' }],
+    ['welcome.test_delivery_succeeded', 'welcome.test_delivery_succeeded', { channelId: 'c1', messageType: 'welcome', configuredDestination: true, templateSource: 'configured', occurrenceId: 'o7b' }],
     ['welcome.dm_blocked_fallback', 'welcome.dm_blocked_fallback', { memberId: 'u1', occurrenceId: 'o8' }],
     ['welcome.member_role_grant_failed', 'welcome.member_role_grant_failed', { memberId: 'u1', roleId: 'r1', attempt: 2, occurrenceId: 'o9' }],
   ])('maps %s to %s', async (type, action, data) => {

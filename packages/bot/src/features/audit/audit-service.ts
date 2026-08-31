@@ -1720,6 +1720,28 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     occurrenceId: (d) => d.occurrenceId as string | undefined,
     correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
   },
+  'welcome.delivery_succeeded': {
+    action: 'welcome.delivery_succeeded', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: (d) => d.deliveryKind === 'channel'
+      ? { channelId: d.channelId, deliveryKind: d.deliveryKind }
+      : { deliveryKind: d.deliveryKind },
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.test_delivery_succeeded': {
+    action: 'welcome.test_delivery_succeeded', category: 'welcome', targetType: 'channel', actorType: 'system',
+    actorId: () => 'welcome-test-worker', targetId: (d) => d.channelId as string,
+    details: (d) => ({
+      channelId: d.channelId,
+      messageType: d.messageType,
+      configuredDestination: d.configuredDestination,
+      templateSource: d.templateSource,
+      ...(d.configUpdatedAt ? { configUpdatedAt: d.configUpdatedAt } : {}),
+    }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:test:${d.channelId as string}`,
+  },
   'welcome.dm_blocked_fallback': {
     action: 'welcome.dm_blocked_fallback', category: 'welcome', targetType: 'member', actorType: 'system',
     actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,

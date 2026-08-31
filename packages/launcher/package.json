@@ -7,9 +7,9 @@
   "type": "module",
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist/main/release-source.json',{force:true})\"",
-    "build": "tsc && tsc -p tsconfig.preload.json && node -e \"require('node:fs').cpSync('src/renderer','dist/renderer',{recursive:true})\"",
+    "build": "tsc && tsc -p tsconfig.preload.json && node -e \"for (const name of ['renderer','resources']) require('node:fs').cpSync('src/'+name,'dist/'+name,{recursive:true})\"",
     "start": "electron dist/main/bootstrap.js",
-    "dev": "tsc && electron dist/main/bootstrap.js",
+    "dev": "pnpm run build && electron dist/main/bootstrap.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "clean": "node ../../scripts/clean.mjs dist",

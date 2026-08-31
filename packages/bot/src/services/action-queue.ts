@@ -1460,13 +1460,13 @@ async function handleSendEmbed(
 
 // ── Test Welcome Handler ──────────────────────────────
 
-async function handleTestWelcome(
+export async function handleTestWelcome(
   guild: Guild,
   supabase: SupabaseClient,
   payload: Record<string, unknown>,
 ): Promise<ActionResult> {
   const channelId = payload.channel_id as string;
-  const type = (payload.type as string) ?? 'welcome';
+  const type = payload.type === 'goodbye' ? 'goodbye' : 'welcome';
   if (!channelId) return { success: false, error: 'Missing channel_id' };
 
   const channel = guild.channels.cache.get(channelId) as TextChannel | undefined;
@@ -1512,8 +1512,26 @@ async function handleTestWelcome(
     messageText = interpolate(configData?.welcome_message ?? defaultWelcome);
   }
 
+  const configuredDestination = type === 'welcome'
+    ? configData?.welcome_enabled === true && configData.welcome_channel_id === channelId
+    : configData?.goodbye_enabled === true && configData.goodbye_channel_id === channelId;
+  const templateSource = type === 'welcome'
+    ? configData?.welcome_message ? 'configured' : 'default'
+    : configData?.goodbye_message ? 'configured' : 'default';
+  const configUpdatedAt = typeof configData?.updated_at === 'string'
+    ? configData.updated_at
+    : undefined;
   const label = type === 'goodbye' ? '👋 Goodbye' : '🎉 Welcome';
   const sent = await channel.send(`**[TEST ${label} Preview]**\n${messageText}`);
+  eventBus.emit('welcome.test_delivery_succeeded', guild.id, {
+    channelId,
+    messageType: type,
+    configuredDestination,
+    templateSource,
+    ...(configUpdatedAt ? { configUpdatedAt } : {}),
+    occurrenceId: `${channelId}:welcome:test:${sent.id}`,
+    correlationId: `welcome:test:${channelId}`,
+  });
 
   log.info(`Test ${type} message sent to #${channel.name}`);
   return { success: true, data: { messageId: sent.id, channelId, type } };

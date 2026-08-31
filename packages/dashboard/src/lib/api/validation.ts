@@ -260,12 +260,14 @@ const reservedCommerceMetadataKeys = [
   'historical_grant_role_ids',
   'role_duration_hours',
   'commerce_plan_recovery',
+  'somnibot_sdk_integration_receipt',
+  'somnibot_sdk_integration_attestation',
 ] as const;
 
 const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
   for (const key of reservedCommerceMetadataKeys) {
     if (Object.prototype.hasOwnProperty.call(metadata, key)) {
-      const message = key === 'commerce_plan_recovery'
+      const message = key === 'commerce_plan_recovery' || key.startsWith('somnibot_sdk_')
         ? `Commerce metadata key "${key}" is reserved for server-managed state.`
         : `Legacy commerce metadata key "${key}" is not accepted. Put permanent product role benefits in granted_role_ids instead.`;
       ctx.addIssue({

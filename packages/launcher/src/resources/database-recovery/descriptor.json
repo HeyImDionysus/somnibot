@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "version": "2.114.0",
+    "commit": "181bc4a7466559393fbf3bc31b7cfc5e74d81cf2"
+  },
+  "images": {
+    "15": "public.ecr.aws/supabase/postgres:15.8.1.085",
+    "17": "public.ecr.aws/supabase/postgres:17.6.1.158"
+  },
+  "variants": {
+    "roles": {
+      "file": "dump_role.sh",
+      "sha256": "cc442e4f19d349b7db1dde69913ed06ef20f68198391d9beef33f63493cf26c8",
+      "env": {
+        "RESERVED_ROLES": "anon|authenticated|authenticator|cli_login_.*|dashboard_user|pgbouncer|postgres|service_role|supabase_.*|pgsodium_keyholder|pgsodium_keyiduser|pgsodium_keymaker|pgtle_admin",
+        "ALLOWED_CONFIGS": "pgaudit.*|pgrst.*|session_replication_role|statement_timeout|track_io_timing",
+        "EXTRA_SED": "/^--/d"
+      }
+    },
+    "schema": {
+      "file": "dump_schema.sh",
+      "sha256": "5cd57189f6565ddf651ff149995398a4c9b1971ca34a0093a77c011a41f21d64",
+      "env": {
+        "EXCLUDED_SCHEMAS": "information_schema|pg_*|_analytics|_realtime|_supavisor|auth|etl|extensions|pgbouncer|realtime|storage|supabase_functions|supabase_migrations|cron|dbdev|graphql|graphql_public|net|pgmq|pgsodium|pgsodium_masks|pgtle|repack|tiger|tiger_data|timescaledb_*|_timescaledb_*|topology|vault",
+        "EXTRA_SED": "/^--/d"
+      }
+    },
+    "data": {
+      "file": "dump_data.sh",
+      "sha256": "c943c7a926122ea0649ddd4bf9b8fb9b12bed23ac9f33da0b489ac83e687d241",
+      "env": {
+        "INCLUDED_SCHEMAS": "*",
+        "EXCLUDED_SCHEMAS": "information_schema|pg_*|graphql|graphql_public|pgsodium|pgsodium_masks|pgtle|repack|tiger|tiger_data|timescaledb_*|_timescaledb_*|topology|vault|etl|extensions|pgbouncer|realtime|supabase_migrations|_analytics|_realtime|_supavisor"
+      }
+    },
+    "historySchema": {
+      "file": "dump_schema.sh",
+      "sha256": "5cd57189f6565ddf651ff149995398a4c9b1971ca34a0093a77c011a41f21d64",
+      "env": {
+        "EXTRA_FLAGS": "--schema=supabase_migrations",
+        "EXTRA_SED": "/^--/d"
+      }
+    },
+    "historyData": {
+      "file": "dump_data.sh",
+      "sha256": "c943c7a926122ea0649ddd4bf9b8fb9b12bed23ac9f33da0b489ac83e687d241",
+      "env": {
+        "INCLUDED_SCHEMAS": "supabase_migrations"
+      }
+    }
+  }
+}

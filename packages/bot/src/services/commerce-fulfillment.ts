@@ -974,7 +974,6 @@ export class CommerceFulfillmentService {
           contract,
           begun.attempt,
         );
-        await this.applyGrantedChannelAccess(payload);
       }
     }
     if (!roleDeliveryAlreadySettled && outwardGenerationId === null) {
@@ -991,7 +990,7 @@ export class CommerceFulfillmentService {
 
     // 3. Confirm the role generation before any outward row can be created.
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
-    await this.applyGrantedChannelAccess(payload);
+    await this.applyGrantedChannelAccess(payload, outwardGenerationId);
 
     // 4. Emit purchase.completed once. A crash after listener acceptance but
     // before the sent marker becomes a manual-review `uncertain`, never resend.
@@ -1067,16 +1066,24 @@ export class CommerceFulfillmentService {
   }
 
   /** Apply the frozen channel vector idempotently for the delivery identity. */
-  private async applyGrantedChannelAccess(payload: FulfillmentPayload): Promise<void> {
+  private async applyGrantedChannelAccess(payload: FulfillmentPayload, outwardGenerationId: string | null): Promise<void> {
     if (payload.granted_channel_ids.length === 0) return;
+    if (outwardGenerationId === null) throw new Error('Channel delivery requires a durable outward generation');
     const member = this.guild.members.cache.get(payload.discord_id) ?? await this.guild.members.fetch(payload.discord_id);
     const me = this.guild.members.me ?? await this.guild.members.fetchMe();
     if (!me.permissions.has('ManageChannels')) throw new Error('Bot lacks Manage Channels for commerce channel delivery');
     for (const channelId of payload.granted_channel_ids) {
       const channel = this.guild.channels.cache.get(channelId);
-      if (!channel || !('permissionOverwrites' in channel)) throw new Error(`Commerce channel ${channelId} is unavailable`);
-      await (channel as import('discord.js').GuildChannel).permissionOverwrites.edit(member.id, { ViewChannel: true }, { reason: `Commerce entitlement ${payload.order_id}` });
+      if (!channel || channel.isThread()) throw new Error(`Commerce channel ${channelId} is unavailable`);
+      await channel.permissionOverwrites.edit(member.id, { ViewChannel: true }, { reason: `Commerce entitlement ${payload.order_id}` });
     }
+    const claim = this.requireExecutionContext();
+    const { data, error } = await bindSupabaseRpc(this.supabase)('commerce_confirm_channel_delivery', {
+      p_action_id: claim.actionId, p_claim_token: claim.claimToken,
+      p_order_id: payload.order_id, p_guild_id: payload.guild_id,
+      p_outward_generation_id: outwardGenerationId, p_channel_ids: payload.granted_channel_ids,
+    });
+    if (error || data !== true) throw new Error(`Channel delivery confirmation failed: ${error?.message ?? 'claim or generation rejected'}`);
   }
 
   private async revokeGrantedChannelAccess(payload: FulfillmentPayload): Promise<void> {
@@ -2064,7 +2071,7 @@ export class CommerceFulfillmentService {
 
     // 3. Confirm the role generation before any outward row can be created.
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
-    await this.applyGrantedChannelAccess(payload);
+    await this.applyGrantedChannelAccess(payload, outwardGenerationId);
 
     // 4. Emit subscription.activated once under the same crash fence.
     const preparedEvent = outwardGenerationId === null
@@ -2168,7 +2175,7 @@ export class CommerceFulfillmentService {
     const outwardGenerationId =
       this.entitlementService.getPurchaseRoleDeliveryOutwardGeneration();
     await this.confirmRoleDeliveryBeforeOutward(outwardGenerationId);
-    await this.applyGrantedChannelAccess(payload);
+    await this.applyGrantedChannelAccess(payload, outwardGenerationId);
     const preparedEvent = outwardGenerationId === null
       ? null
       : this.eventBus.prepareEmitAndWait('subscription.activated', payload.guild_id, {

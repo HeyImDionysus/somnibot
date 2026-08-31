@@ -7,7 +7,8 @@ import { dbError } from '@/lib/api/response';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { evaluateLaunchRun, type LaunchStageKey, type LaunchStageState } from '@/lib/store/commerce-operations';
 import { evaluateCommerceLaunchEvidence, latestLaunchProofTimestamp, launchProofAtOrAfter } from '@/lib/store/commerce-launch-evidence';
-import { readSdkIntegrationReceiptMetadata, resolveSdkDeploymentOrigin, SDK_RECEIPT_METADATA_KEY } from '@/lib/store/sdk-contract-identity';
+import { resolveSdkDeploymentOrigin, SDK_RECEIPT_METADATA_KEY } from '@/lib/store/sdk-contract-identity';
+import { readVerifiedSdkIntegrationReceiptMetadata } from '@/lib/store/sdk-integration-provenance';
 import { verifyLaunchSdkIntegration } from '@/lib/store/sdk-launch-integration';
 import { loadPayPalPolicy } from '@/lib/paypal-policy';
 
@@ -120,7 +121,7 @@ export async function POST(
     verifiedOrderIds.length ? admin.from('payment_refunds').select('id, order_id, payment_id, paypal_refund_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('portal_cancellation_operations').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).eq('status', 'completed').limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('commerce_fulfillment_outward_intents').select('id, order_id, intent_kind, state, sent_at, outward_generation_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).eq('intent_kind', 'receipt_dm').limit(1000) : emptyResult,
-    accessPass && verifiedOrderIds.length ? admin.from('commerce_role_delivery_intents').select('id, order_id, product_id, entitlement_id, permanent_role_ids, completed_role_ids, delivery_confirmed_at, state, outward_generation_id').eq('guild_id', auth.ctx.guildId).eq('product_id', product.data.id).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    accessPass && verifiedOrderIds.length ? admin.from('commerce_role_delivery_intents').select('id, order_id, product_id, entitlement_id, permanent_role_ids, completed_role_ids, delivery_confirmed_at, completed_channel_ids, channel_delivery_confirmed_at, state, outward_generation_id').eq('guild_id', auth.ctx.guildId).eq('product_id', product.data.id).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
   ]);
   for (const [name, result] of [['payments', paymentsResult], ['entitlements', entitlementsResult], ['keys', keysResult], ['downloads', downloadsResult], ['refunds', refundsResult], ['cancellations', cancellationsResult], ['outward', outwardResult], ['roles', rolesResult]] as const) {
     if (result.error) return dbError(result.error, `store/launch-runs/verify/${name}`);
@@ -137,7 +138,7 @@ export async function POST(
   })).safeParse(refundsResult.data ?? []);
   const cancellations = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), status: z.literal('completed') })).safeParse(cancellationsResult.data ?? []);
   const outward = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), intent_kind: z.string(), state: z.string(), sent_at: z.string().datetime({ offset: true }).nullable(), outward_generation_id: z.string().uuid().nullable().default(null) })).safeParse(outwardResult.data ?? []);
-  const roles = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), product_id: z.string().uuid(), entitlement_id: z.string().uuid(), permanent_role_ids: z.array(z.string()), completed_role_ids: z.array(z.string()), delivery_confirmed_at: z.string().datetime({ offset: true }).nullable(), state: z.string(), outward_generation_id: z.string().uuid().nullable() })).safeParse(rolesResult.data ?? []);
+  const roles = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), product_id: z.string().uuid(), entitlement_id: z.string().uuid(), permanent_role_ids: z.array(z.string()), completed_role_ids: z.array(z.string()), delivery_confirmed_at: z.string().datetime({ offset: true }).nullable(), completed_channel_ids: z.array(z.string()).default([]), channel_delivery_confirmed_at: z.string().datetime({ offset: true }).nullable().default(null), state: z.string(), outward_generation_id: z.string().uuid().nullable() })).safeParse(rolesResult.data ?? []);
   if (!payments.success || !entitlements.success || !keys.success || !downloads.success || !refunds.success || !cancellations.success || !outward.success || !roles.success) {
     return NextResponse.json({ error: 'Launch evidence is malformed' }, { status: 503 });
   }
@@ -196,8 +197,11 @@ export async function POST(
       ...roles.data.flatMap((role) => role.product_id === product.data.id && role.outward_generation_id !== null
         && launchProofAtOrAfter(role.delivery_confirmed_at, proofAfter)
         && product.data.granted_role_ids.every((id) => role.permanent_role_ids.includes(id) && role.completed_role_ids.includes(id))
+        && (product.data.granted_channel_ids.length === 0 || (launchProofAtOrAfter(role.channel_delivery_confirmed_at, proofAfter)
+          && product.data.granted_channel_ids.every((id) => role.completed_channel_ids.includes(id))))
         && entitlements.data.some((entitlement) => entitlement.id === role.entitlement_id && entitlement.order_id === role.order_id && entitlement.product_id === role.product_id)
-        ? outward.data.filter((delivery) => delivery.order_id === role.order_id && delivery.outward_generation_id === role.outward_generation_id && delivery.intent_kind === 'receipt_dm' && launchProofAtOrAfter(delivery.sent_at, role.delivery_confirmed_at ?? proofAfter))
+        ? outward.data.filter((delivery) => delivery.order_id === role.order_id && delivery.outward_generation_id === role.outward_generation_id && delivery.intent_kind === 'receipt_dm' && launchProofAtOrAfter(delivery.sent_at, role.delivery_confirmed_at ?? proofAfter)
+          && (product.data.granted_channel_ids.length === 0 || launchProofAtOrAfter(delivery.sent_at, role.channel_delivery_confirmed_at ?? proofAfter)))
           .map((delivery) => ({ id: role.id, orderId: role.order_id, kind: 'access' as const, deliveryState: delivery.state, sentAt: delivery.sent_at })) : []),
     ],
     refunds: refunds.data.map((refund) => ({ id: refund.id, orderId: refund.order_id, paymentId: refund.payment_id, paypalRefundId: refund.paypal_refund_id })),
@@ -211,7 +215,7 @@ export async function POST(
     product_id: product.data.id,
     product_revision: product.data.updated_at,
     policy_revision: policyRevision,
-    sdk_integration_receipt: readSdkIntegrationReceiptMetadata(product.data.metadata),
+    sdk_integration_receipt: await readVerifiedSdkIntegrationReceiptMetadata(product.data.metadata),
     verification_started_at: run.data.verification_started_at,
     proof_after: proofAfter,
     environment: paypalPolicy.environment,

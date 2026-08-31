@@ -125,10 +125,17 @@ async function sendWelcomeChannelMessage(
     // point of it, but a template containing @everyone/@here or a role mention
     // would turn every join into a mass ping. Users-only keeps the intended
     // greeting and drops the escalation.
-    await channel.send({
+    const sent = await channel.send({
       content: messageText,
       files,
       allowedMentions: { parse: ['users'] },
+    });
+    eventBus.emit('welcome.delivery_succeeded', member.guild.id, {
+      memberId: member.id,
+      channelId: channel.id,
+      deliveryKind: 'channel',
+      occurrenceId: `${member.id}:welcome:channel:${sent.id}`,
+      correlationId: `welcome:${member.id}`,
     });
     log.info(`Channel message sent for ${member.user.tag}`);
   } catch (err) {
@@ -152,7 +159,13 @@ async function sendWelcomeDM(
       variables,
     );
 
-    await member.send(messageText);
+    const sent = await member.send(messageText);
+    eventBus.emit('welcome.delivery_succeeded', member.guild.id, {
+      memberId: member.id,
+      deliveryKind: 'dm',
+      occurrenceId: `${member.id}:welcome:dm:${sent.id}`,
+      correlationId: `welcome:${member.id}`,
+    });
     log.info(`DM sent to ${member.user.tag}`);
   } catch (err) {
     const code = typeof err === 'object' && err !== null && 'code' in err

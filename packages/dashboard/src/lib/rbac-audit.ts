@@ -40,6 +40,7 @@ export interface DashboardAuthorizationDenial {
   readonly permission: string;
   readonly reason: string;
   readonly status: 401 | 403;
+  readonly rbacIdentity?: string;
 }
 
 function boundedHeader(value: string | null, fallback: string): string {
@@ -120,6 +121,7 @@ export async function auditDashboardAuthorizationDenial(
         required_permission: denial.permission,
         reason: denial.reason,
         status: denial.status,
+        ...(denial.rbacIdentity ? { rbac_identity: denial.rbacIdentity } : {}),
       },
       correlationId: `dashboard.authorization_denied:${request.occurrenceId}`,
       occurrenceKey: `dashboard.authorization_denied:${request.occurrenceId}`,
@@ -127,6 +129,39 @@ export async function auditDashboardAuthorizationDenial(
     });
   } catch {
     // Audit construction must not change the authorization response.
+  }
+}
+
+export async function auditDashboardAuthorizationAllowed(authorization: {
+  readonly guildId: string;
+  readonly actorId: string;
+  readonly permission: string;
+  readonly rbacIdentity: string;
+}): Promise<void> {
+  try {
+    const request = await readDashboardRequestMetadata();
+    const hourBucket = Math.floor(Date.now() / 3_600_000);
+    await writeRbacAudit(createAdminSupabase(), {
+      guildId: authorization.guildId,
+      actorId: authorization.actorId,
+      action: 'dashboard.authorization_allowed',
+      category: 'security',
+      targetType: 'dashboard_route',
+      targetId: request.route,
+      details: {
+        route: request.route,
+        method: request.method,
+        required_permission: authorization.permission,
+        rbac_identity: authorization.rbacIdentity,
+        authorization_only: true,
+      },
+      occurrenceKey: `dashboard.authorization_allowed:${authorization.rbacIdentity}:${authorization.permission}:${hourBucket}`,
+      success: true,
+    });
+  } catch (error) {
+    console.warn('[rbac] Authorization observation unavailable', {
+      failure: error instanceof Error ? 'observation_failed' : 'unknown_failure',
+    });
   }
 }
 

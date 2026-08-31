@@ -313,6 +313,24 @@
           </label>
         </div>
 
+        <div class="section-header">
+          <h2>Database recovery</h2>
+        </div>
+        <div class="field-group">
+          <p class="field-help">Back up the saved source database first. Logical dumps contain sensitive data and exclude storage object bytes and provider settings. Docker, PostgreSQL clients and the required cached dump image must already be available; nothing is installed automatically. Existing backups are preserved.</p>
+          <div class="field-actions"><button class="btn btn-secondary" id="database-backup" type="button">Back up saved source database</button></div>
+          <details>
+            <summary>Rehearse on a different, unused project</summary>
+            <p class="field-help">You must supply an existing isolated Supabase project with no application data and no connected applications. No project is provisioned. The target receives sensitive source data and is retained after rehearsal. Production restore is not supported.</p>
+            <div class="field"><label for="database-recovery-target">Isolated target project URL</label><input id="database-recovery-target" type="url" autocomplete="off" placeholder="https://targetprojectref.supabase.co" /></div>
+            <div class="field"><label for="database-recovery-password">Target database password (not saved)</label><input id="database-recovery-password" type="password" autocomplete="off" /></div>
+            <div class="field"><label for="database-recovery-template">Target session pooler URL without password (optional)</label><input id="database-recovery-template" type="text" autocomplete="off" placeholder="postgresql://postgres.targetprojectref@host.pooler.supabase.com:5432/postgres" /></div>
+            <div class="field"><label for="database-recovery-confirmation">Confirm the exact target project reference</label><input id="database-recovery-confirmation" type="text" autocomplete="off" /></div>
+            <div class="field-actions"><button class="btn btn-secondary" id="database-rehearse" type="button" disabled>Restore captured backup into isolated target</button></div>
+          </details>
+          <p class="field-help" id="database-recovery-status" role="status" aria-live="polite">Not checked. Capture a backup in this Launcher session to enable isolated rehearsal.</p>
+        </div>
+
         <div class="section-header" style="margin-top: 24px;">
           <h2>PayPal</h2>
           <div class="section-actions">
@@ -464,5 +482,6 @@
   </div>
 
   <script src="renderer.js"></script>
+  <script src="database-recovery.js"></script>
 </body>
 </html>

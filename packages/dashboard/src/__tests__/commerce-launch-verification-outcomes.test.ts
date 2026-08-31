@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSavedProductLicensingSdkBundle } from '@/lib/store/licensing-sdk-bundle';
 import { savedProductToLicensingDraft, savedProductToPolicyIdentityInput } from '@/lib/store/licensing-handoff';
-import { createSdkIntegrationReceipt } from '@/lib/store/sdk-contract-identity';
+import { createVerifiedSdkIntegrationReceipt } from '@/lib/store/sdk-integration-provenance';
+import { signedSdkVerification, SDK_TEST_SIGNING_SECRET } from '../__fixtures__/sdk-verification';
 import { POST } from '@/app/api/store/launch-runs/[id]/verify/route';
 import { createMockSupabase, registerTable, buildRequest } from './helpers';
 
@@ -33,13 +34,11 @@ async function fixture(type: 'free' | 'one_time' | 'subscription' = 'free', deli
   const bundle = await buildSavedProductLicensingSdkBundle({ projectName: draft.projectName, projectContext: draft.projectContext,
     apiBase: 'https://dashboard.example/api', plansAndFeatures: draft.plansAndFeatures, installationIdentity: draft.installationIdentity,
     policy: savedProductToPolicyIdentityInput(product), capabilities: [] });
-  const receipt = createSdkIntegrationReceipt({ contractHash: bundle.contractIdentity.value,
+  const attestation = await signedSdkVerification({ contractHash: bundle.contractIdentity.value,
     productPolicyRevision: bundle.files['somnibot-sdk.json'].content.productPolicyRevision,
-    sdkSchemaVersion: 1, sdkProtocolVersion: 2, storeProductId: PRODUCT, deploymentOrigin: 'https://dashboard.example' }, START,
-  { verificationId: 'verified-1', issuedBy: 'somnibot-server', targetProjectVersion: '1.0', targetProjectCommit: 'abc123',
-    verificationEnvironment: { kind: 'ci', description: 'Isolated conformance run' }, capabilitiesExercised: [],
-    remainingUnverifiedRequirements: [], integrityResult: 'passed', authenticityResult: 'passed', conformanceResult: 'passed' });
-  const saved = { ...product, metadata: { ...product.metadata, somnibot_sdk_integration_receipt: receipt } };
+    sdkSchemaVersion: 1, sdkProtocolVersion: 2, storeProductId: PRODUCT, deploymentOrigin: 'https://dashboard.example' });
+  const receipt = createVerifiedSdkIntegrationReceipt(attestation);
+  const saved = { ...product, metadata: { ...product.metadata, somnibot_sdk_integration_receipt: receipt, somnibot_sdk_integration_attestation: attestation } };
   const run = { id: ID, product_id: PRODUCT, operation_id: ID, is_tutorial: false, version: 1, verification_started_at: START };
   const rows: Record<string, unknown> = {
     commerce_product_launch_runs: run, products: saved, product_license_config: { ...policy }, product_files: product.product_files,
@@ -79,7 +78,7 @@ async function verify() {
 }
 
 describe('launch verifier observable readiness', () => {
-  beforeEach(() => { vi.resetAllMocks(); vi.stubEnv('DASHBOARD_URL', 'https://dashboard.example'); });
+  beforeEach(() => { vi.resetAllMocks(); vi.stubEnv('DASHBOARD_URL', 'https://dashboard.example'); vi.stubEnv('SDK_VERIFICATION_SIGNING_SECRET', SDK_TEST_SIGNING_SECRET); });
   afterEach(() => { vi.unstubAllEnvs(); });
 
   it.each(['free', 'one_time', 'subscription'] as const)('returns ready for a delivered current %s journey', async (type) => {
@@ -165,10 +164,44 @@ describe('launch verifier observable readiness', () => {
     rows.license_keys = [];
     rows.commerce_role_delivery_intents = [{ id: ID, order_id: ORDER, product_id: PRODUCT, entitlement_id: ID,
       permanent_role_ids: ['role-1'], completed_role_ids: ['role-1'], delivery_confirmed_at: PURCHASE,
+      completed_channel_ids: ['channel-1'], channel_delivery_confirmed_at: PURCHASE,
       state: type === 'free' ? 'open' : 'settled', outward_generation_id: ID }];
     const { response, body } = await verify();
     expect(response.status).toBe(200);
     expect(body.evaluation).toEqual({ state: 'ready', missing: [] });
+  });
+
+  it.each(['channel-only', 'mixed'] as const)('blocks %s access when channels have no delivery acknowledgment', async (kind) => {
+    // Given current role/receipt evidence but no acknowledgment of the configured channel.
+    const { rows, saved } = await fixture();
+    const roles = kind === 'mixed' ? ['role-1'] : [];
+    rows.products = { ...saved, delivery_type: 'access_pass', metadata: {}, granted_role_ids: roles, granted_channel_ids: ['channel-1'] };
+    rows.commerce_role_delivery_intents = [{ id: ID, order_id: ORDER, product_id: PRODUCT, entitlement_id: ID,
+      permanent_role_ids: roles, completed_role_ids: roles, delivery_confirmed_at: PURCHASE,
+      state: 'open', outward_generation_id: ID }];
+    // When the launch proof is evaluated.
+    const { response, body } = await verify();
+    // Then role and receipt evidence cannot stand in for channel delivery.
+    expect(response.status).toBe(200);
+    expect(body.evaluation.missing).toContain('fulfillment');
+    expect(body.data.state).toBe('sandbox_verifying');
+  });
+
+  it.each(['complete', 'partial', 'stale', 'receipt-before-channel', 'wrong-generation'] as const)('evaluates channel-only access with %s acknowledgment', async (state) => {
+    // Given an exact channel vector acknowledged on one delivery generation.
+    const { rows, saved } = await fixture();
+    rows.products = { ...saved, delivery_type: 'access_pass', metadata: {}, granted_role_ids: [], granted_channel_ids: ['channel-1', 'channel-2'] };
+    rows.commerce_role_delivery_intents = [{ id: ID, order_id: ORDER, product_id: PRODUCT, entitlement_id: ID,
+      permanent_role_ids: [], completed_role_ids: [], delivery_confirmed_at: PURCHASE,
+      completed_channel_ids: state === 'partial' ? ['channel-1'] : ['channel-1', 'channel-2'],
+      channel_delivery_confirmed_at: state === 'stale' ? '2026-08-22T12:00:00.000Z' : state === 'receipt-before-channel' ? REVISION : PURCHASE,
+      state: 'open', outward_generation_id: state === 'wrong-generation' ? PAYMENT : ID }];
+    // When the launch proof is evaluated.
+    const { response, body } = await verify();
+    // Then only a complete, fresh acknowledgment followed by the matching receipt proves delivery.
+    expect(response.status).toBe(200);
+    expect(body.evaluation.missing.includes('fulfillment')).toBe(state !== 'complete');
+    expect(body.data.state).toBe(state === 'complete' ? 'ready' : 'sandbox_verifying');
   });
 
   it.each(['queued', 'failed', 'partial', 'wrong-entitlement', 'wrong-generation', 'receipt-uncertain'])('blocks access fulfillment when delivery is %s', async (state) => {

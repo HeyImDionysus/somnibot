@@ -52,6 +52,7 @@ import {
 } from '@/lib/store/commerce-plan-recovery';
 import { ensurePayPalPlanState } from '@/lib/store/paypal-plan-state';
 import { writeCommerceAudit } from '@/lib/commerce-audit';
+import { preserveSdkProvenanceMetadata } from '@/lib/store/sdk-integration-receipt';
 import {
   declaresPendingCompletedProjectPolicy,
   hasPendingCompletedProjectPolicy,
@@ -844,11 +845,11 @@ export async function PUT(req: NextRequest) {
     const convertingToDynamic = updates.delivery_type === 'license_key'
       && currentTargets.delivery_type !== 'license_key';
     if (includesCompletedProjectMetadata) {
-      const validConversionLock = convertingToDynamic
+      const validPolicyEditLock = (updates.delivery_type ?? currentTargets.delivery_type) === 'license_key'
         && updates.active === false
         && hasPendingCompletedProjectPolicy(updates.metadata)
         && readCompletedProjectPolicy(updates.metadata) !== null;
-      if (!validConversionLock) {
+      if (!validPolicyEditLock) {
         return apiError('Completed-project licensing recovery metadata is server-managed.', 400);
       }
       updates.metadata = { ...currentTargets.metadata, ...updates.metadata };
@@ -858,6 +859,9 @@ export async function PUT(req: NextRequest) {
     }
     if (updates.metadata && hasPendingCompletedProjectPolicy(currentTargets.metadata)) {
       return apiError('Complete license policy recovery before replacing product metadata.', 409);
+    }
+    if (updates.metadata) {
+      updates.metadata = preserveSdkProvenanceMetadata(currentTargets.metadata ?? {}, updates.metadata);
     }
     if (updates.active === true && hasPendingCompletedProjectPolicy(currentTargets.metadata)) {
       return apiError('Save and verify the requested license policy before activating this product.', 409);

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
-import { createMockSupabase, registerTable } from './helpers';
+import { createMockSupabase as createBaseMockSupabase, registerTable } from './helpers';
 
 const mocks = vi.hoisted(() => ({
   checkAdminRateLimit: vi.fn<() => Promise<null>>(),
@@ -22,6 +22,12 @@ import { GET as getSystemState } from '@/app/api/system-state/route';
 import { GET as getDiagnosticBundle } from '@/app/api/system-state/diagnostic-bundle/route';
 
 const ACTIVE_GUILD_ID = '1464713668766732393';
+
+function createMockSupabase() {
+  const admin = createBaseMockSupabase();
+  admin.rpc.mockResolvedValue({ data: null, error: null });
+  return admin;
+}
 
 function request(path: string): NextRequest {
   return new NextRequest(`http://localhost${path}`);
@@ -52,6 +58,45 @@ describe('system-state credential authorization boundary', () => {
     expect(response.status).toBe(200);
     expect(admin.from).not.toHaveBeenCalledWith('instance_settings');
     expect(body).toMatchObject({ success: true, data: { credentials: [] } });
+  });
+
+  it.each([
+    ['system state', getSystemState, '/api/system-state'],
+    ['diagnostic export', getDiagnosticBundle, '/api/system-state/diagnostic-bundle'],
+  ] as const)('reads the last successful migration for %s from the actual ledger shape', async (surface, handler, path) => {
+    const admin = createMockSupabase();
+    const migrations = registerTable(admin, 'schema_migrations');
+    mocks.createAdminSupabase.mockReturnValue(admin);
+    const applied = '20260831081000_sandbox_launch_persistence.sql';
+    const rows: Array<Record<string, unknown>> = [
+      { filename: '20260831135000_adoption_verification_writer.sql', applied_at: '2026-08-31T14:00:00.000Z', success: false },
+      { filename: applied, applied_at: '2026-08-31T13:00:00.000Z', success: true },
+    ];
+    migrations.maybeSingle.mockImplementation(async () => {
+      const filters = migrations.eq.mock.calls;
+      if (filters.some(([column]) => !(column in rows[0]!))) {
+        return { data: null, error: { message: 'Undefined migration ledger column', code: '42703' } };
+      }
+      return { data: rows.find((row) => filters.every(([column, value]) => row[column] === value)) ?? null, error: null };
+    });
+    mocks.readValkeyKey.mockResolvedValue(JSON.stringify({
+      systemState: {
+        schemaVersion: 1, observedAt: '2026-08-31T14:00:00.000Z', mode: 'normal',
+        identity: {
+          lifecycle: 'ready', version: '1.0.0', exactSha: null, bootId: null,
+          migrationHead: null, configurationGeneration: null, deploymentProfile: 'vps-multi-guild',
+        },
+        providers: [], queues: [], features: [], guildConditions: [],
+      },
+    }));
+
+    const response = await handler(request(path));
+    const body: unknown = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject(surface === 'system state'
+      ? { success: true, data: { identity: { migrationHead: applied } } }
+      : { success: true, data: { deployment: { migrationHead: applied } } });
   });
 
   it('returns only the authorized guild condition from a deployment-global heartbeat', async () => {
@@ -151,6 +196,8 @@ describe('system-state credential authorization boundary', () => {
     const incidents = registerTable(admin, 'incidents');
     const operations = registerTable(admin, 'audit_logs');
     const deadLetters = registerTable(admin, 'action_queue_dlq');
+    const configuration = registerTable(admin, 'guild_config');
+    const lifecycle = registerTable(admin, 'significant_operations');
     mocks.createAdminSupabase.mockReturnValue(admin);
 
     // When the owner exports a diagnostic bundle.
@@ -163,10 +210,154 @@ describe('system-state credential authorization boundary', () => {
     expect(incidents.eq).toHaveBeenCalledWith('guild_id', ACTIVE_GUILD_ID);
     expect(operations.eq).toHaveBeenCalledWith('guild_id', ACTIVE_GUILD_ID);
     expect(deadLetters.eq).toHaveBeenCalledWith('guild_id', ACTIVE_GUILD_ID);
+    expect(configuration.eq).toHaveBeenCalledWith('guild_id', ACTIVE_GUILD_ID);
+    expect(lifecycle.eq).toHaveBeenCalledWith('guild_id', ACTIVE_GUILD_ID);
+    expect(response.headers.get('content-disposition')).toMatch(/^attachment; filename="somnibot-diagnostic-[0-9TZ.-]+\.json"$/);
+    expect(response.headers.get('content-disposition')).not.toContain(ACTIVE_GUILD_ID);
     expect(admin.from).not.toHaveBeenCalledWith('instance_settings');
     expect(body).toMatchObject({ success: true });
     expect(JSON.stringify(body)).not.toContain('credentials');
     expect(JSON.stringify(body)).not.toContain('discord_bot_token');
+  });
+
+  it('exports useful configuration, provider observations and classified failures without raw context', async () => {
+    const admin = createMockSupabase();
+    const timestamp = new Date().toISOString();
+    const configuration = registerTable(admin, 'guild_config');
+    const diagnostics = registerTable(admin, 'bot_diagnostics');
+    const operations = registerTable(admin, 'audit_logs');
+    const lifecycle = registerTable(admin, 'significant_operations');
+    mocks.createAdminSupabase.mockReturnValue(admin);
+    configuration.maybeSingle.mockResolvedValue({
+      data: {
+        music_enabled: true, economy_enabled: false, economy_games_enabled: true,
+        store_enabled: true, paypal_enabled: true, paypal_environment: 'sandbox',
+        automod_enabled: true, scheduled_messages_enabled: false,
+        diagnostics_snapshot_interval_ms: 60_000,
+        guild_id: ACTIVE_GUILD_ID, currency_name: 'private-owner@example.test',
+        discord_bot_token: 'fixture-secret',
+      },
+      error: null,
+    });
+    diagnostics.limit.mockResolvedValue({
+      data: [{
+        snapshot_at: timestamp, uptime_seconds: 3600, boot_id: null,
+        valkey_connected: true, discord_ws_ping: 30,
+        lavalink_nodes: [
+          { connected: true, name: 'private-owner@example.test', host: 'secret.internal' },
+          { connected: false, name: 'fixture-secret' },
+        ],
+      }],
+      error: null,
+    });
+    operations.limit.mockResolvedValue({
+      data: [{
+        action: 'diagnostics.snapshot_failed', category: 'diagnostics',
+        correlation_id: '33333333-3333-4333-8333-333333333333',
+        success: false, timestamp, error_message: 'fixture-secret',
+        details: { error: 'private-owner@example.test' },
+      }],
+      error: null,
+    });
+    lifecycle.limit.mockResolvedValue({
+      data: [{
+        id: '44444444-4444-4444-8444-444444444444', current_stage: 'executed',
+        outcome: 'failed', source_surface: 'dashboard', failure_code: 'provider_uncertain',
+        configuration_generation: 4, updated_at: timestamp,
+        actor_id: 'private-owner@example.test', request_payload: { secret: 'fixture-secret' },
+      }],
+      error: null,
+    });
+
+    const response = await getDiagnosticBundle(request('/api/system-state/diagnostic-bundle'));
+    const body: unknown = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      success: true,
+      data: {
+        configuration: { status: 'available', values: {
+          music_enabled: true, economy_enabled: false, economy_games_enabled: true,
+          paypal_environment: 'sandbox', diagnostics_snapshot_interval_ms: 60_000,
+        } },
+        providers: expect.arrayContaining([
+          { key: 'discord', status: 'ready', checkedAt: timestamp, reason: null },
+          { key: 'valkey', status: 'ready', checkedAt: timestamp, reason: null },
+          { key: 'lavalink', status: 'degraded', checkedAt: timestamp, reason: null },
+          { key: 'paypal', status: 'unknown', checkedAt: null, reason: 'not_observed' },
+        ]),
+        operations: [{ action: 'diagnostics.snapshot_failed', failureClass: 'snapshot_failure', success: false }],
+        operationLifecycle: [{
+          id: '44444444-4444-4444-8444-444444444444', current_stage: 'executed',
+          outcome: 'failed', failure_code: 'provider_uncertain', configuration_generation: 4,
+        }],
+      },
+    });
+    const serialized = JSON.stringify(body);
+    for (const sensitive of [ACTIVE_GUILD_ID, 'private-owner@example.test', 'fixture-secret', 'secret.internal', 'actor_id', 'request_payload']) {
+      expect(serialized).not.toContain(sensitive);
+    }
+  });
+
+  it('reports stale provider observations and missing configuration explicitly instead of claiming readiness', async () => {
+    const admin = createMockSupabase();
+    const timestamp = new Date(Date.now() - 600_000).toISOString();
+    const diagnostics = registerTable(admin, 'bot_diagnostics');
+    const configuration = registerTable(admin, 'guild_config');
+    mocks.createAdminSupabase.mockReturnValue(admin);
+    configuration.maybeSingle.mockResolvedValue({ data: null, error: null });
+    diagnostics.limit.mockResolvedValue({
+      data: [{
+        snapshot_at: timestamp, uptime_seconds: 3600, boot_id: null,
+        valkey_connected: true, discord_ws_ping: 30, lavalink_nodes: [{ connected: true }],
+      }],
+      error: null,
+    });
+
+    const response = await getDiagnosticBundle(request('/api/system-state/diagnostic-bundle'));
+    const body: unknown = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ data: {
+      configuration: { status: 'unavailable', values: null },
+      providers: expect.arrayContaining([
+        { key: 'discord', status: 'unknown', checkedAt: timestamp, reason: 'stale_observation' },
+        { key: 'valkey', status: 'unknown', checkedAt: timestamp, reason: 'stale_observation' },
+        { key: 'lavalink', status: 'unknown', checkedAt: timestamp, reason: 'stale_observation' },
+      ]),
+    } });
+  });
+
+  it('preserves unknown failure observations without echoing attacker-controlled classifications', async () => {
+    const admin = createMockSupabase();
+    const timestamp = new Date().toISOString();
+    const operations = registerTable(admin, 'audit_logs');
+    const lifecycle = registerTable(admin, 'significant_operations');
+    const configuration = registerTable(admin, 'guild_config');
+    mocks.createAdminSupabase.mockReturnValue(admin);
+    operations.limit.mockResolvedValue({
+      data: [{ action: 'private-owner@example.test', category: 'private-owner@example.test', correlation_id: null, success: false, timestamp }], error: null,
+    });
+    lifecycle.limit.mockResolvedValue({
+      data: [{
+        id: '44444444-4444-4444-8444-444444444444', current_stage: 'executed',
+        outcome: 'failed', source_surface: 'dashboard', failure_code: 'SMNI-TEST-LICENSE-1234',
+        configuration_generation: null, updated_at: timestamp,
+      }], error: null,
+    });
+    configuration.maybeSingle.mockResolvedValue({ data: null, error: { message: 'private-owner@example.test' } });
+
+    const response = await getDiagnosticBundle(request('/api/system-state/diagnostic-bundle'));
+    const body: unknown = await response.json();
+
+    expect(body).toMatchObject({ data: {
+      configuration: { status: 'query_failed', values: null },
+      operations: [{ action: 'unclassified', category: null, failureClass: 'unclassified', success: false }],
+      operationLifecycle: [{ failure_code: 'unclassified', outcome: 'failed' }],
+      queryFailures: ['configuration'],
+    } });
+    expect(JSON.stringify(body)).not.toContain('private-owner@example.test');
+    expect(JSON.stringify(body)).not.toContain('SMNI-TEST-LICENSE-1234');
   });
 
   it.each(['2026-08-31T12:00:00.000Z', '2026-08-31T12:00:00.123456+00:00'])(

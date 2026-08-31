@@ -34,7 +34,9 @@ import {
 } from '@/lib/store/commerce-plan-recovery';
 import {
   defaultStoreProductFacets,
+  buildLicensePolicySaveRequest,
   evaluateStoreProductPolicy,
+  prepareStoreProductSave,
   storeProductFacetOptions,
   type StoreProductFacet,
 } from '@/lib/store/store-product-policy';
@@ -163,6 +165,7 @@ const deliveryTypeLabels: Record<Product['delivery_type'], string> = {
 export default function StorePage() {
   const { toast } = useToast();
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [confirmPolicySave, setConfirmPolicySave] = useState(false);
 
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -719,21 +722,24 @@ export default function StorePage() {
     return licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean);
   };
 
-  const saveLicensePolicy = async (productId: string): Promise<string | null> => {
+  const saveLicensePolicy = async (
+    productId: string,
+    desiredPolicy: NonNullable<ReturnType<typeof readCompletedProjectPolicy>> = {
+      keyPrefix: licenseKeyPrefix,
+      maxDevices: licenseMaxDevices,
+      heartbeatIntervalMs: licenseHeartbeatMs,
+      sdkCacheTtlMs: licenseSdkCacheTtlMs,
+      offlineGracePeriodSeconds: licenseOfflineGraceSeconds,
+      featureFlags: effectiveLicenseFeatureFlags(),
+      requireDiscordGuildMembership: licenseRequireMembership,
+      rotationPolicy,
+      selfServiceDeviceRemoval,
+    },
+  ): Promise<string | null> => {
     const configRes = await fetch(`/api/license/config/${productId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        key_prefix: licenseKeyPrefix,
-        max_devices: licenseMaxDevices,
-        heartbeat_interval_ms: licenseHeartbeatMs,
-        sdk_cache_ttl_ms: licenseSdkCacheTtlMs,
-        offline_grace_period_seconds: licenseOfflineGraceSeconds,
-        feature_flags: effectiveLicenseFeatureFlags(),
-        require_discord_guild_membership: licenseRequireMembership,
-        rotation_policy: rotationPolicy,
-        self_service_device_removal: selfServiceDeviceRemoval,
-      }),
+      body: JSON.stringify(buildLicensePolicySaveRequest(desiredPolicy)),
     });
     if (configRes.ok) return null;
     const result: { error?: string } = await configRes.json();
@@ -744,7 +750,8 @@ export default function StorePage() {
     const config = licenseConfigForProduct(product);
     if (!config) return false;
     const expectedFlags = effectiveLicenseFeatureFlags();
-    return config.key_prefix === licenseKeyPrefix
+    return product.active === false
+      && config.key_prefix === licenseKeyPrefix
       && config.max_devices === licenseMaxDevices
       && config.heartbeat_interval_seconds * 1000 === licenseHeartbeatMs
       && config.sdk_cache_ttl_ms === licenseSdkCacheTtlMs
@@ -803,11 +810,18 @@ export default function StorePage() {
         return;
       }
 
-      const policyError = await saveLicensePolicy(integrationProduct.id);
+      const desiredPolicy = readCompletedProjectPolicy(integrationProduct.metadata);
+      if (!desiredPolicy) {
+        setIntegrationRecovery({ kind: 'license', message: 'The saved product has no recoverable desired license policy. Reload the product before retrying.' });
+        return;
+      }
+      const policyError = await saveLicensePolicy(integrationProduct.id, desiredPolicy);
       setIntegrationRecovery(policyError ? { kind: 'license', message: policyError } : null);
       if (!policyError) {
         const verifiedProduct = await readbackProduct(integrationProduct.id);
-        if (!verifiedProduct || !licensePolicyMatches(verifiedProduct)) {
+        const verifiedConfig = verifiedProduct ? licenseConfigForProduct(verifiedProduct) : null;
+        if (!verifiedProduct || verifiedProduct.active || hasPendingCompletedProjectPolicy(verifiedProduct.metadata)
+          || !verifiedConfig || !licenseConfigMatchesDesiredPolicy(verifiedConfig, desiredPolicy)) {
           setIntegrationRecovery({
             kind: 'license',
             message: 'The license policy save returned, but authoritative readback did not match. Retry safely.',
@@ -873,6 +887,9 @@ export default function StorePage() {
     const convertingToDynamic = editingId !== null
       && editingOriginalDeliveryType !== 'license_key'
       && form.delivery_type === 'license_key';
+    const existingCompletedProject = editingId
+      ? readCompletedProjectLicensingMetadata(integrationProduct?.metadata)
+      : null;
     const createRequestId = editingId
       ? null
       : licensingHandoff?.creationRequestId ?? pendingCreateRequestId ?? crypto.randomUUID();
@@ -881,7 +898,7 @@ export default function StorePage() {
     let productResponseReceived = false;
     setSaving(true);
     try {
-      const payload = {
+      const payload = prepareStoreProductSave({
         ...(createRequestId ? { id: createRequestId } : {}),
         ...(editingId ? { id: editingId } : {}),
         name: form.name,
@@ -892,17 +909,17 @@ export default function StorePage() {
         currency: form.currency.toUpperCase(),
         granted_role_ids: form.granted_role_ids,
         granted_channel_ids: form.granted_channel_ids,
-        active: convertingToDynamic ? false : editingId ? form.active : false,
+        active: editingId ? form.active : false,
         ...(form.type === 'subscription' && !editingId ? {
           plans: [{ id: subscriptionPlanId, ...planDraft, currency: form.currency.toUpperCase() }],
         } : {}),
         ...((form.delivery_type === 'license_key' || (!editingId && licensingHandoff) || convertingToDynamic) ? {
           metadata: {
             completed_project_licensing: {
-              plansAndFeatures: licensingHandoff?.envelope.billing.plansAndFeatures ?? '',
+              plansAndFeatures: licensingHandoff?.envelope.billing.plansAndFeatures ?? existingCompletedProject?.plansAndFeatures ?? '',
               privateIntegrationContext: licensingPrivateContext,
-              outputFormats: licensingHandoff?.envelope.staticPolicy?.outputFormats ?? '',
-              installationIdentity: licensingHandoff?.envelope.dynamicPolicy?.installationIdentity ?? '',
+              outputFormats: licensingHandoff?.envelope.staticPolicy?.outputFormats ?? existingCompletedProject?.outputFormats ?? '',
+              installationIdentity: licensingHandoff?.envelope.dynamicPolicy?.installationIdentity ?? existingCompletedProject?.installationIdentity ?? '',
               capabilities: resolvedCapabilities,
               rails: licensingRails ?? {
                 runtimeLicensing: form.delivery_type === 'license_key',
@@ -928,7 +945,7 @@ export default function StorePage() {
             },
           },
         } : {}),
-      };
+      });
 
       const res = await fetch('/api/store/products', {
         method: editingId ? 'PUT' : 'POST',
@@ -995,7 +1012,9 @@ export default function StorePage() {
       setPendingPlanRecovery(null);
       if (!editingId && licensingHandoffActive) clearLicensingHandoff();
       setShowForm(false);
-      toast({ title: editingId ? 'Product updated and verified' : 'Product created and verified', variant: 'success' });
+      toast({ title: editingId
+        ? form.delivery_type === 'license_key' ? 'Product updated and verified; activate it from the Store when ready' : 'Product updated and verified'
+        : 'Product created and verified', variant: 'success' });
     } catch {
       if (preservedProductId && form.delivery_type === 'license_key' && productResponseReceived) {
         persistLicenseRecovery(preservedProductId);
@@ -1486,7 +1505,9 @@ export default function StorePage() {
               </>
             )}
             <Input id="product-currency" label="Currency" value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value })} placeholder="USD" />
-            {editingId ? (
+            {editingId && form.delivery_type === 'license_key' ? (
+              <p className="self-end rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-secondary">Saving integration settings pauses this product. It stays inactive while the requested license policy is saved and verified. Activate it separately from the Store after verification.</p>
+            ) : editingId ? (
               <div className="pt-5"><Toggle label="Active" checked={form.active} onChange={(active) => setForm({ ...form, active })} /></div>
             ) : (
               <p className="self-end rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-secondary">New products are created inactive. Activate this product from the Store only after its saved policy is verified.</p>
@@ -1496,10 +1517,16 @@ export default function StorePage() {
           <div className="mt-4 flex gap-2">
             <Button
               variant="success"
-              onClick={save}
+              onClick={() => {
+                if (form.delivery_type === 'license_key' && products.some((product) => product.id === editingId && product.active)) {
+                  setConfirmPolicySave(true);
+                } else {
+                  void save();
+                }
+              }}
               disabled={saving || !form.name || unresolvedHandoffBilling || integrationRecovery !== null || licenseRecoveryProductId !== null}
             >
-              {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
+              {saving ? 'Saving…' : editingId ? form.delivery_type === 'license_key' ? 'Save policy' : 'Update' : 'Create'}
             </Button>
             <Button
               variant="secondary"
@@ -1559,6 +1586,18 @@ export default function StorePage() {
         </div>
       )}
 
+      <ConfirmDialog
+        open={confirmPolicySave}
+        title="Pause product and save integration settings?"
+        description={`Saving changes to "${form.name}" stops new sales while its license policy is saved and verified. Existing entitlements are preserved. The product stays inactive until you activate it separately from the Store.`}
+        confirmLabel="Pause and save"
+        variant="warning"
+        onConfirm={async () => {
+          setConfirmPolicySave(false);
+          await save();
+        }}
+        onCancel={() => setConfirmPolicySave(false)}
+      />
       {/* Confirm Delete Dialog */}
       <ConfirmDialog
         open={!!confirmDelete}

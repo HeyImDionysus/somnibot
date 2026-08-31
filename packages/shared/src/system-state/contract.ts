@@ -46,6 +46,7 @@ export type BackupState = z.infer<typeof BackupStateSchema>;
 export const RecoveryStateSchema = z.object({
   status: z.enum(['ready', 'rehearsal_due', 'recovering', 'failed', 'unverified']),
   lastRehearsalAt: z.string().datetime().nullable(),
+  rehearsalScope: z.enum(['database', 'valkey', 'database_and_valkey']).optional(),
   recoveryPointObjectiveMinutes: z.number().int().positive().nullable(),
   recoveryTimeObjectiveMinutes: z.number().int().positive().nullable(),
   evidenceRef: z.string().trim().min(1).max(500).nullable(),

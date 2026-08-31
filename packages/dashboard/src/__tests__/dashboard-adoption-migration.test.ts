@@ -6,6 +6,10 @@ const migration = readFileSync(
   resolve(process.cwd(), '../supabase/migrations/20260823142000_dashboard_adoption_map.sql'),
   'utf8',
 );
+const gamesTrackMigration = readFileSync(
+  resolve(process.cwd(), '../supabase/migrations/20260831133000_games_adoption_track.sql'),
+  'utf8',
+);
 
 describe('dashboard adoption-map migration', () => {
   it('keeps desired state guild-scoped, versioned, and separate from verification evidence', () => {
@@ -32,5 +36,12 @@ describe('dashboard adoption-map migration', () => {
     expect(migration).toContain("status = 'rolled_back', recovered_readback = v_readback");
     expect(migration).toContain("operation.idempotency_key = p_idempotency_key");
     expect(migration).toContain("MESSAGE = 'adoption map: idempotency intent mismatch'");
+  });
+
+  it('extends service-authored verification and publisher validation for games', () => {
+    expect(gamesTrackMigration).toContain('DROP CONSTRAINT dashboard_adoption_verifications_track_id_check');
+    expect(gamesTrackMigration).toContain("'games'");
+    expect(gamesTrackMigration).toContain('CREATE OR REPLACE FUNCTION public.publish_dashboard_adoption_map');
+    expect(gamesTrackMigration).toContain("'core', 'structure', 'moderation', 'welcome', 'community', 'economy', 'games'");
   });
 });

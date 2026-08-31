@@ -5,17 +5,13 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkValkeyHealth, readValkeyKey } from '@/lib/api/rate-limit';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import {
+  RECOVERY_EVIDENCE_ACTIONS,
   SystemStateEvidenceSchema,
   buildDashboardSystemState,
   type SystemStateEvidence,
 } from '@/lib/system-state';
 
 const BOT_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
-const EVIDENCE_ACTIONS = [
-  'launcher.backup.database_succeeded',
-  'launcher.backup.valkey_succeeded',
-  'launcher.restore.rehearsal_succeeded',
-] as const;
 function parseRuntimeHeartbeat(raw: string | null): RuntimeSystemState | null {
   if (!raw) return null;
   try {
@@ -36,14 +32,14 @@ export async function GET(request: NextRequest) {
   if (!auth.ok) return auth.response;
 
   const admin = createAdminSupabase();
-  const [valkeyConnected, heartbeatRaw, evidenceResult, dlqResult, migrationResult] = await Promise.all([
+  const [valkeyConnected, heartbeatRaw, evidenceResult, dlqResult, migrationResult, recoveryResult] = await Promise.all([
     checkValkeyHealth(),
     readValkeyKey(BOT_HEARTBEAT_KEY),
     admin
       .from('audit_logs')
       .select('action, timestamp, success, details')
       .eq('guild_id', auth.ctx.guildId)
-      .in('action', [...EVIDENCE_ACTIONS])
+      .in('action', [...RECOVERY_EVIDENCE_ACTIONS])
       .order('timestamp', { ascending: false })
       .limit(100),
     admin
@@ -54,10 +50,14 @@ export async function GET(request: NextRequest) {
     admin
       .from('schema_migrations')
       .select('filename')
-      .eq('status', 'applied')
+      .eq('success', true)
       .order('applied_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
+    admin.rpc('adoption_recovery_proof', {
+      p_guild_id: auth.ctx.guildId,
+      p_since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    }),
   ]);
 
   const evidence: SystemStateEvidence[] = [];
@@ -81,6 +81,7 @@ export async function GET(request: NextRequest) {
     dlqDepth: dlqResult.error ? null : dlqResult.count ?? 0,
     evidence,
     credentials: [],
+    recoveryProof: recoveryResult.error ? null : recoveryResult.data,
   });
 
   return NextResponse.json({ success: true, data: state });

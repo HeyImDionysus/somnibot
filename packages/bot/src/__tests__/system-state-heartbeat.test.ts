@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeSystemStateSchema } from '../../../shared/src/system-state/index.js';
 import { buildBotRuntimeSystemState } from '../services/runtime-system-state.js';
+import { SOMNIBOT_VERSION } from '../version.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -60,5 +61,47 @@ describe('bot runtime system state', () => {
     });
 
     expect(state.identity.deploymentProfile).toBe('higher-load-vps');
+  });
+
+  it('uses the packaged version rather than logging arbitrary version environment values', () => {
+    vi.stubEnv('SOMNIBOT_VERSION', 'Bearer fixture-private-token');
+    vi.stubEnv('npm_package_version', 'fixture-private-password');
+
+    const state = buildBotRuntimeSystemState({
+      bootId: '11111111-1111-4111-8111-111111111111', observedAt: '2026-08-31T14:00:00.000Z',
+      discordReady: true, guildIds: [],
+    });
+
+    expect(state.identity.version).toBe(SOMNIBOT_VERSION);
+    expect(JSON.stringify(state)).not.toContain('fixture-private');
+  });
+
+  it.each([
+    'postgresql://user:fixture-private-password@database.test/postgres',
+    'SUPABASE_SECRET_KEY=fixture-private-token',
+    '../../20260831135500_migration.sql',
+    `20260831135500_${'x'.repeat(256)}.sql`,
+    '20260831135500_migration.sql\nfixture-private-token',
+  ])('does not publish malformed migration metadata %s', (migration) => {
+    vi.stubEnv('SOMNIBOT_MIGRATION_HEAD', migration);
+
+    const state = buildBotRuntimeSystemState({
+      bootId: '11111111-1111-4111-8111-111111111111', observedAt: '2026-08-31T14:00:00.000Z',
+      discordReady: true, guildIds: [],
+    });
+
+    expect(state.identity.migrationHead).toBeNull();
+    expect(JSON.stringify(state)).not.toContain('fixture-private');
+  });
+
+  it('prefers the actual ledger head and keeps a failed ledger observation unknown', () => {
+    vi.stubEnv('SOMNIBOT_MIGRATION_HEAD', '20260823000000_old_release.sql');
+    const input = {
+      bootId: '11111111-1111-4111-8111-111111111111', observedAt: '2026-08-31T14:00:00.000Z',
+      discordReady: true, guildIds: [], migrationHead: '20260831135500_adoption_recovery_proof.sql',
+    };
+
+    expect(buildBotRuntimeSystemState(input).identity.migrationHead).toBe(input.migrationHead);
+    expect(buildBotRuntimeSystemState({ ...input, migrationHead: null }).identity.migrationHead).toBeNull();
   });
 });

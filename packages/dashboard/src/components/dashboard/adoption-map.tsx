@@ -4,6 +4,9 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { CheckCircle2, CirclePause, FlaskConical, LockKeyhole } from 'lucide-react';
 import { ADOPTION_TRACKS, adoptionMapMutationFromState, adoptionTrackStateSchema, blockedDependencies, defaultAdoptionMapState, type AdoptionMapState, type AdoptionTrackState } from '@/lib/dashboard/adoption-map';
+import { z } from 'zod';
+import { adoptionVerificationSchema, currentVerifiedTrackIds, type AdoptionVerification } from '@/lib/dashboard/adoption-verification';
+import { AdoptionVerificationControl } from './adoption-verification-control';
 
 const STATE_LABEL: Record<AdoptionTrackState, string> = {
   not_started: 'Not started', in_progress: 'In progress', ready: 'Ready to test', active: 'Active', paused: 'Paused', skipped: 'Skipped',
@@ -15,14 +18,35 @@ export function AdoptionMap({ canManage }: { readonly canManage: boolean }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [verifications, setVerifications] = useState<AdoptionVerification[]>([]);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     void fetch('/api/dashboard/adoption').then(async (response) => {
       if (!response.ok) throw new Error('adoption-map-unavailable');
-      const result: { readonly data: { readonly state: AdoptionMapState; readonly updatedAt: string | null } } = await response.json();
+      const result: { readonly data: { readonly state: AdoptionMapState; readonly updatedAt: string | null; readonly verifications: unknown } } = await response.json();
+      setVerifications(z.array(adoptionVerificationSchema).parse(result.data.verifications));
       setState(result.data.state); setUpdatedAt(result.data.updatedAt);
     }).catch(() => setMessage('The saved adoption map could not be loaded.')).finally(() => setLoading(false));
   }, []);
+
+  const checkEvidence = async (trackId: string) => {
+    setChecking(true); setMessage(null);
+    try {
+      const response = await fetch('/api/dashboard/adoption/verify', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ trackId }) });
+      if (!response.ok) throw new Error('Evidence could not be checked. Retry when the service is available.');
+      const refreshed = await fetch('/api/dashboard/adoption');
+      if (!refreshed.ok) throw new Error('The check completed, but current evidence could not be refreshed. Reload before activating.');
+      const result: { readonly data: { readonly verifications: unknown } } = await refreshed.json();
+      const current = z.array(adoptionVerificationSchema).max(13).parse(result.data.verifications);
+      setVerifications(current);
+      setState((draft) => ({ ...draft, verifiedTrackIds: [...currentVerifiedTrackIds(current, Date.now())] }));
+      setMessage('Current evidence refreshed. Draft selections are unchanged.');
+    } catch (error) {
+      setState((draft) => ({ ...draft, verifiedTrackIds: draft.verifiedTrackIds.filter((id) => id !== trackId) }));
+      setMessage(error instanceof Error ? error.message : 'Evidence check failed.');
+    } finally { setChecking(false); }
+  };
 
   const selectedTracks = useMemo(() => ADOPTION_TRACKS.filter((track) => state.selectedTrackIds.includes(track.id)), [state.selectedTrackIds]);
   const save = async () => {
@@ -55,10 +79,10 @@ export function AdoptionMap({ canManage }: { readonly canManage: boolean }) {
         const dependencies = blockedDependencies(track, state);
         const verified = state.verifiedTrackIds.includes(track.id);
         const trackState = state.trackStates[track.id] ?? 'not_started';
-        return <article key={track.id} className="rounded-card bg-discord-bg-primary p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-medium text-discord-text-primary">{track.label}</h3><p className="mt-1 text-sm text-discord-text-muted">{track.description}</p></div>{verified ? <CheckCircle2 className="shrink-0 text-discord-success" size={20} aria-label="Verified by recorded feature evidence" /> : <FlaskConical className="shrink-0 text-discord-text-muted" size={20} aria-label="Verified feature evidence required" />}</div>{dependencies.length > 0 && <p className="mt-3 flex items-start gap-2 text-xs text-discord-warning"><LockKeyhole size={14} className="mt-0.5 shrink-0" aria-hidden="true" />Blocked by {dependencies.map((id) => ADOPTION_TRACKS.find((candidate) => candidate.id === id)?.label ?? id).join(', ')}</p>}<div className="mt-4 flex flex-wrap items-center gap-2"><Link href={track.href} className="inline-flex min-h-11 items-center rounded-input bg-discord-bg-elevated px-3 text-sm font-medium text-discord-text-primary hover:bg-discord-bg-hover">Configure</Link><Link href={track.testHref} className="inline-flex min-h-11 items-center rounded-input bg-discord-bg-elevated px-3 text-sm font-medium text-discord-text-primary hover:bg-discord-bg-hover">Open test</Link><label className="text-xs text-discord-text-muted">State<select disabled={!canManage} value={trackState} onChange={(event) => { const nextState = adoptionTrackStateSchema.safeParse(event.target.value); if (nextState.success) setState({ ...state, trackStates: { ...state.trackStates, [track.id]: nextState.data } }); }} className="ml-2 min-h-11 rounded-input border border-discord-border-strong bg-discord-bg-elevated px-3 text-sm text-discord-text-primary"><option value="not_started">Not started</option><option value="in_progress">In progress</option><option value="ready">Ready to test</option><option value="paused">Paused</option><option value="active" disabled={!verified || dependencies.length > 0}>Active</option>{!track.required && <option value="skipped">Skipped</option>}</select></label>{trackState === 'paused' && <CirclePause size={18} className="text-discord-warning" aria-label="Paused" />}</div><p className="mt-2 text-xs text-discord-text-muted">Current state: {STATE_LABEL[trackState]}{verified ? ' · Verified by recorded feature evidence' : ' · no valid feature evidence recorded'}</p></article>;
+        return <article key={track.id} className="rounded-card bg-discord-bg-primary p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-medium text-discord-text-primary">{track.label}</h3><p className="mt-1 text-sm text-discord-text-muted">{track.description}</p></div>{verified ? <CheckCircle2 className="shrink-0 text-discord-success" size={20} aria-label="Verified by recorded feature evidence" /> : <FlaskConical className="shrink-0 text-discord-text-muted" size={20} aria-label="Verified feature evidence required" />}</div>{dependencies.length > 0 && <p className="mt-3 flex items-start gap-2 text-xs text-discord-warning"><LockKeyhole size={14} className="mt-0.5 shrink-0" aria-hidden="true" />Blocked by {dependencies.map((id) => ADOPTION_TRACKS.find((candidate) => candidate.id === id)?.label ?? id).join(', ')}</p>}<div className="mt-4 flex flex-wrap items-center gap-2"><Link href={track.href} className="inline-flex min-h-11 items-center rounded-input bg-discord-bg-elevated px-3 text-sm font-medium text-discord-text-primary hover:bg-discord-bg-hover">Configure</Link><Link href={track.testHref} className="inline-flex min-h-11 items-center rounded-input bg-discord-bg-elevated px-3 text-sm font-medium text-discord-text-primary hover:bg-discord-bg-hover">Open test</Link><label className="text-xs text-discord-text-muted">State<select disabled={!canManage} value={trackState} onChange={(event) => { const nextState = adoptionTrackStateSchema.safeParse(event.target.value); if (nextState.success) setState({ ...state, trackStates: { ...state.trackStates, [track.id]: nextState.data } }); }} className="ml-2 min-h-11 rounded-input border border-discord-border-strong bg-discord-bg-elevated px-3 text-sm text-discord-text-primary"><option value="not_started">Not started</option><option value="in_progress">In progress</option><option value="ready">Ready to test</option><option value="paused">Paused</option><option value="active" disabled={!verified || dependencies.length > 0}>Active</option>{!track.required && <option value="skipped">Skipped</option>}</select></label>{trackState === 'paused' && <CirclePause size={18} className="text-discord-warning" aria-label="Paused" />}</div><p className="mt-2 text-xs text-discord-text-muted">Current state: {STATE_LABEL[trackState]}{verified ? ' · Verified by recorded feature evidence' : ' · no valid feature evidence recorded'}</p><AdoptionVerificationControl verification={verifications.find((item) => item.trackId === track.id)} pending={checking} canManage={canManage && !saving} onCheck={() => { void checkEvidence(track.id); }} /></article>;
       })}</div>
 
-      <div className="mt-5 flex flex-wrap items-center justify-between gap-3"><p role="status" aria-live="polite" className="text-sm text-discord-text-secondary">{message ?? (canManage ? 'Changes remain draft until saved.' : 'Only the server owner can change this map.')}</p>{canManage && <button type="button" disabled={saving} onClick={save} className="min-h-11 rounded-input bg-discord-accent px-5 text-sm font-semibold text-white hover:bg-discord-accent-hover disabled:opacity-60">{saving ? 'Saving…' : 'Save adoption map'}</button>}</div>
+      <div className="mt-5 flex flex-wrap items-center justify-between gap-3"><p role="status" aria-live="polite" className="text-sm text-discord-text-secondary">{message ?? (canManage ? 'Changes remain draft until saved.' : 'Only the server owner can change this map.')}</p>{canManage && <button type="button" disabled={saving || checking} onClick={save} className="min-h-11 rounded-input bg-discord-accent px-5 text-sm font-semibold text-white hover:bg-discord-accent-hover disabled:opacity-60">{saving ? 'Saving…' : 'Save adoption map'}</button>}</div>
     </section>
   );
 }

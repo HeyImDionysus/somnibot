@@ -14,9 +14,7 @@ import { buildSavedProductLicensingSdkBundle } from '@/lib/store/licensing-sdk-b
 import {
   buildSdkContractIdentity,
   classifySdkIntegrationDrift,
-  createSdkIntegrationReceipt,
   mergeSdkIntegrationReceiptMetadata,
-  readSdkIntegrationReceiptMetadata,
   resolveSdkDeploymentOrigin,
   type SdkContractIdentity,
   type SdkIntegrationReceipt,
@@ -26,6 +24,8 @@ import {
   sdkVerificationAttestationSchema,
   verifySdkVerificationAttestation,
 } from '@/lib/store/licensing-sdk-verification';
+import { createVerifiedSdkIntegrationReceipt, readVerifiedSdkIntegrationReceiptMetadata } from '@/lib/store/sdk-integration-provenance';
+import { SDK_ATTESTATION_METADATA_KEY } from '@/lib/store/sdk-integration-receipt';
 
 const requestSchema = z.object({ verification: sdkVerificationAttestationSchema }).strict();
 
@@ -140,7 +140,7 @@ export async function GET(
       { status: 422 },
     );
   }
-  const receipt = readSdkIntegrationReceiptMetadata(context.product.metadata);
+  const receipt = await readVerifiedSdkIntegrationReceiptMetadata(context.product.metadata);
   return NextResponse.json({ success: true, data: identityResponse(context.identity, receipt) });
 }
 
@@ -210,28 +210,15 @@ export async function PUT(
       { status: 409 },
     );
   }
-  const allCriteriaPassed = verification.criteria.every(({ verdict }) => verdict === 'pass');
-  const conformanceResult = allCriteriaPassed
-    && verification.remainingUnverifiedRequirements.length === 0
-    ? 'passed' as const
-    : 'unverified' as const;
-  const receipt = createSdkIntegrationReceipt(context.identity, verification.issuedAt, {
-    verificationId: verification.verificationId,
-    issuedBy: 'somnibot-server',
-    targetProjectVersion: verification.targetProjectVersion,
-    targetProjectCommit: verification.targetProjectCommit,
-    verificationEnvironment: verification.verificationEnvironment,
-    capabilitiesExercised: verification.capabilitiesExercised,
-    remainingUnverifiedRequirements: verification.remainingUnverifiedRequirements,
-    integrityResult: 'passed',
-    authenticityResult: 'passed',
-    conformanceResult,
-  });
+  const receipt = createVerifiedSdkIntegrationReceipt(verification);
   const updatedAt = new Date().toISOString();
   const { data: updated, error } = await context.supabase
     .from('products')
     .update({
-      metadata: mergeSdkIntegrationReceiptMetadata(context.product.metadata, receipt),
+      metadata: {
+        ...mergeSdkIntegrationReceiptMetadata(context.product.metadata, receipt),
+        [SDK_ATTESTATION_METADATA_KEY]: verification,
+      },
       updated_at: updatedAt,
     })
     .eq('id', productId)

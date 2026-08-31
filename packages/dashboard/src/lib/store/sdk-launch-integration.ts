@@ -1,11 +1,12 @@
 import { readCompletedProjectLicensingMetadata, savedLicensingProductSchema, savedProductToLicensingDraft, savedProductToPolicyIdentityInput } from './licensing-handoff';
 import { buildSavedProductLicensingSdkBundle } from './licensing-sdk-bundle';
-import { buildSdkContractIdentity, classifySdkIntegrationDrift, readSdkIntegrationReceiptMetadata } from './sdk-contract-identity';
+import { buildSdkContractIdentity, classifySdkIntegrationDrift } from './sdk-contract-identity';
+import { readVerifiedSdkIntegrationReceiptMetadata } from './sdk-integration-provenance';
 
 export async function verifyLaunchSdkIntegration(savedProduct: unknown, deploymentOrigin: string | null): Promise<boolean> {
   if (!deploymentOrigin) return false;
   const product = savedLicensingProductSchema.parse(savedProduct);
-  const receipt = readSdkIntegrationReceiptMetadata(product.metadata);
+  const receipt = await readVerifiedSdkIntegrationReceiptMetadata(product.metadata);
   if (!receipt) return false;
   const apiBase = `${deploymentOrigin}/api`;
   const draft = await savedProductToLicensingDraft(product, apiBase);

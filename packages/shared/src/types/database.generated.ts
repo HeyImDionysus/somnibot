@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 312 migration files in packages/supabase/migrations/
+ * Source: 317 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -2045,6 +2045,8 @@ export interface DbCommerceRoleDeliveryIntents {
   cleanup_mutation_started_at: string | null;
   last_error: string | null;
   outward_generation_id: string | null;
+  completed_channel_ids: string[];
+  channel_delivery_confirmed_at: string | null;
 }
 
 export interface DbCommerceRoleMetadataMigrationIssues {
@@ -2146,6 +2148,13 @@ export interface DbConfigurationReleases {
   created_at: string;
 }
 
+export interface DbDashboardAdoptionConfigEpochs {
+  guild_id: string;
+  track_id: 'core' | 'structure' | 'moderation' | 'welcome' | 'community' | 'economy' | 'games' | 'music' | 'automation' | 'store' | 'licensing' | 'staff' | 'recovery';
+  revision: number;
+  changed_at: string;
+}
+
 export interface DbDashboardAdoptionMaps {
   guild_id: string;
   mode: 'guided' | 'expert';
@@ -2167,6 +2176,7 @@ export interface DbDashboardAdoptionVerifications {
   operation_id: string | null;
   verified_at: string;
   expires_at: string | null;
+  check_sequence: number | null;
 }
 
 export interface DbDiscordOperationOccurrences {

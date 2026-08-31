@@ -31,7 +31,8 @@ export const ADOPTION_TRACKS: readonly AdoptionTrack[] = [
   { id: 'moderation', label: 'Moderation', description: 'Configure rules, staff actions, appeals, and audit behavior.', href: '/moderation', testHref: '/moderation/rules', required: false, dependencies: ['core'] },
   { id: 'welcome', label: 'Welcome and onboarding', description: 'Choose member entry, welcome, and returning-member behavior.', href: '/onboarding', testHref: '/welcome', required: false, dependencies: ['core'] },
   { id: 'community', label: 'Community features', description: 'Enable levels, reaction roles, giveaways, and scheduled content.', href: '/levels', testHref: '/giveaways', required: false, dependencies: ['core'] },
-  { id: 'economy', label: 'Coin economy', description: 'Connect progression, rewards, shops, crafting, and games.', href: '/economy', testHref: '/economy/analytics', required: false, dependencies: ['core'] },
+  { id: 'economy', label: 'Coin economy', description: 'Connect progression, rewards, shops, and crafting.', href: '/economy', testHref: '/economy/analytics', required: false, dependencies: ['core'] },
+  { id: 'games', label: 'Mini-games and lottery', description: 'Configure mini-games and lottery controls, then confirm their authoritative settings readback.', href: '/economy/games', testHref: '/economy/games', required: false, dependencies: ['core'] },
   { id: 'music', label: 'Music', description: 'Verify voice permissions, playback, queue control, and recovery.', href: '/music', testHref: '/music', required: false, dependencies: ['core'] },
   { id: 'automation', label: 'Automation', description: 'Build triggers and actions with conflict and recursion safety.', href: '/automations', testHref: '/workflows', required: false, dependencies: ['core'] },
   { id: 'store', label: 'Store and PayPal', description: 'Prepare product policy, sandbox payment, fulfillment, and reversal.', href: '/store', testHref: '/store/orders', required: false, dependencies: ['core'] },
@@ -80,7 +81,7 @@ export function withVerifiedTracks(
   return normalizeAdoptionMapState({ ...desired, verifiedTrackIds });
 }
 
-export function adoptionStateErrors(state: AdoptionMapState): readonly string[] {
+export function adoptionStateErrors(state: AdoptionMapState, previous?: AdoptionMapState): readonly string[] {
   const selectedIds = new Set(state.selectedTrackIds);
   const verifiedIds = new Set(state.verifiedTrackIds);
   const knownIds = new Set(ADOPTION_TRACKS.map((track) => track.id));
@@ -94,7 +95,7 @@ export function adoptionStateErrors(state: AdoptionMapState): readonly string[] 
     const trackState = state.trackStates[track.id] ?? 'not_started';
     if (track.required && !selectedIds.has(track.id)) errors.push(`${track.id}:required`);
     if (track.required && trackState === 'skipped') errors.push(`${track.id}:cannot_skip`);
-    if (trackState === 'active' && !verifiedIds.has(track.id)) errors.push(`${track.id}:verification_required`);
+    if (trackState === 'active' && previous?.trackStates[track.id] !== 'active' && !verifiedIds.has(track.id)) errors.push(`${track.id}:verification_required`);
     if (trackState === 'active') {
       for (const dependencyId of track.dependencies) {
         if (state.trackStates[dependencyId] !== 'active') errors.push(`${track.id}:dependency:${dependencyId}`);

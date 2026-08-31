@@ -78,6 +78,18 @@ export const sdkIntegrationReceiptSchema = z.union([
 export type SdkIntegrationReceipt = z.infer<typeof sdkIntegrationReceiptSchema>;
 
 export const SDK_RECEIPT_METADATA_KEY = 'somnibot_sdk_integration_receipt';
+export const SDK_ATTESTATION_METADATA_KEY = 'somnibot_sdk_integration_attestation';
+export const SDK_PROVENANCE_METADATA_KEYS = [SDK_RECEIPT_METADATA_KEY, SDK_ATTESTATION_METADATA_KEY] as const;
+
+export function preserveSdkProvenanceMetadata(
+  current: Readonly<Record<string, unknown>>,
+  replacement: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const preserved = Object.fromEntries(SDK_PROVENANCE_METADATA_KEYS
+    .filter((key) => Object.prototype.hasOwnProperty.call(current, key))
+    .map((key) => [key, current[key]]));
+  return { ...replacement, ...preserved };
+}
 
 type ReceiptProvenance = Pick<SdkIntegrationReceipt,
   | 'verificationId' | 'issuedBy' | 'targetProjectVersion' | 'targetProjectCommit' | 'verificationEnvironment'

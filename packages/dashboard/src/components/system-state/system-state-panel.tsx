@@ -57,6 +57,16 @@ export function SystemStatePanel() {
     ['Database backup', state.backups.database.status],
     ['Valkey backup', state.backups.valkey.status],
   ];
+  const recoveryDetails: ReadonlyArray<readonly [string, string]> = [
+    ['Database captured', valueOrUnknown(state.backups.database.capturedAt)],
+    ['Database SHA-256', valueOrUnknown(state.backups.database.checksumSha256)],
+    ['Database restore rehearsal', valueOrUnknown(state.backups.database.lastRestoreRehearsalAt)],
+    ['Valkey captured', valueOrUnknown(state.backups.valkey.capturedAt)],
+    ['Valkey SHA-256', valueOrUnknown(state.backups.valkey.checksumSha256)],
+    ['Valkey restore rehearsal', valueOrUnknown(state.backups.valkey.lastRestoreRehearsalAt)],
+    ['Recovery point objective (minutes)', valueOrUnknown(state.recovery.recoveryPointObjectiveMinutes)],
+    ['Recovery time objective (minutes)', valueOrUnknown(state.recovery.recoveryTimeObjectiveMinutes)],
+  ];
 
   return (
     <section aria-labelledby="deployment-state-title" className="rounded-card bg-discord-bg-elevated p-5">
@@ -77,6 +87,26 @@ export function SystemStatePanel() {
           </div>
         ))}
       </dl>
+      <details className="mt-5 rounded-input bg-discord-bg-secondary p-3">
+        <summary className="cursor-pointer text-sm font-medium text-discord-text-primary">
+          Backup and recovery evidence — {state.recovery.status}
+        </summary>
+        <dl className="mt-4 grid gap-4 sm:grid-cols-2">
+          {recoveryDetails.map(([label, value]) => (
+            <div key={label} className="min-w-0">
+              <dt className="text-xs text-discord-text-muted">{label}</dt>
+              <dd className="mt-1 break-words font-mono text-sm text-discord-text-secondary">{value}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-4 text-sm text-discord-text-muted">
+          Backups must be less than 24 hours old.{' '}
+          {state.recovery.rehearsalScope === 'database'
+            ? 'The verified rehearsal covers the database only; it does not prove a Valkey restore or restore Storage object files.'
+            : 'Missing restore evidence or recovery objectives remain unknown.'}
+          {' '}Create backups and run isolated recovery rehearsals in Launcher.
+        </p>
+      </details>
       {!healthy && (
         <p className="mt-4 text-sm text-yellow-300">Review provider health, backup evidence, and recovery readiness below before upgrading or changing deployment state.</p>
       )}

@@ -1,8 +1,12 @@
+import { selectDeploymentProfile } from '@somnibot/shared';
+import { SOMNIBOT_VERSION } from '../version.js';
+
 type RuntimeStateInput = {
   readonly bootId: string;
   readonly observedAt: string;
   readonly discordReady: boolean;
   readonly guildIds: readonly string[];
+  readonly migrationHead?: string | null;
 };
 
 function exactSha(): string | null {
@@ -15,6 +19,10 @@ function configurationGeneration(): number | null {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+function migrationHead(value: string | null | undefined): string | null {
+  return value && value.length <= 255 && /^\d{14}_[a-z0-9_]+\.sql$/.test(value) ? value : null;
+}
+
 export function buildBotRuntimeSystemState(input: RuntimeStateInput) {
   const lifecycle = input.discordReady ? 'ready' : 'degraded';
   return {
@@ -23,10 +31,10 @@ export function buildBotRuntimeSystemState(input: RuntimeStateInput) {
     mode: input.discordReady ? 'normal' : 'degraded',
     identity: {
       lifecycle,
-      version: process.env.SOMNIBOT_VERSION ?? process.env.npm_package_version ?? 'unknown',
+      version: SOMNIBOT_VERSION,
       exactSha: exactSha(),
       bootId: input.bootId,
-      migrationHead: process.env.SOMNIBOT_MIGRATION_HEAD?.trim() || null,
+      migrationHead: migrationHead(input.migrationHead === undefined ? process.env.SOMNIBOT_MIGRATION_HEAD : input.migrationHead),
       configurationGeneration: configurationGeneration(),
       deploymentProfile: selectDeploymentProfile(
         process.env.SOMNIBOT_RUNTIME_MODE === 'vps' ? 'vps' : 'local',
@@ -46,4 +54,3 @@ export function buildBotRuntimeSystemState(input: RuntimeStateInput) {
     })),
   };
 }
-import { selectDeploymentProfile } from '@somnibot/shared';

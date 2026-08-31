@@ -33,6 +33,7 @@ describe('system state contract', () => {
       backups: { database: currentBackup, valkey: currentBackup },
       recovery: {
         status: 'ready',
+        rehearsalScope: 'database',
         lastRehearsalAt: '2026-08-22T04:00:00.000Z',
         recoveryPointObjectiveMinutes: 60,
         recoveryTimeObjectiveMinutes: 30,
@@ -52,6 +53,7 @@ describe('system state contract', () => {
     });
 
     expect(state.identity.exactSha).toBe('b'.repeat(40));
+    expect(state.recovery.rehearsalScope).toBe('database');
     expect(JSON.stringify(state)).not.toContain('token');
     expect(JSON.stringify(state)).not.toContain('secret');
   });
