@@ -99,6 +99,17 @@ export function buildDashboardSystemState(input: DashboardSystemStateInput): Sys
   const valkeyBackup = backupState(input.evidence, 'launcher.backup.valkey_succeeded', rehearsalAt);
   const dependenciesReady = input.valkeyConnected && input.supabaseConnected;
   const mode = runtime?.mode === 'normal' && dependenciesReady ? 'normal' : 'degraded';
+  const selectedGuildConditions = runtime?.guildConditions.filter(
+    (condition) => condition.guildId === input.guildId,
+  );
+  const hasSelectedGuildCondition = selectedGuildConditions?.length === 1;
+  const fallbackGuildCondition: SystemState['guildConditions'][number] = {
+    guildId: input.guildId,
+    status: hasSelectedGuildCondition || runtime !== null || dependenciesReady ? 'unknown' : 'degraded',
+    conditions: hasSelectedGuildCondition || runtime !== null || dependenciesReady
+      ? ['Bot runtime state has not been observed']
+      : ['Required runtime provider is unavailable'],
+  };
 
   return SystemStateSchema.parse({
     schemaVersion: 1,
@@ -141,10 +152,6 @@ export function buildDashboardSystemState(input: DashboardSystemStateInput): Sys
       evidenceRef: rehearsal ? `audit:${rehearsal.action}:${rehearsal.timestamp}` : null,
     },
     credentials: input.credentials.map((credential) => credentialMetadata(credential, input.observedAt)),
-    guildConditions: runtime?.guildConditions ?? [{
-      guildId: input.guildId,
-      status: dependenciesReady ? 'unknown' : 'degraded',
-      conditions: dependenciesReady ? ['Bot runtime state has not been observed'] : ['Required runtime provider is unavailable'],
-    }],
+    guildConditions: hasSelectedGuildCondition ? selectedGuildConditions : [fallbackGuildCondition],
   });
 }

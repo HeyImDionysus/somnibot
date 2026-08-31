@@ -1,5 +1,22 @@
 import type { LaunchStageKey, LaunchStageState } from './commerce-operations';
 
+function proofTimestampMicros(value: string): bigint | null {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return null;
+  const fraction = value.match(/\.(\d+)/)?.[1] ?? '';
+  return BigInt(milliseconds) * BigInt(1000) + BigInt(fraction.padEnd(6, '0').slice(3, 6));
+}
+
+export function launchProofAtOrAfter(value: string | null, cutoff: string): boolean {
+  const timestamp = value === null ? null : proofTimestampMicros(value);
+  const boundary = proofTimestampMicros(cutoff);
+  return timestamp !== null && boundary !== null && timestamp >= boundary;
+}
+
+export function latestLaunchProofTimestamp(values: readonly [string, ...string[]]): string {
+  return values.reduce((latest, value) => launchProofAtOrAfter(value, latest) ? value : latest);
+}
+
 type ProductEvidence = {
   readonly id: string;
   readonly active: boolean;
@@ -15,6 +32,7 @@ type LaunchEvidenceInput = {
   readonly orders: readonly {
     readonly id: string; readonly productId: string; readonly status: string;
     readonly paypalOrderId: string | null;
+    readonly paypalSubscriptionId: string | null;
   }[];
   readonly freeClaims: readonly {
     readonly id: string; readonly orderId: string; readonly productId: string;
@@ -26,12 +44,14 @@ type LaunchEvidenceInput = {
   readonly webhooks: readonly {
     readonly eventId: string; readonly eventType: string; readonly result: 'success' | 'duplicate';
     readonly resourceId: string | null; readonly relatedOrderId: string | null;
+    readonly billingAgreementId?: string | null;
   }[];
   readonly entitlements: readonly {
     readonly id: string; readonly orderId: string; readonly productId: string; readonly status: string;
   }[];
   readonly fulfillments: readonly {
     readonly id: string; readonly orderId: string; readonly kind: 'license' | 'download' | 'access';
+    readonly deliveryState?: string; readonly sentAt?: string | null;
   }[];
   readonly refunds: readonly {
     readonly id: string; readonly orderId: string; readonly paymentId: string;
@@ -67,6 +87,10 @@ export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
   readonly witness: LaunchWitness;
 } {
   const productOrders = input.orders.filter((order) => order.productId === input.product.id);
+  const deliveredFulfillments = input.fulfillments.filter((fulfillment) =>
+    (input.product.deliveryType !== 'license_key' || fulfillment.kind === 'license')
+    && (input.product.deliveryType !== 'access_pass' || fulfillment.kind === 'access')
+    && (fulfillment.kind === 'download' || (fulfillment.deliveryState === 'sent' && Boolean(fulfillment.sentAt))));
   const baseStages = {
     product: stage(!input.product.active),
     policy: stage(input.product.policyConfigured),
@@ -85,7 +109,7 @@ export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
         && candidate.productId === input.product.id && candidate.status === 'active')
       : undefined;
     const fulfillment = orderId
-      ? input.fulfillments.find((candidate) => candidate.orderId === orderId)
+      ? deliveredFulfillments.find((candidate) => candidate.orderId === orderId)
       : undefined;
     return {
       stages: {
@@ -102,24 +126,27 @@ export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
 
   const payment = input.payments.find((candidate) => {
     const order = productOrders.find((productOrder) => productOrder.id === candidate.orderId);
-    if (!order || !order.paypalOrderId || !candidate.paypalPaymentId || !candidate.paypalEventId) return false;
+    if (!order || !candidate.paypalPaymentId || !candidate.paypalEventId) return false;
+    if (!(input.product.type === 'subscription' ? order.paypalSubscriptionId : order.paypalOrderId)) return false;
     return ['completed', 'refunded', 'reversed'].includes(candidate.status);
   });
   const order = payment ? productOrders.find((candidate) => candidate.id === payment.orderId) : undefined;
   const paymentWebhook = payment && order
     ? input.webhooks.find((candidate) => (
         candidate.eventId === payment.paypalEventId
-        && ['PAYMENT.CAPTURE.COMPLETED', 'PAYMENT.SALE.COMPLETED'].includes(candidate.eventType)
         && candidate.resourceId === payment.paypalPaymentId
-        && (candidate.eventType === 'PAYMENT.SALE.COMPLETED'
-          || (order.paypalOrderId !== null && candidate.relatedOrderId === order.paypalOrderId))
+        && (input.product.type === 'subscription'
+          ? candidate.eventType === 'PAYMENT.SALE.COMPLETED'
+            && candidate.billingAgreementId === order.paypalSubscriptionId
+          : candidate.eventType === 'PAYMENT.CAPTURE.COMPLETED'
+            && candidate.relatedOrderId === order.paypalOrderId)
       ))
     : undefined;
   const entitlement = order
     ? input.entitlements.find((candidate) => candidate.orderId === order.id && candidate.productId === input.product.id)
     : undefined;
   const fulfillment = order
-    ? input.fulfillments.find((candidate) => candidate.orderId === order.id)
+    ? deliveredFulfillments.find((candidate) => candidate.orderId === order.id)
     : undefined;
   const refund = payment
     ? input.refunds.find((candidate) => candidate.orderId === payment.orderId && candidate.paymentId === payment.id)

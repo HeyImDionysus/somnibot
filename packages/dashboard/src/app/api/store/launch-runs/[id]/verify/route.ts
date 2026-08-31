@@ -6,8 +6,9 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { dbError } from '@/lib/api/response';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { evaluateLaunchRun, type LaunchStageKey, type LaunchStageState } from '@/lib/store/commerce-operations';
-import { evaluateCommerceLaunchEvidence } from '@/lib/store/commerce-launch-evidence';
-import { readSdkIntegrationReceiptMetadata } from '@/lib/store/sdk-contract-identity';
+import { evaluateCommerceLaunchEvidence, latestLaunchProofTimestamp, launchProofAtOrAfter } from '@/lib/store/commerce-launch-evidence';
+import { readSdkIntegrationReceiptMetadata, resolveSdkDeploymentOrigin, SDK_RECEIPT_METADATA_KEY } from '@/lib/store/sdk-contract-identity';
+import { verifyLaunchSdkIntegration } from '@/lib/store/sdk-launch-integration';
 import { loadPayPalPolicy } from '@/lib/paypal-policy';
 
 const runSchema = z.object({
@@ -24,8 +25,10 @@ const productSchema = z.object({
   type: z.enum(['one_time', 'subscription', 'free']),
   delivery_type: z.string(),
   price_cents: z.number().int().nonnegative(),
+  granted_role_ids: z.array(z.string()).default([]),
+  granted_channel_ids: z.array(z.string()).default([]),
   metadata: z.record(z.unknown()).nullable().transform((metadata) => metadata ?? {}),
-  updated_at: z.string(),
+  updated_at: z.string().datetime({ offset: true }),
 });
 
 const webhookSchema = z.object({
@@ -35,6 +38,7 @@ const webhookSchema = z.object({
   payload: z.object({
     resource: z.object({
       id: z.string().optional(),
+      billing_agreement_id: z.string().optional(),
       supplementary_data: z.object({
         related_ids: z.object({ order_id: z.string().optional() }).optional(),
       }).optional(),
@@ -63,9 +67,9 @@ export async function POST(
   const run = runSchema.safeParse(runData);
   if (!run.success) return runData ? NextResponse.json({ error: 'Launch run is malformed' }, { status: 503 }) : NextResponse.json({ error: 'Launch run not found' }, { status: 404 });
   const [productResult, policyResult, filesResult, checkoutIntentsResult, freeClaimsResult] = await Promise.all([
-    admin.from('products').select('id, active, type, delivery_type, price_cents, metadata, updated_at').eq('id', run.data.product_id).eq('guild_id', auth.ctx.guildId).maybeSingle(),
-    admin.from('product_license_config').select('product_id, updated_at').eq('product_id', run.data.product_id).maybeSingle(),
-    admin.from('product_files').select('id').eq('product_id', run.data.product_id).limit(100),
+    admin.from('products').select('*, plans(*), product_files(*)').eq('id', run.data.product_id).eq('guild_id', auth.ctx.guildId).maybeSingle(),
+    admin.from('product_license_config').select('*').eq('product_id', run.data.product_id).maybeSingle(),
+    admin.from('product_files').select('*').eq('product_id', run.data.product_id).limit(100),
     admin.from('commerce_checkout_intents').select('token, order_id, product_id, created_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).eq('launch_run_id', run.data.id).gte('created_at', run.data.verification_started_at).limit(500),
     admin.from('commerce_free_claims').select('request_id, order_id, product_id, created_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).eq('launch_run_id', run.data.id).gte('created_at', run.data.verification_started_at).limit(500),
   ]);
@@ -74,7 +78,11 @@ export async function POST(
   }
   const product = productSchema.safeParse(productResult.data);
   if (!product.success) return NextResponse.json({ error: 'Product verification data is malformed' }, { status: 503 });
-  const policy = z.object({ product_id: z.string().uuid(), updated_at: z.string() }).nullable().safeParse(policyResult.data);
+  const dynamic = product.data.delivery_type === 'license_key';
+  const accessPass = product.data.delivery_type === 'access_pass';
+  const files = z.array(z.object({ id: z.string().uuid(), created_at: z.string().datetime({ offset: true }) })).safeParse(filesResult.data ?? []);
+  if (!files.success) return NextResponse.json({ error: 'Product file verification data is malformed' }, { status: 503 });
+  const policy = z.object({ product_id: z.string().uuid(), updated_at: z.string().datetime({ offset: true }) }).nullable().safeParse(policyResult.data);
   const checkoutIntents = z.array(z.object({
     token: z.string().uuid(), order_id: z.string().uuid().nullable(), product_id: z.string().uuid(), created_at: z.string(),
   })).safeParse(checkoutIntentsResult.data ?? []);
@@ -84,30 +92,37 @@ export async function POST(
   if (!policy.success || !checkoutIntents.success || !freeClaims.success) {
     return NextResponse.json({ error: 'Launch identity evidence is malformed' }, { status: 503 });
   }
+  const policyRevision = dynamic ? policy.data?.updated_at ?? null : null;
+  const proofAfter = latestLaunchProofTimestamp([run.data.verification_started_at, product.data.updated_at, ...(policyRevision ? [policyRevision] : []), ...files.data.map((file) => file.created_at)]);
+  const currentIntents = checkoutIntents.data.filter((intent) => launchProofAtOrAfter(intent.created_at, proofAfter));
+  const currentClaims = freeClaims.data.filter((claim) => launchProofAtOrAfter(claim.created_at, proofAfter));
   const orderIds = [...new Set([
-    ...checkoutIntents.data.flatMap((intent) => intent.order_id ? [intent.order_id] : []),
-    ...freeClaims.data.map((claim) => claim.order_id),
+    ...currentIntents.flatMap((intent) => intent.order_id ? [intent.order_id] : []),
+    ...currentClaims.map((claim) => claim.order_id),
   ])];
   const ordersResult = orderIds.length
-    ? await admin.from('orders').select('id, product_id, status, paypal_order_id, updated_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).in('id', orderIds).gte('created_at', run.data.verification_started_at).limit(500)
+    ? await admin.from('orders').select('id, product_id, status, paypal_order_id, paypal_subscription_id, created_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).in('id', orderIds).gte('created_at', proofAfter).limit(500)
     : { data: [], error: null };
   if (ordersResult.error) return dbError(ordersResult.error, 'store/launch-runs/verify/orders');
   const orders = z.array(z.object({
     id: z.string().uuid(), product_id: z.string().uuid(), status: z.string(),
-    paypal_order_id: z.string().nullable(), updated_at: z.string(),
+    paypal_order_id: z.string().nullable(), paypal_subscription_id: z.string().nullable(), created_at: z.string().datetime({ offset: true }),
   })).safeParse(ordersResult.data ?? []);
   if (!orders.success) return NextResponse.json({ error: 'Order verification data is malformed' }, { status: 503 });
-  const verifiedOrderIds = orders.data.map((order) => order.id);
+  const currentOrders = orders.data.filter((order) => orderIds.includes(order.id) && launchProofAtOrAfter(order.created_at, proofAfter));
+  const verifiedOrderIds = currentOrders.map((order) => order.id);
   const emptyResult = Promise.resolve({ data: [], error: null });
-  const [paymentsResult, entitlementsResult, keysResult, downloadsResult, refundsResult, cancellationsResult] = await Promise.all([
+  const [paymentsResult, entitlementsResult, keysResult, downloadsResult, refundsResult, cancellationsResult, outwardResult, rolesResult] = await Promise.all([
     verifiedOrderIds.length ? admin.from('payments').select('id, order_id, status, paypal_payment_id, paypal_event_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('entitlements').select('id, order_id, product_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('license_keys').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
-    verifiedOrderIds.length ? admin.from('commerce_download_deliveries').select('id, order_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    verifiedOrderIds.length ? admin.from('commerce_download_deliveries').select('id, order_id, product_id, file_id, delivered_at').eq('guild_id', auth.ctx.guildId).eq('product_id', product.data.id).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('payment_refunds').select('id, order_id, payment_id, paypal_refund_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('portal_cancellation_operations').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).eq('status', 'completed').limit(1000) : emptyResult,
+    verifiedOrderIds.length ? admin.from('commerce_fulfillment_outward_intents').select('id, order_id, intent_kind, state, sent_at, outward_generation_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).eq('intent_kind', 'receipt_dm').limit(1000) : emptyResult,
+    accessPass && verifiedOrderIds.length ? admin.from('commerce_role_delivery_intents').select('id, order_id, product_id, entitlement_id, permanent_role_ids, completed_role_ids, delivery_confirmed_at, state, outward_generation_id').eq('guild_id', auth.ctx.guildId).eq('product_id', product.data.id).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
   ]);
-  for (const [name, result] of [['payments', paymentsResult], ['entitlements', entitlementsResult], ['keys', keysResult], ['downloads', downloadsResult], ['refunds', refundsResult], ['cancellations', cancellationsResult]] as const) {
+  for (const [name, result] of [['payments', paymentsResult], ['entitlements', entitlementsResult], ['keys', keysResult], ['downloads', downloadsResult], ['refunds', refundsResult], ['cancellations', cancellationsResult], ['outward', outwardResult], ['roles', rolesResult]] as const) {
     if (result.error) return dbError(result.error, `store/launch-runs/verify/${name}`);
   }
   const payments = z.array(z.object({
@@ -116,17 +131,28 @@ export async function POST(
   })).safeParse(paymentsResult.data ?? []);
   const entitlements = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), product_id: z.string().uuid(), status: z.string() })).safeParse(entitlementsResult.data ?? []);
   const keys = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), status: z.string() })).safeParse(keysResult.data ?? []);
-  const downloads = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid().nullable() })).safeParse(downloadsResult.data ?? []);
+  const downloads = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid().nullable(), product_id: z.string().uuid(), file_id: z.string().uuid().nullable(), delivered_at: z.string().datetime({ offset: true }) })).safeParse(downloadsResult.data ?? []);
   const refunds = z.array(z.object({
     id: z.string().uuid(), order_id: z.string().uuid(), payment_id: z.string().uuid(), paypal_refund_id: z.string(),
   })).safeParse(refundsResult.data ?? []);
   const cancellations = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), status: z.literal('completed') })).safeParse(cancellationsResult.data ?? []);
-  if (!payments.success || !entitlements.success || !keys.success || !downloads.success || !refunds.success || !cancellations.success) {
+  const outward = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), intent_kind: z.string(), state: z.string(), sent_at: z.string().datetime({ offset: true }).nullable(), outward_generation_id: z.string().uuid().nullable().default(null) })).safeParse(outwardResult.data ?? []);
+  const roles = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), product_id: z.string().uuid(), entitlement_id: z.string().uuid(), permanent_role_ids: z.array(z.string()), completed_role_ids: z.array(z.string()), delivery_confirmed_at: z.string().datetime({ offset: true }).nullable(), state: z.string(), outward_generation_id: z.string().uuid().nullable() })).safeParse(rolesResult.data ?? []);
+  if (!payments.success || !entitlements.success || !keys.success || !downloads.success || !refunds.success || !cancellations.success || !outward.success || !roles.success) {
     return NextResponse.json({ error: 'Launch evidence is malformed' }, { status: 503 });
   }
   const paypalPolicy = await loadPayPalPolicy(admin, auth.ctx.guildId);
-  const receipt = readSdkIntegrationReceiptMetadata(product.data.metadata);
-  const dynamic = product.data.delivery_type === 'license_key';
+  const policyConfigured = dynamic ? policy.data !== null : accessPass
+    ? product.data.granted_role_ids.length + product.data.granted_channel_ids.length > 0 : files.data.length > 0;
+  let integrationVerified = policyConfigured;
+  if (dynamic || 'completed_project_licensing' in product.data.metadata || SDK_RECEIPT_METADATA_KEY in product.data.metadata) {
+    try {
+      integrationVerified = policyConfigured && await verifyLaunchSdkIntegration({ ...productResult.data, product_files: filesResult.data, product_license_config: dynamic ? policyResult.data : null }, resolveSdkDeploymentOrigin(process.env));
+    } catch (error) {
+      console.error('[store/launch-runs/verify] SDK contract generation failed:', error instanceof Error ? error.message : 'unknown error');
+      return NextResponse.json({ error: 'Saved licensing policy could not produce an SDK contract' }, { status: 503 });
+    }
+  }
   const { data: webhookData, error: webhookError } = await admin
     .from('webhook_events')
     .select('event_id, event_type, result, payload')
@@ -149,22 +175,30 @@ export async function POST(
       type: product.data.type,
       deliveryType: product.data.delivery_type,
       priceCents: product.data.price_cents,
-      policyConfigured: dynamic ? policyResult.data !== null : (filesResult.data?.length ?? 0) > 0,
-      integrationVerified: dynamic ? receipt?.conformanceResult === 'passed' : (filesResult.data?.length ?? 0) > 0,
+      policyConfigured,
+      integrationVerified,
     },
-    orders: orders.data.map((order) => ({ id: order.id, productId: order.product_id, status: order.status, paypalOrderId: order.paypal_order_id })),
-    freeClaims: freeClaims.data.map((claim) => ({ id: claim.request_id, orderId: claim.order_id, productId: claim.product_id })),
+    orders: currentOrders.map((order) => ({ id: order.id, productId: order.product_id, status: order.status, paypalOrderId: order.paypal_order_id, paypalSubscriptionId: order.paypal_subscription_id })),
+    freeClaims: currentClaims.map((claim) => ({ id: claim.request_id, orderId: claim.order_id, productId: claim.product_id })),
     payments: payments.data.map((payment) => ({ id: payment.id, orderId: payment.order_id, status: payment.status, paypalPaymentId: payment.paypal_payment_id, paypalEventId: payment.paypal_event_id })),
     webhooks: webhooks.data.map((webhook) => ({
       eventId: webhook.event_id, eventType: webhook.event_type, result: webhook.result,
       resourceId: webhook.payload.resource.id ?? null,
       relatedOrderId: webhook.payload.resource.supplementary_data?.related_ids?.order_id ?? null,
+      billingAgreementId: webhook.payload.resource.billing_agreement_id ?? null,
     })),
     entitlements: entitlements.data.map((entitlement) => ({ id: entitlement.id, orderId: entitlement.order_id, productId: entitlement.product_id, status: entitlement.status })),
     fulfillments: [
-      ...keys.data.map((key) => ({ id: key.id, orderId: key.order_id, kind: 'license' as const })),
-      ...downloads.data.filter((download) => download.order_id !== null).map((download) => ({ id: download.id, orderId: download.order_id ?? '', kind: 'download' as const })),
-      ...(product.data.delivery_type === 'access_pass' ? entitlements.data.map((entitlement) => ({ id: entitlement.id, orderId: entitlement.order_id, kind: 'access' as const })) : []),
+      ...outward.data.filter((delivery) => delivery.intent_kind === 'receipt_dm' && keys.data.some((key) => key.order_id === delivery.order_id))
+        .map((delivery) => ({ id: delivery.id, orderId: delivery.order_id, kind: 'license' as const, deliveryState: delivery.state, sentAt: delivery.sent_at })),
+      ...downloads.data.filter((download) => download.product_id === product.data.id && download.order_id !== null && launchProofAtOrAfter(download.delivered_at, proofAfter) && files.data.some((file) => file.id === download.file_id))
+        .map((download) => ({ id: download.id, orderId: download.order_id ?? '', kind: 'download' as const })),
+      ...roles.data.flatMap((role) => role.product_id === product.data.id && role.outward_generation_id !== null
+        && launchProofAtOrAfter(role.delivery_confirmed_at, proofAfter)
+        && product.data.granted_role_ids.every((id) => role.permanent_role_ids.includes(id) && role.completed_role_ids.includes(id))
+        && entitlements.data.some((entitlement) => entitlement.id === role.entitlement_id && entitlement.order_id === role.order_id && entitlement.product_id === role.product_id)
+        ? outward.data.filter((delivery) => delivery.order_id === role.order_id && delivery.outward_generation_id === role.outward_generation_id && delivery.intent_kind === 'receipt_dm' && launchProofAtOrAfter(delivery.sent_at, role.delivery_confirmed_at ?? proofAfter))
+          .map((delivery) => ({ id: role.id, orderId: role.order_id, kind: 'access' as const, deliveryState: delivery.state, sentAt: delivery.sent_at })) : []),
     ],
     refunds: refunds.data.map((refund) => ({ id: refund.id, orderId: refund.order_id, paymentId: refund.payment_id, paypalRefundId: refund.paypal_refund_id })),
     cancellations: cancellations.data.map((cancellation) => ({ id: cancellation.id, orderId: cancellation.order_id, status: cancellation.status })),
@@ -176,27 +210,30 @@ export async function POST(
     operation_id: run.data.operation_id,
     product_id: product.data.id,
     product_revision: product.data.updated_at,
-    policy_revision: policy.data?.updated_at ?? null,
+    policy_revision: policyRevision,
+    sdk_integration_receipt: readSdkIntegrationReceiptMetadata(product.data.metadata),
     verification_started_at: run.data.verification_started_at,
+    proof_after: proofAfter,
     environment: paypalPolicy.environment,
     order_ids: verifiedOrderIds,
     payment_ids: payments.data.map((payment) => payment.id),
     entitlement_ids: entitlements.data.map((entitlement) => entitlement.id),
     refund_ids: refunds.data.map((refund) => refund.id),
     cancellation_ids: cancellations.data.map((cancellation) => cancellation.id),
+    outward_deliveries: outward.data,
+    role_deliveries: roles.data,
+    file_ids: files.data.map((file) => file.id),
     witness: evaluated.witness,
     stages,
   };
   const hash = createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
   const evaluation = evaluateLaunchRun({ productActive: product.data.active, environment: paypalPolicy.environment, stages, receiptHash: hash });
-  const { data, error } = await admin
-    .from('commerce_product_launch_runs')
-    .update({ stages, state: evaluation.state === 'ready' ? 'ready' : 'sandbox_verifying', launch_receipt: evidence, launch_receipt_hash: hash, verified_at: evaluation.state === 'ready' ? new Date().toISOString() : null, updated_by: auth.ctx.discordId, version: run.data.version + 1, updated_at: new Date().toISOString() })
-    .eq('id', run.data.id)
-    .eq('guild_id', auth.ctx.guildId)
-    .eq('version', run.data.version)
-    .select('*')
-    .maybeSingle();
+  const { data, error } = await admin.rpc('commerce_verify_product_launch', {
+    p_guild_id: auth.ctx.guildId, p_actor_id: auth.ctx.discordId, p_launch_run_id: run.data.id,
+    p_expected_version: run.data.version, p_product_revision: product.data.updated_at,
+    p_policy_revision: policyRevision, p_stages: stages,
+    p_receipt: evidence, p_receipt_hash: hash, p_ready: evaluation.state === 'ready',
+  });
   if (error) return dbError(error, 'store/launch-runs/verify/update');
   if (!data) return NextResponse.json({ error: 'Launch run changed; reload before retrying' }, { status: 409 });
   return NextResponse.json({ success: true, data, evaluation, evidence });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateCommerceLaunchEvidence } from '@/lib/store/commerce-launch-evidence';
+import { evaluateCommerceLaunchEvidence, latestLaunchProofTimestamp, launchProofAtOrAfter } from '@/lib/store/commerce-launch-evidence';
 
 const base = {
   product: {
@@ -7,7 +7,7 @@ const base = {
     deliveryType: 'license_key', priceCents: 100,
     policyConfigured: true, integrationVerified: true,
   },
-  orders: [{ id: 'order-1', productId: 'product-1', status: 'refunded', paypalOrderId: 'ORDER-1' }],
+  orders: [{ id: 'order-1', productId: 'product-1', status: 'refunded', paypalOrderId: 'ORDER-1', paypalSubscriptionId: null }],
   freeClaims: [],
   payments: [{ id: 'payment-1', orderId: 'order-1', status: 'refunded', paypalPaymentId: 'CAPTURE-1', paypalEventId: 'EVENT-PAID' }],
   webhooks: [
@@ -15,12 +15,20 @@ const base = {
     { eventId: 'EVENT-REFUND', eventType: 'PAYMENT.CAPTURE.REFUNDED', result: 'success' as const, resourceId: 'REFUND-1', relatedOrderId: null },
   ],
   entitlements: [{ id: 'entitlement-1', orderId: 'order-1', productId: 'product-1', status: 'cancelled' }],
-  fulfillments: [{ id: 'key-1', orderId: 'order-1', kind: 'license' as const }],
+  fulfillments: [{ id: 'key-1', orderId: 'order-1', kind: 'license' as const, deliveryState: 'sent', sentAt: '2026-08-23T12:01:00Z' }],
   refunds: [{ id: 'refund-row-1', orderId: 'order-1', paymentId: 'payment-1', paypalRefundId: 'REFUND-1' }],
   cancellations: [],
 };
 
 describe('commerce launch evidence', () => {
+  it('preserves PostgreSQL microseconds while comparing equivalent timezone offsets', () => {
+    const older = '2026-08-23T08:01:00.000800-04:00';
+    const newer = '2026-08-23T12:01:00.000900Z';
+    expect(launchProofAtOrAfter(older, newer)).toBe(false);
+    expect(launchProofAtOrAfter(newer, older)).toBe(true);
+    expect(latestLaunchProofTimestamp([newer, older])).toBe(newer);
+  });
+
   it('verifies a paid launch only when one exact order links product, payment, signed webhooks, delivery, entitlement and reversal', () => {
     const result = evaluateCommerceLaunchEvidence(base);
 
@@ -49,11 +57,11 @@ describe('commerce launch evidence', () => {
   it('proves a free claim, entitlement and fulfillment without requiring PayPal evidence', () => {
     const result = evaluateCommerceLaunchEvidence({
       product: { ...base.product, type: 'free', priceCents: 0 },
-      orders: [{ id: 'free-order', productId: 'product-1', status: 'completed', paypalOrderId: null }],
+      orders: [{ id: 'free-order', productId: 'product-1', status: 'completed', paypalOrderId: null, paypalSubscriptionId: null }],
       freeClaims: [{ id: 'claim-1', orderId: 'free-order', productId: 'product-1' }],
       payments: [], webhooks: [], refunds: [], cancellations: [],
       entitlements: [{ id: 'entitlement-free', orderId: 'free-order', productId: 'product-1', status: 'active' }],
-      fulfillments: [{ id: 'license-free', orderId: 'free-order', kind: 'license' }],
+      fulfillments: [{ id: 'license-free', orderId: 'free-order', kind: 'license', deliveryState: 'sent', sentAt: '2026-08-23T12:01:00Z' }],
     });
 
     expect(result.stages.sandbox_transaction).toBe('not_applicable');
@@ -62,5 +70,65 @@ describe('commerce launch evidence', () => {
     expect(result.stages.fulfillment).toBe('verified');
     expect(result.stages.reversal).toBe('not_applicable');
     expect(result.witness.freeClaimId).toBe('claim-1');
+  });
+
+  it('verifies subscription SALE evidence with a subscription identity and no PayPal order id', () => {
+    // Given a completed subscription journey with provider-bound sale and cancellation.
+    const input = {
+      ...base, product: { ...base.product, type: 'subscription' as const },
+      orders: [{ ...base.orders[0], paypalOrderId: null, paypalSubscriptionId: 'SUB-1' }],
+      webhooks: [
+        { ...base.webhooks[0], eventType: 'PAYMENT.SALE.COMPLETED', relatedOrderId: null, billingAgreementId: 'SUB-1' },
+        { ...base.webhooks[1], eventType: 'PAYMENT.SALE.REFUNDED' },
+      ],
+      cancellations: [{ id: 'cancel-1', orderId: 'order-1', status: 'completed' }],
+    };
+    // When the evidence is evaluated.
+    const result = evaluateCommerceLaunchEvidence(input);
+    // Then every journey stage is proven.
+    expect(Object.values(result.stages).every((value) => value === 'verified')).toBe(true);
+  });
+
+  it.each(['SUB-OTHER', null])('rejects a SALE whose billing agreement is %s', (billingAgreementId) => {
+    // Given a sale belonging to a different or unidentified subscription.
+    const input = {
+      ...base, product: { ...base.product, type: 'subscription' as const },
+      orders: [{ ...base.orders[0], paypalSubscriptionId: 'SUB-1' }],
+      webhooks: [{ ...base.webhooks[0], eventType: 'PAYMENT.SALE.COMPLETED', billingAgreementId }],
+    };
+    // When / Then the webhook is not verified.
+    expect(evaluateCommerceLaunchEvidence(input).stages.webhook).toBe('pending');
+  });
+
+  it('rejects SALE evidence for a one-time capture order', () => {
+    // Given / When a subscription sale is attached to a one-time order.
+    const result = evaluateCommerceLaunchEvidence({ ...base,
+      webhooks: [{ ...base.webhooks[0], eventType: 'PAYMENT.SALE.COMPLETED' }],
+    });
+    // Then a capture is still required.
+    expect(result.stages.webhook).toBe('pending');
+  });
+
+  it.each(['pending', 'sending', 'failed', 'uncertain'])('does not prove license delivery while outward state is %s', (deliveryState) => {
+    // Given a persisted key without confirmed outward delivery.
+    const input = { ...base, fulfillments: [{ ...base.fulfillments[0], deliveryState, sentAt: null }] };
+    // When / Then persistence alone is not fulfillment.
+    expect(evaluateCommerceLaunchEvidence(input).stages.fulfillment).toBe('pending');
+  });
+
+  it('rejects sent license delivery without a durable sent timestamp', () => {
+    // Given / When an incomplete delivery record is evaluated.
+    const result = evaluateCommerceLaunchEvidence({ ...base,
+      fulfillments: [{ ...base.fulfillments[0], sentAt: null }],
+    });
+    // Then the license remains unfulfilled.
+    expect(result.stages.fulfillment).toBe('pending');
+  });
+
+  it('does not substitute a companion download for required license delivery', () => {
+    const result = evaluateCommerceLaunchEvidence({ ...base,
+      fulfillments: [{ id: 'download-1', orderId: 'order-1', kind: 'download' }],
+    });
+    expect(result.stages.fulfillment).toBe('pending');
   });
 });
