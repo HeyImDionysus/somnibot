@@ -9,6 +9,7 @@ import { FeatureManifestCatalogSchema } from './schema.js';
 
 export {
   DataGovernanceSchema,
+  FeatureConfigurationFieldSchema,
   FeatureDefinitionOfDoneSchema,
   FeatureDomainSchema,
   FeatureManifestCatalogSchema,
@@ -18,6 +19,7 @@ export {
 } from './schema.js';
 export type {
   FeatureDomain,
+  FeatureConfigurationField,
   FeatureManifest,
   IntendedUser,
 } from './schema.js';

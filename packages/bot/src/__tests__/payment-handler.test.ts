@@ -27,8 +27,9 @@ vi.mock('../services/audit.js', () => ({
   writeAuditLog: vi.fn(async () => {}),
 }));
 
-import { handleBuyButton } from '../features/commerce/payment-handler.js';
+import { handleBuyButton, handleFreeClaimButton } from '../features/commerce/payment-handler.js';
 import { invalidateBrandKitCache } from '../features/branding/brand-kit.js';
+import { mockButtonInteraction, mockGuild } from './helpers/discord-mocks.js';
 
 // The production path refuses to create a provider checkout unless its
 // opaque checkout handle can be HMAC-signed.  Every test that reaches PayPal
@@ -62,6 +63,43 @@ function makeSupa() {
 }
 
 describe('payment-handler', () => {
+  it('rejects an inactive free launch claim from anyone except the server owner', async () => {
+    const supabase = makeSupa();
+    const guild = Object.assign(mockGuild(), { ownerId: 'different-user' });
+    const interaction = mockButtonInteraction({
+      customId: 'store:launch-claim:00000000-0000-4000-8000-000000000301:00000000-0000-4000-8000-000000000302',
+      userId: 'user-1',
+      guild,
+    });
+
+    await handleFreeClaimButton(interaction, supabase, 'guild-1');
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: '❌ This Sandbox launch proof is not available to you.',
+    });
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  it('rejects an inactive Sandbox launch checkout from anyone except the server owner', async () => {
+    const supabase = makeSupa();
+    const guild = Object.assign(mockGuild(), { ownerId: 'different-user' });
+    const interaction = mockButtonInteraction({
+      customId: 'store:launch-buy:00000000-0000-4000-8000-000000000301:00000000-0000-4000-8000-000000000302',
+      userId: 'user-1',
+      guild,
+    });
+
+    await handleBuyButton(
+      interaction, supabase, 'guild-1',
+      'https://api-m.sandbox.paypal.com', 'client-id', 'secret', 'https://dashboard.com',
+    );
+
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: '❌ This paid Sandbox launch proof is not available.',
+    });
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
   it('handleBuyButton replies error when product not found', async () => {
     const interaction = {
       customId: 'store:buy:prod-1',

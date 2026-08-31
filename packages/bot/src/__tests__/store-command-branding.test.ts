@@ -29,7 +29,14 @@ vi.mock('discord.js', () => {
     setStyle() { return this; }
     setEmoji() { return this; }
   }
-  class SlashCommandBuilder { setName() { return this; } setDescription() { return this; } }
+  class SlashCommandBuilder {
+    setName() { return this; }
+    setDescription() { return this; }
+    addBooleanOption(callback: (option: SlashCommandBuilder) => unknown) { callback(this); return this; }
+    addStringOption(callback: (option: SlashCommandBuilder) => unknown) { callback(this); return this; }
+    setMinLength() { return this; }
+    setMaxLength() { return this; }
+  }
   return { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle: { Primary: 1 }, SlashCommandBuilder };
 });
 
@@ -49,16 +56,49 @@ const sampleProduct = {
   sort_order: 0,
 };
 
-function makeSupabase(products: any[], guildConfig: any, productError: { code: string; message: string } | null = null) {
+type StoreRow = Record<string, unknown>;
+type ProductQueryError = { readonly code: string; readonly message: string } | null;
+
+type ProductQueryChain = {
+  readonly select: () => ProductQueryChain;
+  readonly eq: () => ProductQueryChain;
+  readonly in: () => ProductQueryChain;
+  readonly order: () => ProductQueryChain;
+  readonly limit: () => ProductQueryChain;
+  readonly then: PromiseLike<{ readonly data: readonly StoreRow[] | null; readonly error: ProductQueryError }>['then'];
+};
+
+function makeProductQueryChain(data: readonly StoreRow[], error: ProductQueryError): ProductQueryChain {
+  const result = { data: error ? null : data, error };
+  const chain: ProductQueryChain = {
+    select: () => chain,
+    eq: () => chain,
+    in: () => chain,
+    order: () => chain,
+    limit: () => chain,
+    then: (onFulfilled, onRejected) => Promise.resolve(result).then(onFulfilled, onRejected),
+  };
+  return chain;
+}
+
+function makeSupabase(
+  products: readonly StoreRow[],
+  guildConfig: StoreRow | null,
+  productError: ProductQueryError = null,
+  launchRuns: readonly StoreRow[] = [],
+) {
   const auditRows: Record<string, unknown>[] = [];
   return {
     auditRows,
     from: vi.fn((table: string) => {
       if (table === 'products') {
         const chain: any = {};
-        for (const m of ['select', 'eq', 'order', 'limit']) chain[m] = vi.fn(() => chain);
+        for (const m of ['select', 'eq', 'in', 'order', 'limit']) chain[m] = vi.fn(() => chain);
         chain.then = (resolve: any) => resolve({ data: productError ? null : products, error: productError });
         return chain;
+      }
+      if (table === 'commerce_product_launch_runs') {
+        return makeProductQueryChain(launchRuns, null);
       }
       if (table === 'audit_logs') {
         return {
@@ -77,12 +117,15 @@ function makeSupabase(products: any[], guildConfig: any, productError: { code: s
   } as any;
 }
 
-function makeInteraction(guildName?: string, coupon?: string) {
+function makeInteraction(guildName?: string, coupon?: string, testLaunch = false) {
   return {
     id: 'interaction-1',
     user: { id: 'member-1' },
-    guild: guildName ? { name: guildName } : null,
-    options: { getString: vi.fn(() => coupon ?? null) },
+    guild: guildName ? { name: guildName, ownerId: 'member-1' } : null,
+    options: {
+      getString: vi.fn(() => coupon ?? null),
+      getBoolean: vi.fn(() => testLaunch),
+    },
     deferReply: vi.fn().mockResolvedValue({}),
     editReply: vi.fn().mockResolvedValue({}),
   } as any;
@@ -145,6 +188,23 @@ describe('handleStoreCommand — white-label branding', () => {
 
     expect(buttonCustomIds).toContain('store:buy:prod-1:SAVE_25');
     expect(embedInstances[0].data.description).toContain('SAVE_25');
+  });
+
+  it('gives only the owner a launch-scoped Sandbox button for an inactive product', async () => {
+    const runId = '00000000-0000-4000-8000-000000000101';
+    const productId = '00000000-0000-4000-8000-000000000102';
+    const interaction = makeInteraction('Cool Server', undefined, true);
+    const supabase = makeSupabase(
+      [{ ...sampleProduct, id: productId }],
+      { store_brand_name: null, store_show_powered_by: true },
+      null,
+      [{ id: runId, product_id: productId }],
+    );
+
+    await handleStoreCommand(interaction, supabase, 'g1', 'https://api-m.sandbox.paypal.com');
+
+    expect(buttonCustomIds).toContain(`store:launch-buy:${runId}:${productId}`);
+    expect(embedInstances[0].data.description).toContain('Sandbox launch test');
   });
 
   it('audits an actual products-query failure once without calling an empty store a failure', async () => {

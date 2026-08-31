@@ -13,6 +13,10 @@ import {
   sdkStatusPolicySchema,
 } from './licensing-sdk-instructions';
 import { staticDeliveryContractSchema, type StaticDeliveryContract } from './licensing-sdk-static-delivery';
+import {
+  sdkIntegrationReceiptContractSchema,
+  sdkIntegrationReceiptFieldSources,
+} from './licensing-sdk-integration-receipt';
 
 export { buildAcceptanceScenarios, buildConformanceMarkdown } from './licensing-sdk-conformance';
 export { buildAgentMarkdown } from './licensing-sdk-agent-markdown';
@@ -123,38 +127,7 @@ export const sdkConfigSchema = z.object({
     responseParsing: z.literal('schema_parse_before_state_change'),
     unknownStatus: z.literal('fail_closed_unrecognized_verdict'),
   }),
-  integrationReceipt: z.object({
-    fileName: z.literal('somnibot-integration-receipt.json'),
-    receiptSchemaVersion: z.literal(2),
-    requiredAfterConformance: z.literal(true),
-    issuance: z.literal('somnibot_server_after_signed_conformance_verification'),
-    ownerSelfAttestationAccepted: z.literal(false),
-    fieldSources: z.object({
-      verificationId: z.literal('signedConformance.verificationId'),
-      issuedBy: z.literal('somnibot-server'),
-      contractHash: z.literal('bundle.contractIdentity.value'),
-      sdkSchemaVersion: z.literal('somnibot-sdk.json.schemaVersion'),
-      sdkProtocolVersion: z.literal('somnibot-sdk.json.protocolVersion'),
-      productPolicyRevision: z.literal('somnibot-sdk.json.productPolicyRevision'),
-      storeProductId: z.literal('somnibot-sdk.json.project.productId'),
-      deploymentOrigin: z.literal('runtime.deploymentOrigin'),
-      targetProjectVersion: z.literal('targetProject.version'),
-      targetProjectCommit: z.literal('targetProject.commit'),
-      verificationEnvironment: z.literal('conformance.verificationEnvironment'),
-      capabilitiesExercised: z.literal('conformance.capabilitiesExercised'),
-      remainingUnverifiedRequirements: z.literal('conformance.remainingUnverifiedRequirements'),
-      integrityResult: z.literal('contractAndArtifact.integrityResult'),
-      authenticityResult: z.literal('sourceAndArtifact.authenticityResult'),
-      conformanceResult: z.literal('passed|failed|unverified'),
-      integratedAt: z.literal('ISO-8601 UTC datetime'),
-    }),
-    driftStates: z.tuple([
-      z.literal('current'),
-      z.literal('reintegration_required'),
-      z.literal('implementation_unverified'),
-      z.literal('older_protocol'),
-    ]),
-  }),
+  integrationReceipt: sdkIntegrationReceiptContractSchema,
   invariants: z.array(z.string().min(1)),
   acceptanceScenarios: z.array(acceptanceScenarioSchema),
 });
@@ -229,25 +202,7 @@ export function buildSdkConfig(input: {
       requiredAfterConformance: true,
       issuance: 'somnibot_server_after_signed_conformance_verification',
       ownerSelfAttestationAccepted: false,
-      fieldSources: {
-        verificationId: 'signedConformance.verificationId',
-        issuedBy: 'somnibot-server',
-        contractHash: 'bundle.contractIdentity.value',
-        sdkSchemaVersion: 'somnibot-sdk.json.schemaVersion',
-        sdkProtocolVersion: 'somnibot-sdk.json.protocolVersion',
-        productPolicyRevision: 'somnibot-sdk.json.productPolicyRevision',
-        storeProductId: 'somnibot-sdk.json.project.productId',
-        deploymentOrigin: 'runtime.deploymentOrigin',
-        targetProjectVersion: 'targetProject.version',
-        targetProjectCommit: 'targetProject.commit',
-        verificationEnvironment: 'conformance.verificationEnvironment',
-        capabilitiesExercised: 'conformance.capabilitiesExercised',
-        remainingUnverifiedRequirements: 'conformance.remainingUnverifiedRequirements',
-        integrityResult: 'contractAndArtifact.integrityResult',
-        authenticityResult: 'sourceAndArtifact.authenticityResult',
-        conformanceResult: 'passed|failed|unverified',
-        integratedAt: 'ISO-8601 UTC datetime',
-      },
+      fieldSources: sdkIntegrationReceiptFieldSources,
       driftStates: ['current', 'reintegration_required', 'implementation_unverified', 'older_protocol'],
     },
     invariants: [

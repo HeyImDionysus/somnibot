@@ -15,6 +15,7 @@ import { createHash } from 'crypto';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { apiServerError, dbError } from '@/lib/api/response';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -158,15 +159,14 @@ export async function POST(request: NextRequest) {
           { success: true, data: raced, deduped: true, message: 'request-received' },
         );
       }
-      return NextResponse.json({ error: insertError.message }, { status: 500 });
+      return dbError(insertError, 'POST /api/portal/requests');
     }
 
     return NextResponse.json(
       { success: true, data: created, message: 'request-received' },
       { status: 201 },
     );
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Unknown error';
-    return NextResponse.json({ error: msg }, { status: 500 });
+  } catch (error) {
+    return apiServerError(error, 'POST /api/portal/requests');
   }
 }

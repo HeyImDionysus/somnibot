@@ -1,4 +1,5 @@
 import type { FeatureDomain, FeatureManifest, IntendedUser } from './schema.js';
+import { getFeatureContract } from './feature-contracts.js';
 import { FeatureManifestSchema } from './schema.js';
 
 type FeatureSurfaces = {
@@ -25,7 +26,6 @@ export type FeatureSeed = {
   readonly syntheticEvidence: string;
   readonly liveEvidence: string;
   readonly crossFeature: string;
-  readonly configuration?: readonly string[];
   readonly dependencies?: readonly string[];
   readonly conflicts?: readonly string[];
   readonly permissions?: readonly string[];
@@ -91,6 +91,7 @@ const PERMISSION_PROFILES: Readonly<Record<FeatureDomain, PermissionProfile>> = 
 
 export function buildFeatureManifest(seed: FeatureSeed): FeatureManifest {
   const profile = PERMISSION_PROFILES[seed.domain];
+  const featureContract = getFeatureContract(seed.id);
   const routes = seed.surfaces.dashboardRoutes ?? [];
   const portalRoutes = seed.surfaces.portalRoutes ?? [];
   const botFeatures = seed.surfaces.botFeatures ?? [];
@@ -106,7 +107,6 @@ export function buildFeatureManifest(seed: FeatureSeed): FeatureManifest {
     ...routes.map((route) => `dashboard route ${route}`),
     ...portalRoutes.map((route) => `portal route ${route}`),
   ];
-  const configurationFacts = seed.configuration ?? [seed.dashboardBehavior];
   const auditEvents = seed.auditEvents ?? [];
   const healthSignals = seed.healthSignals ?? [seed.syntheticEvidence, seed.liveEvidence];
 
@@ -134,7 +134,7 @@ export function buildFeatureManifest(seed: FeatureSeed): FeatureManifest {
     },
     configuration: {
       schemaOwner: sourceReferences[0],
-      settings: configurationFacts,
+      fields: featureContract.configurationFields,
     },
     relationships: {
       dependencies: seed.dependencies ?? [],
@@ -157,20 +157,20 @@ export function buildFeatureManifest(seed: FeatureSeed): FeatureManifest {
       healthSignals,
     },
     recovery: {
-      behavior: seed.syntheticEvidence,
-      compensation: seed.invalidState,
+      behavior: featureContract.restartAndRecovery.join(' '),
+      compensation: featureContract.cleanupBehavior.join(' '),
     },
     definitionOfDone: {
       primaryJourneys: [seed.journey],
-      validStates: [seed.journey],
+      validStates: featureContract.validStates,
       invalidStates: [seed.invalidState],
       permissionBoundaries: [`Authorized roles: ${seed.users.join(', ')}. Dashboard: ${(seed.permissions ?? [profile.dashboardPermission]).join('; ')}. Discord: ${profile.discordPermission}.`],
       discordBehavior: [seed.discordBehavior],
       dashboardBehavior: [seed.dashboardBehavior],
-      persistenceRequirements: [seed.dashboardBehavior],
-      restartAndRecovery: [seed.syntheticEvidence],
+      persistenceRequirements: featureContract.persistenceRequirements,
+      restartAndRecovery: featureContract.restartAndRecovery,
       errorPaths: [seed.invalidState],
-      cleanupBehavior: [seed.crossFeature],
+      cleanupBehavior: featureContract.cleanupBehavior,
       requiredSyntheticEvidence: [seed.syntheticEvidence],
       requiredLiveEvidence: [seed.liveEvidence],
       crossFeatureInteractions: [seed.crossFeature],

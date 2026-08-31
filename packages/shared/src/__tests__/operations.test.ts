@@ -83,7 +83,11 @@ describe('surface authority', () => {
     }));
     expect(surfaceAuthorityFor('community_behavior')).toEqual(expect.objectContaining({
       authority: 'discord',
-      allowedSources: ['discord', 'dashboard'],
+      allowedSources: ['discord'],
+    }));
+    expect(surfaceAuthorityFor('service_lifecycle')).toEqual(expect.objectContaining({
+      authority: 'launcher',
+      allowedSources: ['launcher'],
     }));
   });
 
@@ -93,6 +97,12 @@ describe('surface authority', () => {
     );
     expect(() => assertSurfaceAuthority('agent_contract', 'portal')).toThrow(
       'portal cannot own agent_contract; sdk is authoritative',
+    );
+    expect(() => assertSurfaceAuthority('service_lifecycle', 'dashboard')).toThrow(
+      'dashboard cannot own service_lifecycle; launcher is authoritative',
+    );
+    expect(() => assertSurfaceAuthority('community_behavior', 'dashboard')).toThrow(
+      'dashboard cannot own community_behavior; discord is authoritative',
     );
   });
 });

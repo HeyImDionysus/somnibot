@@ -5,6 +5,10 @@ const sql = readFileSync(
   new URL('../../../supabase/migrations/20260823170000_commerce_operations_control.sql', import.meta.url),
   'utf8',
 );
+const launchUpgradeSql = readFileSync(
+  new URL('../../../supabase/migrations/20260831081000_sandbox_launch_persistence.sql', import.meta.url),
+  'utf8',
+);
 
 describe('commerce operations migration', () => {
   it('creates guild-scoped launch, exception, event and risk records with service-role-only access', () => {
@@ -39,5 +43,27 @@ describe('commerce operations migration', () => {
     expect(sql).toContain("'notification'");
     expect(sql).toContain('provider_fee_cents');
     expect(sql).toContain('provider_net_cents');
+    expect(launchUpgradeSql).toContain('verification_started_at timestamptz NOT NULL');
+    expect(launchUpgradeSql).toContain('ON public.commerce_checkout_intents(launch_run_id, created_at)');
+    expect(launchUpgradeSql).toContain('ON public.commerce_free_claims(launch_run_id, created_at)');
+  });
+
+  it('gates only products enrolled in a launch run so legacy activation stays compatible', () => {
+    const activationFunction = launchUpgradeSql.slice(
+      launchUpgradeSql.indexOf('CREATE OR REPLACE FUNCTION public.commerce_activate_product_launch()'),
+      launchUpgradeSql.indexOf('DROP TRIGGER IF EXISTS commerce_product_launch_activation_readback'),
+    );
+
+    expect(activationFunction).toContain('IF NOT FOUND THEN RETURN NEW; END IF;');
+    expect(activationFunction).toContain(
+      "IF v_run.state <> 'ready' OR v_run.launch_receipt_hash IS NULL THEN",
+    );
+    expect(activationFunction).not.toContain(
+      "IF NOT FOUND OR v_run.state <> 'ready' OR v_run.launch_receipt_hash IS NULL THEN",
+    );
+    expect(activationFunction).toContain("launch_receipt->>'product_revision'");
+    expect(activationFunction).toContain("launch_receipt->>'policy_revision'");
+    expect(activationFunction).toContain('product launch evidence is stale');
+    expect(activationFunction).toContain('product launch policy evidence is stale');
   });
 });

@@ -1156,76 +1156,19 @@ describe('/api/sync/action', () => {
 });
 
 describe('/api/settings', () => {
-  it('PUT records WHICH installation settings changed and never their values', async () => {
+  it('PUT rejects dashboard-owned installation changes without recording a mutation', async () => {
     createAdminMock({ instance_settings: { data: null, error: null } });
     const { PUT } = await import('@/app/api/settings/route');
-
-    // discord_bot_token is encrypted before persistence. Supply the same
-    // bootstrap inputs production uses so this wiring test exercises the
-    // successful write path rather than failing before the upsert.
-    const previousSecret = process.env.SUPABASE_SECRET_KEY;
-    const previousUrl = process.env.SUPABASE_URL;
-    process.env.SUPABASE_SECRET_KEY = 'test-bootstrap-secret';
-    process.env.SUPABASE_URL = 'https://test.supabase.co';
-
-    let res: Response;
-    try {
-      res = await PUT(jsonRequest('http://x/api/settings', 'PUT', {
-        section: 'discord',
-        values: {
-          discord_guild_id: '111222333',
-          discord_bot_token: SECRET_MARKERS[1],
-        },
-      }));
-    } finally {
-      if (previousSecret === undefined) delete process.env.SUPABASE_SECRET_KEY;
-      else process.env.SUPABASE_SECRET_KEY = previousSecret;
-      if (previousUrl === undefined) delete process.env.SUPABASE_URL;
-      else process.env.SUPABASE_URL = previousUrl;
-    }
-    expect(res.status).toBe(200);
-
-    const arg = recorded();
-    expectWellFormed(arg);
-    expect(arg.action).toBe('instance.settings_updated');
-    expect(arg.blastRadius).toBe('critical');
-    // instance_settings stores the bot token, the Supabase service-role key and
-    // the PayPal secret. Key NAMES are useful; values would replicate every
-    // credential of this installation into a table the admin UI renders.
-    expect(arg.after).toMatchObject({
-      section: 'discord',
-      changed_keys: ['discord_guild_id', 'discord_bot_token_encrypted'],
-    });
-    expect(arg.before).toBeUndefined();
-    expectNoSecrets(arg);
-    // Instance settings are not per-guild; the sentence has to say so.
-    expect(arg.description).toContain('installation');
-    expect(arg.undo).toBeUndefined();
-  });
-
-  it('rejects a no-op when every submitted value was masked or blank', async () => {
-    createAdminMock({ instance_settings: { data: null, error: null } });
-    const { PUT } = await import('@/app/api/settings/route');
-
     const res = await PUT(jsonRequest('http://x/api/settings', 'PUT', {
       section: 'discord',
-      values: { discord_bot_token: '••••••••abcd', discord_client_secret: '  ' },
+      values: {
+        discord_guild_id: '111222333',
+        discord_bot_token: SECRET_MARKERS[1],
+      },
     }));
 
-    expect(res.status).toBe(400);
-    expect(recordAdminChange).not.toHaveBeenCalled();
-  });
-
-  it('records nothing when the settings upsert reports an error', async () => {
-    createAdminMock({ instance_settings: { data: null, error: { message: 'boom' } } });
-    const { PUT } = await import('@/app/api/settings/route');
-
-    const res = await PUT(jsonRequest('http://x/api/settings', 'PUT', {
-      section: 'discord',
-      values: { discord_guild_id: '111222333' },
-    }));
-
-    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(res.status).toBe(405);
+    await expect(res.json()).resolves.toMatchObject({ authority: 'launcher' });
     expect(recordAdminChange).not.toHaveBeenCalled();
   });
 });

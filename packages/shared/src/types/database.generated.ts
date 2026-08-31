@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 309 migration files in packages/supabase/migrations/
+ * Source: 310 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1725,6 +1725,7 @@ export interface DbCommerceCheckoutIntents {
   promotion_code: string | null;
   discount_cents: number;
   final_amount_cents: number | null;
+  launch_run_id: string | null;
 }
 
 export interface DbCommerceDownloadDeliveries {
@@ -1747,6 +1748,7 @@ export interface DbCommerceFreeClaims {
   product_id: string;
   order_id: string;
   created_at: string;
+  launch_run_id: string | null;
 }
 
 export interface DbCommerceFulfillmentClaims {
@@ -1878,6 +1880,7 @@ export interface DbCommerceProductLaunchRuns {
   updated_at: string;
   verified_at: string | null;
   activated_at: string | null;
+  verification_started_at: string;
 }
 
 export interface DbCommerceProductTempRoleConfig {

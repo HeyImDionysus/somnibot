@@ -970,7 +970,7 @@ const licenseKeyUpdate = z.object({
   revocation_reason: z.string().max(500).optional(),
 });
 
-// ── Public license SDK schemas ──────────────────────
+// ── Public SomniBot licensing protocol schemas ─────
 
 const licenseValidate = z.object({
   license_key: z.string().min(1).max(512),

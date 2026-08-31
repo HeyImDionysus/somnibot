@@ -8,6 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
@@ -99,6 +100,11 @@ function hasUnresolvedCapabilityPlanGrants(metadata: unknown): boolean {
     capability.grantingPlans.some((plan) => !plan.planId)
   )) ?? false;
 }
+
+const launchReceiptRevisionSchema = z.object({
+  product_revision: z.string().datetime({ offset: true }),
+  policy_revision: z.string().datetime({ offset: true }).nullable(),
+});
 
 /**
  * `1999, 'USD'` → `"19.99 USD"`.
@@ -829,7 +835,7 @@ export async function PUT(req: NextRequest) {
   ) {
     const { data: currentTargets, error: currentTargetsError } = await supabase
       .from('products')
-      .select('type, delivery_type, granted_role_ids, granted_channel_ids, active, metadata')
+      .select('type, delivery_type, granted_role_ids, granted_channel_ids, active, metadata, updated_at')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
@@ -859,16 +865,35 @@ export async function PUT(req: NextRequest) {
     if (updates.active === true) {
       const { data: launchRun, error: launchRunError } = await supabase
         .from('commerce_product_launch_runs')
-        .select('state, launch_receipt_hash')
+        .select('state, launch_receipt_hash, launch_receipt')
         .eq('guild_id', guildId)
         .eq('product_id', id)
         .maybeSingle();
       if (launchRunError) return dbError(launchRunError, 'store/products/launch-readiness');
-      if (!launchRun) {
-        return apiError('Start a Product Launch Run before activation.', 409);
-      }
-      if (launchRun.state !== 'ready' || !launchRun.launch_receipt_hash) {
+      if (launchRun && (launchRun.state !== 'ready' || !launchRun.launch_receipt_hash)) {
         return apiError('Finish the Product Launch Run and verify its sandbox reversal before activation.', 409);
+      }
+      if (launchRun) {
+        const receipt = launchReceiptRevisionSchema.safeParse(launchRun.launch_receipt);
+        if (!receipt.success || receipt.data.product_revision !== currentTargets.updated_at) {
+          return apiError('Product settings changed after launch verification. Re-run the Product Launch proof.', 409);
+        }
+        if (Object.keys(updates).some((field) => field !== 'active')) {
+          return apiError('Activate the verified product separately from any other product changes.', 409);
+        }
+        const dynamicAfterUpdate = (updates.delivery_type ?? currentTargets.delivery_type) === 'license_key';
+        const { data: currentPolicy, error: currentPolicyError } = dynamicAfterUpdate
+          ? await supabase
+            .from('product_license_config')
+            .select('updated_at')
+            .eq('product_id', id)
+            .maybeSingle()
+          : { data: null, error: null };
+        if (currentPolicyError) return dbError(currentPolicyError, 'store/products/launch-policy-readiness');
+        const currentPolicyRevision = currentPolicy?.updated_at ?? null;
+        if (receipt.data.policy_revision !== currentPolicyRevision) {
+          return apiError('License policy changed after launch verification. Re-run the Product Launch proof.', 409);
+        }
       }
     }
     if (

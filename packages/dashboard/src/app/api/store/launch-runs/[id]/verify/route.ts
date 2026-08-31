@@ -16,6 +16,7 @@ const runSchema = z.object({
   operation_id: z.string().uuid(),
   is_tutorial: z.boolean(),
   version: z.number().int().positive(),
+  verification_started_at: z.string().datetime({ offset: true }),
 });
 const productSchema = z.object({
   id: z.string().uuid(),
@@ -54,41 +55,59 @@ export async function POST(
   const admin = createAdminSupabase();
   const { data: runData, error: runError } = await admin
     .from('commerce_product_launch_runs')
-    .select('id, product_id, operation_id, is_tutorial, version')
+    .select('id, product_id, operation_id, is_tutorial, version, verification_started_at')
     .eq('id', id)
     .eq('guild_id', auth.ctx.guildId)
     .maybeSingle();
   if (runError) return dbError(runError, 'store/launch-runs/verify/read');
   const run = runSchema.safeParse(runData);
   if (!run.success) return runData ? NextResponse.json({ error: 'Launch run is malformed' }, { status: 503 }) : NextResponse.json({ error: 'Launch run not found' }, { status: 404 });
-  const [productResult, policyResult, filesResult, ordersResult] = await Promise.all([
+  const [productResult, policyResult, filesResult, checkoutIntentsResult, freeClaimsResult] = await Promise.all([
     admin.from('products').select('id, active, type, delivery_type, price_cents, metadata, updated_at').eq('id', run.data.product_id).eq('guild_id', auth.ctx.guildId).maybeSingle(),
     admin.from('product_license_config').select('product_id, updated_at').eq('product_id', run.data.product_id).maybeSingle(),
     admin.from('product_files').select('id').eq('product_id', run.data.product_id).limit(100),
-    admin.from('orders').select('id, product_id, status, paypal_order_id, updated_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).order('created_at', { ascending: false }).limit(500),
+    admin.from('commerce_checkout_intents').select('token, order_id, product_id, created_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).eq('launch_run_id', run.data.id).gte('created_at', run.data.verification_started_at).limit(500),
+    admin.from('commerce_free_claims').select('request_id, order_id, product_id, created_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).eq('launch_run_id', run.data.id).gte('created_at', run.data.verification_started_at).limit(500),
   ]);
-  for (const [name, result] of [['product', productResult], ['policy', policyResult], ['files', filesResult], ['orders', ordersResult]] as const) {
+  for (const [name, result] of [['product', productResult], ['policy', policyResult], ['files', filesResult], ['checkout-intents', checkoutIntentsResult], ['free-claims', freeClaimsResult]] as const) {
     if (result.error) return dbError(result.error, `store/launch-runs/verify/${name}`);
   }
   const product = productSchema.safeParse(productResult.data);
   if (!product.success) return NextResponse.json({ error: 'Product verification data is malformed' }, { status: 503 });
+  const policy = z.object({ product_id: z.string().uuid(), updated_at: z.string() }).nullable().safeParse(policyResult.data);
+  const checkoutIntents = z.array(z.object({
+    token: z.string().uuid(), order_id: z.string().uuid().nullable(), product_id: z.string().uuid(), created_at: z.string(),
+  })).safeParse(checkoutIntentsResult.data ?? []);
+  const freeClaims = z.array(z.object({
+    request_id: z.string().uuid(), order_id: z.string().uuid(), product_id: z.string().uuid(), created_at: z.string(),
+  })).safeParse(freeClaimsResult.data ?? []);
+  if (!policy.success || !checkoutIntents.success || !freeClaims.success) {
+    return NextResponse.json({ error: 'Launch identity evidence is malformed' }, { status: 503 });
+  }
+  const orderIds = [...new Set([
+    ...checkoutIntents.data.flatMap((intent) => intent.order_id ? [intent.order_id] : []),
+    ...freeClaims.data.map((claim) => claim.order_id),
+  ])];
+  const ordersResult = orderIds.length
+    ? await admin.from('orders').select('id, product_id, status, paypal_order_id, updated_at').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).in('id', orderIds).gte('created_at', run.data.verification_started_at).limit(500)
+    : { data: [], error: null };
+  if (ordersResult.error) return dbError(ordersResult.error, 'store/launch-runs/verify/orders');
   const orders = z.array(z.object({
     id: z.string().uuid(), product_id: z.string().uuid(), status: z.string(),
     paypal_order_id: z.string().nullable(), updated_at: z.string(),
   })).safeParse(ordersResult.data ?? []);
   if (!orders.success) return NextResponse.json({ error: 'Order verification data is malformed' }, { status: 503 });
-  const orderIds = orders.data.map((order) => order.id);
+  const verifiedOrderIds = orders.data.map((order) => order.id);
   const emptyResult = Promise.resolve({ data: [], error: null });
-  const [paymentsResult, entitlementsResult, keysResult, downloadsResult, refundsResult, cancellationsResult, freeClaimsResult] = await Promise.all([
-    orderIds.length ? admin.from('payments').select('id, order_id, status, paypal_payment_id, paypal_event_id').eq('guild_id', auth.ctx.guildId).in('order_id', orderIds).limit(1000) : emptyResult,
-    orderIds.length ? admin.from('entitlements').select('id, order_id, product_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', orderIds).limit(1000) : emptyResult,
-    orderIds.length ? admin.from('license_keys').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', orderIds).limit(1000) : emptyResult,
-    orderIds.length ? admin.from('commerce_download_deliveries').select('id, order_id').eq('guild_id', auth.ctx.guildId).in('order_id', orderIds).limit(1000) : emptyResult,
-    orderIds.length ? admin.from('payment_refunds').select('id, order_id, payment_id, paypal_refund_id').eq('guild_id', auth.ctx.guildId).in('order_id', orderIds).limit(1000) : emptyResult,
-    orderIds.length ? admin.from('portal_cancellation_operations').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', orderIds).eq('status', 'completed').limit(1000) : emptyResult,
-    orderIds.length ? admin.from('commerce_free_claims').select('request_id, order_id, product_id').eq('guild_id', auth.ctx.guildId).eq('product_id', run.data.product_id).in('order_id', orderIds).limit(1000) : emptyResult,
+  const [paymentsResult, entitlementsResult, keysResult, downloadsResult, refundsResult, cancellationsResult] = await Promise.all([
+    verifiedOrderIds.length ? admin.from('payments').select('id, order_id, status, paypal_payment_id, paypal_event_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    verifiedOrderIds.length ? admin.from('entitlements').select('id, order_id, product_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    verifiedOrderIds.length ? admin.from('license_keys').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    verifiedOrderIds.length ? admin.from('commerce_download_deliveries').select('id, order_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    verifiedOrderIds.length ? admin.from('payment_refunds').select('id, order_id, payment_id, paypal_refund_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    verifiedOrderIds.length ? admin.from('portal_cancellation_operations').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).eq('status', 'completed').limit(1000) : emptyResult,
   ]);
-  for (const [name, result] of [['payments', paymentsResult], ['entitlements', entitlementsResult], ['keys', keysResult], ['downloads', downloadsResult], ['refunds', refundsResult], ['cancellations', cancellationsResult], ['free-claims', freeClaimsResult]] as const) {
+  for (const [name, result] of [['payments', paymentsResult], ['entitlements', entitlementsResult], ['keys', keysResult], ['downloads', downloadsResult], ['refunds', refundsResult], ['cancellations', cancellationsResult]] as const) {
     if (result.error) return dbError(result.error, `store/launch-runs/verify/${name}`);
   }
   const payments = z.array(z.object({
@@ -102,8 +121,7 @@ export async function POST(
     id: z.string().uuid(), order_id: z.string().uuid(), payment_id: z.string().uuid(), paypal_refund_id: z.string(),
   })).safeParse(refundsResult.data ?? []);
   const cancellations = z.array(z.object({ id: z.string().uuid(), order_id: z.string().uuid(), status: z.literal('completed') })).safeParse(cancellationsResult.data ?? []);
-  const freeClaims = z.array(z.object({ request_id: z.string().uuid(), order_id: z.string().uuid(), product_id: z.string().uuid() })).safeParse(freeClaimsResult.data ?? []);
-  if (!payments.success || !entitlements.success || !keys.success || !downloads.success || !refunds.success || !cancellations.success || !freeClaims.success) {
+  if (!payments.success || !entitlements.success || !keys.success || !downloads.success || !refunds.success || !cancellations.success) {
     return NextResponse.json({ error: 'Launch evidence is malformed' }, { status: 503 });
   }
   const paypalPolicy = await loadPayPalPolicy(admin, auth.ctx.guildId);
@@ -158,8 +176,10 @@ export async function POST(
     operation_id: run.data.operation_id,
     product_id: product.data.id,
     product_revision: product.data.updated_at,
+    policy_revision: policy.data?.updated_at ?? null,
+    verification_started_at: run.data.verification_started_at,
     environment: paypalPolicy.environment,
-    order_ids: orderIds,
+    order_ids: verifiedOrderIds,
     payment_ids: payments.data.map((payment) => payment.id),
     entitlement_ids: entitlements.data.map((entitlement) => entitlement.id),
     refund_ids: refunds.data.map((refund) => refund.id),

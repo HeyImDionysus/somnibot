@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const { runInNewContextMock } = vi.hoisted(() => ({
   runInNewContextMock: vi.fn(),
@@ -9,6 +9,11 @@ vi.mock('node:vm', () => ({
 }));
 
 import { evaluateBoundedRegex } from '../services/bounded-regex.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  runInNewContextMock.mockReset();
+});
 
 describe('evaluateBoundedRegex', () => {
   it('retries a VM timeout caused without exhausting this worker thread CPU budget', () => {

@@ -1728,7 +1728,7 @@
       "id": "commerce-licenses",
       "name": "License keys",
       "category": "commerce",
-      "promise": "License keys are secure by construction and self-serviceable: keys are stored only as hashes (SMNI-prefixed, shown in full exactly once at issuance), activation via /license activate binds strictly to the purchasing Discord account, compromised keys are rotated — never revealed — and buyers manage their own device sessions within the configured device limit through the portal and license SDK endpoints.",
+      "promise": "License keys are secure by construction and self-serviceable: keys are stored only as hashes (SMNI-prefixed, shown in full exactly once at issuance), activation via /license activate binds strictly to the purchasing Discord account, compromised keys are rotated — never revealed — and buyers manage their own device sessions within the configured device limit through the portal and SomniBot SDK protocol endpoints.",
       "controls": [
         {
           "id": "store-keys-hashed",
@@ -1842,7 +1842,7 @@
         },
         {
           "id": "manage-own-devices",
-          "actor": "Authenticated key holder in the customer portal or via the license SDK",
+          "actor": "Authenticated key holder in the customer portal or via the SomniBot SDK",
           "action": "List sessions, remove a device, and deactivate on uninstall for their own keys",
           "defaultDecision": "allow",
           "enforcement": "Portal session token and license-key proof scope every session read/write to the holder's own keys; rate limits protect the endpoints."
@@ -1907,7 +1907,7 @@
         {
           "id": "device-limit-reached",
           "trigger": "A new device attempted to validate beyond the device limit",
-          "surface": "License SDK validate response and portal devices panel",
+          "surface": "SomniBot SDK validation response and portal devices panel",
           "audience": "Key holder",
           "defaultTemplate": "Device limit reached for this license ({max-devices} devices). Remove a device in the portal to free a slot.",
           "variables": [
@@ -1917,7 +1917,7 @@
         {
           "id": "validate-degraded",
           "trigger": "License validation service temporarily unavailable",
-          "surface": "License SDK response",
+          "surface": "SomniBot SDK response",
           "audience": "Key holder's app",
           "defaultTemplate": "License checks are temporarily unavailable; your existing activation keeps working while we retry.",
           "variables": []

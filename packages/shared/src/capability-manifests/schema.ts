@@ -48,6 +48,22 @@ export const DataGovernanceSchema = z.object({
   backupImplications: NonEmptyTextSchema,
 }).strict();
 
+export const FeatureConfigurationFieldSchema = z.object({
+  key: z.string().regex(/^[a-z][A-Za-z0-9]*$/),
+  valueType: z.enum([
+    'boolean',
+    'duration',
+    'identifier',
+    'integer',
+    'object',
+    'object-list',
+    'string',
+    'string-list',
+  ]),
+  required: z.boolean(),
+  purpose: NonEmptyTextSchema,
+}).strict();
+
 export const FeatureDefinitionOfDoneSchema = z.object({
   primaryJourneys: NonEmptyListSchema,
   validStates: NonEmptyListSchema,
@@ -62,7 +78,23 @@ export const FeatureDefinitionOfDoneSchema = z.object({
   requiredSyntheticEvidence: NonEmptyListSchema,
   requiredLiveEvidence: NonEmptyListSchema,
   crossFeatureInteractions: NonEmptyListSchema,
-}).strict();
+}).strict().superRefine((definition, context) => {
+  const comparisons = [
+    ['validStates', definition.validStates, definition.primaryJourneys],
+    ['persistenceRequirements', definition.persistenceRequirements, definition.dashboardBehavior],
+    ['restartAndRecovery', definition.restartAndRecovery, definition.requiredSyntheticEvidence],
+    ['cleanupBehavior', definition.cleanupBehavior, definition.crossFeatureInteractions],
+  ] as const;
+  for (const [field, actual, unrelated] of comparisons) {
+    if (JSON.stringify(actual) === JSON.stringify(unrelated)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} must declare its own acceptance requirement instead of reusing an unrelated manifest field.`,
+      });
+    }
+  }
+});
 
 export const FeatureManifestSchema = z.object({
   schemaVersion: z.literal(1),
@@ -88,8 +120,20 @@ export const FeatureManifestSchema = z.object({
   }).strict(),
   configuration: z.object({
     schemaOwner: NonEmptyTextSchema,
-    settings: z.array(NonEmptyTextSchema),
-  }).strict(),
+    fields: z.array(FeatureConfigurationFieldSchema).min(1),
+  }).strict().superRefine((configuration, context) => {
+    const keys = new Set<string>();
+    configuration.fields.forEach((field, index) => {
+      if (keys.has(field.key)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['fields', index, 'key'],
+          message: `Duplicate configuration field "${field.key}".`,
+        });
+      }
+      keys.add(field.key);
+    });
+  }),
   relationships: z.object({
     dependencies: z.array(IdentifierSchema),
     conflicts: z.array(NonEmptyTextSchema),
@@ -198,3 +242,4 @@ export const FeatureManifestCatalogSchema = z.array(FeatureManifestSchema).min(1
 export type FeatureManifest = z.infer<typeof FeatureManifestSchema>;
 export type FeatureDomain = z.infer<typeof FeatureDomainSchema>;
 export type IntendedUser = z.infer<typeof IntendedUserSchema>;
+export type FeatureConfigurationField = z.infer<typeof FeatureConfigurationFieldSchema>;

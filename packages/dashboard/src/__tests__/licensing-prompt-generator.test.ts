@@ -12,6 +12,7 @@ import {
   buildSavedProductLicensingSdkBundle,
   verifyLicensingSdkBundleIdentity,
 } from '@/lib/store/licensing-sdk-bundle';
+import { resolveSdkReceiptDeploymentOrigin } from '@/lib/store/licensing-sdk-integration-receipt';
 
 const dynamicDraft: LicensingPromptDraft = {
   mode: 'dynamic',
@@ -149,6 +150,31 @@ describe('licensing prompt generator contract', () => {
       'models-cad-and-game-assets',
       'source-templates-archives-and-data',
     ]));
+  });
+
+  it('resolves receipt deployment provenance from the project contract for static and dynamic SDKs', async () => {
+    // Given: static and dynamic products generated from the same SomniBot deployment
+    const dynamicBundle = extractLicensingSdkBundle(await renderLicensingPrompt(
+      buildLicensingPromptEnvelope(dynamicDraft),
+    ));
+    const staticBundle = extractLicensingSdkBundle(await renderLicensingPrompt(
+      buildLicensingPromptEnvelope({ ...dynamicDraft, mode: 'static', outputFormats: 'PDF' }),
+    ));
+    const dynamicSdk = dynamicBundle.files['somnibot-sdk.json'].content;
+    const staticSdk = staticBundle.files['somnibot-sdk.json'].content;
+
+    // When: receipt issuance resolves the declared provenance source
+    const dynamicOrigin = resolveSdkReceiptDeploymentOrigin(dynamicSdk);
+    const staticOrigin = resolveSdkReceiptDeploymentOrigin(staticSdk);
+
+    // Then: both SDK modes have a concrete, authoritative origin, even without static runtime licensing
+    expect(dynamicSdk.integrationReceipt.fieldSources.deploymentOrigin)
+      .toBe('somnibot-sdk.json.project.deploymentOrigin');
+    expect(staticSdk.integrationReceipt.fieldSources.deploymentOrigin)
+      .toBe('somnibot-sdk.json.project.deploymentOrigin');
+    expect(dynamicOrigin).toBe(dynamicSdk.project.deploymentOrigin);
+    expect(staticSdk.runtime).toBeNull();
+    expect(staticOrigin).toBe(staticSdk.project.deploymentOrigin);
   });
 
   it('normalizes legacy modes into safe independent rails and preserves explicit mixed rails', async () => {
