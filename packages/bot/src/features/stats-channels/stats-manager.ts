@@ -18,6 +18,13 @@ import { writeAuditLog } from '../../services/audit.js';
 
 const log = createLogger('StatsManager');
 
+export function isDiscordRenameRateLimit(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const status = 'status' in error ? error.status : undefined;
+  const code = 'code' in error ? error.code : undefined;
+  return status === 429 || code === 20028 || code === 20029;
+}
+
 export interface StatsChannelConfig {
   id: string;
   guild_id: string;
@@ -38,6 +45,54 @@ export interface StatsChannelConfig {
 interface GatheredStats {
   readonly values: Record<string, string>;
   readonly unavailableStatTypes: ReadonlySet<string>;
+}
+
+export async function recordStatsRenameDeferred(
+  supabase: SupabaseClient,
+  config: StatsChannelConfig,
+  value: string,
+  updateCycle: string,
+  error: unknown,
+): Promise<void> {
+  await writeAuditLog(supabase, {
+    guildId: config.guild_id,
+    actorType: 'system',
+    actorId: 'stats-channel-manager',
+    action: 'stats_channels.rename_deferred',
+    category: 'statistics',
+    targetType: 'stats_channel',
+    targetId: config.id,
+    details: {
+      stat_type: config.stat_type,
+      deferred_value: value,
+      update_cycle: updateCycle,
+    },
+    correlationId: `stats:${config.id}`,
+    occurrenceKey: `stats_channels.rename_deferred:${config.id}:${value}:${updateCycle}`,
+    success: false,
+    errorMessage: error instanceof Error ? error.message : String(error),
+  });
+}
+
+export async function recordStatsChannelMissing(
+  supabase: SupabaseClient,
+  config: StatsChannelConfig,
+  channelId: string,
+): Promise<void> {
+  await writeAuditLog(supabase, {
+    guildId: config.guild_id,
+    actorType: 'system',
+    actorId: 'stats-channel-manager',
+    action: 'stats_channels.channel_missing',
+    category: 'statistics',
+    targetType: 'channel',
+    targetId: channelId,
+    details: { stat_channel_id: config.id, stat_type: config.stat_type },
+    correlationId: `stats:${config.id}`,
+    occurrenceKey: `stats_channels.channel_missing:${config.id}:${channelId}`,
+    success: false,
+    errorMessage: `Stats channel ${channelId} no longer exists`,
+  });
 }
 
 export class StatsChannelManager {
@@ -155,14 +210,7 @@ export class StatsChannelManager {
             // advance last_value — otherwise the deletion is silent and the
             // counter would skip this value once the channel is recreated.
             await this.raiseChannelDeletedAlert(config);
-            this.eventBus.emit('stats_channel.update_failed', this.guild.id, {
-              statChannelId: config.id,
-              channelId,
-              statType: config.stat_type,
-              error: `channel_missing:${channelId}`,
-              occurrenceId: `${config.id}:channel_missing:${channelId}`,
-              correlationId: `stats:${config.id}`,
-            });
+            await recordStatsChannelMissing(this.supabase, config, channelId);
             continue;
           }
           await channel.setName(newName);
@@ -317,6 +365,16 @@ export class StatsChannelManager {
         });
       } catch (err) {
         log.error(`Failed to update ${config.stat_type}:`, err);
+        if (isDiscordRenameRateLimit(err)) {
+          await recordStatsRenameDeferred(
+            this.supabase,
+            config,
+            this.resolveStatValue(config, stats.values),
+            updateCycle,
+            err,
+          );
+          continue;
+        }
         await this.raiseUpdateFailedAlert(config, err);
         continue;
       }

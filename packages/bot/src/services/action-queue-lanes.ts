@@ -1,3 +1,11 @@
+import {
+  WORKLOAD_CLASSES,
+  WORKLOAD_CONCURRENCY,
+  WorkloadScheduler,
+  workloadForAction,
+  type WorkloadClass,
+} from './workload-scheduler.js';
+
 /**
  * Action Queue Lanes — commerce vs game segregation.
  *
@@ -122,28 +130,38 @@ export function laneDepthAlertType(lane: ActionQueueLane): string {
  * wake-up).
  */
 export class LaneScheduler {
-  private readonly budgets: Readonly<Record<ActionQueueLane, number>>;
-  private readonly active: Record<ActionQueueLane, number> = { commerce: 0, game: 0 };
-  private readonly waiters: Record<ActionQueueLane, Array<() => void>> = {
-    commerce: [],
-    game: [],
-  };
-  private drainWaiters: Array<() => void> = [];
+  private readonly workloadScheduler: WorkloadScheduler;
   private retryTimers = new Set<ReturnType<typeof setTimeout>>();
   private closed = false;
 
-  constructor(budgets: Readonly<Record<ActionQueueLane, number>> = LANE_CONCURRENCY) {
-    this.budgets = budgets;
+  constructor(budgets?: Readonly<Record<ActionQueueLane, number>>) {
+    const workloadBudgets: Readonly<Record<WorkloadClass, number>> = budgets
+      ? {
+          moderation: budgets.game,
+          commerce: budgets.commerce,
+          music: budgets.game,
+          administration: budgets.game,
+          automation: budgets.game,
+          economy: budgets.game,
+        }
+      : WORKLOAD_CONCURRENCY;
+    this.workloadScheduler = new WorkloadScheduler(workloadBudgets);
   }
 
   /** Number of tasks currently running in the lane. */
   activeCount(lane: ActionQueueLane): number {
-    return this.active[lane];
+    return this.laneWorkloads(lane).reduce(
+      (count, workload) => count + this.workloadScheduler.activeCount(workload),
+      0,
+    );
   }
 
   /** Number of tasks waiting for a slot in the lane. */
   queuedCount(lane: ActionQueueLane): number {
-    return this.waiters[lane].length;
+    return this.laneWorkloads(lane).reduce(
+      (count, workload) => count + this.workloadScheduler.queuedCount(workload),
+      0,
+    );
   }
 
   /**
@@ -152,12 +170,12 @@ export class LaneScheduler {
    */
   async run<T>(lane: ActionQueueLane, task: () => Promise<T>): Promise<T> {
     if (this.closed) throw new Error('LaneScheduler is closed');
-    await this.acquire(lane);
-    try {
-      return await task();
-    } finally {
-      this.release(lane);
-    }
+    return this.workloadScheduler.run(lane === 'commerce' ? 'commerce' : 'economy', 'legacy', task);
+  }
+
+  runAction<T>(action: string, guildId: string, task: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('LaneScheduler is closed'));
+    return this.workloadScheduler.run(workloadForAction(action), guildId, task);
   }
 
   /**
@@ -181,54 +199,40 @@ export class LaneScheduler {
     return true;
   }
 
+  scheduleAction(
+    action: string,
+    guildId: string,
+    delayMs: number,
+    task: () => Promise<void>,
+    onError: (error: unknown) => void,
+  ): boolean {
+    if (this.closed) return false;
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer);
+      this.runAction(action, guildId, task).catch(onError);
+    }, delayMs);
+    timer.unref?.();
+    this.retryTimers.add(timer);
+    return true;
+  }
+
   /** Reject new work, cancel delayed retries, and let admitted work drain. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.workloadScheduler.close();
     for (const timer of this.retryTimers) clearTimeout(timer);
     this.retryTimers.clear();
   }
 
   /** Resolve only after every running and FIFO-waiting task has settled. */
   drain(): Promise<void> {
-    if (this.isIdle()) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      this.drainWaiters.push(resolve);
-    });
+    return this.workloadScheduler.drain();
   }
 
-  private acquire(lane: ActionQueueLane): Promise<void> {
-    if (this.active[lane] < this.budgets[lane]) {
-      this.active[lane]++;
-      return Promise.resolve();
-    }
-    // Saturated — wait for a hand-off. The releaser transfers its slot
-    // without decrementing the active count, so the budget is never
-    // transiently exceeded or leaked.
-    return new Promise<void>((resolve) => {
-      this.waiters[lane].push(resolve);
-    });
-  }
-
-  private release(lane: ActionQueueLane): void {
-    const next = this.waiters[lane].shift();
-    if (next) {
-      next(); // hand the slot to the next FIFO waiter; active count unchanged
-    } else {
-      this.active[lane]--;
-      if (this.isIdle()) {
-        const waiters = this.drainWaiters.splice(0);
-        for (const resolve of waiters) resolve();
-      }
-    }
-  }
-
-  private isIdle(): boolean {
-    return (
-      this.active.commerce === 0
-      && this.active.game === 0
-      && this.waiters.commerce.length === 0
-      && this.waiters.game.length === 0
-    );
+  private laneWorkloads(lane: ActionQueueLane): readonly WorkloadClass[] {
+    return lane === 'commerce'
+      ? ['commerce']
+      : WORKLOAD_CLASSES.filter((workload) => workload !== 'commerce');
   }
 }

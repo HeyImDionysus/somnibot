@@ -16,6 +16,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { licenseUnavailable } from '@/lib/api/license-status';
 import { getClientIp } from '@/lib/api/client-ip';
 import { writeCommerceAudit } from '@/lib/commerce-audit';
+import { licensingCapabilitiesSchema } from '@/lib/store/licensing-capabilities';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 function sha256(input: string): string {
@@ -29,7 +30,8 @@ type LicenseUnavailableAudit = {
     | 'authoritative_lookup_failed'
     | 'membership_lookup_failed'
     | 'device_session_failed'
-    | 'activation_failed';
+    | 'activation_failed'
+    | 'capability_policy_invalid';
   readonly guildId?: string;
 };
 
@@ -144,6 +146,7 @@ interface LookupResult {
   entitlement_status?: string;
   entitlement_expires_at?: string;
   entitlement_grace_period_ends_at?: string | null;
+  entitlement_plan_id?: string | null;
   config_max_devices?: number;
   config_device_policy?: string;
   config_feature_flags?: string[];
@@ -156,6 +159,65 @@ interface LookupResult {
   customer_discord_username?: string;
   customer_discord_id?: string;
   product_guild_id?: string;
+  product_licensing_metadata?: unknown;
+}
+
+type GrantedFeatureResolution =
+  | { readonly ok: true; readonly features: string[] }
+  | { readonly ok: false; readonly error: Error };
+
+function resolveGrantedFeatures(result: LookupResult): GrantedFeatureResolution {
+  const fallback = [...new Set(result.config_feature_flags ?? [])];
+  const metadata = result.product_licensing_metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return { ok: true, features: fallback };
+  }
+  if (!Object.prototype.hasOwnProperty.call(metadata, 'capabilities')) {
+    return { ok: true, features: fallback };
+  }
+
+  const parsed = licensingCapabilitiesSchema.safeParse(
+    Reflect.get(metadata, 'capabilities'),
+  );
+  if (!parsed.success) {
+    return { ok: false, error: new Error('Saved capability policy is malformed') };
+  }
+
+  const initiallyGranted = new Set<string>();
+  for (const capability of parsed.data) {
+    if (capability.grantingPlans.some((plan) => !plan.planId)) {
+      return {
+        ok: false,
+        error: new Error(`Capability ${capability.key} has an unresolved plan grant`),
+      };
+    }
+    if (
+      capability.grantingPlans.length === 0
+      || capability.grantingPlans.some((plan) => plan.planId === result.entitlement_plan_id)
+    ) {
+      initiallyGranted.add(capability.key);
+    }
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const capability of parsed.data) {
+      if (
+        initiallyGranted.has(capability.key)
+        && capability.dependencyKeys.some((dependency) => !initiallyGranted.has(dependency))
+      ) {
+        initiallyGranted.delete(capability.key);
+        changed = true;
+      }
+    }
+  }
+  return {
+    ok: true,
+    features: parsed.data
+      .filter((capability) => initiallyGranted.has(capability.key))
+      .map((capability) => capability.key),
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -361,6 +423,18 @@ export async function POST(req: NextRequest) {
 
     await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'expired', clientIp, app_version);
     return NextResponse.json({ valid: false, status: 'expired', error: 'License has expired' });
+  }
+
+  const featureResolution = resolveGrantedFeatures(result);
+  if (!featureResolution.ok) {
+    await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'unavailable', clientIp, app_version);
+    await auditLicenseUnavailable(supabase, {
+      productId: product_id,
+      keyHash,
+      cause: 'capability_policy_invalid',
+      guildId: result.product_guild_id,
+    });
+    return licenseUnavailable('License/validate capability policy', featureResolution.error);
   }
 
   // 6. Multi-device tracking (atomic RPC stays separate — needs FOR UPDATE)
@@ -618,10 +692,8 @@ export async function POST(req: NextRequest) {
     // and access ends at grace_period_ends_at.
     status: inGracePeriod ? 'grace_period' : 'active',
     entitlement_id: result.entitlement_id,
-    features: result.config_feature_flags ?? [],
+    features: featureResolution.features,
     tier: result.config_tier ?? null,
-    customer_discord_id: result.customer_discord_id,
-    customer_name: result.customer_discord_username,
     expires_at: result.entitlement_expires_at,
     grace_period_ends_at: inGracePeriod ? graceEndsAt : null,
     session_id: sessionId ?? null,

@@ -130,6 +130,8 @@ import {
   stopLocalValkeyBackupSchedule,
   validateRdbFile,
 } from './local-backup-manager.js';
+import { buildLocalBackupAuditEntry } from './backup-audit.js';
+import { registerDatabaseRecoveryIpc } from './database-recovery-ipc.js';
 import {
   hasSupabaseProjectOriginChanged,
   readRuntimeLeaseStatus,
@@ -902,17 +904,7 @@ async function startLocalStack(
     if (cancelled()) return cancelAndStop();
   }
 
-  startLocalValkeyBackupSchedule((result) => {
-    if (result.ok) return;
-    recordLauncherAudit({
-      action: 'launcher.backup.valkey_failed',
-      category: 'infrastructure',
-      targetType: 'local_valkey',
-      details: { mode: 'regular-local' },
-      success: false,
-      errorMessage: result.error ?? 'Local Valkey backup failed.',
-    });
-  });
+  startLocalValkeyBackupSchedule((result) => recordLauncherAudit(buildLocalBackupAuditEntry(result)));
 
   sessionToken = crypto.randomBytes(32).toString('hex');
   const envVars = buildEnvVars(runtimeConfig);
@@ -1749,6 +1741,7 @@ async function createWindow(showWhenReady = true): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 function registerIpcHandlers(): void {
+  registerDatabaseRecoveryIpc();
   // ── Config ──
   ipcMain.handle('wait-for-startup-ready', async () => {
     await startupReady;
@@ -2234,7 +2227,7 @@ function registerIpcHandlers(): void {
           prepareVpsState: async () => {
             if (!transferLocalValkeyState) return;
             const backup = await backupLocalValkeySnapshot();
-            if (!backup.ok || !backup.path) {
+            if (!backup.ok) {
               throw new Error(backup.error || 'Local Valkey state could not be snapshotted for VPS transfer.');
             }
             const stageCommand = plan.commands.find((command) => command.id === 'stage-local-valkey-state');

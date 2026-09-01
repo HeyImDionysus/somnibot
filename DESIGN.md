@@ -23,6 +23,13 @@ Keep coin-economy actions and real-money-store actions visibly distinct. The
 navigation's `Coin economy` and `Real-money store` groups are intentional
 operator safety labels, not interchangeable categories.
 
+The cross-surface terminology and status vocabulary is exported from
+`packages/shared/src/experience/language-system.ts`. Operator copy says
+`server`; `guild` is reserved for diagnostics and API contracts. Use the
+canonical status labels instead of inventing synonyms such as `okay`, `down`,
+or `broken`, and always pair severity color with the status label and a
+supported action when `actionRequired` is true.
+
 ## Tokens
 
 Use the existing `discord` Tailwind tokens and matching CSS variables. Do not
@@ -173,15 +180,14 @@ work.
 2. Shared primitives are available but not every route uses them. Some pages
    still use raw Tailwind greys/reds and direct pink controls, so token and
    primitive adoption is an incremental hardening task.
-3. `Input` currently renders visual errors but does not yet wire
-   `aria-invalid`/`aria-describedby`; the custom confirmation dialog sets
-   dialog labels and Escape/cancel focus but does not yet provide a full focus
-   trap or close-button accessible name.
-4. The application shell currently has a fixed `w-60` sidebar with no defined
+3. The application shell currently has a fixed `w-60` sidebar with no defined
    narrow-screen navigation treatment. Existing isolated responsive layouts do
    not satisfy the shell-level mobile contract.
-5. Existing components use `animate-*`, `transition-*`, and pulse/spin states;
-   there is no dashboard-wide reduced-motion override yet.
+
+The shared Input, confirmation dialog, loading/empty states, error boundary,
+and dashboard-wide reduced-motion override now form the accessibility baseline.
+Their semantic relationships, focus behavior, live regions, and motion fallback
+are regression contracts; route-specific components must not bypass them.
 
 Hardening work should close those gaps through shared primitives and shell
 behavior before adding route-specific visual variants.

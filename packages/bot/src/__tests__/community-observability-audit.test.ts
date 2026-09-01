@@ -430,12 +430,25 @@ describe('community-reaction-roles audit', () => {
     const supa = makeSupa({
       button_roles: { data: { active: true, exclusive_group: null, require_role: null, require_level: null }, error: null },
     });
-    const member = { id: 'u1', roles: { cache: { has: () => false }, add: vi.fn(async () => {}), remove: vi.fn(async () => {}) } };
+    const guild = {
+      id: 'g1',
+      members: {
+        me: { permissions: { has: vi.fn().mockReturnValue(true) } },
+        fetch: vi.fn(),
+      },
+      roles: { cache: new Map([['role1', { name: 'Member', managed: false, editable: true }]]) },
+    };
+    const member = {
+      id: 'u1',
+      guild,
+      roles: { cache: { has: () => false }, add: vi.fn(async () => {}), remove: vi.fn(async () => {}) },
+    };
+    guild.members.fetch.mockResolvedValue(member);
     const interaction: any = {
       customId: 'btnrole:panel1:role1',
       user: { id: 'u1' },
       reply: vi.fn(async () => {}),
-      guild: { id: 'g1', members: { fetch: vi.fn(async () => member) }, roles: { cache: new Map() } },
+      guild,
     };
 
     await handleButtonRoleInteraction(interaction, supa, eventBus);

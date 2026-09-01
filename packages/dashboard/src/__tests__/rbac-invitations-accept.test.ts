@@ -42,6 +42,9 @@ function createAdminMock(config: Record<string, QueryResult[]>) {
   for (const [t, arr] of Object.entries(config)) queues[t] = [...arr];
   const inserts: Array<{ table: string; payload: unknown }> = [];
   const updates: Array<{ table: string; payload: unknown }> = [];
+  const rpc = vi.fn(() => Promise.resolve(
+    queues.accept_team_invitation_atomic?.shift() ?? { data: null, error: null },
+  ));
 
   const from = vi.fn((table: string) => {
     const result = queues[table]?.length ? queues[table].shift()! : { data: null, error: null };
@@ -58,7 +61,7 @@ function createAdminMock(config: Record<string, QueryResult[]>) {
     return chain;
   });
 
-  return { supabase: { from }, inserts, updates };
+  return { supabase: { from, rpc }, inserts, updates, rpc };
 }
 
 const SESSION = { userId: 'u1', discordId: '222222222222222222' };
@@ -97,9 +100,11 @@ describe('POST /api/rbac/invitations/[id]/accept', () => {
     adminMock = createAdminMock({
       team_invitations: [
         { data: inv, error: null }, // initial fetch
-        { data: { id: 'inv-1' }, error: null }, // claim
       ],
-      dashboard_user_roles: [{ error: null }], // ensureAssignment
+      accept_team_invitation_atomic: [{
+        data: [{ outcome: 'accepted', invitation_id: 'inv-1', guild_id: 'guild-1', role_id: 'role-1' }],
+        error: null,
+      }],
     });
 
     const res = await POST(req(), ctx());
@@ -108,16 +113,13 @@ describe('POST /api/rbac/invitations/[id]/accept', () => {
     expect(json.success).toBe(true);
     expect(json.data.role_id).toBe('role-1');
 
-    const grant = adminMock.inserts.find((i) => i.table === 'dashboard_user_roles');
-    expect(grant).toBeTruthy();
-    const payload = grant!.payload as Record<string, unknown>;
-    expect(payload.discord_id).toBe(SESSION.discordId);
-    expect(payload.role_id).toBe('role-1');
-    expect(payload.assigned_by).toBe('111111111111111111');
-    expect(mockWriteTeamAudit).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ action: 'team.invite_accepted' }),
-    );
+    expect(adminMock.rpc).toHaveBeenCalledWith('accept_team_invitation_atomic', {
+      p_invitation_id: 'inv-1',
+      p_discord_id: SESSION.discordId,
+    });
+    expect(adminMock.inserts.some((i) => i.table === 'dashboard_user_roles')).toBe(false);
+    expect(adminMock.updates.some((i) => i.table === 'team_invitations')).toBe(false);
+    expect(mockWriteTeamAudit).not.toHaveBeenCalled();
   });
 
   it('returns 404 for a foreign invitation (no info leak)', async () => {
@@ -148,7 +150,13 @@ describe('POST /api/rbac/invitations/[id]/accept', () => {
       id: 'inv-1', guild_id: 'guild-1', discord_id: SESSION.discordId,
       role_id: 'role-1', invited_by: '111111111111111111', status: 'revoked', expires_at: future(),
     };
-    adminMock = createAdminMock({ team_invitations: [{ data: inv, error: null }] });
+    adminMock = createAdminMock({
+      team_invitations: [{ data: inv, error: null }],
+      accept_team_invitation_atomic: [{
+        data: [{ outcome: 'revoked', invitation_id: 'inv-1', guild_id: 'guild-1', role_id: 'role-1' }],
+        error: null,
+      }],
+    });
     const res = await POST(req(), ctx());
     expect(res.status).toBe(409);
     expect(adminMock.inserts.some((i) => i.table === 'dashboard_user_roles')).toBe(false);
@@ -159,7 +167,13 @@ describe('POST /api/rbac/invitations/[id]/accept', () => {
       id: 'inv-1', guild_id: 'guild-1', discord_id: SESSION.discordId,
       role_id: 'role-1', invited_by: '111111111111111111', status: 'pending', expires_at: past(),
     };
-    adminMock = createAdminMock({ team_invitations: [{ data: inv, error: null }] });
+    adminMock = createAdminMock({
+      team_invitations: [{ data: inv, error: null }],
+      accept_team_invitation_atomic: [{
+        data: [{ outcome: 'expired', invitation_id: 'inv-1', guild_id: 'guild-1', role_id: 'role-1' }],
+        error: null,
+      }],
+    });
     const res = await POST(req(), ctx());
     expect(res.status).toBe(409);
     expect(adminMock.inserts.some((i) => i.table === 'dashboard_user_roles')).toBe(false);
@@ -172,7 +186,10 @@ describe('POST /api/rbac/invitations/[id]/accept', () => {
     };
     adminMock = createAdminMock({
       team_invitations: [{ data: inv, error: null }],
-      dashboard_user_roles: [{ error: { code: '23505' } }], // already granted
+      accept_team_invitation_atomic: [{
+        data: [{ outcome: 'already_accepted', invitation_id: 'inv-1', guild_id: 'guild-1', role_id: 'role-1' }],
+        error: null,
+      }],
     });
     const res = await POST(req(), ctx());
     const json = await res.json();

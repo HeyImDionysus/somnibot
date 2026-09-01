@@ -11,7 +11,8 @@ import { cookies, headers } from 'next/headers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { resolveLauncherLocalAuth } from '@/lib/api/launcher-local-auth';
-import { auditDashboardAuthorizationDenial } from '@/lib/rbac-audit';
+import { auditDashboardAuthorizationAllowed, auditDashboardAuthorizationDenial } from '@/lib/rbac-audit';
+import { STAFF_AUTHORIZATION_ASSIGNMENT_SELECT, staffAuthorizationIdentity } from '@/lib/rbac-authorization-identity';
 import type { DashboardPermission } from '@somnibot/shared';
 import { verifiedDiscordId } from '@/lib/verified-discord-identity';
 
@@ -21,6 +22,7 @@ export interface AuthContext {
   guildId: string;
   isOwner: boolean;
   permissions: DashboardPermission[];
+  readonly rbacIdentity?: string;
 }
 
 /**
@@ -187,7 +189,7 @@ export async function getAuthContext(): Promise<AuthContext | null> {
   // Look up user's dashboard roles
   const { data: userRoles } = await admin
     .from('dashboard_user_roles')
-    .select('role_id, dashboard_roles(permissions)')
+    .select(STAFF_AUTHORIZATION_ASSIGNMENT_SELECT)
     .eq('guild_id', guild.id)
     .eq('discord_id', discordId)
     .limit(1000);
@@ -204,12 +206,14 @@ export async function getAuthContext(): Promise<AuthContext | null> {
     }
   }
 
+  const rbacIdentity = staffAuthorizationIdentity({ guildId: guild.id, actorId: discordId }, userRoles);
   return {
     userId: user.id,
     discordId,
     guildId: guild.id,
     isOwner: false,
     permissions: Array.from(permissions),
+    ...(rbacIdentity ? { rbacIdentity } : {}),
   };
 }
 
@@ -230,13 +234,17 @@ export async function requirePermission(
   }
 
   if (permission === null) return ctx;
-  if (ctx.permissions.includes('dashboard.full_access')) return ctx;
-  if (!ctx.permissions.includes(permission)) {
+  if (ctx.isOwner) return ctx;
+  if (!ctx.permissions.includes('dashboard.full_access') && !ctx.permissions.includes(permission)) {
     await auditDashboardAuthorizationDenial({
       guildId: ctx.guildId, actorId: ctx.discordId, permission, reason: 'permission_denied', status: 403,
+      ...(ctx.rbacIdentity ? { rbacIdentity: ctx.rbacIdentity } : {}),
     });
     throw new AuthError('Forbidden', 403);
   }
 
+  if (ctx.rbacIdentity) await auditDashboardAuthorizationAllowed({
+    guildId: ctx.guildId, actorId: ctx.discordId, permission, rbacIdentity: ctx.rbacIdentity,
+  });
   return ctx;
 }

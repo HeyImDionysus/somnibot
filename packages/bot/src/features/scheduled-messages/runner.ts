@@ -174,6 +174,8 @@ function replaceVariables(text: string, guild: Guild): string {
 export class ScheduledMessageRunner {
   private schedules: ScheduledMessage[] = [];
   private timer: NodeJS.Timeout | null = null;
+  private aligner: NodeJS.Timeout | null = null;
+  private stopped = false;
   private allowEmbeds = true;
   private variablesEnabled = true;
   private defaultMissedPolicy: 'skip-missed' | 'send-latest' = 'skip-missed';
@@ -185,6 +187,7 @@ export class ScheduledMessageRunner {
   ) {}
 
   async start(): Promise<void> {
+    this.stopped = false;
     await this.loadSchedules();
 
     if (this.schedules.length === 0) {
@@ -201,7 +204,9 @@ export class ScheduledMessageRunner {
     const msToNextMinute = 60_000 - (now % 60_000);
 
     // Initial alignment
-    setTimeout(() => {
+    this.aligner = setTimeout(() => {
+      this.aligner = null;
+      if (this.stopped) return;
       this.tick().catch((err) => log.error('Tick error:', { error: String(err) }));
       this.timer = setInterval(() => {
         this.tick().catch((err) => log.error('Tick error:', { error: String(err) }));
@@ -216,6 +221,11 @@ export class ScheduledMessageRunner {
   }
 
   stop(): void {
+    this.stopped = true;
+    if (this.aligner) {
+      clearTimeout(this.aligner);
+      this.aligner = null;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

@@ -63,17 +63,20 @@ function makeGuild(members: any[] = []) {
   const memberMap = new MockCollection();
   for (const m of members) memberMap.set(m.id, m);
   const roleMap = new MockCollection();
-  roleMap.set('r1', { id: 'r1', name: 'ColorRed' });
-  roleMap.set('r2', { id: 'r2', name: 'ColorBlue' });
-  roleMap.set('r3', { id: 'r3', name: 'Premium' });
-  return {
+  roleMap.set('r1', { id: 'r1', name: 'ColorRed', managed: false, editable: true });
+  roleMap.set('r2', { id: 'r2', name: 'ColorBlue', managed: false, editable: true });
+  roleMap.set('r3', { id: 'r3', name: 'Premium', managed: false, editable: true });
+  const guild = {
     id: 'g1',
     members: {
       cache: memberMap,
       fetch: vi.fn(async (id: string) => memberMap.get(id) ?? null),
+      me: { permissions: { has: vi.fn(() => true) } },
     },
     roles: { cache: roleMap },
   } as any;
+  for (const member of members) member.guild = guild;
+  return guild;
 }
 
 function makeMember(id: string, roleIds: string[] = []) {

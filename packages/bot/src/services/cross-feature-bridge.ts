@@ -239,12 +239,14 @@ export class CrossFeatureBridge {
     event: T,
     handler: (event: PlatformEvent<T, PlatformEventMap[T]>) => Promise<void> | void,
   ): void {
-    const wrapped = (evt: PlatformEvent<T, PlatformEventMap[T]>) => {
+    const wrapped = async (evt: PlatformEvent<T, PlatformEventMap[T]>): Promise<void> => {
       // Only process events for our guild
       if (evt.guildId !== this.guild.id) return;
-      Promise.resolve(handler(evt)).catch((err) => {
+      try {
+        await handler(evt);
+      } catch (err) {
         log.error(`Error handling ${event}:`, err);
-      });
+      }
     };
     this.eventBus.on(event, wrapped);
     this.listeners.push(() => this.eventBus.off(event, wrapped));

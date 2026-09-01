@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState, useCallback, type ComponentType } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { GuildSelector } from '@/components/guild-selector';
+import { GlobalDashboardSearch } from '@/components/dashboard/global-dashboard-search';
 import {
   OpenTicketsBadge,
   PendingOrdersBadge,
@@ -183,7 +184,7 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Analytics', href: '/analytics', icon: TrendingUp },
       { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
-      { label: 'Prompt Generator', href: '/project-licensing', icon: FileCode2 },
+      { label: 'SDK', href: '/sdk', icon: FileCode2 },
       { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal', badge: PendingOrdersBadge },
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
       { label: 'Licensing', href: '/licenses', icon: Key, requires: 'paypal' },
@@ -447,6 +448,8 @@ export function Sidebar() {
 
       {/* Guild Selector (multi-guild — V53 Phase 4) */}
       <GuildSelector />
+
+      <GlobalDashboardSearch />
 
       {/* Navigation */}
       <SidebarBadgesProvider>

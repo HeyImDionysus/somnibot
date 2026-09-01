@@ -11,10 +11,6 @@ describe('PayPal webhook event catalog', () => {
     path.resolve(__dirname, '../app/api/paypal/webhook/route.ts'),
     'utf8',
   );
-  const setupSource = readFileSync(
-    path.resolve(__dirname, '../app/(setup)/setup/page.tsx'),
-    'utf8',
-  );
   const readmeSource = readFileSync(
     path.resolve(__dirname, '../../../../README.md'),
     'utf8',
@@ -28,10 +24,6 @@ describe('PayPal webhook event catalog', () => {
     for (const eventType of PAYPAL_HANDLED_WEBHOOK_EVENT_TYPES) {
       expect(routeSource).toContain(`case '${eventType}'`);
     }
-  });
-
-  it('renders the shared event catalog in setup instead of a stale hand-written list', () => {
-    expect(setupSource).toContain('PAYPAL_HANDLED_WEBHOOK_EVENTS.map');
   });
 
   it('keeps README and bot setup instructions aligned to handled events', () => {

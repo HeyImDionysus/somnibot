@@ -53,6 +53,7 @@ vi.mock('../sync/repair-actions.js', () => ({
 }));
 
 import {
+  handleTestWelcome,
   handleReconcileEntitlementRoles,
   handleRevokeRoles,
   startActionQueueListener,
@@ -65,7 +66,10 @@ afterEach(() => {
 });
 
 // Multi-table Supabase mock that returns different data per table/call
-function makeSupa(pendingActions: any[] = []) {
+function makeSupa(
+  pendingActions: any[] = [],
+  guildConfig: Record<string, unknown> = { guild_id: 'guild-1', economy_enabled: true },
+) {
   // Track sequential calls to .from('bot_action_queue') to differentiate
   // the recover RPC, the pending query, and the status updates
   let pendingReturned = false;
@@ -109,7 +113,7 @@ function makeSupa(pendingActions: any[] = []) {
         return chain;
       }
       if (table === 'guild_config') {
-        return makeChain({ guild_id: 'guild-1', economy_enabled: true });
+        return makeChain(guildConfig);
       }
       if (table === 'guild_desired_state') {
         return makeChain({ guild_id: 'guild-1', roles: [], channels: [], categories: [] });
@@ -2328,6 +2332,67 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
       expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // test welcome message sending
+  });
+
+  it('records a configured welcome test only after Discord accepts the delivery', async () => {
+    const guild = makeGuild();
+    const channel = guild.channels.cache.get('ch-1');
+    channel.isTextBased = () => true;
+    channel.send.mockResolvedValue({ id: 'test-welcome-message-1' });
+    guild.members.me = {
+      id: 'bot-1',
+      displayName: 'SomniBot',
+      user: { tag: 'SomniBot#0001', displayAvatarURL: () => 'https://cdn.example/bot.png' },
+    };
+    const config = {
+      welcome_enabled: true,
+      welcome_channel_id: 'ch-1',
+      welcome_message: 'Welcome {user}',
+      updated_at: '2026-08-31T13:00:00.000Z',
+    };
+    const supabase = makeSupa([], config);
+    const emit = vi.spyOn(eventBus, 'emit').mockImplementation(() => undefined);
+
+    const result = await handleTestWelcome(guild, supabase, {
+      channel_id: 'ch-1',
+      type: 'welcome',
+    });
+
+    expect(result).toMatchObject({ success: true, data: { messageId: 'test-welcome-message-1', channelId: 'ch-1', type: 'welcome' } });
+    expect(emit).toHaveBeenCalledWith('welcome.test_delivery_succeeded', 'guild-1', {
+      channelId: 'ch-1',
+      messageType: 'welcome',
+      configuredDestination: true,
+      templateSource: 'configured',
+      configUpdatedAt: '2026-08-31T13:00:00.000Z',
+      occurrenceId: 'ch-1:welcome:test:test-welcome-message-1',
+      correlationId: 'welcome:test:ch-1',
+    });
+  });
+
+  it('does not record a welcome test when Discord rejects the delivery', async () => {
+    const guild = makeGuild();
+    const channel = guild.channels.cache.get('ch-1');
+    channel.isTextBased = () => true;
+    channel.send.mockRejectedValue(new Error('Discord rejected delivery'));
+    guild.members.me = {
+      id: 'bot-1',
+      displayName: 'SomniBot',
+      user: { tag: 'SomniBot#0001', displayAvatarURL: () => 'https://cdn.example/bot.png' },
+    };
+    const supabase = makeSupa([], {
+      welcome_enabled: true,
+      welcome_channel_id: 'ch-1',
+      welcome_message: 'Welcome {user}',
+    });
+    const emit = vi.spyOn(eventBus, 'emit').mockImplementation(() => undefined);
+
+    await expect(handleTestWelcome(guild, supabase, {
+      channel_id: 'ch-1',
+      type: 'welcome',
+    })).rejects.toThrow('Discord rejected delivery');
+
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it('handles create_role with missing required fields', async () => {

@@ -241,7 +241,7 @@ describe('appeal decision DM', () => {
 
   it('flips the latch for delivered and terminal outcomes but not transient', async () => {
     const appeals = [
-      appealRow({ id: 'ok', status: 'approved' }),
+      appealRow({ id: 'ok', status: 'denied' }),
       appealRow({ id: 'gone', status: 'denied' }),
       appealRow({ id: 'retry', status: 'denied' }),
     ];

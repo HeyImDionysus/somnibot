@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { Button } from '@/components/shared/button';
 import { buildProductIntegrationGuide } from '@/lib/store/commerce-onboarding';
 import type { CommerceProductIdentity } from './onboarding-types';
+import { SdkIntegrationReceiptPanel } from './sdk-integration-receipt-panel';
 
 type Props = {
   readonly product: CommerceProductIdentity;
@@ -82,10 +83,10 @@ export function ProductIntegrationPanel({
         {supportsCompletedProjectPrompt ? (
           <>
             <p className="mt-4 text-xs text-discord-text-muted">
-              Generate the final implementation contract from this authoritative saved product and license policy. The generator reads these values but never changes them.
+              Generate the final SDK integration contract from this authoritative saved product and license policy. The SDK reads these values but never changes them.
             </p>
-            <Link href={`/project-licensing?productId=${encodeURIComponent(product.id)}`} className="mt-2 inline-flex h-8 items-center rounded-input bg-discord-bg-active px-3 text-xs font-medium text-discord-text-primary hover:bg-discord-border-strong">
-              Open Prompt Generator
+            <Link href={`/sdk?productId=${encodeURIComponent(product.id)}`} className="mt-2 inline-flex h-8 items-center rounded-input bg-discord-bg-active px-3 text-xs font-medium text-discord-text-primary hover:bg-discord-border-strong">
+              Open SDK
             </Link>
           </>
         ) : (
@@ -114,6 +115,7 @@ export function ProductIntegrationPanel({
           <p className="mt-2 text-xs text-discord-warning">Static revocation blocks future delivery but cannot erase a copy already downloaded. Watermarking supports attribution; it is not a remote-delete promise.</p>
         )}
       </div>
+      {supportsCompletedProjectPrompt && <SdkIntegrationReceiptPanel productId={product.id} />}
     </section>
   );
 }

@@ -224,6 +224,7 @@ function ItemFormModal({
                 role_id: (value as string | null) ?? '',
               })}
               placeholder="Select role…"
+              requireAssignable
             />
           )}
           {effect && (effect.type === 'shovel' || effect.type === 'pickaxe' || effect.type === 'hunting_rifle') && (
@@ -256,6 +257,7 @@ function ItemFormModal({
             value={form.grant_role_id ?? null}
             onChange={(value) => update('grant_role_id', (value as string | null) ?? null)}
             placeholder="No purchase role"
+            requireAssignable
           />
         </div>
 

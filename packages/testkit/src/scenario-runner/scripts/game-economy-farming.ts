@@ -443,17 +443,12 @@ function gateBrandKit(ctx: ScenarioContext): void {
   );
 }
 
-/**
- * Farming actions write no `audit_logs` row in the manager code path inspected; the only
- * ledger row (economy_transactions `farm_harvest`) is written INSIDE `/farm harvest`
- * (a subcommand handler), undrivable here — so there is no DB-observable audit row to read.
- */
 function gateAudit(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'audit-row',
     'Every farming state change lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation.',
-    'the FarmingManager writes no audit_logs row, and its only ledger row (economy_transactions farm_harvest) is written inside the /farm harvest subcommand handler — undrivable in this bot-only harness, so no DB-observable audit row can be read',
+    'farming mutations write transaction-local audit rows and harvest writes the economy ledger; proving each action requires driving the real /farm subcommands and reading audit_logs from the live guild-scoped stack',
   );
 }
 

@@ -340,26 +340,17 @@ export default function OnboardingPage() {
         <p className="mt-1 text-sm text-discord-text-muted">
           The role granted when a member completes onboarding. This unlocks channel access.
         </p>
-        <select
-          className="mt-3 w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
-          value={config.member_role_id ?? ''}
-          onChange={(e) =>
-            setConfig((prev) => ({
-              ...prev,
-              member_role_id: e.target.value || null,
-            }))
-          }
-        >
-          <option value="">Select a role...</option>
-          {roles
-            .filter((r) => r.name !== '@everyone')
-            .sort((a, b) => b.position - a.position)
-            .map((role) => (
-              <option key={role.id} value={role.id}>
-                {role.name}
-              </option>
-            ))}
-        </select>
+        <RolePicker
+          className="mt-3"
+          value={config.member_role_id}
+          onChange={(value) => setConfig((previous) => ({
+            ...previous,
+            member_role_id: typeof value === 'string' ? value : null,
+          }))}
+          placeholder="Select a role…"
+          allowNone
+          requireAssignable
+        />
       </section>
 
       {/* Interest Role Mapping */}
@@ -404,21 +395,13 @@ export default function OnboardingPage() {
             onChange={(e) => setNewInterestName(e.target.value)}
             className="min-w-0 flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-discord-accent focus:outline-none"
           />
-          <select
-            value={newInterestRole}
-            onChange={(e) => setNewInterestRole(e.target.value)}
-            className="min-w-0 flex-1 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
-          >
-            <option value="">Select role...</option>
-            {roles
-              .filter((r) => r.name !== '@everyone')
-              .sort((a, b) => b.position - a.position)
-              .map((role) => (
-                <option key={role.id} value={role.id}>
-                  {role.name}
-                </option>
-              ))}
-          </select>
+          <RolePicker
+            className="min-w-0 flex-1"
+            value={newInterestRole || null}
+            onChange={(value) => setNewInterestRole(typeof value === 'string' ? value : '')}
+            placeholder="Select role…"
+            requireAssignable
+          />
           <button
             onClick={addInterestMapping}
             disabled={!newInterestName.trim() || !newInterestRole}

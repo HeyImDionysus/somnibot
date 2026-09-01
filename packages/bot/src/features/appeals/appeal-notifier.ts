@@ -119,7 +119,8 @@ export async function deliverDecisionDmsForGuild(
   let flipped = 0;
   for (const appeal of pending) {
     if (appeal.status === 'approved') {
-      await applyApprovedAppeal(client, appeal, guildId, guildName, guild);
+      const punishmentLifted = await applyApprovedAppeal(client, appeal, guildId, guildName, guild);
+      if (!punishmentLifted) continue;
     }
     const outcome = await deliverDecisionDm(client, appeal, guildName, kit);
     if (outcome !== 'transient') {
@@ -144,7 +145,7 @@ async function applyApprovedAppeal(
   guildId: string,
   guildName: string,
   guild?: Guild,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const { data: infraction, error } = await client.supabase
       .from('infractions')
@@ -154,7 +155,7 @@ async function applyApprovedAppeal(
       .maybeSingle();
     if (error || !infraction) {
       await recordAppealLiftFailure(client.supabase, guildId, appeal, `infraction lookup failed: ${error?.message ?? 'not found'}`);
-      return;
+      return false;
     }
 
     const pardoned = await pardonInfraction(
@@ -165,7 +166,7 @@ async function applyApprovedAppeal(
     );
     if (!pardoned) {
       await recordAppealLiftFailure(client.supabase, guildId, appeal, 'infraction could not be pardoned');
-      return;
+      return false;
     }
 
     const member = guild
@@ -193,7 +194,7 @@ async function applyApprovedAppeal(
         appeal,
         `Discord ${infraction.type} could not be lifted (member unavailable or insufficient permissions)`,
       );
-      return;
+      return false;
     }
 
     await writeAuditLog(client.supabase, {
@@ -214,8 +215,10 @@ async function applyApprovedAppeal(
       occurrenceKey: `appeal:${appeal.id}:punishment-lifted`,
       success: true,
     });
+    return true;
   } catch (err) {
     await recordAppealLiftFailure(client.supabase, guildId, appeal, String(err));
+    return false;
   }
 }
 

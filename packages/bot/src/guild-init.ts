@@ -13,6 +13,7 @@
 
 import type { Guild, RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 import { BOOT_ID } from './services/boot-identity.js';
+import { buildBotRuntimeSystemState } from './services/runtime-system-state.js';
 import { seedStarterContent } from './services/content-seeder.js';
 import { backfillMembers } from './features/welcome/member-service.js';
 import { reconcilePendingOnboardingMembers } from './features/welcome/onboarding-handler.js';
@@ -780,11 +781,25 @@ export async function initGuildFeatures(
     services.auditService.start();
     ctx.setManager('auditService', services.auditService);
 
+    const migration = await supabase.from('schema_migrations').select('filename')
+      .eq('success', true).order('applied_at', { ascending: false })
+      .order('filename', { ascending: false }).limit(1).maybeSingle();
     await services.auditService.log({
       action: 'bot.started',
       actorType: 'system',
       actorId: 'system',
-      details: { version: SOMNIBOT_VERSION },
+      details: {
+        version: SOMNIBOT_VERSION,
+        bootId: BOOT_ID,
+        runtimeIdentity: buildBotRuntimeSystemState({
+          bootId: BOOT_ID,
+          observedAt: new Date().toISOString(),
+          discordReady: client.ws.status === 0,
+          guildIds: Array.from(client.guilds.cache.keys()),
+          migrationHead: !migration.error && typeof migration.data?.filename === 'string'
+            ? migration.data.filename : null,
+        }).identity,
+      },
     });
 
     services.diagnosticsService = new DiagnosticsService(
@@ -840,9 +855,7 @@ export async function initGuildFeatures(
       () => { void services.auditService?.refreshFlushInterval(); },
       () => { void services.automationEngine?.refreshPreviewRequirement(); },
       (snapshotIntervalMs) => {
-        if (snapshotIntervalMs !== undefined) {
-          services.diagnosticsService?.setSnapshotInterval(snapshotIntervalMs);
-        }
+        services.diagnosticsService?.refreshConfiguration(snapshotIntervalMs);
       },
       async () => {
         await reconcilePendingOnboardingMembers(client, guild);

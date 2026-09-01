@@ -321,7 +321,7 @@ function gateAuditDeferredToDef(ctx: ScenarioContext): void {
     'audit',
     'audit-row',
     'Every member-profile state change lands one append-only audit row.',
-    'member-profile saves emit no audit_logs rows at all — the unaudited-writes finding is recorded once in DEF; this scenario adds no new audit-observable behavior',
+    'profile saves use occurrence-keyed audit events with bounded retry; proving this scenario requires the real profile command followed by audit_logs readback',
   );
 }
 
@@ -553,7 +553,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'One audit row records each rejected profile-configuration attempt with its validation reason.',
-    'the rejected-config audit row is written by the dashboard save path (not reachable in a bot-only harness), and profiles write no audit_logs rows at all (see DEF)',
+    'the rejected-config audit row requires the authenticated dashboard save path, while profile write audits require the real command path; neither audit readback is reachable in this bot-only harness',
   );
 
   await proveRlsIsolation(ctx, handle, userA);
@@ -1069,7 +1069,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Audit history is anonymized rather than deleted (operational profile rows deleted, audit_logs retained-anonymized).',
-    'requires an audit_logs anonymization readback lane; member-profile operational rows are the DB-observable evidence here and profiles write no audit_logs rows to anonymize (see DEF)',
+    'profile writes produce durable audit rows; proving anonymize-over-delete requires real profile changes, cleanup, and retained audit_logs readback',
   );
   ctx.gate(
     'Discord',

@@ -10,6 +10,7 @@ const role = {
   name: 'Member',
   color: 0,
   position: 1,
+  managed: false,
   editableByBot: true,
 };
 
@@ -53,20 +54,21 @@ describe('roleAssignmentIssue — requireAssignable fails closed without authori
     // Stale editableByBot=true is exactly the dangerous case: the bot may
     // have lost Manage Roles since, and submission only fails later at
     // server validation.
-    expect(roleAssignmentIssue({ editableByBot: true }, true, false)).toContain('cannot be verified');
-    expect(roleAssignmentIssue({ editableByBot: false }, true, false)).toContain('cannot be verified');
+    expect(roleAssignmentIssue({ editableByBot: true, managed: false }, true, false)).toContain('cannot be verified');
+    expect(roleAssignmentIssue({ editableByBot: false, managed: false }, true, false)).toContain('cannot be verified');
   });
 
   it('names the hierarchy/permission repair under an authoritative snapshot', async () => {
     const { roleAssignmentIssue } = await import('@/components/shared/role-picker');
-    expect(roleAssignmentIssue({ editableByBot: false }, true, true)).toContain('Manage Roles');
-    expect(roleAssignmentIssue({ editableByBot: true }, true, true)).toBeNull();
+    expect(roleAssignmentIssue({ editableByBot: false, managed: false }, true, true)).toContain('Manage Roles');
+    expect(roleAssignmentIssue({ editableByBot: true, managed: false }, true, true)).toBeNull();
+    expect(roleAssignmentIssue({ editableByBot: false, managed: true }, true, true)).toContain('managed by Discord');
   });
 
   it('never blocks pickers that do not require assignability', async () => {
     const { roleAssignmentIssue } = await import('@/components/shared/role-picker');
-    expect(roleAssignmentIssue({ editableByBot: false }, false, false)).toBeNull();
-    expect(roleAssignmentIssue({ editableByBot: false }, false, true)).toBeNull();
+    expect(roleAssignmentIssue({ editableByBot: false, managed: false }, false, false)).toBeNull();
+    expect(roleAssignmentIssue({ editableByBot: false, managed: false }, false, true)).toBeNull();
   });
 });
 
@@ -96,7 +98,7 @@ describe('roleSnapshotTimestampMs — mounted expiry anchors to the SNAPSHOT tim
       snapshotVersion: 2,
       snapshotAt: new Date(NOW - (10 * 60_000 - 1_000)).toISOString(),
       data: [{
-        id: 'role-1', name: 'Mod', color: 0, position: 3, editableByBot: true,
+        id: 'role-1', name: 'Mod', color: 0, position: 3, managed: false, editableByBot: true,
       }],
     };
     expect(isAuthoritativeRoleSnapshot(payload, NOW)).toBe(true);

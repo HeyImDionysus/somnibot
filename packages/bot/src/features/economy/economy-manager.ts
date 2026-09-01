@@ -18,6 +18,7 @@ import { randomInt } from 'node:crypto';
 import { eventBus } from '../../services/event-bus.js';
 import { resolveBrandKit } from '../branding/brand-kit.js';
 import { handleLevelUp } from '../levels/level-announcer.js';
+import { roleAssignmentIssue } from '../../services/role-assignability.js';
 
 const log = createLogger('Economy');
 
@@ -86,6 +87,7 @@ export interface TransactionResult {
   amount: number;
   balance: WalletData;
   message: string;
+  indeterminate?: boolean;
   streak?: StreakData;
 }
 
@@ -1225,6 +1227,14 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: '❌ Item not found.' };
     }
 
+    if (item.grant_role_id) {
+      const issue = roleAssignmentIssue(this.guild, item.grant_role_id);
+      if (issue) {
+        const wallet = await this.getOrCreateWallet(userId);
+        return { success: false, amount: 0, balance: wallet, message: `❌ ${issue.message}` };
+      }
+    }
+
     // Role requirement — a live-Discord check, so it stays here (the RPC can't
     // see the member's roles). The RPC re-validates stock/max/funds under a lock.
     if (item.require_role_id) {
@@ -1291,13 +1301,52 @@ export class EconomyManager {
 
     const totalCost = Number(result.total_cost);
 
-    // Grant role if applicable (member.roles.add is idempotent — safe on a replay).
     if (item.grant_role_id) {
-      try {
-        const member = await this.guild.members.fetch(userId);
-        await member.roles.add(item.grant_role_id, `Purchased ${item.name} from economy shop`);
-      } catch (err) {
-        log.warn('Failed to grant role', { roleId: item.grant_role_id, detail: err });
+      const { data: queued, error: queueReadError } = await this.supabase
+        .from('bot_action_queue')
+        .select('id')
+        .eq('guild_id', this.guild.id)
+        .eq('action', 'bulk_role_add')
+        .contains('payload', { source: 'economy_shop_purchase', request_id: requestId })
+        .maybeSingle();
+      if (queueReadError) {
+        return {
+          success: false,
+          indeterminate: true,
+          amount: totalCost,
+          balance: wallet,
+          message: '⚠️ The purchase completed, but role delivery could not be confirmed. Contact staff and do not purchase again.',
+        };
+      }
+      if (!queued) {
+        const { error: queueWriteError } = await this.supabase.from('bot_action_queue').insert({
+          guild_id: this.guild.id,
+          action: 'bulk_role_add',
+          status: 'pending',
+          payload: {
+            member_id: userId,
+            role_id: item.grant_role_id,
+            source: 'economy_shop_purchase',
+            item_id: item.id,
+            request_id: requestId,
+          },
+        });
+        if (queueWriteError) {
+          await raiseOwnerAlert(this.supabase, this.guild.id, {
+            alertType: 'economy_role_delivery_failed',
+            severity: 'critical',
+            title: 'Economy role delivery failed',
+            message: `A completed economy shop purchase could not queue role ${item.grant_role_id}.`,
+            metadata: { user_id: userId, item_id: item.id, request_id: requestId },
+          });
+          return {
+            success: false,
+            indeterminate: true,
+            amount: totalCost,
+            balance: wallet,
+            message: '⚠️ The purchase completed, but role delivery could not be queued. Staff have been alerted; do not purchase again.',
+          };
+        }
       }
     }
 

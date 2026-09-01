@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { RuntimeIdentitySchema, type RuntimeIdentity } from '@somnibot/shared';
 
 const BOT_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
 const BOT_HEARTBEAT_STALE_MS = 120_000; // 2 minutes — matches bot TTL
@@ -26,6 +27,10 @@ async function getValkeyHealth(probe: HealthProbe | null): Promise<boolean> {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 export async function buildHealthResponse(probe: HealthProbe | null = null) {
   const valkeyUp = await getValkeyHealth(probe);
   const configStatus = getConfigStatus();
@@ -33,15 +38,21 @@ export async function buildHealthResponse(probe: HealthProbe | null = null) {
   let botStatus: 'online' | 'offline' | 'unknown' = 'unknown';
   let botBootId: string | null = null;
   let botHeartbeatAt: number | null = null;
+  let runtimeIdentity: RuntimeIdentity | null = null;
   if (valkeyUp) {
     try {
       const heartbeatRaw = await probe?.readValkeyKey(BOT_HEARTBEAT_KEY);
       if (heartbeatRaw) {
-        const heartbeat = JSON.parse(heartbeatRaw);
-        const age = Date.now() - (heartbeat.timestamp ?? 0);
+        const parsedHeartbeat: unknown = JSON.parse(heartbeatRaw);
+        const heartbeat = isRecord(parsedHeartbeat) ? parsedHeartbeat : {};
+        const timestamp = typeof heartbeat.timestamp === 'number' ? heartbeat.timestamp : 0;
+        const age = Date.now() - timestamp;
         botStatus = age < BOT_HEARTBEAT_STALE_MS ? 'online' : 'offline';
         botBootId = typeof heartbeat.bootId === 'string' ? heartbeat.bootId : null;
         botHeartbeatAt = typeof heartbeat.timestamp === 'number' ? heartbeat.timestamp : null;
+        const systemState = isRecord(heartbeat.systemState) ? heartbeat.systemState : null;
+        const identity = RuntimeIdentitySchema.safeParse(systemState?.identity);
+        runtimeIdentity = identity.success ? identity.data : null;
       } else {
         botStatus = 'offline';
       }
@@ -64,6 +75,7 @@ export async function buildHealthResponse(probe: HealthProbe | null = null) {
         bootId: botBootId,
         heartbeatAt: botHeartbeatAt,
       },
+      runtimeIdentity,
       timestamp: new Date().toISOString(),
     },
     { status: isHealthy ? 200 : 503 },

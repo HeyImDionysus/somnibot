@@ -13,7 +13,6 @@ packages/
   shared/       # Shared types and utilities
   supabase/     # Migrations, seed data, edge functions
   launcher/     # Desktop launcher (Electron)
-  license-sdk/  # License validation SDK
 ```
 
 ## Critical Invariants

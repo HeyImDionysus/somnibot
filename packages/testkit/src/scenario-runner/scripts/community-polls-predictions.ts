@@ -700,7 +700,7 @@ function gateAuditLog(ctx: ScenarioContext): void {
     'audit',
     'discord-readback',
     'Every polls/predictions state change lands one append-only audit_logs row with actor, guild, and correlation id; anonymization (never deletion) is the only mutation.',
-    'PollsManager still writes no audit_logs row (no AuditService call, no DB trigger); the money path now lands economy_transactions prediction_bet/payout/refund ledger rows (asserted live in the money lanes) and prediction_bets remains the per-bet operational evidence, but the dedicated correlation-id audit_logs lane is unbuilt',
+    'poll and prediction lifecycle events are mapped into audit_logs while money effects retain their economy ledger; proving the correlation requires the live interaction and audit readback lane',
   );
 }
 
@@ -1409,7 +1409,7 @@ async function INVALID(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Each rejected input lands one audit row with its validation reason.',
-    'PollsManager writes no audit_logs row for rejected creates/bets (no AuditService call, no DB trigger) — the reject replies are now driven live above, but there is no audit lane to read',
+    'rejected poll creates and prediction bets emit mapped denial events; proving them requires the live rejected interaction followed by audit_logs readback',
   );
   await proveMemberSurfaces(ctx, handle);
   gateReplayDeferredTo(ctx, 'DEF / REPLAY / RACE');
@@ -1498,7 +1498,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Each denied close/resolve attempt is audited with actor, target id, and reason permission-denied.',
-    'PollsManager writes no audit_logs row for denied attempts (no AuditService call, no DB trigger); the creator-only guard is now driven live above and refuses the non-creator, but writes no audit row',
+    'creator-only denials emit mapped audit events; proving them requires the live non-creator interaction followed by audit_logs readback',
   );
   await proveMemberSurfaces(ctx, handle);
   gateReplayDeferredTo(ctx, 'DEF / REPLAY / RACE');

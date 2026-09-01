@@ -17,6 +17,28 @@
 WSL2 is a VPS-like test bed. It is not the same thing as the regular-local user
 experience.
 
+### Supported deployment profiles
+
+The versioned profile contract lives in
+`packages/shared/src/experience/deployment-profiles.ts`. Launcher preflight,
+dashboard diagnostics, and upgrade checks must use these identifiers rather
+than infer support from a host name:
+
+| Profile | Intended shape | Minimum host | Backup | Important limit |
+|---|---|---|---|---|
+| `local-single-guild` | One server on an owner-managed machine | 2 CPU / 4 GiB | Required | The owner device must remain online |
+| `local-multi-guild` | Up to 10 servers on an owner-managed machine | 4 CPU / 8 GiB | Required | Capacity is bounded by that device |
+| `vps-single-guild` | One always-on hosted server | 2 CPU / 4 GiB | Required | Valkey and Lavalink stay private |
+| `vps-multi-guild` | Up to 25 hosted servers | 4 CPU / 8 GiB | Required | Measure provider and queue capacity per active server |
+| `higher-load-vps` | Up to 100 hosted servers | 8 CPU / 16 GiB | Required | Requires measured isolation, backpressure, and restore rehearsal |
+
+The 10,000-member objective is registered members per server, not simultaneous
+Discord accounts. A profile is not ready merely because its processes start:
+its CPU, memory, backup, guild-count, provider, queue, database, and recovery
+evidence must satisfy the profile contract and the feature-specific live gates.
+Capacity above a listed profile requires measurement and an explicit supported
+profile revision; it must not be silently treated as compatible.
+
 ---
 
 ## Shared Prerequisites

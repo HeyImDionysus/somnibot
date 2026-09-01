@@ -48,7 +48,7 @@ import { validateAssignableDiscordTargets } from '@/lib/api/live-discord-facts';
 
 function supaDouble() {
   const chain: any = {};
-  for (const m of ['select', 'eq', 'in', 'order', 'limit', 'update', 'delete']) {
+  for (const m of ['select', 'eq', 'in', 'order', 'limit', 'update', 'upsert', 'delete']) {
     chain[m] = vi.fn(() => chain);
   }
   chain.insert = vi.fn(() => chain);
@@ -101,10 +101,14 @@ describe('POST /api/store/products — drafts skip live-target validation', () =
     expect(validateAssignableDiscordTargets).not.toHaveBeenCalled();
   });
 
-  it('still refuses a LIVE product with the same unverifiable targets', async () => {
+  it('creates an inactive draft even when a caller requests activation', async () => {
     const response = await POST(request({ ...DRAFT, active: true }));
 
-    expect(response.status).toBe(503);
-    expect(validateAssignableDiscordTargets).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(200);
+    expect(validateAssignableDiscordTargets).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toMatchObject({
+      success: true,
+      data: { active: false },
+    });
   });
 });

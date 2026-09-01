@@ -20,6 +20,9 @@ export function buildStoreCommand() {
   return new SlashCommandBuilder()
     .setName('store')
     .setDescription('Browse the server store')
+    .addBooleanOption((option) => option
+      .setName('test_launch')
+      .setDescription('Owner-only: test an inactive Product Launch Run in Sandbox'))
     .addStringOption((option) => option
       .setName('coupon')
       .setDescription('Apply a coupon code to eligible one-time products')
@@ -51,17 +54,47 @@ export async function handleStoreCommand(
   const requestedCoupon = typeof interaction.options?.getString === 'function'
     ? interaction.options.getString('coupon')?.trim().toUpperCase() ?? null
     : null;
+  const requestedLaunchTest = typeof interaction.options?.getBoolean === 'function'
+    ? interaction.options.getBoolean('test_launch') === true
+    : false;
+  if (requestedLaunchTest && interaction.guild?.ownerId !== interaction.user.id) {
+    await interaction.editReply({ content: '❌ Only the server owner can run an inactive product Sandbox launch test.' });
+    return;
+  }
   if (requestedCoupon && !/^[A-Z0-9][A-Z0-9_-]{1,31}$/.test(requestedCoupon)) {
     await interaction.editReply({ content: '❌ Coupon codes may contain only letters, numbers, underscores, and hyphens.' });
     return;
   }
 
-  // Fetch active products
-  const { data: products, error } = await supabase
+  const { data: launchRuns, error: launchRunsError } = requestedLaunchTest
+    ? await supabase
+      .from('commerce_product_launch_runs')
+      .select('id, product_id, environment, state, created_by')
+      .eq('guild_id', guildId)
+      .eq('created_by', interaction.user.id)
+      .eq('environment', 'sandbox')
+      .in('state', ['draft', 'sandbox_verifying', 'ready'])
+      .limit(100)
+    : { data: [], error: null };
+  if (launchRunsError) {
+    await interaction.editReply({ content: '⚠️ Product Launch Run state is temporarily unavailable.' });
+    return;
+  }
+  const launchRunByProduct = new Map<string, string>();
+  for (const run of launchRuns ?? []) {
+    if (typeof run.id === 'string' && typeof run.product_id === 'string') {
+      launchRunByProduct.set(run.product_id, run.id);
+    }
+  }
+  const productQuery = supabase
     .from('products')
     .select('*')
     .eq('guild_id', guildId)
-    .eq('active', true)
+    .eq('active', !requestedLaunchTest);
+  const scopedProductQuery = requestedLaunchTest
+    ? productQuery.in('id', [...launchRunByProduct.keys()])
+    : productQuery;
+  const { data: products, error } = await scopedProductQuery
     .order('sort_order', { ascending: true })
     .limit(1000);
 
@@ -127,7 +160,9 @@ export async function handleStoreCommand(
   // owner's powered-by toggle.
   const headerEmbed = new EmbedBuilder()
     .setTitle(kit.brandName)
-    .setDescription(requestedCoupon
+    .setDescription(requestedLaunchTest
+      ? 'Sandbox launch test: these products remain inactive and only you can use these proof controls.'
+      : requestedCoupon
       ? `Coupon **${requestedCoupon}** will be verified against eligible one-time products before PayPal opens.`
       : 'Browse our products below. Click "Buy" to purchase!');
   applyBrand(headerEmbed, kit, { intent: 'primary' });
@@ -153,6 +188,15 @@ export async function handleStoreCommand(
     );
 
     const couponSuffix = requestedCoupon && product.type === 'one_time' ? `:${requestedCoupon}` : '';
+    const launchRunId = launchRunByProduct.get(product.id);
+    const launchPrefix = product.type === 'free' && product.price_cents === 0
+      ? 'store:launch-claim'
+      : 'store:launch-buy';
+    const customId = requestedLaunchTest && launchRunId
+      ? `${launchPrefix}:${launchRunId}:${product.id}`
+      : product.type === 'free' && product.price_cents === 0
+        ? `store:claim:${product.id}`
+        : `store:buy:${product.id}${couponSuffix}`;
     const purchaseLabel = product.type === 'free' && product.price_cents === 0
       ? `Claim ${product.name}`
       : requestedCoupon && product.type === 'one_time'
@@ -160,7 +204,7 @@ export async function handleStoreCommand(
         : `Buy ${product.name} — $${price}`;
     const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(product.type === 'free' && product.price_cents === 0 ? `store:claim:${product.id}` : `store:buy:${product.id}${couponSuffix}`)
+        .setCustomId(customId)
         .setLabel(purchaseLabel.slice(0, 80))
         .setStyle(ButtonStyle.Primary)
         .setEmoji(product.type === 'free' ? '🎁' : '🛒'),

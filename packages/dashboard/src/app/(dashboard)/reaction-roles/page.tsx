@@ -491,6 +491,7 @@ export default function ReactionRolesPage() {
                     value={form.role_id || null}
                     onChange={(v) => setForm({ ...form, role_id: (v as string) ?? '' })}
                     placeholder="Select role to assign…"
+                    requireAssignable
                   />
                 </div>
               </div>

@@ -769,16 +769,8 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
 
 /** DEPFAIL — losing Valkey never lets cooldowns be bypassed (Valkey leg honestly gated). */
 async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
-  // The premise is a controlled "stop Valkey mid-run" outage: the contracted fault
-  // severs VALKEY (the cooldown check-and-set), not Supabase — a Supabase sever
-  // would not model this contract (invocation reads the in-memory registry loaded
-  // at boot; the cooldown is the Valkey branch). The fault-proxy lane severs
-  // SUPABASE only this wave, so the Valkey sever leg stays honestly gated. The
-  // engine's cooldown branch also has no branded temporarily-unavailable fallback
-  // yet — fixing + proving that belongs to the Valkey-sever wave, where the fix
-  // can be driven for real instead of shipped unproven.
   const valkeyLane = ctx.faults?.valkey
-    ? 'the contracted outage severs VALKEY; its fault proxy is registered but deliberately not severed this wave (Supabase-sever only) — the cooldown-branch degradation (and its missing branded temporarily-unavailable fallback) is proven on the Valkey-sever wave'
+    ? 'the contracted outage severs VALKEY; its fault proxy is registered but deliberately not severed in this Supabase-sever wave, so the existing branded fail-closed cooldown degradation must be proven on the Valkey-sever wave'
     : 'no fault proxy registered in this process (run via run-one-domain.mjs for the dependency-outage lane); the contracted outage severs Valkey, not Supabase';
   ctx.gate(
     'Discord',
@@ -808,7 +800,7 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'branding',
     'captured-reply',
     'The unavailable copy is calm and branded.',
-    `${valkeyLane}; the temporarily-unavailable branch does not exist in the engine yet (a real gap to surface on that wave, never faked green here)`,
+    `${valkeyLane}; capturing the branded temporarily-unavailable reply requires the real Valkey-sever interaction lane`,
   );
   ctx.gate(
     'database-RLS',

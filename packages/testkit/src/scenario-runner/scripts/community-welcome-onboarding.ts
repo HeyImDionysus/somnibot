@@ -700,7 +700,6 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   // (undrivable) below rather than force-passed.
   // The timed fallback grant, the dm-fallback-notice in-channel, the single
   // config-alert to the owner, and the post-timeout member-role grant all need the
-  // (unimplemented) fallback path + a live gateway + a timer + the owner alert channel.
   gateGatewayReadback(
     ctx,
     'The welcome channel shows the dm-fallback-notice, and the member role appears within the fallback window despite no completed onboarding.',
@@ -709,13 +708,13 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'owner-notification',
     'discord-readback',
     'Exactly one config-alert reaches the owner channel describing the fallback grant and its cause.',
-    'requires the (currently unimplemented) fallback path + a live gateway + the owner alert channel readback',
+    'the durable onboarding fallback and deduped owner alert exist; proving them requires the live gateway, fallback timer, and configured owner channel readback',
   );
   ctx.gate(
     'audit',
     'discord-readback',
     'Append-only audit rows capture the fallback grant with actor, guild, and correlation id.',
-    'the fallback audit row is written by the gateway/fallback path (not reachable in a bot-only harness, and the fallback itself is unimplemented)',
+    'the fallback RPC writes member.onboarding_fallback_granted atomically; proving it requires the live gateway/fallback path followed by audit_logs readback',
   );
   gateBrandingNoReply(ctx);
   gateReplayDeferredTo(ctx, 'REPLAY / RACE');

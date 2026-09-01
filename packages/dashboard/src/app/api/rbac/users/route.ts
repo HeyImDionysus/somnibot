@@ -206,6 +206,15 @@ export async function POST(request: NextRequest) {
       }
 
       const expiresAt = new Date(Date.now() + teamConfig.invitationExpiryMs).toISOString();
+      const { data: inviterMember } = await admin
+        .from('members')
+        .select('username')
+        .eq('guild_id', ctx.guildId)
+        .eq('discord_id', ctx.discordId)
+        .maybeSingle();
+      const inviterName = typeof inviterMember?.username === 'string'
+        ? inviterMember.username
+        : null;
       const { data: invitation, error: inviteError } = await admin
         .from('team_invitations')
         .insert({
@@ -218,6 +227,7 @@ export async function POST(request: NextRequest) {
           dm_status: teamConfig.inviteDmEnabled ? 'queued' : 'skipped',
           delivery_mode: teamConfig.inviteDmEnabled ? null : 'dashboard',
           invited_by: ctx.discordId,
+          invited_by_name: inviterName,
           expires_at: expiresAt,
         })
         .select('*, dashboard_roles(name)')

@@ -6,6 +6,7 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron';
+import type { RecoveryBackupSummary, RecoveryResult, RehearsalRequest } from './database-recovery-api.js';
 
 // V5 Audit §10.P2a: Safety-net cleanup of all IPC listeners on window close.
 // Individual on* handlers return cleanup functions for React unmount, but if a
@@ -26,6 +27,9 @@ window.addEventListener('beforeunload', () => {
 });
 
 export interface SomniBotAPI {
+  backupDatabase: () => Promise<RecoveryResult>;
+  getRetainedDatabaseBackup: () => Promise<RecoveryBackupSummary | null>;
+  rehearseDatabase: (request: RehearsalRequest) => Promise<RecoveryResult>;
   // Config
   waitForStartupReady: () => Promise<void>;
   getConfig: () => Promise<Record<string, unknown>>;
@@ -271,6 +275,9 @@ export interface SomniBotAPI {
 }
 
 contextBridge.exposeInMainWorld('somnibot', {
+  backupDatabase: () => ipcRenderer.invoke('database:backup'),
+  getRetainedDatabaseBackup: () => ipcRenderer.invoke('database:retained-backup'),
+  rehearseDatabase: (request) => ipcRenderer.invoke('database:rehearse', request),
   // Config
   waitForStartupReady: () => ipcRenderer.invoke('wait-for-startup-ready'),
   getConfig: () => ipcRenderer.invoke('get-config'),

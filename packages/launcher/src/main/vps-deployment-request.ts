@@ -56,6 +56,9 @@ function rendererApproval(request: VpsDeploymentRunRequest | undefined): VpsDepl
 }
 
 export function vpsDeploymentPlanInputFromConfig(config: LauncherConfig): VpsDeploymentPlanInput {
+  const enabledGuildCount = config.guilds.length > 0
+    ? config.guilds.filter((guild) => guild.enabled).length
+    : config.discordGuildId.trim() ? 1 : 0;
   return {
     runtimeMode: config.runtimeMode,
     vpsPublicAccessMode: config.vpsPublicAccessMode,
@@ -81,6 +84,7 @@ export function vpsDeploymentPlanInputFromConfig(config: LauncherConfig): VpsDep
     ),
     supabaseAccessTokenReady: Boolean(config.supabaseAccessToken),
     supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
+    enabledGuildCount,
   };
 }
 

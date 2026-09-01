@@ -62,6 +62,14 @@ const CSRF_EXEMPT_PREFIXES = [
  */
 const GET_ONLY_PUBLIC_ROUTES = ['/api/health', '/api/health/live'];
 
+/**
+ * Routes that export mutation methods only to reject them without reading the
+ * request body or changing state. Their route-level tests enforce the 405
+ * contract, so putting them in a shared prefix exemption would be broader and
+ * less accurate than this exact-path classification.
+ */
+const REJECTION_ONLY_PUBLIC_ROUTES = ['/api/setup'];
+
 // ── Tests ────────────────────────────────────────────
 
 describe('CSRF exempt-prefix integrity', () => {
@@ -84,6 +92,7 @@ describe('CSRF exempt-prefix integrity', () => {
     const uncovered = unguardedRoutes.filter((route) => {
       // GET-only routes don't need CSRF exemption
       if (GET_ONLY_PUBLIC_ROUTES.includes(route.path)) return false;
+      if (REJECTION_ONLY_PUBLIC_ROUTES.includes(route.path)) return false;
       // Check if any prefix matches
       return !CSRF_EXEMPT_PREFIXES.some((prefix) => route.path.startsWith(prefix));
     });

@@ -130,17 +130,19 @@ describe('setup-wizard commands', () => {
       expect(interaction.reply).toHaveBeenCalled();
     });
 
-    it('loads progress and shows current wizard step for owner', async () => {
+    it('guides the owner to Launcher without opening credential controls', async () => {
       const interaction = makeInteraction();
       await handleSetupCommand(interaction, { supabase: {} } as any);
-      expect(mockLoadProgress).toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
+      expect(mockLoadProgress).not.toHaveBeenCalled();
+      expect(mockStoreCredentials).not.toHaveBeenCalled();
     });
 
-    it('shows completion embed when all steps done', async () => {
+    it('does not inspect legacy wizard progress', async () => {
       mockGetNextStep.mockReturnValueOnce(-1);
       const interaction = makeInteraction();
       await handleSetupCommand(interaction, { supabase: {} } as any);
-        // Handler completed without throwing; response sent via reply/showModal/update
+      expect(mockGetNextStep).not.toHaveBeenCalled();
     });
   });
 
@@ -159,11 +161,13 @@ describe('setup-wizard commands', () => {
         // Handler completed without throwing; response sent via reply/showModal/update
     });
 
-    it('handles configure button — shows modal', async () => {
+    it('rejects stale configure buttons without showing a credential modal', async () => {
       const interaction = makeInteraction({ customId: 'setup_configure' });
       interaction.guild.ownerId = 'owner-1';
       await handleSetupButton(interaction, { supabase: {} } as any);
-        // Handler completed without throwing; response sent via reply/showModal/update
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
+      expect(interaction.showModal).not.toHaveBeenCalled();
+      expect(mockStoreCredentials).not.toHaveBeenCalled();
     });
 
     it('rejects non-owners', async () => {
@@ -177,6 +181,16 @@ describe('setup-wizard commands', () => {
   });
 
   describe('handleSetupModal', () => {
+    it('rejects stale credential submissions without storing them', async () => {
+      const interaction = makeInteraction({ customId: 'setup:modal:paypal' });
+
+      await handleSetupModal(interaction);
+
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
+      expect(mockStoreCredentials).not.toHaveBeenCalled();
+      expect(mockEnableFeatureFlag).not.toHaveBeenCalled();
+    });
+
     it('rejects non-owners', async () => {
       const interaction = makeInteraction({
         customId: 'setup_modal_paypal',
@@ -195,7 +209,8 @@ describe('setup-wizard commands', () => {
       });
       interaction.guild.ownerId = 'owner-1';
       await handleReconfigureSelect(interaction, { supabase: {} } as any);
-        // Handler completed without throwing; response sent via reply/showModal/update
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ components: [] }));
+      expect(mockStoreCredentials).not.toHaveBeenCalled();
     });
   });
 });

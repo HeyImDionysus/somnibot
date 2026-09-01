@@ -10,7 +10,7 @@
     "build": "node scripts/build-workspace.mjs",
     "lint": "node scripts/run-workspace-task.mjs lint",
     "type-check": "node scripts/run-workspace-task.mjs type-check",
-    "clean": "node scripts/clean.mjs packages/shared/dist packages/bot/dist packages/dashboard/.next packages/dashboard/.turbo packages/e2e/dist packages/license-sdk/dist packages/launcher/dist",
+    "clean": "node scripts/clean.mjs packages/shared/dist packages/bot/dist packages/dashboard/.next packages/dashboard/.turbo packages/e2e/dist packages/launcher/dist",
     "bot:dev": "turbo dev --filter=@somnibot/bot",
     "dashboard:dev": "turbo dev --filter=@somnibot/dashboard",
     "db:migrate": "supabase db push --db-url $SUPABASE_DB_URL",

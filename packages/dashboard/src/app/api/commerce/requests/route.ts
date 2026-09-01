@@ -23,7 +23,7 @@ const REQUEST_STATUSES = ['pending', 'reviewing', 'resolved', 'rejected'] as con
 
 const querySchema = z.object({
   status: z.enum(REQUEST_STATUSES).optional(),
-  type: z.enum(['refund', 'service']).optional(),
+  type: z.enum(['refund', 'service', 'identity_relink', 'download_help']).optional(),
 });
 
 export async function GET(request: NextRequest) {

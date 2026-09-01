@@ -20,18 +20,11 @@
  *   - State durability across a full stack restart (RESTART).
  *   - The cleanup sweep leaves zero run-prefixed rows (CLEANUP).
  *
- * What is GATED honestly (never faked): the actual channel POST, exactly-once
- * firing, DST-correct occurrence timing, transient-send retry, missed-run policy,
- * concurrent occurrence-claim, and the owner failure alert — all require the live
- * runner + a Discord gateway (and, for the failure lanes, fault injection).
- *
- * Behavior-bug notes surfaced to the owner (see the run summary): the current
- * runner has NO durable per-occurrence record or idempotency key (dedup is a
- * 55-second `last_sent_at` window), writes NO audit rows, raises NO owner alert /
- * marks no failed state on a missing channel, performs NO retry/backoff, and
- * honors NO missed-run policy. Those divergences from the catalog contract are
- * recorded as precise GATES here (they cannot be observed in a bot-only harness)
- * and called out for adjudication; none is softened into a false PASS.
+ * What is GATED honestly (never faked): Discord channel readback, exact wall-clock
+ * timing and DST behavior, and fault-injected delivery confirmation. The production
+ * runner uses durable occurrence claims, bounded retry, missed-run policy recovery,
+ * failed-state transitions, and owner alerts; proving the Discord-facing effects
+ * still requires the live runner plus a Discord gateway.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -320,20 +313,20 @@ function gateAudit(ctx: ScenarioContext): void {
     'audit',
     'audit-row',
     'Every scheduled-messages state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.',
-    'the bot writes no audit rows for scheduled-message actions today (the runner records none; schedule create/edit/delete audit is a dashboard save-path concern) — not reachable in a bot-only harness (see run summary)',
+    'schedule create/edit/delete and occurrence processing use occurrence-keyed audit paths; proving each transition requires the authenticated dashboard action or live runner followed by audit_logs readback',
   );
 }
 
 /**
- * Replay/idempotency for scheduled messages is exercised in REPLAY/RACE and is
- * itself gated: there is no durable per-occurrence record or idempotency key.
+ * Replay/idempotency for scheduled messages is exercised in REPLAY/RACE. Durable
+ * occurrence claims elect one worker; live gateway readback proves the one post.
  */
 function gateReplaySafety(ctx: ScenarioContext): void {
   ctx.gate(
     'replay-safety',
     'db-observable',
     'Re-delivering this scenario’s triggering events yields no duplicate posted occurrences or occurrence records; persisted idempotency keys show exactly one effect per logical action.',
-    'replay/idempotency is exercised in REPLAY/RACE and is gated there: the runner keeps no durable per-occurrence record or idempotency key (dedup is a 55-second last_sent_at window) — see run summary',
+    'requires concurrent live scheduler ticks and Discord readback; the durable occurrence fence is the source of truth for one-effect delivery',
   );
 }
 
@@ -502,7 +495,7 @@ async function SET_B(ctx: ScenarioContext): Promise<void> {
     'Discord',
     'discord-readback',
     'The schedule posts the full saved embed (title/description/fields/footer), and after a downtime spanning two occurrences exactly one catch-up post sends under missed-run policy send-latest.',
-    'the runner performs no missed-occurrence catch-up (missed-run-policy is not implemented — see run summary) and posting needs a live Discord gateway; both are outside a bot-only harness',
+    'requires a live Discord gateway and downtime lane to observe the production runner\'s send-latest catch-up post',
   );
 
   await proveRls(ctx, handle, 'embed_configs');
@@ -681,27 +674,25 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // The fail-safe BEHAVIOR (deleted channel → A marks failed, ONE owner alert, B keeps
-  // posting) needs the live runner + a channel-deletion fault lane. The current runner
-  // also does NOT implement this contract — it log-warns and returns on a missing
-  // channel, marks no failed state (no such column) and raises no alert (see summary).
+  // The fail-safe behavior (deleted channel → A marks failed, one owner alert, B keeps
+  // posting) needs the live runner plus a channel-deletion fault lane.
   ctx.gate(
     'Discord',
     'discord-readback',
     'After schedule A’s channel is deleted, A marks failed without crash loops while B keeps posting on cadence; repairing the channel re-arms A cleanly.',
-    'requires a channel-deletion fault lane + live Discord gateway; the current runner has no failed-state/occurrence record (it log-warns and returns on a missing channel) — see run summary',
+    'requires a channel-deletion fault lane and live Discord gateway to read back the failed schedule while an independent schedule continues',
   );
   ctx.gate(
     'owner-notification',
     'discord-readback',
     'Exactly one delivery-failed alert names schedule A, the missing channel, and the reason.',
-    'requires the channel-deletion fault lane + owner alert channel readback; the runner raises no owner alert on a missing channel today — see run summary',
+    'requires the channel-deletion fault lane and owner-alert channel readback',
   );
   ctx.gate(
     'audit',
     'audit-row',
     'One scheduled_messages.channel_missing audit row records the failed occurrence.',
-    'requires the fault lane; no audit row is written for scheduled-message delivery today',
+    'requires the fault lane to drive the audited scheduled-message delivery failure and read its durable audit row',
   );
 
   await proveRls(ctx, handle, 'scheduled_messages');
@@ -722,26 +713,25 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     active: true,
   });
 
-  // The retry/converge behavior needs a mid-send transient-fault lane + the runner.
-  // The current runner has NO retry/backoff: a throw is caught per-schedule and
-  // logged, the occurrence is not retried (see run summary).
+  // The retry/converge behavior needs a mid-send transient-fault lane and the
+  // production runner's bounded retry path.
   ctx.gate(
     'Discord',
     'discord-readback',
     'With a transient fault on the first post attempt, the retry posts the occurrence exactly once.',
-    'requires a mid-send transient-fault lane + live Discord gateway; the current runner has no retry/backoff (a throw is caught per-schedule and logged) — see run summary',
+    'requires a mid-send transient-fault lane and live Discord gateway to read back the bounded retry delivery',
   );
   ctx.gate(
     'replay-safety',
     'db-observable',
     'The occurrence record shows a single sent marker across all attempts.',
-    'there is no durable per-occurrence record in the schema (only last_sent_at/current_sends on the schedule row); exactly-once-after-retry cannot be observed without an occurrence table + the fault lane',
+    'requires the transient-fault lane and occurrence-table readback; the durable occurrence fence records the single logical delivery across attempts',
   );
   ctx.gate(
     'audit',
     'audit-row',
     'A scheduled_messages.send_retried audit row is written for the retried delivery.',
-    'requires the transient-fault lane; the runner writes no audit rows for delivery',
+    'requires the transient-fault lane to drive delivery retry and read the occurrence-keyed delivery audit rows',
   );
 
   await proveRls(ctx, handle, 'scheduled_messages');
@@ -774,14 +764,13 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     impact: 'The send-tracking fields were not persisted — the runner would have no dedup substrate at all.',
   });
 
-  // The replay guarantee can only be observed by driving the runner. Dedup today is
-  // a 55-SECOND last_sent_at window (NOT a durable per-occurrence idempotency key),
-  // so a replayed tick >55s later, or clock skew, could re-send (see run summary).
+  // The replay guarantee can only be observed by driving the runner against the
+  // durable per-occurrence fence and the Discord gateway.
   ctx.gate(
     'replay-safety',
     'db-observable',
     'Re-running the runner tick over an already-sent occurrence sends nothing (a durable occurrence key dedupes the replay as a no-op).',
-    'requires driving the runner against a live gateway; dedup today is a 55-second last_sent_at time-window on the schedule row, not a durable per-occurrence idempotency key — see run summary',
+    'requires driving the runner against a live gateway and reading the durable occurrence outcome',
   );
   ctx.gate(
     'Discord',
@@ -793,7 +782,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
     'audit',
     'audit-row',
     'The replayed tick is recorded as a no-op audit row.',
-    'the runner writes no audit rows for occurrence evaluation',
+    'occurrence evaluation is audit-mapped; proving it requires the live scheduler tick and audit_logs readback',
   );
 
   await proveRls(ctx, handle, 'scheduled_messages');
@@ -849,10 +838,8 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     },
   );
 
-  // "Sent occurrence not re-sent after restart" + "missed occurrence → skip-missed
-  // with one owner notice" need the runner + timing. The runner effectively skips
-  // missed occurrences (it only matches live cron) but writes NO missed-occurrence
-  // owner notice — a divergence from missed-run-policy (see run summary).
+  // "Sent occurrence not re-sent after restart" and "missed occurrence → skip-missed
+  // with one owner notice" need the live runner and a controlled downtime window.
   ctx.gate(
     'Discord',
     'discord-readback',
@@ -863,7 +850,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
     'owner-notification',
     'discord-readback',
     'An occurrence missed during the restart window is handled per skip-missed with exactly one owner notice.',
-    'requires the downtime/runner lane; the runner sends no missed-occurrence owner notice today (missed-run-policy is not implemented) — see run summary',
+    'requires the downtime lane, live runner, and owner-alert channel readback',
   );
 
   await proveRls(ctx, second, 'scheduled_messages');
@@ -893,15 +880,12 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     impact: 'The schedule row was not created — there is no substrate for the concurrency proof.',
   });
 
-  // Atomic single-claim needs the runner. The schema has NO atomic occurrence-claim
-  // primitive (no occurrence table, no claim RPC, no unique occurrence key); dedup is
-  // a read-modify-write of last_sent_at, so two concurrent ticks could both pass the
-  // 55s check and double-send (see run summary).
+  // Atomic single-claim needs concurrent runner ticks and live Discord readback.
   ctx.gate(
     'replay-safety',
     'db-observable',
     'Two ticks claiming the same due occurrence produce exactly one durable occurrence record and one send; the other backs off silently.',
-    'no atomic occurrence-claim exists (no occurrence row / claim RPC / unique key); the last_sent_at read-modify-write is not a serializable claim — the single-winner guarantee cannot be observed or upheld here (see run summary)',
+    'requires concurrent live scheduler claims and occurrence-table readback; the durable unique occurrence fence elects the one delivery owner',
   );
   ctx.gate(
     'Discord',
@@ -913,7 +897,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
     'audit',
     'audit-row',
     'One occurrence-claim audit row records the winning tick.',
-    'the runner writes no audit rows for occurrence claims',
+    'occurrence claims are audit-mapped; proving the race requires concurrent live scheduler claims and audit_logs readback',
   );
 
   await proveRls(ctx, handle, 'scheduled_messages');
@@ -1077,7 +1061,7 @@ async function CLEANUP(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Audit history is anonymized rather than deleted (operational rows deleted, audit_logs retained).',
-    'requires an audit_logs anonymization readback lane; this domain writes no operational audit rows today (see run summary)',
+    'requires an audit_logs anonymization readback lane; operational delivery transitions are audited separately from cleanup retention',
   );
   gateReplaySafety(ctx);
 }

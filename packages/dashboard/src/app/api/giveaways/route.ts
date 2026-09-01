@@ -29,13 +29,14 @@ async function writeGiveawayAudit(
     actorId: string;
     action: 'giveaway.created' | 'giveaway.updated' | 'giveaway.deleted';
     targetId: string;
+    occurrenceKey: string;
     details?: Record<string, unknown>;
     beforeState?: Record<string, unknown> | null;
     afterState?: Record<string, unknown> | null;
   },
 ): Promise<void> {
   try {
-    const { error } = await supabase.from('audit_logs').insert({
+    const row = {
       guild_id: entry.guildId,
       actor_type: 'dashboard',
       actor_id: entry.actorId,
@@ -43,10 +44,15 @@ async function writeGiveawayAudit(
       category: 'giveaways',
       target_type: 'giveaway',
       target_id: entry.targetId,
+      occurrence_key: entry.occurrenceKey,
       details: entry.details ?? {},
       before_state: entry.beforeState ?? null,
       after_state: entry.afterState ?? null,
       success: true,
+    };
+    const { error } = await supabase.from('audit_logs').upsert([row], {
+      onConflict: 'guild_id,occurrence_key',
+      ignoreDuplicates: true,
     });
     if (error) {
       console.error(`[giveaways] Failed to write ${entry.action} audit row:`, error.message);
@@ -164,6 +170,7 @@ export async function POST(req: NextRequest) {
     actorId: auth.ctx.discordId,
     action: 'giveaway.created',
     targetId: data.id,
+    occurrenceKey: `giveaway.created:${data.id}`,
     details: { prize: data.prize, channelId: data.channel_id, endsAt: data.ends_at },
     afterState: typedPick(data, ['prize', 'channel_id', 'winner_count', 'ends_at', 'required_role_id', 'required_level', 'prize_product_id', 'prize_license_count', 'status']),
   });
@@ -250,7 +257,12 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'giveaways');
   }
 
-  const changedKeys = Object.keys(updates);
+  const requestedKeys = Object.keys(updates);
+  const changedKeys = beforeRow
+    ? requestedKeys.filter((key) =>
+        JSON.stringify((beforeRow as Record<string, unknown>)[key] ?? null)
+        !== JSON.stringify((data as Record<string, unknown>)[key] ?? null))
+    : requestedKeys;
   // A no-op PUT (nothing picked from the body) changed nothing — writing a
   // giveaway.updated row with an empty diff would fabricate a mutation.
   if (changedKeys.length > 0) {
@@ -259,6 +271,7 @@ export async function PUT(req: NextRequest) {
       actorId: auth.ctx.discordId,
       action: 'giveaway.updated',
       targetId: data.id,
+      occurrenceKey: `giveaway.updated:${data.id}:${String(data.updated_at)}`,
       details: { prize: data.prize, fields: changedKeys },
       beforeState: beforeRow
         ? Object.fromEntries(changedKeys.map((k) => [k, (beforeRow as Record<string, unknown>)[k] ?? null]))
@@ -269,21 +282,22 @@ export async function PUT(req: NextRequest) {
 
   await notifyBot(guildId, 'giveaways');
 
-  await recordCrudChange({
-    guildId: auth.ctx.guildId,
-    actorId: auth.ctx.discordId,
-    operation: 'updated',
-    action: 'giveaways.giveaway_updated',
-    table: 'giveaways',
-    targetType: 'giveaway',
-    targetId: body.id,
-    label: (beforeRow as Record<string, unknown> | null)?.prize as string | undefined,
-
-    before: (beforeRow as Record<string, unknown> | null) ?? undefined,
-    after: updates as Record<string, unknown>,
-    match: { id: body.id, guild_id: auth.ctx.guildId },
-    blastRadius: 'medium',
-  }, supabase);
+  if (changedKeys.length > 0) {
+    await recordCrudChange({
+      guildId: auth.ctx.guildId,
+      actorId: auth.ctx.discordId,
+      operation: 'updated',
+      action: 'giveaways.giveaway_updated',
+      table: 'giveaways',
+      targetType: 'giveaway',
+      targetId: body.id,
+      label: (beforeRow as Record<string, unknown> | null)?.prize as string | undefined,
+      before: (beforeRow as Record<string, unknown> | null) ?? undefined,
+      after: Object.fromEntries(changedKeys.map((key) => [key, updates[key]])),
+      match: { id: body.id, guild_id: auth.ctx.guildId },
+      blastRadius: 'medium',
+    }, supabase);
+  }
 
   return NextResponse.json({ success: true, data });
 }
@@ -324,6 +338,7 @@ export async function DELETE(req: NextRequest) {
       actorId: auth.ctx.discordId,
       action: 'giveaway.deleted',
       targetId: id,
+      occurrenceKey: `giveaway.deleted:${id}`,
       details: { prize: deleted.prize, status: deleted.status, entryCount: Array.isArray(deleted.entries) ? deleted.entries.length : 0 },
       beforeState: typedPick(deleted, ['prize', 'channel_id', 'winner_count', 'ends_at', 'required_role_id', 'required_level', 'prize_product_id', 'prize_license_count', 'status']),
     });

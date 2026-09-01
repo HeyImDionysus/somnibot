@@ -12,6 +12,7 @@ describe('roleUpdatePayload', () => {
       hoist: false,
       mentionable: false,
       managed: false,
+      editableByBot: true,
       tags: {
         botId: null,
         integrationId: null,

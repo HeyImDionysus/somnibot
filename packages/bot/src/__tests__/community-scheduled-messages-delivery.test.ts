@@ -297,6 +297,25 @@ describe('ScheduledMessageRunner — transient send retry', () => {
 });
 
 describe('ScheduledMessageRunner — missed-run policy', () => {
+  it('does not run the aligned delivery tick after it is stopped before the minute boundary', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-23T12:00:00.000Z'));
+    try {
+      const Runner = await loadRunner();
+      const { supabase } = schedSupa([{ ...BASE_SCHEDULE }]);
+      const { guild: g, send } = guild();
+      const runner = new Runner(g, supabase);
+
+      await runner.start();
+      runner.stop();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('send-latest fires exactly one catch-up post on recovery', async () => {
     const Runner = await loadRunner();
     const sched = {

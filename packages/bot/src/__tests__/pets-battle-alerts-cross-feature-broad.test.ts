@@ -209,7 +209,7 @@ describe('AlertService', () => {
     const { AlertService } = await import('../services/alert-service.js');
     const supa = mockSupabase();
     supa.from.mockReturnValue(mockSupabaseChain({ alert_channel_id: 'ch1' }));
-    const service = new AlertService(mockValkey() as any, supa, mockGuild() as any);
+    const service = new AlertService(mockValkey(), supa, mockGuild());
     await service.init();
   });
 
@@ -217,7 +217,7 @@ describe('AlertService', () => {
     const { AlertService } = await import('../services/alert-service.js');
     const supa = mockSupabase();
     supa.from.mockReturnValue(mockSupabaseChain(null));
-    const service = new AlertService(mockValkey() as any, supa, mockGuild() as any, { failureThreshold: 5 });
+    const service = new AlertService(mockValkey(), supa, mockGuild(), { failureThreshold: 5 });
     await service.init();
   });
 });
@@ -226,14 +226,25 @@ describe('AlertService', () => {
 // CrossFeatureBridge
 // ═══════════════════════════════════════
 describe('CrossFeatureBridge', () => {
-  it('constructor and basic methods', async () => {
+  it('uses the production event bus and the declared constructor dependency order', async () => {
     const { CrossFeatureBridge } = await import('../services/cross-feature-bridge.js');
+    const { PlatformEventBus } = await import('../services/event-bus.js');
     const supa = mockSupabase();
     const guild = mockGuild();
     const valkey = mockValkey();
-    const bus = mockEventBus();
-    const bridge = new CrossFeatureBridge(guild as any, supa, valkey as any, bus as any);
-    expect(bridge).toBeDefined();
+    const bus = new PlatformEventBus();
+    const bridge = new CrossFeatureBridge(guild, supa, bus, valkey);
+    bridge.start();
+
+    await bus.emitAndWait('member.left', guild.id, {
+      discordId: 'member-cross-feature', username: 'Member', roles: [],
+    });
+
+    expect(supa.rpc).toHaveBeenCalledWith('cleanup_member_economy', {
+      p_guild_id: guild.id,
+      p_user_id: 'member-cross-feature',
+      p_reason: 'left',
+    });
   });
 });
 
@@ -314,7 +325,7 @@ describe('GiveawayManager', () => {
     const supa = mockSupabase();
     const guild = mockGuild();
     const bus = mockEventBus();
-    const mgr = new GiveawayManager(guild as any, supa, mockValkey() as any, bus as any);
+    const mgr = new GiveawayManager(guild, supa, mockValkey(), bus);
     expect(mgr).toBeDefined();
   });
 });
@@ -334,7 +345,7 @@ describe('HeistManager deeper', () => {
   it('startHeist with config disabled', async () => {
     const supa = mockSupabase();
     supa.from.mockReturnValue(mockSupabaseChain({ guild_id: 'g1', economy_heist_enabled: false }));
-    const mgr = new HeistManager(supa, mockValkey() as any);
+    const mgr = new HeistManager(supa, mockValkey());
     const int = mockChatInputInteraction({ userId: 'u1' });
     await mgr.startHeist(int);
     expect(int.reply).toHaveBeenCalled();
@@ -347,7 +358,7 @@ describe('HeistManager deeper', () => {
       .mockReturnValueOnce(mockSupabaseChain(null)); // no active heist after all
     const valkey = mockValkey();
     valkey.get.mockResolvedValue(null);
-    const mgr = new HeistManager(supa, valkey as any);
+    const mgr = new HeistManager(supa, valkey);
     const int = mockChatInputInteraction({ userId: 'u1' });
     try {
       await mgr.viewHeist(int);
@@ -359,7 +370,7 @@ describe('HeistManager deeper', () => {
 
   it('register and invalidate', async () => {
     const mod = await import('../features/heist/heist-manager.js');
-    const mgr = new HeistManager(mockSupabase(), mockValkey() as any);
+    const mgr = new HeistManager(mockSupabase(), mockValkey());
     mod.registerHeistManager(mgr, 'test-guild-id');
     mod.invalidateHeistCache();
     expect(mod.getHeistManager()).toBe(mgr);
@@ -376,7 +387,7 @@ describe('AutomationEngine', () => {
     const guild = mockGuild();
     const valkey = mockValkey();
     const bus = mockEventBus();
-    const engine = new AutomationEngine(guild as any, supa, valkey as any, bus as any);
+    const engine = new AutomationEngine(guild, supa, valkey, bus);
     expect(engine).toBeDefined();
   });
 });

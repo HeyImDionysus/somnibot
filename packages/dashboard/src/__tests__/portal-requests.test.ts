@@ -4,21 +4,23 @@
  * Filing a request inserts exactly one pending row scoped to the customer's own
  * order and never mutates payments/orders; a duplicate filing dedupes to one.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/rate-limit', () => ({
-  rateLimits: { portalData: vi.fn(async () => ({ limited: false, retryAfterMs: 0 })) },
+  rateLimits: { portalData: vi.fn(async () => ({ limited: false, remaining: 1, retryAfterMs: 0 })) },
 }));
 
 import { POST } from '@/app/api/portal/requests/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 const SESSION = { customer_id: 'cust-1', guild_id: 'guild-1' };
 
 let requestRows: any[];
 let paymentsTouched: boolean;
+let insertErrorMessage: string | undefined;
 
 function makeAdmin(opts: { orderExists?: boolean } = {}) {
   const orderExists = opts.orderExists ?? true;
@@ -56,6 +58,9 @@ function makeAdmin(opts: { orderExists?: boolean } = {}) {
           const insChain: any = {
             select: () => insChain,
             single: async () => {
+              if (insertErrorMessage) {
+                return { data: null, error: { code: 'XX000', message: insertErrorMessage } };
+              }
               const dup = requestRows.find((r) =>
                 r.status === 'pending' && r.customer_id === row.customer_id && r.order_id === row.order_id && r.type === row.type,
               );
@@ -83,9 +88,15 @@ function makeRequest(body: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(rateLimits.portalData).mockReset().mockResolvedValue({ limited: false, remaining: 1, retryAfterMs: 0 });
   requestRows = [];
   paymentsTouched = false;
+  insertErrorMessage = undefined;
   (createAdminSupabase as any).mockReturnValue(makeAdmin());
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('POST /api/portal/requests', () => {
@@ -125,5 +136,47 @@ describe('POST /api/portal/requests', () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(401);
+  });
+
+  it('redacts a hostile database insert failure from the customer response', async () => {
+    const hostileMessage = 'relation commerce_portal_requests violated secret_token=portal-super-secret';
+    insertErrorMessage = hostileMessage;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const res = await POST(makeRequest({ type: 'service' }));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      success: false,
+      error: 'An internal error occurred',
+      errorDetails: { code: 'internal_error' },
+    });
+    expect(JSON.stringify(json)).not.toContain(hostileMessage);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[POST /api/portal/requests] DB error:',
+      hostileMessage,
+    );
+  });
+
+  it('redacts a hostile runtime failure from the customer response', async () => {
+    const hostileMessage = 'upstream failure bearer=portal-runtime-secret';
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.mocked(rateLimits.portalData).mockRejectedValueOnce(new Error(hostileMessage));
+
+    const res = await POST(makeRequest({ type: 'service' }));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      success: false,
+      error: 'An internal error occurred',
+      errorDetails: { code: 'internal_error' },
+    });
+    expect(JSON.stringify(json)).not.toContain(hostileMessage);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[POST /api/portal/requests] Server error:',
+      hostileMessage,
+    );
   });
 });

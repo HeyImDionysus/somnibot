@@ -3,7 +3,7 @@
  * fulfillment pipeline handling purchases, subscriptions, cancellations,
  * and suspensions. 185 uncovered statements.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -1171,6 +1171,51 @@ describe('CommerceFulfillmentService', () => {
       };
     });
     service = new CommerceFulfillmentService(makeGuild(), makeSupa() as any, eventBus);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(['complete', 'partial-failure', 'confirmation-rejected'] as const)('records channel delivery only after all permission edits succeed: %s', async (outcome) => {
+    // Given two frozen channels and the claimed outward generation.
+    const guild = makeGuild();
+    const edit = vi.fn(async () => undefined);
+    if (outcome === 'partial-failure') edit.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Discord rejected channel access'));
+    guild.channels = { cache: new Map(['channel-1', 'channel-2'].map((id) => [id, { isThread: () => false, permissionOverwrites: { edit } }])) };
+    guild.members.me = { permissions: { has: () => true } };
+    guild.members.cache = new Map();
+    service['guild'] = guild;
+    service['executionContext'] = { actionId: 'action-1', claimToken: 'claim-1' };
+    const rpc = vi.spyOn(service['supabase'], 'rpc').mockResolvedValue({
+      success: true, data: outcome !== 'confirmation-rejected', error: null, count: null, status: 200, statusText: 'OK',
+    });
+    const payload = { ...basePayload, granted_channel_ids: ['channel-1', 'channel-2'] };
+    // When the actual channel-delivery operation runs.
+    const delivery = service['applyGrantedChannelAccess'](payload, 'generation-1');
+    // Then partial or rejected delivery cannot record successful fulfillment.
+    if (outcome === 'complete') await expect(delivery).resolves.toBeUndefined();
+    else await expect(delivery).rejects.toThrow();
+    expect(edit).toHaveBeenCalledTimes(2);
+    if (outcome === 'partial-failure') expect(rpc).not.toHaveBeenCalled();
+    else {
+      expect(rpc).toHaveBeenCalledWith('commerce_confirm_channel_delivery', {
+        p_action_id: 'action-1', p_claim_token: 'claim-1', p_order_id: payload.order_id,
+        p_guild_id: payload.guild_id, p_outward_generation_id: 'generation-1',
+        p_channel_ids: ['channel-1', 'channel-2'],
+      });
+      expect(rpc.mock.invocationCallOrder[0]).toBeGreaterThan(edit.mock.invocationCallOrder[1] ?? 0);
+    }
+  });
+
+  it('rejects channel delivery without a generation before Discord or database mutation', async () => {
+    const rpc = vi.spyOn(service['supabase'], 'rpc');
+    await expect(service['applyGrantedChannelAccess']({ ...basePayload, granted_channel_ids: ['channel-1'] }, null)).rejects.toThrow('durable outward generation');
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('keeps role-only delivery independent of channel confirmation', async () => {
+    const rpc = vi.spyOn(service['supabase'], 'rpc');
+    await expect(service['applyGrantedChannelAccess']({ ...basePayload, granted_channel_ids: [] }, null)).resolves.toBeUndefined();
+    expect(rpc).not.toHaveBeenCalled();
   });
 
   it('rejects a cross-guild queued payload before any database or Discord call', async () => {

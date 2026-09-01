@@ -15,7 +15,11 @@
  * fire the transition — see the completionConfirmed check below.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { createLogger } from '@somnibot/shared';
+import {
+  ServiceLifecycleController,
+  createLogger,
+  type ServiceLifecycleState,
+} from '@somnibot/shared';
 import { evaluateSetupGate } from './setup-gate.js';
 
 const log = createLogger('SetupWatch');
@@ -24,8 +28,28 @@ const log = createLogger('SetupWatch');
 export const SETUP_COMPLETION_POLL_MS = 15_000;
 
 export interface SetupCompletionWatcher {
+  readonly lifecycle: ServiceLifecycleState;
   /** Stop polling (idempotent). Called on transition and on shutdown. */
   stop(): void;
+}
+
+function createWatcherLifecycle(): ServiceLifecycleController {
+  const lifecycle = new ServiceLifecycleController();
+  lifecycle.transition('initializing');
+  lifecycle.transition('ready');
+  return lifecycle;
+}
+
+function stopWatcherLifecycle(lifecycle: ServiceLifecycleController): void {
+  if (lifecycle.state === 'destroyed') return;
+  if (lifecycle.canTransition('draining')) lifecycle.transition('draining');
+  if (lifecycle.canTransition('destroyed')) lifecycle.transition('destroyed');
+}
+
+function recoverWatcherLifecycle(lifecycle: ServiceLifecycleController): void {
+  if (lifecycle.state !== 'degraded') return;
+  lifecycle.transition('recovering');
+  lifecycle.transition('ready');
 }
 
 /**
@@ -43,6 +67,7 @@ export function startSetupCompletionWatcher(
   opts: { pollMs?: number } = {},
 ): SetupCompletionWatcher {
   const pollMs = opts.pollMs ?? SETUP_COMPLETION_POLL_MS;
+  const lifecycle = createWatcherLifecycle();
   let fired = false;
   // Once stop() is called the watcher stays stopped for good: clearing the
   // interval only prevents FUTURE ticks, but a tick already suspended inside
@@ -58,6 +83,7 @@ export function startSetupCompletionWatcher(
       clearInterval(timer);
       timer = null;
     }
+    stopWatcherLifecycle(lifecycle);
   };
 
   timer = setInterval(async () => {
@@ -68,9 +94,11 @@ export function startSetupCompletionWatcher(
     try {
       gate = await evaluateSetupGate(supabase);
     } catch (err) {
+      if (lifecycle.canTransition('degraded')) lifecycle.transition('degraded');
       log.warn('Setup-completion check failed (will retry)', { error: String(err) });
       return;
     }
+    recoverWatcherLifecycle(lifecycle);
     // Re-check AFTER the await: while this poll was awaiting the gate, stop()
     // may have run (shutdown/replacement) or a concurrent slow poll may have
     // already fired the transition. Either way this callback must not run
@@ -98,7 +126,7 @@ export function startSetupCompletionWatcher(
   }, pollMs);
   timer.unref?.();
 
-  return { stop };
+  return { stop, get lifecycle() { return lifecycle.state; } };
 }
 
 /**
@@ -126,6 +154,7 @@ export function startAwaitingSetupWatcher(
   opts: { pollMs?: number } = {},
 ): SetupCompletionWatcher {
   const pollMs = opts.pollMs ?? SETUP_COMPLETION_POLL_MS;
+  const lifecycle = createWatcherLifecycle();
   let fired = false;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -136,6 +165,7 @@ export function startAwaitingSetupWatcher(
       clearInterval(timer);
       timer = null;
     }
+    stopWatcherLifecycle(lifecycle);
   };
 
   timer = setInterval(async () => {
@@ -144,9 +174,11 @@ export function startAwaitingSetupWatcher(
     try {
       gate = await evaluateSetupGate(supabase);
     } catch (err) {
+      if (lifecycle.canTransition('degraded')) lifecycle.transition('degraded');
       log.warn('Awaiting-setup credential check failed (will retry)', { error: String(err) });
       return;
     }
+    recoverWatcherLifecycle(lifecycle);
     if (fired || stopped) return;
     // Still no token to log in with — keep waiting. Any non-'not_started' state
     // means a Discord token has appeared (in_progress once the wizard stored it,
@@ -166,5 +198,5 @@ export function startAwaitingSetupWatcher(
   }, pollMs);
   timer.unref?.();
 
-  return { stop };
+  return { stop, get lifecycle() { return lifecycle.state; } };
 }

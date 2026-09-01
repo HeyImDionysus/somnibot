@@ -15,16 +15,44 @@ import { createHash } from 'crypto';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { apiServerError, dbError } from '@/lib/api/response';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
 const portalRequestSchema = z.object({
-  type: z.enum(['refund', 'service']),
+  type: z.enum(['refund', 'service', 'identity_relink', 'download_help']),
   order_id: z.string().uuid().optional().nullable(),
   reason: z.string().max(2000).optional().nullable(),
 });
+
+export async function GET(request: NextRequest) {
+  const token = request.headers.get('x-portal-token');
+  if (!token) return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+  const tokenHash = hashToken(token);
+  const rateLimited = await rateLimits.portalData(tokenHash);
+  if (rateLimited.limited) return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+  const admin = createAdminSupabase();
+  const { data: session, error: sessionError } = await admin
+    .from('portal_sessions')
+    .select('customer_id, guild_id')
+    .eq('token_hash', tokenHash)
+    .eq('revoked', false)
+    .gt('expires_at', new Date().toISOString())
+    .maybeSingle();
+  if (sessionError) return NextResponse.json({ error: 'Portal session could not be verified' }, { status: 503 });
+  if (!session) return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
+  const { data, error } = await admin
+    .from('commerce_portal_requests')
+    .select('id, order_id, type, status, reason, resolution_note, customer_notified, created_at, updated_at, decided_at')
+    .eq('guild_id', session.guild_id)
+    .eq('customer_id', session.customer_id)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) return NextResponse.json({ error: 'Request history could not be loaded' }, { status: 503 });
+  return NextResponse.json({ success: true, data: data ?? [] });
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -131,15 +159,14 @@ export async function POST(request: NextRequest) {
           { success: true, data: raced, deduped: true, message: 'request-received' },
         );
       }
-      return NextResponse.json({ error: insertError.message }, { status: 500 });
+      return dbError(insertError, 'POST /api/portal/requests');
     }
 
     return NextResponse.json(
       { success: true, data: created, message: 'request-received' },
       { status: 201 },
     );
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Unknown error';
-    return NextResponse.json({ error: msg }, { status: 500 });
+  } catch (error) {
+    return apiServerError(error, 'POST /api/portal/requests');
   }
 }

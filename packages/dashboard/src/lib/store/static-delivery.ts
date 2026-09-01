@@ -1,6 +1,4 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
-import sharp from 'sharp';
 import { resolveStaticFormat } from '@/lib/store/static-format-contract';
 export const MAX_STATIC_SOURCE_BYTES = 25 * 1024 * 1024;
 type StaticManifest = {
@@ -83,6 +81,7 @@ function watermarkSvg(source: Uint8Array, fingerprint: string): Uint8Array {
 }
 
 async function watermarkPdf(source: Uint8Array, fingerprint: string): Promise<Uint8Array> {
+  const { PDFDocument, StandardFonts, degrees, rgb } = await import('pdf-lib');
   const document = await PDFDocument.load(source, { updateMetadata: false });
   const font = await document.embedFont(StandardFonts.Helvetica);
   for (const page of document.getPages()) {
@@ -135,6 +134,7 @@ async function watermarkRaster(
   mimeType: string,
   fingerprint: string,
 ): Promise<Uint8Array> {
+  const { default: sharp } = await import('sharp');
   const image = sharp(source, { failOn: 'error', limitInputPixels: 100_000_000 });
   const metadata = await image.metadata();
   if (!metadata.width || !metadata.height) throw new Error('Image dimensions unavailable');

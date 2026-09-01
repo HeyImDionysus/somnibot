@@ -1510,7 +1510,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:${d.channelId as string}`,
   },
   'temp_channel.creation_failed': {
-    action: 'temp_channel.creation_failed',
+    action: 'temp_channels.creation_failed',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: (d) => (d.memberId ? 'user' : 'system'),
@@ -1533,7 +1533,7 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     correlationId: (d) => (d.correlationId as string | undefined) ?? `temp:hub:${d.hubId as string}`,
   },
   'temp_channel.orphan_reconciled': {
-    action: 'temp_channel.orphan_reconciled',
+    action: 'temp_channels.orphan_reconciled',
     category: 'temp_channels',
     targetType: 'channel',
     actorType: 'system',
@@ -1719,6 +1719,28 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     details: (d) => ({ surface: d.surface, reason: d.reason }), success: false,
     occurrenceId: (d) => d.occurrenceId as string | undefined,
     correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.delivery_succeeded': {
+    action: 'welcome.delivery_succeeded', category: 'welcome', targetType: 'member', actorType: 'system',
+    actorId: () => 'welcome-worker', targetId: (d) => d.memberId as string,
+    details: (d) => d.deliveryKind === 'channel'
+      ? { channelId: d.channelId, deliveryKind: d.deliveryKind }
+      : { deliveryKind: d.deliveryKind },
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:${d.memberId as string}`,
+  },
+  'welcome.test_delivery_succeeded': {
+    action: 'welcome.test_delivery_succeeded', category: 'welcome', targetType: 'channel', actorType: 'system',
+    actorId: () => 'welcome-test-worker', targetId: (d) => d.channelId as string,
+    details: (d) => ({
+      channelId: d.channelId,
+      messageType: d.messageType,
+      configuredDestination: d.configuredDestination,
+      templateSource: d.templateSource,
+      ...(d.configUpdatedAt ? { configUpdatedAt: d.configUpdatedAt } : {}),
+    }),
+    occurrenceId: (d) => d.occurrenceId as string | undefined,
+    correlationId: (d) => (d.correlationId as string | undefined) ?? `welcome:test:${d.channelId as string}`,
   },
   'welcome.dm_blocked_fallback': {
     action: 'welcome.dm_blocked_fallback', category: 'welcome', targetType: 'member', actorType: 'system',

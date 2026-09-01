@@ -38,6 +38,7 @@ const ROW = {
   max_sends: null,
   missed_run_policy: 'skip-missed',
   active: true,
+  updated_at: '2026-08-01T00:00:00.000Z',
 };
 
 /**
@@ -55,7 +56,9 @@ function makeAdmin(config: {
 
   function chainFor(table: string) {
     if (table === 'audit_logs') {
-      return { insert: vi.fn(async (row: any) => { auditRows.push(row); return { error: null }; }) };
+      return {
+        upsert: vi.fn(async (row: unknown[]) => { auditRows.push(...row); return { error: null }; }),
+      };
     }
     const c: any = {};
     for (const m of ['select', 'insert', 'update', 'delete', 'eq', 'order', 'limit', 'range']) {
@@ -114,6 +117,7 @@ describe('POST /api/scheduled-messages — audit', () => {
       category: 'scheduled_messages',
       target_type: 'scheduled_message',
       target_id: MSG_ID,
+      occurrence_key: `scheduled_message.created:${MSG_ID}`,
       success: true,
     });
     expect(auditRows[0].after_state).toMatchObject({ name: 'Daily Digest', cron_expression: '0 9 * * *' });
@@ -143,6 +147,7 @@ describe('PUT /api/scheduled-messages — audit', () => {
       category: 'scheduled_messages',
       actor_type: 'dashboard',
       target_id: MSG_ID,
+      occurrence_key: `scheduled_message.updated:${MSG_ID}:${ROW.updated_at}`,
       before_state: { name: 'Daily Digest', active: true },
       after_state: { name: 'Weekly Digest', active: false },
     });
@@ -164,6 +169,23 @@ describe('PUT /api/scheduled-messages — audit', () => {
 
     expect(res.status).toBe(200);
     // An empty diff is not a mutation — no fabricated audit row.
+    expect(auditRows).toHaveLength(0);
+  });
+
+  it('writes NO scheduled_message.updated row when a replay saves values already present', async () => {
+    const { admin, auditRows } = makeAdmin({
+      singles: {
+        scheduled_messages: [
+          { data: ROW, error: null },
+          { data: ROW, error: null },
+        ],
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PUT(makeRequest('PUT', { body: { id: MSG_ID, name: ROW.name } }));
+
+    expect(res.status).toBe(200);
     expect(auditRows).toHaveLength(0);
   });
 
@@ -204,7 +226,7 @@ describe('PUT /api/scheduled-messages — audit', () => {
     });
     const baseFrom = admin.from;
     admin.from = vi.fn((t: string) => t === 'audit_logs'
-      ? { insert: vi.fn(async () => ({ error: { message: 'insert denied' } })) }
+      ? { upsert: vi.fn(async () => ({ error: { message: 'insert denied' } })) }
       : baseFrom(t)) as any;
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
 
@@ -234,6 +256,7 @@ describe('DELETE /api/scheduled-messages — audit', () => {
       action: 'scheduled_message.deleted',
       category: 'scheduled_messages',
       target_id: MSG_ID,
+      occurrence_key: `scheduled_message.deleted:${MSG_ID}`,
     });
     expect(auditRows[0].before_state).toMatchObject({ name: 'Daily Digest', channel_id: '123456789012345678' });
   });

@@ -39,6 +39,8 @@ describe('local Valkey backup manager', () => {
     expect(result).toEqual({
       ok: true,
       path: path.join(testState.userDataPath, 'backups', 'valkey', 'valkey-20260802T150000Z.rdb'),
+      checksumSha256: createHash('sha256').update(source).digest('hex'),
+      capturedAt: '2026-08-02T15:00:00.000Z',
     });
     const copied = await fsp.readFile(result.path!);
     expect(copied).toEqual(source);

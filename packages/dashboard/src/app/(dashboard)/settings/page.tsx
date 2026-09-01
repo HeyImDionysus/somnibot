@@ -11,7 +11,7 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-xl font-bold text-discord-text-primary">Settings</h1>
         <p className="mt-1 text-sm text-discord-text-muted">
-          Configure installation connections, owner controls, bot presence, and data retention.
+          Configure server controls, bot presence, and data retention. Installation connections, deployment, services, updates, and recovery are managed in the SomniBot Launcher.
         </p>
       </div>
 

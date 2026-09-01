@@ -21,6 +21,7 @@ import {
   CONDITION_TYPES,
   TRIGGER_TYPES,
 } from '@somnibot/shared';
+import { completedProjectLicensingMetadataSchema } from '@/lib/store/licensing-handoff';
 
 // ── Parse helpers ───────────────────────────────────
 
@@ -157,10 +158,32 @@ const automationTemplateDeploySchema = z.object({
 
 // ── Custom command schemas ──────────────────────────
 
+const customCommandEmbedConfig = z.object({
+  title: z.string().max(256).optional(),
+  description: z.string().max(4096).optional(),
+  color: z.number().int().min(0).max(0xFFFFFF).optional(),
+  fields: z.array(z.object({
+    name: z.string().min(1).max(256),
+    value: z.string().min(1).max(1024),
+    inline: z.boolean(),
+  })).max(25).optional(),
+  image_url: optionalHttpUrlSchema,
+  thumbnail_url: optionalHttpUrlSchema,
+  footer_text: z.string().max(2048).optional(),
+});
+
+const customCommandAction = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('send_message'), message: z.string().min(1).max(2000), channelId: snowflake.optional() }),
+  z.object({ type: z.literal('send_embed'), channelId: snowflake.optional(), embedConfig: customCommandEmbedConfig }),
+  z.object({ type: z.literal('give_role'), roleId: snowflake }),
+  z.object({ type: z.literal('remove_role'), roleId: snowflake }),
+  z.object({ type: z.literal('send_dm'), message: z.string().min(1).max(2000) }),
+]);
+
 const customCommandCreate = z.object({
   name: z.string().min(1).max(32).regex(/^[\w-]+$/, 'Only lowercase letters, numbers, and hyphens'),
   description: z.string().max(100).optional(),
-  actions: z.array(z.record(z.unknown())).max(25).default([]),
+  actions: z.array(customCommandAction).max(25).default([]),
   allowed_roles: snowflakeArray,
   allowed_channels: snowflakeArray,
   denied_roles: snowflakeArray,
@@ -173,7 +196,7 @@ const customCommandUpdate = z.object({
   id: uuid,
   name: z.string().min(1).max(32).regex(/^[\w-]+$/).optional(),
   description: z.string().max(100).optional(),
-  actions: z.array(z.record(z.unknown())).max(25).optional(),
+  actions: z.array(customCommandAction).max(25).optional(),
   allowed_roles: z.array(snowflake).max(100).optional(),
   allowed_channels: z.array(snowflake).max(100).optional(),
   denied_roles: z.array(snowflake).max(100).optional(),
@@ -237,12 +260,14 @@ const reservedCommerceMetadataKeys = [
   'historical_grant_role_ids',
   'role_duration_hours',
   'commerce_plan_recovery',
+  'somnibot_sdk_integration_receipt',
+  'somnibot_sdk_integration_attestation',
 ] as const;
 
 const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
   for (const key of reservedCommerceMetadataKeys) {
     if (Object.prototype.hasOwnProperty.call(metadata, key)) {
-      const message = key === 'commerce_plan_recovery'
+      const message = key === 'commerce_plan_recovery' || key.startsWith('somnibot_sdk_')
         ? `Commerce metadata key "${key}" is reserved for server-managed state.`
         : `Legacy commerce metadata key "${key}" is not accepted. Put permanent product role benefits in granted_role_ids instead.`;
       ctx.addIssue({
@@ -252,9 +277,24 @@ const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
       });
     }
   }
+  if (Object.prototype.hasOwnProperty.call(metadata, 'completed_project_licensing')) {
+    const parsed = completedProjectLicensingMetadataSchema.safeParse(
+      metadata.completed_project_licensing,
+    );
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['completed_project_licensing', ...issue.path],
+          message: issue.message,
+        });
+      }
+    }
+  }
 });
 
 const productPlanDefinition = z.object({
+  id: uuid.optional(),
   name: safeName.optional(),
   interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']).optional(),
   interval_count: z.number().int().min(1).max(12).optional(),
@@ -276,7 +316,7 @@ const productCreate = z.object({
     .default('USD'),
   granted_role_ids: snowflakeArray,
   granted_channel_ids: snowflakeArray,
-  active: z.boolean().default(true),
+  active: z.boolean().default(false),
   sort_order: z.number().int().min(0).max(999).default(0),
   metadata: productMetadata.optional(),
   plans: z.array(productPlanDefinition).max(1).optional(),
@@ -932,7 +972,7 @@ const licenseKeyUpdate = z.object({
   revocation_reason: z.string().max(500).optional(),
 });
 
-// ── Public license SDK schemas ──────────────────────
+// ── Public SomniBot licensing protocol schemas ─────
 
 const licenseValidate = z.object({
   license_key: z.string().min(1).max(512),
@@ -949,7 +989,7 @@ const licenseHeartbeat = z.object({
 
 const licenseDeactivate = z.object({
   license_key: z.string().min(1).max(512),
-  session_id: uuid.optional(),
+  session_id: uuid,
 });
 
 
@@ -962,6 +1002,7 @@ export const schemas = {
     deployTemplate: automationTemplateDeploySchema,
   },
   customCommand: {
+    action: customCommandAction,
     create: customCommandCreate,
     update: customCommandUpdate,
   },

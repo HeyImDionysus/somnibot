@@ -594,9 +594,9 @@
     },
     {
       "id": "infrastructure-license-sdk",
-      "name": "License SDK and validation API",
+      "name": "Generated SomniBot licensing contract and validation protocol",
       "category": "infrastructure",
-      "promise": "The @somnibot/license-sdk and the dashboard license API validate license keys for real-store products against hashed key storage, enforce per-product device limits through atomic session registration, keep sessions honest with heartbeats, honor a bounded offline grace window on a monotonic clock without ever extending a lapsed payment-grace deadline, and give the owner and the customer working recovery resets that free device slots — all strictly guild-scoped and replay-safe. License access is account-bound commerce state and never touches the play-money game economy.",
+      "promise": "A self-contained SomniBot licensing contract generated for the customer's existing project defines the validate, heartbeat, and deactivate protocol against the dashboard license API. A conforming integration validates license keys for real-store products against hashed key storage, enforces per-product device limits through atomic session registration, keeps sessions honest with heartbeats, honors a bounded offline grace window on a monotonic clock without ever extending a lapsed payment-grace deadline, and gives the owner and customer working recovery resets that free device slots — all strictly guild-scoped and replay-safe. License access is account-bound commerce state and never touches the play-money game economy.",
       "controls": [
         {
           "id": "license-mode",
@@ -612,7 +612,7 @@
         },
         {
           "id": "heartbeat-interval-seconds",
-          "description": "Server-directed heartbeat cadence returned to the SDK on validation; the SDK clamps any interval below 30 seconds up to 30 to protect the API.",
+          "description": "Server-directed heartbeat cadence returned by validation; the generated contract requires a conforming integration to clamp any interval below 30 seconds up to 30 to protect the API.",
           "valueType": "integer",
           "constraints": { "min": 0, "max": 86400, "sdk-clamp-floor": 30 }
         },
@@ -630,13 +630,13 @@
         },
         {
           "id": "feature-flags",
-          "description": "Per-product feature flag strings delivered to the SDK on successful validation for in-app gating.",
+          "description": "Per-product feature flag strings delivered through the validation protocol for in-project capability gating.",
           "valueType": "string-list",
           "constraints": {}
         },
         {
           "id": "sdk-cache-ttl-ms",
-          "description": "How long the SDK serves a cached valid response before revalidating; always capped at a payment-grace deadline when one is in force.",
+          "description": "How long a conforming generated integration may serve a cached valid response before revalidating; always capped at a payment-grace deadline when one is in force.",
           "valueType": "duration-ms",
           "constraints": { "grace-deadline-cap": true }
         }
@@ -670,12 +670,12 @@
         {
           "controlId": "feature-flags",
           "value": [],
-          "rationale": "No flags until the owner defines them; the SDK receives an empty list rather than an absent field."
+          "rationale": "No flags until the owner defines them; the validation protocol returns an empty list rather than an absent field."
         },
         {
           "controlId": "sdk-cache-ttl-ms",
           "value": 60000,
-          "rationale": "One minute of client caching absorbs bursts while keeping revocations fast; matches the SDK constructor default."
+          "rationale": "One minute of integration-side caching absorbs bursts while keeping revocations fast; matches the generated contract default."
         }
       ],
       "permissions": [
@@ -712,7 +712,7 @@
         {
           "id": "validation-success",
           "trigger": "License validates successfully for a device",
-          "surface": "Customer app via SDK response and portal license card",
+          "surface": "Customer app via generated-protocol response and portal license card",
           "audience": "Customer",
           "defaultTemplate": "Welcome back, {customer-name}! Your {product-name} license is active on this device.",
           "variables": ["customer-name", "product-name"]
@@ -720,7 +720,7 @@
         {
           "id": "device-limit-reached",
           "trigger": "Validation from a new device fingerprint would exceed max-devices",
-          "surface": "Customer app via SDK response",
+          "surface": "Customer app via generated-protocol response",
           "audience": "Customer",
           "defaultTemplate": "This key is already active on {active-devices} of {max-devices} allowed devices. Free a slot from your portal, or ask {owner-brand} support for a reset.",
           "variables": ["active-devices", "max-devices", "owner-brand"]
@@ -728,7 +728,7 @@
         {
           "id": "grace-period-warning",
           "trigger": "Validation or heartbeat reports status grace_period after a payment failure",
-          "surface": "Customer app via SDK response and portal banner",
+          "surface": "Customer app via generated-protocol response and portal banner",
           "audience": "Customer",
           "defaultTemplate": "Your payment for {product-name} needs attention. Access continues until {grace-ends-at}; update your payment method to keep everything running.",
           "variables": ["grace-ends-at", "product-name"]
@@ -736,7 +736,7 @@
         {
           "id": "license-revoked",
           "trigger": "Key is revoked, expired, or its payment grace lapsed",
-          "surface": "Customer app via SDK response",
+          "surface": "Customer app via generated-protocol response",
           "audience": "Customer",
           "defaultTemplate": "This license for {product-name} is no longer valid. If that seems wrong, contact {owner-brand} support with your order id.",
           "variables": ["owner-brand", "product-name"]
@@ -744,7 +744,7 @@
         {
           "id": "offline-grace-notice",
           "trigger": "License server unreachable while a cached validation is still within the offline window",
-          "surface": "Customer app via SDK response",
+          "surface": "Customer app via generated-protocol response",
           "audience": "Customer",
           "defaultTemplate": "We cannot reach the license server right now, so you are covered by the offline window until {offline-until}. The app revalidates automatically once you are back online.",
           "variables": ["offline-until"]
@@ -760,7 +760,7 @@
         {
           "id": "server-unreachable",
           "trigger": "First-time validation fails with no cached result, or the composite lookup RPC errors",
-          "surface": "Customer app via SDK response",
+          "surface": "Customer app via generated-protocol response",
           "audience": "Customer",
           "defaultTemplate": "The license server for {product-name} is unreachable and this device has no prior validation to fall back on. Check your connection and try again.",
           "variables": ["product-name"]
@@ -768,7 +768,7 @@
         {
           "id": "rate-limited",
           "trigger": "Per-IP or per-key rate limit trips on the validation API",
-          "surface": "Customer app via SDK response",
+          "surface": "Customer app via generated-protocol response",
           "audience": "Customer",
           "defaultTemplate": "Too many license checks in a short burst. The server asked us to wait {retry-after-seconds} seconds before trying again.",
           "variables": ["retry-after-seconds"]
@@ -779,10 +779,10 @@
         "values": [
           { "id": "unvalidated", "description": "Device holds a key but no accepted validation or active session." },
           { "id": "active-session", "description": "Server accepted the validation; a device session row is active and heartbeats run at the directed interval." },
-          { "id": "offline-grace", "description": "Server unreachable; the SDK serves the cached validation within the offline window on the anchored monotonic clock." },
-          { "id": "payment-grace", "description": "Payment failed; the license stays valid until grace_period_ends_at, with the SDK cache hard-capped at that deadline." },
+          { "id": "offline-grace", "description": "Server unreachable; a conforming generated integration serves the cached validation within the offline window on the anchored monotonic clock." },
+          { "id": "payment-grace", "description": "Payment failed; the license stays valid until grace_period_ends_at, with the generated-protocol cache hard-capped at that deadline." },
           { "id": "revoked", "description": "Key rejected: revoked, expired, grace lapsed, or offline window exhausted; heartbeats stopped and cache cleared." },
-          { "id": "deactivated", "description": "This device's session was ended (SDK deactivate or recovery reset); the device slot is free for reuse." }
+          { "id": "deactivated", "description": "This device's session was ended (protocol deactivate or recovery reset); the device slot is free for reuse." }
         ],
         "transitions": [
           {
@@ -790,21 +790,21 @@
             "from": "unvalidated",
             "to": "active-session",
             "trigger": "POST /api/license/validate with a valid key, product, and registrable device fingerprint",
-            "expectedEffect": "Atomic device registration within max-devices; session id issued; features, tier, and heartbeat interval returned; SDK auto-starts heartbeats."
+            "expectedEffect": "Atomic device registration within max-devices; session id issued; features, tier, and heartbeat interval returned; the generated contract requires automatic heartbeats."
           },
           {
             "id": "heartbeat-keepalive",
             "from": "active-session",
             "to": "active-session",
             "trigger": "Periodic POST /api/license/heartbeat with the session id",
-            "expectedEffect": "last_seen_at refreshed and the next interval returned; the server time anchor is re-established on the SDK."
+            "expectedEffect": "last_seen_at refreshed and the next interval returned; the server time anchor is re-established in the conforming integration."
           },
           {
             "id": "go-offline",
             "from": "active-session",
             "to": "offline-grace",
             "trigger": "Network failure on a validate or heartbeat call within the offline window",
-            "expectedEffect": "SDK serves the cached result with status offline_grace, timed on the monotonic clock so wall-clock manipulation cannot stretch the window."
+            "expectedEffect": "The conforming integration serves the cached result with status offline_grace, timed on the monotonic clock so wall-clock manipulation cannot stretch the window."
           },
           {
             "id": "come-online",
@@ -818,14 +818,14 @@
             "from": "offline-grace",
             "to": "revoked",
             "trigger": "Offline elapsed time exceeds offline-grace-period-seconds",
-            "expectedEffect": "Cache cleared, heartbeats stopped, SDK reports offline_grace_expired; no zombie session is asserted."
+            "expectedEffect": "Cache cleared, heartbeats stopped, and the generated protocol reports offline_grace_expired; no zombie session is asserted."
           },
           {
             "id": "enter-payment-grace",
             "from": "active-session",
             "to": "payment-grace",
             "trigger": "Validation or heartbeat reports status grace_period with grace_period_ends_at",
-            "expectedEffect": "SDK caps its cache at the anchored deadline, records the offline hard stop, and surfaces the branded payment warning."
+            "expectedEffect": "The generated contract requires the integration to cap its cache at the anchored deadline, record the offline hard stop, and surface the branded payment warning."
           },
           {
             "id": "payment-recovered",
@@ -839,13 +839,13 @@
             "from": "payment-grace",
             "to": "revoked",
             "trigger": "grace_period_ends_at passes, whether the device is online or offline",
-            "expectedEffect": "The server rejects the key and the SDK hard-stops at the deadline even mid-offline-window; heartbeats cease."
+            "expectedEffect": "The server rejects the key and the conforming integration hard-stops at the deadline even mid-offline-window; heartbeats cease."
           },
           {
             "id": "deactivate-device",
             "from": "active-session",
             "to": "deactivated",
-            "trigger": "SDK deactivate() on uninstall, or an owner/customer recovery reset revokes the session",
+            "trigger": "Protocol deactivate on uninstall, or an owner/customer recovery reset revokes the session",
             "expectedEffect": "Session marked inactive with its deactivation reason; the device slot is freed and the reset confirmation is surfaced."
           },
           {
@@ -868,7 +868,7 @@
         {
           "id": "network-error-no-cache",
           "trigger": "License server unreachable on a device with no cached successful validation",
-          "expectedBehavior": "SDK returns valid:false with status network_error and asserts no entitlement; no offline grace applies because there is nothing trustworthy to fall back on.",
+          "expectedBehavior": "The generated protocol returns valid:false with status network_error and the conforming integration asserts no entitlement; no offline grace applies because there is nothing trustworthy to fall back on.",
           "resultingState": "unvalidated",
           "retry": "automatic",
           "messageId": "server-unreachable",
@@ -888,7 +888,7 @@
         {
           "id": "payment-grace-lapsed-offline",
           "trigger": "The cached payment-grace deadline passes while the device is offline inside its offline window",
-          "expectedBehavior": "The SDK hard-stops at the anchored deadline instead of riding out the longer offline window; cache is cleared and heartbeats stop, so going offline cannot keep a lapsed payment valid.",
+          "expectedBehavior": "The conforming integration hard-stops at the anchored deadline instead of riding out the longer offline window; cache is cleared and heartbeats stop, so going offline cannot keep a lapsed payment valid.",
           "resultingState": "revoked",
           "retry": "never",
           "messageId": "license-revoked",
@@ -898,7 +898,7 @@
         {
           "id": "rate-limit-tripped",
           "trigger": "Per-IP or per-key rate limit exceeded on the validation API",
-          "expectedBehavior": "429 with a Retry-After header; key status and sessions are unchanged; the SDK backs off and retries after the stated delay without hammering.",
+          "expectedBehavior": "429 with a Retry-After header; key status and sessions are unchanged; the generated contract requires backoff until the stated delay without hammering.",
           "resultingState": "unvalidated",
           "retry": "automatic",
           "messageId": "rate-limited",
@@ -948,7 +948,7 @@
         {
           "assertionClass": "branding",
           "proofMode": "real-stack",
-          "observer": "Capture of SDK-surfaced message templates and portal license pages",
+          "observer": "Capture of generated-protocol message templates and portal license pages",
           "expectedObservation": "Customer-facing license copy leads with the owner's brand and support path, with only subtle powered-by-SomniBot attribution on portal surfaces.",
           "artifact": "evidence/infrastructure-license-sdk/branding"
         },
@@ -972,8 +972,8 @@
           "id": "infrastructure-license-sdk-def",
           "class": "DEF",
           "disposition": "required",
-          "promise": "Out of the box (portal_only, 3 devices, 300s heartbeat, 24h offline grace, guild membership required), a customer's app validates its key, receives features and a session, heartbeats on schedule, and deactivates cleanly on uninstall.",
-          "expectedOutcome": "validate() returns valid with session id, tier, and features; heartbeats at the directed 300s cadence keep the session fresh; deactivate() frees the device slot; all attempts appear in license_validations.",
+          "promise": "Out of the box (portal_only, 3 devices, 300s heartbeat, 24h offline grace, guild membership required), a customer project integrated from the generated SomniBot licensing contract validates its key, receives features and a session, heartbeats on schedule, and deactivates cleanly on uninstall.",
+          "expectedOutcome": "Protocol validate returns valid with session id, tier, and features; heartbeats at the directed 300s cadence keep the session fresh; protocol deactivate frees the device slot; all attempts appear in license_validations.",
           "assertions": [
             { "assertionClass": "Discord", "expectedObservation": "The bound customer's test-guild membership satisfies the default membership requirement." },
             { "assertionClass": "database-RLS", "expectedObservation": "The created session row is reachable only through guild-scoped owner queries, never anonymously." },
@@ -988,7 +988,7 @@
           "id": "infrastructure-license-sdk-set-a",
           "class": "SET-A",
           "disposition": "required",
-          "promise": "Dashboard config takes effect: setting max_devices=1 and heartbeat_interval_seconds=60 for the product means a second device is rejected at the limit and the SDK heartbeats at the new 60-second cadence.",
+          "promise": "Dashboard config takes effect: setting max_devices=1 and heartbeat_interval_seconds=60 for the product means a second device is rejected at the limit and a conforming generated integration heartbeats at the new 60-second cadence.",
           "expectedOutcome": "PUT /api/license/config/[productId] persists; device one validates, device two is refused with the device-limit message; observed heartbeat spacing follows the 60s server-directed interval.",
           "assertions": [
             { "assertionClass": "Discord", "expectedObservation": "The rejected second device causes no change to the customer's guild roles or access." },
@@ -1004,7 +1004,7 @@
           "id": "infrastructure-license-sdk-set-b",
           "class": "SET-B",
           "disposition": "required",
-          "promise": "A second distinct configuration also takes effect: max_devices=5, offline_grace_period_seconds=3600, feature_flags and tier set — five devices coexist, the offline window shortens to one hour, and the SDK receives the flags and tier.",
+          "promise": "A second distinct configuration also takes effect: max_devices=5, offline_grace_period_seconds=3600, feature_flags and tier set — five devices coexist, the offline window shortens to one hour, and the generated protocol delivers the flags and tier.",
           "expectedOutcome": "Five fingerprints hold concurrent sessions; a sixth is refused; a device offline past one hour reports offline_grace_expired instead of the default 24h; getFeatures() and getTier() return the configured values.",
           "assertions": [
             { "assertionClass": "Discord", "expectedObservation": "Feature-flagged behavior in the test guild follows the configured flags for entitled customers." },
@@ -1021,7 +1021,7 @@
           "class": "INVALID",
           "disposition": "required",
           "promise": "Invalid product license config is rejected and rolled back: max_devices=0, a negative heartbeat interval, an offline grace beyond seven days, or an over-length mode string are all refused by validation with the stored config unchanged.",
-          "expectedOutcome": "Each invalid PUT returns a 4xx validation error naming the offending field; a follow-up GET shows the prior config intact; running SDK sessions are unaffected.",
+          "expectedOutcome": "Each invalid PUT returns a 4xx validation error naming the offending field; a follow-up GET shows the prior config intact; running protocol sessions are unaffected.",
           "assertions": [
             { "assertionClass": "Discord", "expectedObservation": "Entitled customers in the test guild see no interruption during the rejected config attempts." },
             { "assertionClass": "database-RLS", "expectedObservation": "No partial or invalid config row is persisted." },
@@ -1101,7 +1101,7 @@
           "class": "RESTART",
           "disposition": "required",
           "promise": "State survives a full stack restart: keys, sessions, and product config persist in Supabase; a customer app restarting mid-session revalidates into its existing session rather than consuming a fresh device slot.",
-          "expectedOutcome": "After dashboard restart, admin session listings and portal views match pre-restart state; the restarted SDK's validate() reoccupies the same fingerprint's session; heartbeat cadence resumes at the configured interval.",
+          "expectedOutcome": "After dashboard restart, admin session listings and portal views match pre-restart state; a restarted conforming integration revalidates into the same fingerprint's session; heartbeat cadence resumes at the configured interval.",
           "assertions": [
             { "assertionClass": "Discord", "expectedObservation": "Entitlement-driven guild behavior is continuous across the restart." },
             { "assertionClass": "database-RLS", "expectedObservation": "Persisted license rows retain their guild scoping and protections after restart." },

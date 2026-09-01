@@ -102,14 +102,24 @@ export class ConfigWatcher {
       const changedEnabled = event.data.changes?.sync_enabled;
       const changedSnapshotInterval = event.data.changes?.diagnostics_snapshot_interval_ms;
       const changedMusicEnabled = event.data.changes?.music_enabled;
+      const diagnosticsChanged = event.data.changes !== undefined && [
+        'memory_alert_threshold_mb',
+        'ws_ping_alert_threshold_ms',
+        'webhook_error_rate_threshold',
+        'diagnostics_snapshot_interval_ms',
+      ].some((field) => Object.hasOwn(event.data.changes ?? {}, field));
       if (section === 'settings' || section === 'all') {
         // Audit cadence is a runtime timer, not merely cached config. Refresh
         // it on the same config event so the new value takes effect without a
         // restart and the old timer is replaced exactly once.
         this.onAuditConfigChange?.();
         this.onAutomationConfigChange?.();
-        if (typeof changedSnapshotInterval === 'number' && Number.isFinite(changedSnapshotInterval)) {
-          this.onDiagnosticsConfigChange?.(changedSnapshotInterval);
+        if (diagnosticsChanged) {
+          const snapshotInterval = typeof changedSnapshotInterval === 'number'
+            && Number.isFinite(changedSnapshotInterval)
+            ? changedSnapshotInterval
+            : undefined;
+          this.onDiagnosticsConfigChange?.(snapshotInterval);
         }
       }
       if (

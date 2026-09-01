@@ -30,6 +30,15 @@ export type DiscordTargetValidation =
   | { ok: true; snapshotAt: string | null }
   | LiveFactsFailure;
 
+export type DiscordRoleTargets = {
+  readonly assignableRoleIds: readonly string[];
+  readonly existingRoleIds: readonly string[];
+};
+
+export function discordTargetFailureStatus(failure: LiveFactsFailure): 409 | 503 {
+  return failure.kind === 'unavailable' ? 503 : 409;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -75,6 +84,80 @@ function parseChannels(value: unknown): LiveChannelFact[] | null {
     });
   }
   return channels;
+}
+
+function collectRoleIssues(
+  roles: readonly LiveRoleFact[],
+  targets: DiscordRoleTargets,
+  hierarchyRemediation: (roleName: string) => string,
+  managedRemediation: (roleName: string) => string,
+): string[] {
+  const rolesById = new Map(roles.map((role) => [role.id, role]));
+  const assignableIds = new Set(targets.assignableRoleIds);
+  const issues: string[] = [];
+  for (const roleId of new Set([...targets.assignableRoleIds, ...targets.existingRoleIds])) {
+    const role = rolesById.get(roleId);
+    if (!role) {
+      issues.push(`Discord role ${roleId} was deleted or is not in this server.`);
+    } else if (assignableIds.has(roleId) && role.managed) {
+      issues.push(managedRemediation(role.name));
+    } else if (assignableIds.has(roleId) && !role.editableByBot) {
+      issues.push(hierarchyRemediation(role.name));
+    }
+  }
+  return issues;
+}
+
+export async function validateDiscordRoleTargets(
+  supabase: SupabaseClient,
+  guildId: string,
+  targets: DiscordRoleTargets,
+  nowMs = Date.now(),
+): Promise<DiscordTargetValidation> {
+  if (targets.assignableRoleIds.length === 0 && targets.existingRoleIds.length === 0) {
+    return { ok: true, snapshotAt: null };
+  }
+
+  const { data, error } = await supabase
+    .from('guild_live_state')
+    .select('roles, snapshot_at, snapshot_version')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (error || !isRecord(data)) {
+    return { ok: false, kind: 'unavailable', issues: ['SomniBot has not published live Discord facts for this server.'] };
+  }
+
+  const snapshotAt = typeof data.snapshot_at === 'string' ? data.snapshot_at : null;
+  const snapshotMs = snapshotAt ? Date.parse(snapshotAt) : Number.NaN;
+  if (
+    data.snapshot_version !== 2
+    || !Number.isFinite(snapshotMs)
+    || nowMs - snapshotMs > MAX_SNAPSHOT_AGE_MS
+    || snapshotMs - nowMs > 60_000
+  ) {
+    return {
+      ok: false,
+      kind: 'unavailable',
+      issues: ['SomniBot live Discord facts are missing, legacy, or stale. Wait for a fresh bot snapshot and retry.'],
+    };
+  }
+
+  const roles = parseRoles(data.roles);
+  if (!roles) {
+    return { ok: false, kind: 'unavailable', issues: ['SomniBot live Discord facts are malformed. Wait for the bot to refresh them and retry.'] };
+  }
+
+  const issues = collectRoleIssues(
+    roles,
+    targets,
+    (roleName) => `Move SomniBot above the "${roleName}" role and grant Manage Roles, then retry.`,
+    (roleName) => `Discord role "${roleName}" is managed by Discord and cannot be changed by SomniBot.`,
+  );
+
+  return issues.length > 0
+    ? { ok: false, kind: 'conflict', issues }
+    : { ok: true, snapshotAt };
 }
 
 export async function validateExternalWebhookChannel(
@@ -190,20 +273,13 @@ export async function validateAssignableDiscordTargets(
     };
   }
 
-  const rolesById = new Map(roles.map((role) => [role.id, role]));
   const channelsById = new Map(channels.map((channel) => [channel.id, channel]));
-  const issues: string[] = [];
-
-  for (const roleId of new Set(roleIds)) {
-    const role = rolesById.get(roleId);
-    if (!role) {
-      issues.push(`Discord role ${roleId} was deleted or is not in this server.`);
-    } else if (role.managed) {
-      issues.push(`Discord role "${role.name}" is managed by Discord and cannot be granted by SomniBot.`);
-    } else if (!role.editableByBot) {
-      issues.push(`Move SomniBot above the "${role.name}" role and grant Manage Roles before selling this benefit.`);
-    }
-  }
+  const issues = collectRoleIssues(
+    roles,
+    { assignableRoleIds: roleIds, existingRoleIds: [] },
+    (roleName) => `Move SomniBot above the "${roleName}" role and grant Manage Roles before selling this benefit.`,
+    (roleName) => `Discord role "${roleName}" is managed by Discord and cannot be granted by SomniBot.`,
+  );
 
   for (const channelId of new Set(channelIds)) {
     const channel = channelsById.get(channelId);

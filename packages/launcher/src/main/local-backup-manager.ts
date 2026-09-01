@@ -16,11 +16,14 @@ const LOCAL_BACKUP_INITIAL_DELAY_MS = 5 * 60_000;
 const LOCAL_BACKUP_INTERVAL_MS = 24 * 60 * 60_000;
 const execFileAsync = promisify(execFile);
 
-export interface LocalBackupResult {
-  ok: boolean;
-  path?: string;
-  error?: string;
-}
+export type LocalBackupResult =
+  | {
+      readonly ok: true;
+      readonly path: string;
+      readonly checksumSha256: string;
+      readonly capturedAt: string;
+    }
+  | { readonly ok: false; readonly error: string };
 
 let backupTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -131,9 +134,15 @@ export async function installIncomingLocalValkeySnapshot(
       throw error;
     }
     await fsp.chmod(finalPath, 0o600);
+    const installedChecksum = createHash('sha256').update(await fsp.readFile(finalPath)).digest('hex');
     if (movedPrevious && previousWasValid) await fsp.rm(previousPath, { force: true });
     await discardIncomingLocalValkeySnapshot(incomingPath);
-    return { ok: true, path: finalPath };
+    return {
+      ok: true,
+      path: finalPath,
+      checksumSha256: installedChecksum,
+      capturedAt: new Date().toISOString(),
+    };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   } finally {
@@ -179,7 +188,12 @@ export async function backupLocalValkeySnapshot(
     await fsp.chmod(finalPath, 0o600);
     await fsp.writeFile(`${finalPath}.sha256`, `${checksum}  ${fileName}\n`, { mode: 0o600 });
     await pruneExpiredBackups(directory, now.getTime());
-    return { ok: true, path: finalPath };
+    return {
+      ok: true,
+      path: finalPath,
+      checksumSha256: checksum,
+      capturedAt: now.toISOString(),
+    };
   } catch (error) {
     await fsp.rm(partialPath, { force: true }).catch(() => undefined);
     return { ok: false, error: error instanceof Error ? error.message : String(error) };

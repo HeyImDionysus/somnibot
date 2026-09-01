@@ -73,7 +73,21 @@ function makeFixture(guildId: string, members: ReturnType<typeof makeMember>[]) 
   const fetch = vi.fn(async (request?: string | { readonly time: number }) => (
     typeof request === 'string' ? roster.get(request) : roster
   ));
-  const guild = { id: guildId, members: { fetch } };
+  const roleIds = ['member-role', 'current-member-role', 'stale-member-role'];
+  const roles = new Map(roleIds.map((roleId) => [roleId, {
+    id: roleId,
+    name: roleId,
+    managed: false,
+    editable: true,
+  }]));
+  const guild = {
+    id: guildId,
+    members: {
+      fetch,
+      me: { permissions: { has: vi.fn(() => true) } },
+    },
+    roles: { cache: roles },
+  };
   for (const member of members) member.guild = guild;
 
   type RpcResult = {

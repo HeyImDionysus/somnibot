@@ -3,6 +3,31 @@ import type {
   StoreDeliveryType,
   StoreProductType,
 } from './operator-licensing-guide';
+import type { readCompletedProjectPolicy } from './licensing-handoff';
+
+export function buildLicensePolicySaveRequest(policy: NonNullable<ReturnType<typeof readCompletedProjectPolicy>>) {
+  return {
+    key_prefix: policy.keyPrefix,
+    max_devices: policy.maxDevices,
+    heartbeat_interval_ms: policy.heartbeatIntervalMs,
+    sdk_cache_ttl_ms: policy.sdkCacheTtlMs,
+    offline_grace_period_seconds: policy.offlineGracePeriodSeconds,
+    feature_flags: policy.featureFlags,
+    require_discord_guild_membership: policy.requireDiscordGuildMembership,
+    rotation_policy: policy.rotationPolicy,
+    self_service_device_removal: policy.selfServiceDeviceRemoval,
+  };
+}
+
+export function prepareStoreProductSave<T extends {
+  readonly delivery_type: StoreDeliveryType;
+  readonly active: boolean;
+}>(product: T): Omit<T, 'active'> & { readonly active: boolean } {
+  return {
+    ...product,
+    active: product.delivery_type === 'license_key' ? false : product.active,
+  };
+}
 
 export const storeProductFacetSchema = z.enum([
   'downloadable',

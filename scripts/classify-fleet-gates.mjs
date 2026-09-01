@@ -68,15 +68,15 @@ function routeGate({ channel, reason = '', promise = '', class: assertionClass, 
   // Route by the surface that must actually be exercised before falling back
   // to the recorder's observation channel. Several scenario scripts use a
   // placeholder channel for an unavailable surface; channel-only routing sent
-  // dashboard, SDK, Lavalink, and known implementation gaps to Discord.
+  // dashboard, SDK-protocol, Lavalink, and known implementation gaps to Discord.
   if (/unimplemented|code gap|no backing|not backed|contract is unmet|does not exist|writes no audit|no audit_logs row/.test(detail)) {
     return 'product-implementation';
   }
+  if (/generated somnibot (?:licensing|sdk)|generated[- ]protocol|sdk (?:contract|conformance|protocol)/.test(detail)) {
+    return 'sdk-conformance-protocol';
+  }
   if (/dashboard|browser|oauth session|rendered portal|portal render|http api|\/api\//.test(detail)) {
     return 'dashboard-browser';
-  }
-  if (/license-sdk|@somnibot\/license-sdk/.test(detail)) {
-    return 'license-sdk';
   }
   if (/lavalink|shoukaku|voice channel|audible playback/.test(detail)) {
     return 'lavalink-voice';

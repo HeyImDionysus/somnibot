@@ -1,12 +1,16 @@
+import { RuntimeIdentitySchema, type RuntimeIdentity } from '@somnibot/shared';
+
 export interface DashboardHealthPayload {
   status?: unknown;
   services?: unknown;
+  runtimeIdentity?: unknown;
 }
 
 export interface DashboardHealthEvaluation {
   ok: boolean;
   status: string;
   services: Record<string, string>;
+  runtimeIdentity?: RuntimeIdentity;
   error?: string;
 }
 
@@ -42,9 +46,15 @@ export function evaluateDashboardHealthPayload(payload: unknown): DashboardHealt
     : null;
   const status = typeof body?.status === 'string' ? body.status : 'unknown';
   const services = extractServices(body);
+  const runtimeIdentity = RuntimeIdentitySchema.safeParse(body?.runtimeIdentity);
 
   if (body?.status === 'healthy') {
-    return { ok: true, status, services };
+    return {
+      ok: true,
+      status,
+      services,
+      ...(runtimeIdentity.success ? { runtimeIdentity: runtimeIdentity.data } : {}),
+    };
   }
 
   return {

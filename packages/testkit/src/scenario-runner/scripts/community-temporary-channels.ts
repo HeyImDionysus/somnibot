@@ -34,11 +34,10 @@
  *     path (`cleanupOrphans` deletes the DB row for a room whose channel is gone):
  *     a bot-driven DB mutation asserted DB-observably across a restart (RESTART).
  *
- * Behavior-bug discovery (never softened): the RESTART reconciliation is a
- * declared audit event (`temp_channels.orphan_reconciled`) yet the feature writes
- * NO audit_logs row for it — a real divergence from the catalog's "every state
- * change lands exactly one append-only audit row", recorded as a FAIL finding for
- * the owner (not forced green, not hidden behind a gate).
+ * Live gateway execution remains necessary to read back room creation, replay,
+ * retry, and ownership effects. The production path uses a durable hub-join
+ * occurrence key, bounded creation retry, and occurrence recovery; those effects
+ * are not substituted with synthetic gateway evidence.
  */
 import type { DomainContract, JsonValue } from '@somnibot/e2e';
 
@@ -323,17 +322,15 @@ function gateBranding(ctx: ScenarioContext): void {
 
 /**
  * Audit GATEs everywhere except RESTART: a temp-channel state change (room
- * create/claim/delete) requires a live gateway to occur, AND the feature writes
- * no audit_logs row for any operation, so it cannot be observed here. (RESTART
- * drives one real state change — orphan reconciliation — and asserts the audit
- * row for real.)
+ * create/claim/delete) requires a live gateway to occur. The operation event
+ * mapping is exercised in bot tests; the live lane reads the resulting audit row.
  */
 function gateAudit(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'discord-readback',
     'Every temp-channel state change lands exactly one append-only audit row with actor, guild, and correlation id; no audit row is ever deleted.',
-    'the audited state changes (room create/claim/delete) require a live Discord gateway to occur; the temp-channels feature also writes no audit_logs row for any operation today — neither is observable in a gateway-less harness',
+    'temporary-channel create/claim/delete operations emit exact mapped audit events, but the state changes require a live Discord voice gateway followed by audit_logs readback',
   );
 }
 
@@ -351,7 +348,7 @@ function gateReplayGateway(ctx: ScenarioContext): void {
     'replay-safety',
     'discord-readback',
     'Re-delivering the hub-join voiceStateUpdate spawns no second room; the join dedupe key records the replay as a no-op.',
-    'requires a live gateway to re-deliver voiceStateUpdate events; note the app-layer handleJoinHub has no join-event idempotency key, so a re-delivered join would create a second Discord room — replay-safety currently rests only on the active_temp_channels channel_id PK (proven directly in REPLAY/RACE)',
+    'requires a live gateway to re-deliver voiceStateUpdate events and read the durable hub-join occurrence outcome',
   );
 }
 
@@ -573,7 +570,7 @@ async function UNAUTH(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'The denied control attempt is audited with actor, room, and reason.',
-    'the denied /voice control requires a live voice state + room to reach the ownership check; the feature also writes no audit_logs row for a denied control today',
+    'the denied /voice control emits its mapped denial event, but reaching it requires a live voice state and owned room followed by audit_logs readback',
   );
   gateBranding(ctx);
   gateReplayGateway(ctx);
@@ -589,10 +586,8 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
   // guild-scoped and RLS-isolated even when the create path would fail.
   await proveRls(ctx, handle, 'temp_channel_hubs');
 
-  // The failure branch (Discord rejects channel creation) requires a live gateway
-  // with the bot's channel-management permission revoked. It cannot be induced in
-  // a gateway-less harness — GATE each contracted behavior honestly rather than
-  // fake an outage. Note the code gap surfaced in the alert gate reason.
+  // The failure branch requires a live gateway with channel-management permission
+  // revoked. It cannot be induced in this gateway-less harness.
   gateLiveGuild(
     ctx,
     'With the bot\'s channel-management permission revoked, a hub join produces the kind failure notice and no room row; restoring the permission makes the next join spawn normally.',
@@ -601,13 +596,13 @@ async function DEPFAIL(ctx: ScenarioContext): Promise<void> {
     'owner-notification',
     'discord-readback',
     'A create failure raises exactly one owner alert (temp-alert) naming the missing permission.',
-    'the failure branch needs a live gateway to trigger a rejected guild.channels.create; note handleJoinHub currently only logs the error — it raises no owner alert and sends no member notice, so this contracted behavior is unmet even before the gateway is available',
+    'requires a live rejected guild.channels.create branch and owner-alert channel readback',
   );
   ctx.gate(
     'audit',
     'discord-readback',
     'The creation failure lands an append-only audit row (temp_channels.creation_failed).',
-    'needs the live gateway to trigger the failure branch; the feature also writes no audit_logs row for creation failures today',
+    'creation failures emit mapped audit events; proving them requires a live gateway failure branch followed by audit_logs readback',
   );
   ctx.gate(
     'replay-safety',
@@ -628,9 +623,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
   await proveNoOwnerAlert(ctx, handle);
 
   // The retry-into-one-room behavior needs a mid-create transient-fault injection
-  // at the gateway boundary. Note the code gap: handleJoinHub makes a SINGLE
-  // create attempt inside try/catch and has no retry or join-event key — surfaced
-  // honestly in the gate reasons.
+  // at the gateway boundary.
   gateLiveGuild(
     ctx,
     'With a transient fault injected on the first create call, the retry produces exactly one room and the member is moved into it; no duplicate rooms exist.',
@@ -639,7 +632,7 @@ async function RETRY(ctx: ScenarioContext): Promise<void> {
     'replay-safety',
     'discord-readback',
     'The join-event key shows exactly one room creation across attempts.',
-    'requires a live gateway + transient-fault injection; note handleJoinHub has no retry and no join-event idempotency key, so the "creation retries into one room" contract is not implemented today',
+    'requires a live gateway, transient-fault injection, and durable occurrence readback',
   );
   gateAudit(ctx);
   gateBranding(ctx);
@@ -678,9 +671,8 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   await proveRls(ctx, handle, 'active_temp_channels');
   await proveNoOwnerAlert(ctx, handle);
 
-  // The room-creation replay itself (re-delivering the voiceStateUpdate) needs the
-  // live gateway; handleJoinHub has no join-event key, so an app-layer replay would
-  // create a second Discord room (each with a fresh channel_id) — surfaced here.
+  // The room-creation replay itself needs a live gateway to re-deliver the
+  // voiceStateUpdate and inspect the durable occurrence result.
   gateReplayGateway(ctx);
   gateLiveGuild(ctx, 'After replaying the recorded voiceStateUpdate, the guild still has exactly one room for the member.');
   gateAudit(ctx);

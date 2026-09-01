@@ -47,6 +47,30 @@ describe('GET /api/health', () => {
     expect(body.timestamp).toBeTruthy();
   });
 
+  it('publishes the safe shared runtime identity for launcher readback', async () => {
+    mockCheckHealth.mockResolvedValue(true);
+    const runtimeIdentity = {
+      lifecycle: 'ready',
+      version: '1.2.3',
+      exactSha: 'a'.repeat(40),
+      bootId: '11111111-1111-4111-8111-111111111111',
+      migrationHead: '20260823173000_experience_runtime_controls.sql',
+      configurationGeneration: 20260823173000,
+      deploymentProfile: 'higher-load-vps',
+    };
+    mockReadKey.mockResolvedValue(JSON.stringify({
+      bootId: runtimeIdentity.bootId,
+      timestamp: Date.now() - 30_000,
+      systemState: { identity: runtimeIdentity },
+    }));
+
+    const res = await buildHealthResponse(probe);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.runtimeIdentity).toEqual(runtimeIdentity);
+  });
+
   it('returns degraded with bot offline when heartbeat exceeds 120s TTL', async () => {
     mockCheckHealth.mockResolvedValue(true);
     // 3 minutes old — bot crashed or disconnected

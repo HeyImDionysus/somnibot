@@ -179,7 +179,7 @@ function isSessionlessPublicRoute(pathname: string): boolean {
     pathname.startsWith('/api/auth') ||
     pathname === '/api/csrf' ||
     pathname === '/setup' ||
-    pathname.startsWith('/api/setup') ||
+    pathname === '/api/setup' ||
     pathname.startsWith('/api/paypal/webhook') ||
     pathname.startsWith('/api/inbound-webhooks/') ||
     // Cron/operator recovery authenticates with the dedicated
@@ -251,6 +251,15 @@ export async function middleware(request: NextRequest) {
     const healthResponse = nextWithNonce(request, nonce, occurrenceId);
     applyCspHeaders(healthResponse, nonce);
     return healthResponse;
+  }
+
+  if (
+    request.nextUrl.pathname === '/api/setup' &&
+    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)
+  ) {
+    const setupResponse = nextWithNonce(request, nonce, occurrenceId);
+    applyCspHeaders(setupResponse, nonce);
+    return setupResponse;
   }
 
   // ── Local mode: bypass Supabase entirely ──

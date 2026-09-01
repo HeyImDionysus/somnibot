@@ -34,6 +34,16 @@ const WRITABLE_COLUMNS = [
 ] as const;
 
 describe('schemas.product.update — strict mass-assignment guard', () => {
+  it.each(['somnibot_sdk_integration_receipt', 'somnibot_sdk_integration_attestation'])('rejects server-managed SDK metadata %s on create and update', (key) => {
+    // Given: an owner supplies provenance through the generic product writer.
+    const metadata = { [key]: { issuedBy: 'somnibot-server' } };
+    // When: both public product schemas parse the request.
+    const update = schemas.product.update.safeParse({ id: VALID_ID, metadata });
+    const create = schemas.product.create.safeParse({ name: 'Product', type: 'free', delivery_type: 'file', metadata });
+    // Then: neither writer accepts server-managed provenance.
+    expect(update.success).toBe(false);
+    expect(create.success).toBe(false);
+  });
   it('accepts a minimal legitimate update ({ id, name })', () => {
     const res = schemas.product.update.safeParse({ id: VALID_ID, name: 'New name' });
     expect(res.success).toBe(true);

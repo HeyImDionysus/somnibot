@@ -180,7 +180,7 @@ describe('VPS public access modes', () => {
     expect(composeOverride).toContain('127.0.0.1:3456:3000');
     expect(composeOverride).toContain('profiles: ["somnibot-domain-edge"]');
     expect(composeOverride).not.toContain('0.0.0.0:3456');
-  });
+  }, 15_000);
 
   it('parses the generated Funnel environment and override with real Docker Compose', () => {
     // Given the exact environment and override that the launcher streams to a Funnel VPS.

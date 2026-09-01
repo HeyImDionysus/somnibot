@@ -37,11 +37,13 @@ describe('startSetupCompletionWatcher', () => {
     const onComplete = vi.fn();
 
     const watcher = startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });
+    expect(watcher.lifecycle).toBe('ready');
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(evaluateSetupGate).toHaveBeenCalled();
     expect(onComplete).not.toHaveBeenCalled();
     watcher.stop();
+    expect(watcher.lifecycle).toBe('destroyed');
   });
 
   it('transitions to full boot once the gate reports a CONFIRMED complete (no manual restart)', async () => {

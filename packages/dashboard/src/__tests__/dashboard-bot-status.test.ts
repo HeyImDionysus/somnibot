@@ -20,6 +20,7 @@ vi.mock('react', async () => {
 
 vi.mock('@/hooks/use-realtime-events', () => ({ useAutoRefresh: mocks.useAutoRefresh }));
 vi.mock('@/components/layout/pending-team-invitations', () => ({ PendingTeamInvitations: () => null }));
+vi.mock('@/components/dashboard/dashboard-control-center', () => ({ DashboardControlCenter: () => null }));
 
 import DashboardPage from '@/app/(dashboard)/dashboard/page';
 

@@ -11,6 +11,11 @@ import { ChannelType, type GuildChannel, type DMChannel, type NonThreadGuildBase
 import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
+import {
+  parseSyncConfigCache,
+  serializeSyncConfigCache,
+  type SyncConfigCache,
+} from './tenant-sync-cache.js';
 import { createLogger } from '@somnibot/shared';
 import { queueDriftItem } from './drift-debouncer.js';
 
@@ -236,33 +241,30 @@ export async function handleChannelDelete(
 // Helpers
 // ============================================================
 
-interface SyncConfigLocal {
-  autoRepair: boolean;
-}
-
-async function getSyncConfig(client: SomniClient, guildId: string): Promise<SyncConfigLocal> {
+async function getSyncConfig(client: SomniClient, guildId: string): Promise<SyncConfigCache> {
   const cacheKey = `sync_config:${guildId}`;
 
   try {
     const cached = await client.valkey.get(cacheKey);
     if (cached) {
-      const parsed = JSON.parse(cached);
-      return { autoRepair: parsed.autoRepair ?? false };
+      const parsed = parseSyncConfigCache(cached, guildId);
+      if (parsed) return parsed;
     }
   } catch { /* miss */ }
 
   const { data } = await client.supabase
     .from('guild_config')
-    .select('sync_auto_repair')
+    .select('sync_auto_repair, sync_auto_repair_everyone')
     .eq('guild_id', guildId)
     .maybeSingle();
 
-  const config: SyncConfigLocal = {
+  const config: SyncConfigCache = {
     autoRepair: data?.sync_auto_repair ?? false,
+    autoRepairEveryone: data?.sync_auto_repair_everyone ?? false,
   };
 
   try {
-    await client.valkey.set(cacheKey, JSON.stringify(config), 'EX', 60);
+    await client.valkey.set(cacheKey, serializeSyncConfigCache(guildId, config), 'EX', 60);
   } catch { /* non-critical */ }
 
   return config;

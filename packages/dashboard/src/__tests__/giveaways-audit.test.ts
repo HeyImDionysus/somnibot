@@ -40,6 +40,7 @@ const ROW = {
   entries: ['u1', 'u2'],
   winners: [],
   status: 'active',
+  updated_at: '2026-08-01T00:00:00.000Z',
 };
 
 function makeAdmin(config: {
@@ -52,7 +53,9 @@ function makeAdmin(config: {
 
   function chainFor(table: string) {
     if (table === 'audit_logs') {
-      return { insert: vi.fn(async (row: any) => { auditRows.push(row); return { error: null }; }) };
+      return {
+        upsert: vi.fn(async (row: unknown[]) => { auditRows.push(...row); return { error: null }; }),
+      };
     }
     const c: any = {};
     for (const m of ['select', 'insert', 'update', 'delete', 'eq', 'order', 'limit', 'range']) {
@@ -111,6 +114,7 @@ describe('POST /api/giveaways — audit', () => {
       category: 'giveaways',
       target_type: 'giveaway',
       target_id: GW_ID,
+      occurrence_key: `giveaway.created:${GW_ID}`,
       success: true,
     });
     expect(auditRows[0].after_state).toMatchObject({ prize: 'Nitro', status: 'active' });
@@ -138,6 +142,7 @@ describe('PUT /api/giveaways — audit', () => {
       category: 'giveaways',
       actor_type: 'dashboard',
       target_id: GW_ID,
+      occurrence_key: `giveaway.updated:${GW_ID}:${ROW.updated_at}`,
       before_state: { status: 'active' },
       after_state: { status: 'cancelled' },
     });
@@ -159,6 +164,23 @@ describe('PUT /api/giveaways — audit', () => {
 
     expect(res.status).toBe(200);
     // An empty diff is not a mutation — no fabricated audit row.
+    expect(auditRows).toHaveLength(0);
+  });
+
+  it('writes NO giveaway.updated row when a replay saves values already present', async () => {
+    const { admin, auditRows } = makeAdmin({
+      singles: {
+        giveaways: [
+          { data: ROW, error: null },
+          { data: ROW, error: null },
+        ],
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
+
+    const res = await PUT(makeRequest('PUT', { body: { id: GW_ID, prize: ROW.prize } }));
+
+    expect(res.status).toBe(200);
     expect(auditRows).toHaveLength(0);
   });
 
@@ -199,7 +221,7 @@ describe('PUT /api/giveaways — audit', () => {
     });
     const baseFrom = admin.from;
     admin.from = vi.fn((t: string) => t === 'audit_logs'
-      ? { insert: vi.fn(async () => ({ error: { message: 'insert denied' } })) }
+      ? { upsert: vi.fn(async () => ({ error: { message: 'insert denied' } })) }
       : baseFrom(t)) as any;
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(admin);
 
@@ -229,6 +251,7 @@ describe('DELETE /api/giveaways — audit', () => {
       action: 'giveaway.deleted',
       category: 'giveaways',
       target_id: GW_ID,
+      occurrence_key: `giveaway.deleted:${GW_ID}`,
     });
     expect(auditRows[0].before_state).toMatchObject({ prize: 'Nitro', status: 'active' });
     expect(auditRows[0].details).toMatchObject({ entryCount: 2 });

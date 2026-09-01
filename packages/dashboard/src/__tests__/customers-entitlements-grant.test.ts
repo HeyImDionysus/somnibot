@@ -198,9 +198,14 @@ describe('POST /api/customers/[id]/entitlements — RPC authority rejection', ()
 
       const res = await invoke({ request_id: REQUEST_ID, product_id: PRODUCT_ID });
       expect(res.status).toBe(500);
-      expect(await res.json()).toEqual({
+      expect(await res.json()).toMatchObject({
         success: false,
         error: 'An internal error occurred',
+        errorDetails: {
+          code: 'internal_error',
+          safeMessage: 'An internal error occurred',
+          retryable: true,
+        },
       });
     } finally {
       errorSpy.mockRestore();

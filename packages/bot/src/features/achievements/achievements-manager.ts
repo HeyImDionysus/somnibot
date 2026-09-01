@@ -79,12 +79,16 @@ export class AchievementsManager {
 
   clearCache(): void { this.configCache.clear(); }
 
-  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+  private async getConfigChecked(
+    guildId: string,
+  ): Promise<{ readonly config: DbGuildConfig | null; readonly degraded: boolean; readonly errorMessage?: string }> {
     const now = Date.now();
     const cached = this.configCache.get(guildId);
-    if (cached && now - cached.time < CONFIG_CACHE_TTL_MS) return cached.data;
+    if (cached && now - cached.time < CONFIG_CACHE_TTL_MS) {
+      return { config: cached.data, degraded: false };
+    }
 
-    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data, error } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) {
       // Evict oldest if at capacity
       if (this.configCache.size >= CONFIG_CACHE_MAX) {
@@ -93,7 +97,62 @@ export class AchievementsManager {
       }
       this.configCache.set(guildId, { data, time: now });
     }
-    return data;
+    const degraded = error != null && error.code !== 'PGRST116';
+    return {
+      config: data,
+      degraded,
+      ...(degraded ? { errorMessage: error.message } : {}),
+    };
+  }
+
+  private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+    return (await this.getConfigChecked(guildId)).config;
+  }
+
+  private async replyBackendUnavailable(
+    interaction: ChatInputCommandInteraction,
+    operation: 'view_badges' | 'prestige',
+    errorMessage?: string,
+  ): Promise<void> {
+    const guildId = interaction.guildId!;
+    const userId = interaction.user.id;
+    const operationId = interaction.id || randomUUID();
+    await writeEconomyAudit(this.supabase, {
+      guildId,
+      actorId: userId,
+      operationId,
+      action: 'achievements.backend_unavailable',
+      details: { operation },
+      success: false,
+      errorMessage,
+      actorType: 'system',
+    });
+    eventBus.emit('achievements.backend_unavailable', guildId, {
+      userId,
+      operation,
+      correlationId: operationId,
+      occurrenceId: operationId,
+    });
+    await raiseOwnerAlert(this.supabase, guildId, {
+      alertType: 'achievements_backend_unavailable',
+      severity: 'warning',
+      title: 'Achievements are temporarily unavailable',
+      message: `The ${operation === 'prestige' ? 'prestige' : 'badges'} dependency failed for member ${userId}.`,
+      channelMessage: 'The achievements system could not reach its data store. Member progress remains unchanged; retry after the dependency recovers.',
+      metadata: { operation, user_id: userId },
+      ...(this.guild ? { guild: this.guild } : {}),
+    });
+
+    const kit = brandKitFromConfig(null, interaction.guild?.name);
+    const brandName = interaction.guild?.name ?? kit.brandName;
+    await interaction.reply({
+      embeds: [brandedEmbed(kit, {
+        intent: 'warning',
+        title: '🏆 Achievements',
+        description: `${brandName}'s achievements are temporarily unavailable — please try again in a moment. Your progress is unchanged.`,
+      })],
+      ephemeral: true,
+    });
   }
 
   async viewBadges(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -109,17 +168,7 @@ export class AchievementsManager {
       .limit(1000);
 
     if (defsError || achError) {
-      const operationId = interaction.id || randomUUID();
-      await writeEconomyAudit(this.supabase, {
-        guildId, actorId: userId, operationId,
-        action: 'achievements.backend_unavailable', details: { operation: 'view_badges' }, success: false,
-        errorMessage: defsError?.message ?? achError?.message, actorType: 'system',
-      });
-      eventBus.emit('achievements.backend_unavailable', guildId, {
-        userId, operation: 'view_badges', correlationId: operationId, occurrenceId: operationId,
-      });
-      const kit = brandKitFromConfig(await this.getConfig(guildId), interaction.guild?.name);
-      await interaction.reply({ embeds: [brandedEmbed(kit, { intent: 'warning', title: '🏆 Achievements', description: 'Achievements are temporarily unavailable — please try again in a moment.' })] });
+      await this.replyBackendUnavailable(interaction, 'view_badges', defsError?.message ?? achError?.message);
       return;
     }
 
@@ -313,7 +362,12 @@ export class AchievementsManager {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
     const operationId = interaction.id || randomUUID();
-    const config = await this.getConfig(guildId);
+    const { config, degraded, errorMessage } = await this.getConfigChecked(guildId);
+
+    if (degraded) {
+      await this.replyBackendUnavailable(interaction, 'prestige', errorMessage);
+      return;
+    }
 
     if (!config?.economy_prestige_enabled) {
       await writeEconomyAudit(this.supabase, {

@@ -16,6 +16,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { readGuildConfigBefore, recordGuildConfigChange } from '@/lib/admin-changes';
 import { optionalHttpUrlSchema } from '@/lib/api/discord-values';
+import { discordTargetFailureStatus, validateDiscordRoleTargets } from '@/lib/api/live-discord-facts';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -133,6 +134,19 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
+  if (body.no_xp_role_id) {
+    const validation = await validateDiscordRoleTargets(supabase, guildId, {
+      assignableRoleIds: [],
+      existingRoleIds: [body.no_xp_role_id],
+    });
+    if (!validation.ok) {
+      return NextResponse.json(
+        { success: false, error: validation.issues.join(' '), issues: validation.issues },
+        { status: discordTargetFailureStatus(validation) },
+      );
+    }
+  }
+
   const updates: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(body)) {
     if (val !== undefined) {
@@ -227,6 +241,17 @@ export async function POST(req: NextRequest) {
       roleId = body.role_id;
       removeRoleId = body.remove_role_id ?? null;
       removeAtLevel = body.remove_at_level ?? null;
+
+      const validation = await validateDiscordRoleTargets(supabase, guildId, {
+        assignableRoleIds: [roleId, ...(removeRoleId ? [removeRoleId] : [])],
+        existingRoleIds: [],
+      });
+      if (!validation.ok) {
+        return NextResponse.json(
+          { success: false, error: validation.issues.join(' '), issues: validation.issues },
+          { status: discordTargetFailureStatus(validation) },
+        );
+      }
     }
 
     const { data, error } = await supabase
@@ -261,6 +286,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { success: false, error: 'Missing required fields: role_id, multiplier' },
         { status: 400 },
+      );
+    }
+
+    const validation = await validateDiscordRoleTargets(supabase, guildId, {
+      assignableRoleIds: [],
+      existingRoleIds: [role_id],
+    });
+    if (!validation.ok) {
+      return NextResponse.json(
+        { success: false, error: validation.issues.join(' '), issues: validation.issues },
+        { status: discordTargetFailureStatus(validation) },
       );
     }
 

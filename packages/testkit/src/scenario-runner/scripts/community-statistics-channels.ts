@@ -741,7 +741,7 @@ async function REPLAY(ctx: ScenarioContext): Promise<void> {
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
   gateBranding(ctx);
-  gateAudit(ctx, 'a no-op replayed tick writes no audit row; audit rows are dashboard-authored (not reachable in a bot-only harness)');
+  gateAudit(ctx, 'replayed and rate-limited ticks emit exact deferred/no-op audit events; proving this tick requires the live manager and audit_logs readback');
 }
 
 /** RESTART — last_value and counter config survive a full stack reboot. */
@@ -788,7 +788,7 @@ async function RESTART(ctx: ScenarioContext): Promise<void> {
   await proveRlsIsolation(ctx, second);
   await proveNoOwnerAlert(ctx, second);
   gateBranding(ctx);
-  gateAudit(ctx, 'no audit row is written for a boot-time recompute; audit rows are dashboard-authored');
+  gateAudit(ctx, 'boot-time recompute events are audit-mapped; proving them requires a live manager restart and audit_logs readback');
   gateReplayDeferred(ctx, 'REPLAY');
 }
 
@@ -827,7 +827,7 @@ async function RACE(ctx: ScenarioContext): Promise<void> {
   await proveRlsIsolation(ctx, handle);
   await proveNoOwnerAlert(ctx, handle);
   gateBranding(ctx);
-  gateAudit(ctx, 'no audit row is written for a burst recompute; audit rows are dashboard-authored');
+  gateAudit(ctx, 'burst recompute and rate-limit deferrals are audit-mapped; proving them requires the live manager and audit_logs readback');
 }
 
 /** XGUILD — counters are strictly per-guild: each counter's backing query reads only its own guild. */

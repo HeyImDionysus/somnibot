@@ -6,7 +6,7 @@
  *  - deploy/deploy-listener.ts (219 uncov / 247 total)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { EventEmitter } from 'node:events';
+import { PlatformEventBus } from '../services/event-bus.js';
 
 vi.mock('@somnibot/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@somnibot/shared')>()),
@@ -65,7 +65,7 @@ function makeSupa(overrides: Record<string, any> = {}) {
 describe('CrossFeatureBridge', () => {
   let CrossFeatureBridge: any;
   let bridge: any;
-  let eventBus: EventEmitter;
+  let eventBus: PlatformEventBus;
   let supa: any;
   let guild: any;
   let valkey: any;
@@ -76,7 +76,7 @@ describe('CrossFeatureBridge', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     ({ CrossFeatureBridge } = await import('../services/cross-feature-bridge.js'));
-    eventBus = new EventEmitter();
+    eventBus = new PlatformEventBus();
     guild = { id: 'guild-1', name: 'Test' };
     valkey = { get: vi.fn(), set: vi.fn(), del: vi.fn() };
     supa = makeSupa({
@@ -86,60 +86,44 @@ describe('CrossFeatureBridge', () => {
     bridge = new CrossFeatureBridge(guild, supa, eventBus, valkey);
   }, 30_000);
 
-  it('constructor creates bridge', () => {
-    expect(bridge).toBeDefined();
-  });
-
-  it('start() registers event listeners', () => {
-    bridge.start();
-    expect(eventBus.listenerCount('member.banned')).toBeGreaterThan(0);
-  });
-
-  it('stop() removes listeners', () => {
+  it('stop removes durable event handlers', async () => {
     bridge.start();
     bridge.stop();
-      expect(bridge).toBeDefined(); // lifecycle completed without throwing
-    // listeners should be removed
+    await eventBus.emitAndWait('member.left', 'guild-1', {
+      discordId: 'user-stop', username: 'stopped', roles: [],
+    });
+    expect(supa.rpc).not.toHaveBeenCalled();
   });
 
   it('member.banned event cleans up giveaways, tickets, economy', async () => {
     bridge.start();
-    eventBus.emit('member.banned', {
-      type: 'member.banned', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-1', username: 'tester', reason: 'spam' },
+    await eventBus.emitAndWait('member.banned', 'guild-1', {
+      discordId: 'user-1', moderatorId: 'moderator-1', reason: 'spam',
     });
-    // Wait for async handlers
-    await new Promise((r) => setTimeout(r, 50));
     expect(supa.rpc).toHaveBeenCalled();
   });
 
   it('member.kicked event cleans up giveaways and economy', async () => {
     bridge.start();
-    eventBus.emit('member.kicked', {
-      type: 'member.kicked', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-2', username: 'tester2', reason: 'violation' },
+    await eventBus.emitAndWait('member.kicked', 'guild-1', {
+      discordId: 'user-2', moderatorId: 'moderator-1', reason: 'violation',
     });
-    await new Promise((r) => setTimeout(r, 50));
     expect(supa.rpc).toHaveBeenCalled();
   });
 
   it('member.left event cleans up economy', async () => {
     bridge.start();
-    eventBus.emit('member.left', {
-      type: 'member.left', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-3', username: 'leaver' },
+    await eventBus.emitAndWait('member.left', 'guild-1', {
+      discordId: 'user-3', username: 'leaver', roles: [],
     });
-    await new Promise((r) => setTimeout(r, 50));
     expect(supa.rpc).toHaveBeenCalled();
   });
 
   it('level.up event checks feature unlocks', async () => {
     bridge.start();
-    eventBus.emit('level.up', {
-      type: 'level.up', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-4', username: 'leveler', newLevel: 5 },
+    await eventBus.emitAndWait('level.up', 'guild-1', {
+      discordId: 'user-4', previousLevel: 4, newLevel: 5, totalXp: 500,
     });
-    await new Promise((r) => setTimeout(r, 50));
     expect(supa.from).toHaveBeenCalledWith('level_unlock_configs');
   });
 
@@ -147,74 +131,57 @@ describe('CrossFeatureBridge', () => {
     bridge.start();
     supa.rpc.mockClear();
     supa.from.mockClear();
-    eventBus.emit('purchase.completed', {
-      type: 'purchase.completed', guildId: 'guild-1', timestamp: Date.now(),
-      data: {
-        discordId: 'user-5',
-        username: 'buyer',
-        amount: 10,
-        productId: 'product-1',
-        productName: 'Widget',
-      },
+    await eventBus.emitAndWait('purchase.completed', 'guild-1', {
+      discordId: 'user-5', amount: 10, currency: 'USD', orderNumber: 'ORDER-1',
+      productId: 'product-1', productName: 'Widget', orderId: 'order-1',
     });
-    await new Promise((r) => setTimeout(r, 50));
-    expect(eventBus.listenerCount('purchase.completed')).toBe(0);
     expect(supa.rpc).not.toHaveBeenCalled();
     expect(supa.from).not.toHaveBeenCalled();
   });
 
   it('ticket.closed event logs resolution', async () => {
     bridge.start();
-    eventBus.emit('ticket.closed', {
-      type: 'ticket.closed', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-6', ticketId: 'ticket-1', resolution: 'resolved' },
+    await eventBus.emitAndWait('ticket.closed', 'guild-1', {
+      userDiscordId: 'user-6', ticketId: 'ticket-1', ticketNumber: 1,
+      channelId: 'channel-1', actorId: 'mod-1', panelId: 'panel-1',
     });
-    await new Promise((r) => setTimeout(r, 50));
-      // Event processed without throwing
+    expect(supa.from).toHaveBeenCalledWith('tickets');
   });
 
   it('infraction.created event checks escalation', async () => {
     bridge.start();
-    eventBus.emit('infraction.created', {
-      type: 'infraction.created', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-7', type: 'warn', reason: 'spam' },
+    await eventBus.emitAndWait('infraction.created', 'guild-1', {
+      infractionId: 'inf-1', userId: 'user-7', moderatorId: 'mod-1',
+      type: 'warn', reason: 'spam', totalInfractions: 1,
     });
-    await new Promise((r) => setTimeout(r, 50));
-      // Event processed without throwing
+    expect(supa.rpc).not.toHaveBeenCalledWith('giveaway_remove_entry', expect.anything());
   });
 
   it('ignores events from wrong guild', async () => {
     bridge.start();
     supa.rpc.mockClear();
-    eventBus.emit('member.banned', {
-      type: 'member.banned', guildId: 'other-guild', timestamp: Date.now(),
-      data: { discordId: 'user-8', username: 'alien' },
+    await eventBus.emitAndWait('member.banned', 'other-guild', {
+      discordId: 'user-8', moderatorId: 'mod-other', reason: 'other guild',
     });
-    await new Promise((r) => setTimeout(r, 50));
-    // rpc should not be called for wrong guild
     expect(supa.rpc).not.toHaveBeenCalled();
   });
 
   it('handles missing discordId gracefully', async () => {
     bridge.start();
-    eventBus.emit('member.banned', {
-      type: 'member.banned', guildId: 'guild-1', timestamp: Date.now(),
-      data: {},
+    await eventBus.emitAndWait('member.banned', 'guild-1', {
+      discordId: '', moderatorId: 'mod-1', reason: 'invalid member',
     });
-    await new Promise((r) => setTimeout(r, 50));
-      // Graceful handling verified (no throw)
+    expect(supa.rpc).not.toHaveBeenCalled();
   });
 
   it('handles economy cleanup RPC error', async () => {
     supa.rpc = vi.fn(async () => ({ data: null, error: { message: 'DB error' } }));
     bridge = new CrossFeatureBridge(guild, supa, eventBus, valkey);
     bridge.start();
-    eventBus.emit('member.banned', {
-      type: 'member.banned', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-9', username: 'bad' },
+    await eventBus.emitAndWait('member.banned', 'guild-1', {
+      discordId: 'user-9', moderatorId: 'mod-1', reason: 'failure case',
     });
-    await new Promise((r) => setTimeout(r, 50));
-      expect(supa.rpc).toHaveBeenCalled();
+    expect(supa.rpc).toHaveBeenCalled();
   });
 });
 
@@ -235,11 +202,7 @@ describe('AutomationEngine', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     ({ AutomationEngine } = await import('../features/automations/automation-engine.js'));
-    const emitter = new EventEmitter();
-    eventBus = Object.assign(emitter, {
-      onAny: vi.fn((handler: Function) => { emitter.on('*', handler as any); }),
-      offAny: vi.fn((handler: Function) => { emitter.off('*', handler as any); }),
-    });
+    eventBus = new PlatformEventBus();
     guild = {
       id: 'guild-1', name: 'Test',
       channels: {
@@ -281,11 +244,6 @@ describe('AutomationEngine', () => {
     });
   });
 
-  it('constructs and starts', () => {
-    engine = new AutomationEngine(guild, supa, valkey, eventBus);
-    expect(engine).toBeDefined();
-  });
-
   it('start() loads rules and subscribes to events', async () => {
     engine = new AutomationEngine(guild, supa, valkey, eventBus);
     await engine.start();
@@ -293,59 +251,41 @@ describe('AutomationEngine', () => {
     expect(supa.channel).toHaveBeenCalled();
   });
 
-  it('engine has loader and rate limiter', () => {
-    engine = new AutomationEngine(guild, supa, valkey, eventBus);
-    expect(engine).toBeDefined();
-  });
-
   it('processes matching event through rule', async () => {
     engine = new AutomationEngine(guild, supa, valkey, eventBus);
     await engine.start();
-    eventBus.emit('member.joined', {
-      type: 'member.joined', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-1', username: 'newmember' },
+    await eventBus.emitAndWait('member.joined', 'guild-1', {
+      discordId: 'user-1', username: 'newmember', isReturning: false,
     });
-    await new Promise((r) => setTimeout(r, 100));
-      expect(supa.from).toHaveBeenCalled();
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('ignores events from wrong guild', async () => {
     engine = new AutomationEngine(guild, supa, valkey, eventBus);
     await engine.start();
-    eventBus.emit('member.joined', {
-      type: 'member.joined', guildId: 'other-guild', timestamp: Date.now(),
-      data: { discordId: 'user-2', username: 'alien' },
+    await eventBus.emitAndWait('member.joined', 'other-guild', {
+      discordId: 'user-2', username: 'alien', isReturning: false,
     });
-    await new Promise((r) => setTimeout(r, 50));
-      expect(supa.from).toHaveBeenCalled();
+    expect(supa.from).toHaveBeenCalled();
   });
 
-  it('handles rule with cooldown', async () => {
+  it('prevents a rule action when the production rate limiter rejects the event', async () => {
     supa = makeSupa({
       automation_rules: [{
         id: 'rule-2', guild_id: 'guild-1', name: 'Cooldown Rule', enabled: true,
-        trigger_event: 'message.created', conditions: [],
+          trigger_event: 'member.joined', conditions: [],
         actions: [{ type: 'send_message', channel_id: 'ch-1', message: 'Hello' }],
         cooldown_seconds: 60,
       }],
     });
     engine = new AutomationEngine(guild, supa, valkey, eventBus);
     await engine.start();
-    // Simulate cooldown key exists
-    valkey.get = vi.fn().mockResolvedValue('1');
-    eventBus.emit('message.created', {
-      type: 'message.created', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-3', content: 'test' },
+    valkey.incr = vi.fn().mockResolvedValue(6);
+    await eventBus.emitAndWait('member.joined', 'guild-1', {
+      discordId: 'user-3', username: 'cooldown', isReturning: false,
     });
-    await new Promise((r) => setTimeout(r, 50));
-      expect(supa.from).toHaveBeenCalled();
-  });
-
-  it('handles event after start', async () => {
-    engine = new AutomationEngine(guild, supa, valkey, eventBus);
-    await engine.start();
-    // onAny should have been called
-    expect(eventBus.onAny).toHaveBeenCalled();
+    const channel = guild.channels.cache.get('ch-1');
+    expect(channel.send).not.toHaveBeenCalled();
   });
 });
 
@@ -421,7 +361,7 @@ describe('deploy-listener', () => {
         from: vi.fn(() => makeChain()),
       },
       guilds: { cache: new Map([['guild-1', { id: 'guild-1' }]]) },
-      eventBus: new EventEmitter(),
+      eventBus: new PlatformEventBus(),
       router: {
         getContext: vi.fn(() => ({
           guild: { id: 'guild-1' },

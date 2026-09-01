@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 interface PortalRequest {
   id: string;
-  type: 'refund' | 'service';
+  type: 'refund' | 'service' | 'identity_relink' | 'download_help';
   status: 'pending' | 'reviewing' | 'resolved' | 'rejected';
   reason: string | null;
   created_at: string;
@@ -198,7 +198,13 @@ export default function StoreRequestsPage() {
                         {r.status}
                       </span>
                       <span className="text-sm font-semibold text-discord-text-primary">
-                        {r.type === 'refund' ? 'Refund request' : 'Support request'}
+                        {r.type === 'refund'
+                          ? 'Refund request'
+                          : r.type === 'identity_relink'
+                            ? 'Identity relinking request'
+                            : r.type === 'download_help'
+                              ? 'Download support request'
+                              : 'Support request'}
                       </span>
                       {r.orders?.order_number && (
                         <span className="text-xs text-discord-text-muted">

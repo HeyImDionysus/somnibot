@@ -473,17 +473,12 @@ async function proveBranding(ctx: ScenarioContext, handle: LiveClientHandle): Pr
   gateBrandKit(ctx);
 }
 
-/**
- * Pet play coins move via economy_subtract_balance / economy_add_balance (which mutate
- * ONLY economy_wallets — no economy_transactions ledger row) and PetsManager writes no
- * audit_logs row for care actions, so there is no DB-observable audit row to read here.
- */
 function gateAudit(ctx: ScenarioContext): void {
   ctx.gate(
     'audit',
     'audit-row',
     'Every pets state change lands exactly one append-only audit row with actor, guild, and correlation id; anonymization, never deletion, is the only mutation.',
-    'pet acquire/battle/prestige emit mapped audit events (pet.acquired / pet.battle_resolved / pet.prestiged) but they flow through the process-singleton event bus (setImmediate) into the AuditService 5-second batch flush, so no audit_logs row is synchronously DB-observable within a scenario; the care actions (feed/play/train/rename) emit no audit event at all',
+    'pet buy/feed/train/play/rename, battle, and prestige now use transaction-local or idempotent audited RPC paths; proving every action requires driving the real pet commands and reading their durable audit_logs rows',
   );
 }
 

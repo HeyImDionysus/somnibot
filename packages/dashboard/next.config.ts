@@ -38,6 +38,7 @@ const nextConfig: NextConfig = {
     SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL || '',
     SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '',
   },
+  experimental: { cpus: 2 },
   // Lint runs as a dedicated CI step via `eslint src/`;
   // skip the built-in next lint during `next build` to avoid duplicate / conflicting runs.
   eslint: { ignoreDuringBuilds: true },

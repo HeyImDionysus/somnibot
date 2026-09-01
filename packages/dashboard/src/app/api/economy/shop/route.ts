@@ -17,6 +17,7 @@ import { dbError, dbConflictOr500, apiServerError } from '@/lib/api/response';
 import { readRowBefore, recordCrudChange } from '@/lib/admin-changes';
 import { discordSnowflakeSchema } from '@/lib/api/discord-values';
 import { ECONOMY_AUTOMATIC_ITEM_EFFECT_TYPES } from '@somnibot/shared/constants/economy';
+import { discordTargetFailureStatus, validateDiscordRoleTargets } from '@/lib/api/live-discord-facts';
 
 const automaticEffectSchema = z.object({
   type: z.enum(ECONOMY_AUTOMATIC_ITEM_EFFECT_TYPES),
@@ -82,6 +83,14 @@ function validateItemBehavior(
 
 const itemSchema = itemSchemaBase.superRefine(validateItemBehavior);
 
+function roleTargetsForItem(item: Partial<z.infer<typeof itemSchemaBase>>) {
+  const effectRoleId = item.use_effect?.type === 'role_grant' ? item.use_effect.role_id : null;
+  return {
+    assignableRoleIds: [item.grant_role_id, effectRoleId].filter((roleId): roleId is string => typeof roleId === 'string'),
+    existingRoleIds: typeof item.require_role_id === 'string' ? [item.require_role_id] : [],
+  };
+}
+
 export async function GET() {
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
@@ -117,6 +126,14 @@ export async function POST(request: NextRequest) {
     const parsed = result.data;
 
     const admin = createAdminSupabase();
+
+    const roleValidation = await validateDiscordRoleTargets(admin, ctx.guildId, roleTargetsForItem(parsed));
+    if (!roleValidation.ok) {
+      return NextResponse.json(
+        { success: false, error: roleValidation.issues.join(' '), issues: roleValidation.issues },
+        { status: discordTargetFailureStatus(roleValidation) },
+      );
+    }
 
     // Check item count limit (max 100 items per guild)
     const { count } = await admin
@@ -183,6 +200,14 @@ export async function PATCH(request: NextRequest) {
         success: false,
         error: completeItem.error.issues[0]?.message ?? 'Invalid item behavior.',
       }, { status: 400 });
+    }
+
+    const roleValidation = await validateDiscordRoleTargets(admin, ctx.guildId, roleTargetsForItem(completeItem.data));
+    if (!roleValidation.ok) {
+      return NextResponse.json(
+        { success: false, error: roleValidation.issues.join(' '), issues: roleValidation.issues },
+        { status: discordTargetFailureStatus(roleValidation) },
+      );
     }
 
     const { data, error } = await admin

@@ -18,9 +18,9 @@ interface DiscordRole {
   name: string;
   color: number;
   position: number;
-  managed?: boolean;
+  managed: boolean;
   hoist?: boolean;
-  editableByBot?: boolean;
+  editableByBot: boolean;
 }
 
 interface RoleSnapshot {
@@ -87,6 +87,7 @@ function hasValidRoleShape(value: unknown): value is DiscordRole {
     && Number.isFinite(value.color)
     && typeof value.position === 'number'
     && Number.isFinite(value.position)
+    && typeof value.managed === 'boolean'
     && typeof value.editableByBot === 'boolean';
 }
 
@@ -150,13 +151,16 @@ export function missingRoleIds(
  * picker must not offer a choice it cannot verify.
  */
 export function roleAssignmentIssue(
-  role: Pick<DiscordRole, 'editableByBot'>,
+  role: Pick<DiscordRole, 'editableByBot' | 'managed'>,
   requireAssignable: boolean,
   rolesAuthoritative: boolean,
 ): string | null {
   if (!requireAssignable) return null;
   if (!rolesAuthoritative) {
     return 'Live bot role authority cannot be verified right now — retry after the bot refreshes its snapshot.';
+  }
+  if (role.managed) {
+    return 'This role is managed by Discord and cannot be changed by SomniBot';
   }
   if (role.editableByBot === false) {
     return 'Move SomniBot above this role and grant Manage Roles first';
@@ -554,6 +558,11 @@ export function RolePicker({
       {!error && loadFailed && (
         <p className="text-xs text-discord-warning">
           Roles could not be refreshed. Existing role IDs are preserved until Discord data is available.
+        </p>
+      )}
+      {!error && !loading && !loadFailed && requireAssignable && !liveRolesAuthoritative && (
+        <p className="text-xs text-discord-warning">
+          Role changes are unavailable until SomniBot publishes a fresh hierarchy snapshot. Refresh after the bot is online.
         </p>
       )}
       {!error && unreachableSelected.length > 0 && (

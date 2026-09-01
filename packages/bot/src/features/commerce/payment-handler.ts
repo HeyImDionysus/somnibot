@@ -22,6 +22,7 @@ import { brandedEmbed, resolveBrandKit } from '../branding/index.js';
 import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { deterministicUuidV8 } from '../../utils/deterministic-uuid.js';
 import { writeAuditLog } from '../../services/audit.js';
+import { authorizeLaunchTest, parseLaunchTestButton } from './launch-test-context.js';
 
 const log = createLogger('PaymentHandler');
 const PAYPAL_FETCH_TIMEOUT_MS = 15_000;
@@ -35,7 +36,6 @@ const PAYPAL_TRANSACTION_STATUSES = new Set([
   'REFUNDED',
   'REVERSED',
 ]);
-
 type CheckoutFailureAudit = {
   readonly guildId: string;
   readonly actorId: string;
@@ -176,15 +176,24 @@ export async function handleFreeClaimButton(
   guildId: string,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
-  const productId = interaction.customId.replace('store:claim:', '');
+  const launchButton = parseLaunchTestButton(interaction.customId, 'claim');
+  const launchTest = launchButton
+    ? await authorizeLaunchTest(interaction, supabase, { ...launchButton, guildId })
+    : null;
+  const productId = launchButton?.productId ?? interaction.customId.replace('store:claim:', '');
   const discordId = interaction.user.id;
-  const { data: product, error: productError } = await supabase
+  if (launchButton && !launchTest) {
+    await interaction.editReply({ content: '❌ This Sandbox launch proof is not available to you.' });
+    return;
+  }
+  const productQuery = supabase
     .from('products')
     .select('id, name, type, price_cents, delivery_type, granted_role_ids, granted_channel_ids')
     .eq('id', productId)
-    .eq('guild_id', guildId)
-    .eq('active', true)
-    .maybeSingle();
+    .eq('guild_id', guildId);
+  const { data: product, error: productError } = await (launchTest
+    ? productQuery.eq('active', false)
+    : productQuery.eq('active', true)).maybeSingle();
   if (productError || !product || product.type !== 'free' || product.price_cents !== 0
     || !CHECKOUT_DELIVERY_TYPES.has(String(product.delivery_type))) {
     await interaction.editReply({ content: '❌ This free product is no longer available.' });
@@ -240,12 +249,22 @@ export async function handleFreeClaimButton(
     await interaction.editReply({ content: '⚠️ Free claims are temporarily unavailable. Please try again.' });
     return;
   }
-  const requestId = claimConfig?.free_claim_policy === 'repeatable'
+  const requestIdentity = launchTest
+    ? [guildId, discordId, productId, launchTest.runId, launchTest.verificationStartedAt]
+    : [guildId, discordId, productId, 'live'];
+  const requestId = !launchTest && claimConfig?.free_claim_policy === 'repeatable'
     ? randomUUID()
-    : deterministicUuidV8('somnibot:free-claim:v1', [guildId, discordId, productId]);
-  const { data, error } = await supabase.rpc('commerce_claim_free_product', {
+    : deterministicUuidV8('somnibot:free-claim:v1', requestIdentity);
+  const claimIdentity = {
     p_request_id: requestId, p_guild_id: guildId, p_customer_id: customer.id, p_product_id: productId,
-  });
+  };
+  const { data, error } = launchTest
+    ? await supabase.rpc('commerce_claim_free_product_for_launch', {
+      ...claimIdentity,
+      p_launch_run_id: launchTest.runId,
+      p_verification_started_at: launchTest.verificationStartedAt,
+    })
+    : await supabase.rpc('commerce_claim_free_product', claimIdentity);
   if (error) {
     log.error('Free claim RPC failed', {
       guildId,
@@ -938,13 +957,30 @@ export async function handleBuyButton(
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
+  const launchButton = parseLaunchTestButton(interaction.customId, 'buy');
+  const launchTest = launchButton
+    ? await authorizeLaunchTest(interaction, supabase, { ...launchButton, guildId })
+    : null;
   const checkoutParts = interaction.customId.split(':');
-  const productId = checkoutParts[2] ?? '';
+  const productId = launchButton?.productId ?? checkoutParts[2] ?? '';
   const requestedCoupon = interaction.customId.startsWith('store:buy:')
     ? checkoutParts[3]?.trim().toUpperCase() ?? null
     : null;
   const discordId = interaction.user.id;
   const discordUsername = interaction.user.username;
+
+  if (launchButton) {
+    let paypalHost: string;
+    try {
+      paypalHost = new URL(paypalApiBase).hostname;
+    } catch {
+      paypalHost = '';
+    }
+    if (paypalHost !== 'api-m.sandbox.paypal.com' || !launchTest) {
+      await interaction.editReply({ content: '❌ This paid Sandbox launch proof is not available.' });
+      return;
+    }
+  }
 
   // Buyer-facing surface: the owner's white-label kit frames every checkout
   // embed AND supplies the PayPal checkout brand_name. Resolved once per
@@ -956,13 +992,14 @@ export async function handleBuyButton(
   // Fetch product. A failed READ is not a missing product: during a database
   // outage the product may exist and be buyable, so degrade honestly instead
   // of lying with "not found".
-  const { data: product, error: productLookupError } = await supabase
+  const productQuery = supabase
     .from('products')
     .select('*')
     .eq('id', productId)
-    .eq('guild_id', guildId)
-    .eq('active', true)
-    .maybeSingle();
+    .eq('guild_id', guildId);
+  const { data: product, error: productLookupError } = await (launchTest
+    ? productQuery.eq('active', false)
+    : productQuery.eq('active', true)).maybeSingle();
 
   if (productLookupError) {
     await replyCheckoutUnavailable(interaction, supabase, guildId);
@@ -1485,6 +1522,28 @@ export async function handleBuyButton(
     await interaction.editReply({ content: '❌ Checkout could not be safely recorded. Please try again.' });
     return;
   }
+  if (launchTest) {
+    const { data: launchBound, error: launchBindingError } = await supabase.rpc(
+      'commerce_bind_checkout_launch',
+      {
+        p_checkout_token: checkoutToken,
+        p_guild_id: guildId,
+        p_customer_id: customerId,
+        p_product_id: productId,
+        p_launch_run_id: launchTest.runId,
+        p_verification_started_at: launchTest.verificationStartedAt,
+      },
+    );
+    if (launchBindingError || launchBound !== true) {
+      await supabase
+        .from('commerce_checkout_intents')
+        .update({ status: 'cancelled', cancel_reason: 'launch proof binding failed' })
+        .eq('token', checkoutToken)
+        .eq('status', 'pending');
+      await interaction.editReply({ content: '❌ Sandbox checkout proof could not be bound to this launch run. No PayPal checkout was created.' });
+      return;
+    }
+  }
   const cancelCheckoutIntent = async (reason: string): Promise<void> => {
     const { error } = await supabase
       .from('commerce_checkout_intents')
@@ -1540,10 +1599,16 @@ export async function handleBuyButton(
     couponCode: string | null;
   } | null = null;
   if (product.type === 'one_time') {
-    const pricingResponse = await supabase.rpc('commerce_reserve_checkout_pricing', {
-      p_checkout_token: checkoutToken,
-      p_coupon_code: requestedCoupon,
-    });
+    const pricingResponse = await supabase.rpc(
+      launchTest ? 'commerce_reserve_launch_checkout_pricing' : 'commerce_reserve_checkout_pricing',
+      launchTest ? {
+        p_checkout_token: checkoutToken,
+        p_verification_started_at: launchTest.verificationStartedAt,
+      } : {
+        p_checkout_token: checkoutToken,
+        p_coupon_code: requestedCoupon,
+      },
+    );
     const pricing = pricingResponse.data;
     const validPricing = isUnknownRecord(pricing)
       && Number.isSafeInteger(pricing.amount_cents)
@@ -1729,7 +1794,9 @@ export async function handleBuyButton(
     // order-number contract once; SQL returns the already-frozen row only when
     // every immutable field still matches.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const response = await supabase.rpc('commerce_create_and_bind_active_paid_checkout', {
+      const response = await supabase.rpc(launchTest
+        ? 'commerce_create_and_bind_launch_paid_checkout'
+        : 'commerce_create_and_bind_active_paid_checkout', {
         p_checkout_token: checkoutToken,
         p_order_number: orderNumber,
         p_guild_id: guildId,
@@ -1741,6 +1808,7 @@ export async function handleBuyButton(
         p_approval_url: approvalLink.href,
         p_amount_cents: oneTimePricing?.amountCents ?? product.price_cents,
         p_currency: productCurrency,
+        ...(launchTest ? { p_verification_started_at: launchTest.verificationStartedAt } : {}),
       });
       pendingOrder = response.data;
       pendingOrderError = response.error;
@@ -1845,8 +1913,11 @@ export async function handleBuyButton(
     // valid PayPal-backed subscription rather than falling through to a more
     // expensive row or being mistaken for an unchargeable plan.
     const { data: selectedPlans, error: planError } = await supabase.rpc(
-      'commerce_select_checkout_plan',
-      {
+      launchTest ? 'commerce_select_launch_checkout_plan' : 'commerce_select_checkout_plan',
+      launchTest ? {
+        p_checkout_token: checkoutToken,
+        p_verification_started_at: launchTest.verificationStartedAt,
+      } : {
         p_guild_id: guildId,
         p_product_id: productId,
       },
@@ -2012,7 +2083,9 @@ export async function handleBuyButton(
     let pendingOrder: unknown = null;
     let pendingOrderError: { code?: string; message?: string } | null = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const response = await supabase.rpc('commerce_create_and_bind_active_paid_checkout', {
+      const response = await supabase.rpc(launchTest
+        ? 'commerce_create_and_bind_launch_paid_checkout'
+        : 'commerce_create_and_bind_active_paid_checkout', {
         p_checkout_token: checkoutToken,
         p_order_number: orderNumber,
         p_guild_id: guildId,
@@ -2024,6 +2097,7 @@ export async function handleBuyButton(
         p_approval_url: approvalLink.href,
         p_amount_cents: plan.price_cents,
         p_currency: planCurrency,
+        ...(launchTest ? { p_verification_started_at: launchTest.verificationStartedAt } : {}),
       });
       pendingOrder = response.data;
       pendingOrderError = response.error;

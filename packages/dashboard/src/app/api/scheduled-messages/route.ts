@@ -28,13 +28,14 @@ async function writeScheduledMessageAudit(
     actorId: string;
     action: 'scheduled_message.created' | 'scheduled_message.updated' | 'scheduled_message.deleted';
     targetId: string;
+    occurrenceKey: string;
     details?: Record<string, unknown>;
     beforeState?: Record<string, unknown> | null;
     afterState?: Record<string, unknown> | null;
   },
 ): Promise<void> {
   try {
-    const { error } = await supabase.from('audit_logs').insert({
+    const row = {
       guild_id: entry.guildId,
       actor_type: 'dashboard',
       actor_id: entry.actorId,
@@ -42,10 +43,15 @@ async function writeScheduledMessageAudit(
       category: 'scheduled_messages',
       target_type: 'scheduled_message',
       target_id: entry.targetId,
+      occurrence_key: entry.occurrenceKey,
       details: entry.details ?? {},
       before_state: entry.beforeState ?? null,
       after_state: entry.afterState ?? null,
       success: true,
+    };
+    const { error } = await supabase.from('audit_logs').upsert([row], {
+      onConflict: 'guild_id,occurrence_key',
+      ignoreDuplicates: true,
     });
     if (error) {
       console.error(`[scheduled-messages] Failed to write ${entry.action} audit row:`, error.message);
@@ -157,6 +163,7 @@ export async function POST(req: NextRequest) {
     actorId: auth.ctx.discordId,
     action: 'scheduled_message.created',
     targetId: data.id,
+    occurrenceKey: `scheduled_message.created:${data.id}`,
     details: { name: data.name, channelId: data.channel_id, cronExpression: data.cron_expression },
     afterState: typedPick(data, ['name', 'channel_id', 'message', 'embed_config_id', 'cron_expression', 'timezone', 'start_date', 'end_date', 'max_sends', 'missed_run_policy', 'active']),
   });
@@ -224,7 +231,12 @@ export async function PUT(req: NextRequest) {
     return dbError(error, 'scheduled-messages');
   }
 
-  const changedKeys = Object.keys(updates).filter((k) => k !== 'updated_at');
+  const requestedKeys = Object.keys(updates).filter((key) => key !== 'updated_at');
+  const changedKeys = beforeRow
+    ? requestedKeys.filter((key) =>
+        JSON.stringify((beforeRow as Record<string, unknown>)[key] ?? null)
+        !== JSON.stringify((data as Record<string, unknown>)[key] ?? null))
+    : requestedKeys;
   // A no-op PUT (only the id, nothing picked) bumps updated_at but changes no
   // owner-visible field — writing a scheduled_message.updated row with an
   // empty diff would fabricate a mutation.
@@ -234,6 +246,7 @@ export async function PUT(req: NextRequest) {
       actorId: auth.ctx.discordId,
       action: 'scheduled_message.updated',
       targetId: data.id,
+      occurrenceKey: `scheduled_message.updated:${data.id}:${String(data.updated_at)}`,
       details: { name: data.name, fields: changedKeys },
       beforeState: beforeRow
         ? Object.fromEntries(changedKeys.map((k) => [k, (beforeRow as Record<string, unknown>)[k] ?? null]))
@@ -299,6 +312,7 @@ export async function DELETE(req: NextRequest) {
       actorId: auth.ctx.discordId,
       action: 'scheduled_message.deleted',
       targetId: id,
+      occurrenceKey: `scheduled_message.deleted:${id}`,
       details: { name: deleted.name, channelId: deleted.channel_id },
       beforeState: typedPick(deleted, ['name', 'channel_id', 'message', 'embed_config_id', 'cron_expression', 'timezone', 'start_date', 'end_date', 'max_sends', 'missed_run_policy', 'active']),
     });

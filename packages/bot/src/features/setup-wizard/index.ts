@@ -3,10 +3,8 @@
  *
  * Provides:
  * - /setup slash command (guild owner only)
- * - Sequential flow: Database Setup → PayPal → Deployment
- * - Button, modal, and select menu interaction handlers
- * - Credential verification via real API calls
- * - Progress persistence in Supabase instance_settings
+ * - Launcher handoff for installation credentials, deployment, and services
+ * - Compatibility handlers that reject stale setup buttons and modals
  */
 
 export {

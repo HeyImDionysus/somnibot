@@ -280,6 +280,49 @@ test.describe('Dashboard admin mutation safety', () => {
     await page.screenshot({ path: testInfo.outputPath('diagnostics-webhook-replay-confirmation.png'), fullPage: true });
   });
 
+  test('persists diagnostics guided mode through its scoped API and renders the readback', async ({ page }, testInfo) => {
+    await installCsrfApi(page);
+    let guidedMode = true;
+    let patchBody: unknown = null;
+    const diagnosticsData = () => ({
+      guidedMode,
+      thresholds: { memoryRssMb: 512, wsPingMs: 500, webhookErrorRate: 0.25 },
+      snapshotIntervalMs: 60_000,
+      bot: { online: true, uptimeSeconds: 3600, memoryRssMb: 180, memoryHeapMb: 120, wsPing: 42, guildMemberCount: 12, activeVoiceConnections: 0, snapshotAt: '2030-01-01T12:00:00.000Z', staleSecs: 5 },
+      lavalink: { nodes: [] },
+      valkey: { connected: true, memoryMb: 8 },
+      supabase: { healthy: true },
+      webhooks: { total: 0, success: 0, error: 0, duplicate: 0, pending: 0 },
+      sync: { lastSync: null, lastSyncDetails: null, lastDrift: null, lastDriftDetails: null },
+      automations: { activeCount: 0 },
+      scheduledMessages: { activeCount: 0 },
+      dlq: { pendingCount: 0 },
+      healthMetrics: {},
+    });
+    await page.route('**/api/alerts?*', (route) => fulfillJson(route, { success: true, data: { alerts: [] } }));
+    await page.route('**/api/webhooks?*', (route) => fulfillJson(route, {
+      success: true,
+      data: [],
+      pagination: { page: 1, pageSize: 25, total: 0, totalPages: 0 },
+    }));
+    await page.route('**/api/diagnostics', async (route) => {
+      if (route.request().method() === 'PATCH') {
+        patchBody = route.request().postDataJSON();
+        guidedMode = false;
+      }
+      await fulfillJson(route, { success: true, data: diagnosticsData() });
+    });
+
+    await page.goto('/diagnostics');
+    const guidedToggle = page.getByRole('checkbox', { name: 'Explain these numbers' });
+    await expect(guidedToggle).toBeChecked();
+    await guidedToggle.uncheck();
+
+    await expect.poll(() => patchBody).toEqual({ diagnostics_guided_mode: false });
+    await expect(guidedToggle).not.toBeChecked();
+    await page.screenshot({ path: testInfo.outputPath('diagnostics-guided-mode-readback.png'), fullPage: true });
+  });
+
   test('prevents duplicate alert acknowledgement and rejects a stale active-alert readback', async ({ page }) => {
     await installCsrfApi(page);
     const alert = {

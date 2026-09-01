@@ -29,6 +29,7 @@ import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { recordAdminChange } from '@/lib/admin-changes';
+import { discordTargetFailureStatus, validateDiscordRoleTargets } from '@/lib/api/live-discord-facts';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -238,6 +239,17 @@ export async function PATCH(request: NextRequest) {
 
   const admin = createAdminSupabase();
 
+  const validation = await validateDiscordRoleTargets(admin, guildId, {
+    assignableRoleIds: [body.roleId],
+    existingRoleIds: [],
+  });
+  if (!validation.ok) {
+    return NextResponse.json(
+      { success: false, error: validation.issues.join(' '), issues: validation.issues },
+      { status: discordTargetFailureStatus(validation) },
+    );
+  }
+
   // Read the role's current Discord properties BEFORE queueing the edit —
   // afterwards the snapshot still shows the old values for a while and then
   // silently becomes the NEW ones, so a "before" captured later is just the
@@ -337,6 +349,17 @@ export async function DELETE(request: NextRequest) {
   const body = parsed.data;
 
   const admin = createAdminSupabase();
+
+  const validation = await validateDiscordRoleTargets(admin, guildId, {
+    assignableRoleIds: [body.roleId],
+    existingRoleIds: [],
+  });
+  if (!validation.ok) {
+    return NextResponse.json(
+      { success: false, error: validation.issues.join(' '), issues: validation.issues },
+      { status: discordTargetFailureStatus(validation) },
+    );
+  }
 
   // Capture the role before it is gone — once the bot deletes it, this snapshot
   // is the only remaining description of what the role was.

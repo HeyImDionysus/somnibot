@@ -21,10 +21,10 @@
  *
  * Anything else — a query error, an RPC error, a dependency being down — is a
  * SERVICE FAULT and must be reported with {@link LICENSE_STATUS_UNAVAILABLE}
- * and HTTP 503. `@somnibot/license-sdk` lists that status (plus `rate_limited`,
- * plus any 5xx/429) in `INDETERMINATE_STATUSES` and handles it non-terminally:
- * the client keeps its cached validation, keeps heartbeating, and rides the
- * normal offline-grace window. Keep the two lists in sync.
+ * and HTTP 503. The self-contained generated SDK protocol contract classifies
+ * that status (plus `rate_limited`, any 5xx, and 429) as indeterminate: clients
+ * keep a prior valid cache, continue heartbeats, and use the bounded offline
+ * grace window. Keep server responses aligned with that generated contract.
  *
  * ## Fail-open vs fail-closed
  *

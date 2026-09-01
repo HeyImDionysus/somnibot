@@ -12,7 +12,7 @@ Discord Gateway → Bot (Node.js + Valkey) → Supabase (Postgres)
 Browser → Dashboard (Next.js 15) → Supabase (Postgres)
 ```
 
-**Packages:** bot, dashboard, shared, launcher, license-sdk, supabase (migrations)
+**Packages:** bot, dashboard, shared, launcher, supabase (migrations)
 **External:** Supabase, Valkey/Redis, Lavalink, PayPal, Discord API
 
 ## Deployment
@@ -319,6 +319,61 @@ backup and record its timestamp, the deployed Git SHA, and the
 writes, restore only the recorded backup when necessary; after customer writes,
 disable `store_enabled`, preserve payment evidence, and use an additive
 forward-fix instead of overwriting live data.
+
+The Launcher **Database recovery** section provides two separate, explicitly
+confirmed actions. **Back up saved source database** captures the configured
+Supabase database into a unique directory beneath the Launcher's user-data
+`backups/database/` directory. It uses checksum-verified vendored Supabase 2.114.0
+logical roles/schema/data scripts through an owned Docker container, and native PostgreSQL `psql`; these prerequisites and
+the exact required cached Docker dump image must already exist. Each dump uses
+an inspected immutable image ID with `--pull=never`, disabled container logging,
+a read-only root filesystem, bounded tmpfs, 512 MiB memory and one CPU. SQL stdout
+streams with backpressure into the precreated private artifact; it is not buffered
+as an unbounded string or duplicated into Docker logs. Only containers with this
+operation's exact name, both ownership labels and expected image ID may be removed;
+cleanup must verify zero survivors. There is no image or volume prune. The action does not
+install tools, download an image, provision a project, or change production data.
+Source and target passwords remain in scoped child-process environments, never
+command arguments or audit records. Target credentials are not saved.
+
+Every capture has actual file sizes/SHA-256 checksums and a private manifest.
+When `supabase_migrations` exists, its schema and data are captured as two
+additional artifacts; existing target history is never dropped to force a restore.
+The logical data dump has its own database snapshot; the separate dumps are
+**not a single exported cross-file snapshot**. Migration/configuration/schema
+observations must match before and after capture. Actual deployed identity is
+recorded only when a fresh matching bot health/boot observation provides it;
+packaged Launcher identity never substitutes for deployed identity. Unknown
+runtime identity leaves deployment/recovery readiness unverified.
+
+**Restore captured backup into isolated target** accepts only an intact backup
+created during the current Launcher session, not an arbitrary operator file.
+Supply an existing, different Supabase project, its database password, an
+optional password-free session-pooler endpoint, and the exact project reference
+confirmation. Keep the target disconnected from all applications/external
+writers. A second native confirmation identifies the target and consequences.
+The same fail-fast `psql` transaction checks unused application state, locks the
+auth/storage guard tables, restores the captured artifacts, and compares the
+migration/configuration/schema identities, public table inventory, auth user
+count, and storage metadata object count. A guard or validation error aborts
+that transaction. The advisory lock coordinates this workflow, not arbitrary
+external writers; this is only supported on an owner-designated unused target.
+
+Successful target data is retained and contains sensitive source information.
+Keep it isolated and remove it through the provider's supported owner controls
+when no longer needed. Logical backup/rehearsal excludes **storage object
+bytes**, provider authentication settings, function deployments, and the
+separate Valkey snapshot; it is not a whole-application restore certificate.
+An absent target remains an explicit prerequisite, not a passed rehearsal.
+
+The local artifact set is limited to 512 MiB with a 2 GiB disk reserve; each
+client process has a three-minute bound. Source drift or quota exhaustion stops
+capture and removes only that new owned partial directory. Prior successful
+backups are never automatically pruned. After restarting the Launcher, take a
+fresh capture for its rehearsal controls; earlier backup files remain preserved.
+Successful physical work with failed durable audit recording is reported as
+such and does not produce verified readiness. Actual hosted backup/restore and
+rendered Launcher verification remain mandatory release checks.
 
 ### Migrations
 The bot's migration runner applies files from `packages/supabase/migrations/`

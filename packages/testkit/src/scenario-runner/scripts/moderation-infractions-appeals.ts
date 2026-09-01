@@ -492,7 +492,7 @@ async function DEF(ctx: ScenarioContext): Promise<void> {
     'audit',
     'discord-readback',
     'Every escalation, pardon, appeal, denial, and failure additionally lands exactly one append-only audit_logs row with a run-prefixed correlation id.',
-    'the manual /warn path writes the infractions row + emits an event but no audit_logs row; audit_logs entries for moderation come from the escalation-failure / automod / dashboard paths — driving them needs DISCORD_TOKEN + a live guild (and, for appeals, an unimplemented feature)',
+    'manual warnings and the appeal lifecycle emit mapped audit events, but proving the full escalation, pardon, denial, and failure sequence requires driving the real Discord commands and member actions with DISCORD_TOKEN in a live guild, followed by audit_logs readback',
   );
 
   // The third-warning escalation to a 60-minute mute is a Discord action (member.timeout).

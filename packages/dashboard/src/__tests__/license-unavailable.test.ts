@@ -17,7 +17,7 @@
  *
  * The rule these tests pin: a verdict may only be returned for a state the
  * server actually read. A failed read is HTTP 503 + 'service_unavailable',
- * which `@somnibot/license-sdk` handles non-terminally.
+ * which the generated SDK protocol contract handles non-terminally.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -190,6 +190,26 @@ describe('POST /api/license/validate — a failed lookup is not a revocation', (
 // ───────────────────────── heartbeat ─────────────────────────
 
 describe('POST /api/license/heartbeat — heartbeats survive a transient fault', () => {
+  it('keeps the response schema complete when rate limited', async () => {
+    vi.mocked(rateLimits.licenseHeartbeat).mockResolvedValue({
+      limited: true,
+      remaining: 0,
+      retryAfterMs: 30_000,
+    });
+    const request = new NextRequest('http://localhost/api/license/heartbeat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ license_key: 'SOMNI-TEST-1234-ABCD', session_id: SESSION_ID }),
+    });
+
+    const response = await heartbeatPost(request);
+    const body = await response.json();
+
+    expect(response.status).toBe(429);
+    expect(body).toMatchObject({ valid: false, status: 'rate_limited', next_heartbeat_seconds: 0 });
+    expect(response.headers.get('Retry-After')).toBe('30');
+  });
+
   function atomicDecision(
     rows: EntitlementFixture[],
     key: { id: string; status: string } | null,

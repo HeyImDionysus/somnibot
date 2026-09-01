@@ -16,7 +16,12 @@ describe('action-queue event ingress', () => {
         enabled: true,
         actionCount: 1,
       },
-    })).toMatchObject({ type: 'automation.created' });
+    })).toMatchObject({
+      schemaVersion: 1,
+      operationId: null,
+      producer: 'bot',
+      type: 'automation.created',
+    });
   });
 
   it.each(['member.joined', 'purchase.completed', 'entitlement.granted', 'config.changed'])(
@@ -37,7 +42,27 @@ describe('action-queue event ingress', () => {
         status: 'expired',
         orderId: 'order-1',
       },
-    })).toMatchObject({ type: 'subscription.expired' });
+      operation_id: '11111111-1111-4111-8111-111111111111',
+      schema_version: 1,
+    })).toMatchObject({
+      schemaVersion: 1,
+      operationId: '11111111-1111-4111-8111-111111111111',
+      producer: 'bot',
+      type: 'subscription.expired',
+    });
+  });
+
+  it('rejects an unsupported explicit event contract version', () => {
+    expect(parseActionQueuePlatformEvent({
+      schema_version: 2,
+      event_type: 'webhook.received',
+      event_data: {
+        eventId: 'event-1',
+        eventType: 'payment.completed',
+        provider: 'paypal',
+        result: 'accepted',
+      },
+    })).toBeNull();
   });
 
   it('rejects allowed names with malformed payloads', () => {

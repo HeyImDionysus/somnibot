@@ -8,6 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import ProductFiles from '@/components/store/product-files';
 import StoreControlRoom from '@/components/store/store-control-room';
+import { CommerceOperationsCenter } from '@/components/store/commerce-operations-center';
 import { PayPalOnboardingStatusPanel } from '@/components/store/paypal-onboarding-status';
 import { ProductIntegrationPanel } from '@/components/store/product-integration-panel';
 import { StoreProductCard } from '@/components/store/store-product-card';
@@ -17,6 +18,7 @@ import type {
   SubscriptionPlan,
   SubscriptionPlanDraft,
 } from '@/components/store/onboarding-types';
+import type { LicensingRails } from '@/lib/store/licensing-rails';
 import { RolePicker } from '@/components/shared/role-picker';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
@@ -32,17 +34,23 @@ import {
 } from '@/lib/store/commerce-plan-recovery';
 import {
   defaultStoreProductFacets,
+  buildLicensePolicySaveRequest,
   evaluateStoreProductPolicy,
+  prepareStoreProductSave,
   storeProductFacetOptions,
   type StoreProductFacet,
 } from '@/lib/store/store-product-policy';
 import {
   LICENSING_STORE_HANDOFF_KEY,
   hasPendingCompletedProjectPolicy,
+  licensingCapabilitiesSchema,
   parseLicensingStoreHandoff,
   promptEnvelopeToStorePrefill,
   readCompletedProjectPolicy,
+  readCompletedProjectLicensingMetadata,
+  resolveCapabilityPlanGrants,
   serializeLicensingStoreHandoff,
+  type LicensingCapability,
   type LicensingStoreHandoffV1,
 } from '@/lib/store/licensing-handoff';
 
@@ -157,6 +165,7 @@ const deliveryTypeLabels: Record<Product['delivery_type'], string> = {
 export default function StorePage() {
   const { toast } = useToast();
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [confirmPolicySave, setConfirmPolicySave] = useState(false);
 
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -190,10 +199,14 @@ export default function StorePage() {
   const [savingPaypalPolicy, setSavingPaypalPolicy] = useState(false);
   const [liveModeConfirmed, setLiveModeConfirmed] = useState(false);
   const [planDraft, setPlanDraft] = useState<SubscriptionPlanDraft>(emptyPlan);
+  const [subscriptionPlanId, setSubscriptionPlanId] = useState('');
   const [integrationProduct, setIntegrationProduct] = useState<Product | null>(null);
   const [licensingHandoffActive, setLicensingHandoffActive] = useState(false);
   const [licensingHandoffMessage, setLicensingHandoffMessage] = useState('');
   const [licensingPlanNotes, setLicensingPlanNotes] = useState('');
+  const [licensingPrivateContext, setLicensingPrivateContext] = useState('');
+  const [licensingCapabilities, setLicensingCapabilities] = useState<LicensingCapability[]>([]);
+  const [licensingRails, setLicensingRails] = useState<LicensingRails | null>(null);
   const [billingChoiceRequired, setBillingChoiceRequired] = useState(false);
   const [licensingHandoff, setLicensingHandoff] = useState<LicensingStoreHandoffV1 | null>(null);
   const [licenseRecoveryProductId, setLicenseRecoveryProductId] = useState<string | null>(null);
@@ -206,6 +219,9 @@ export default function StorePage() {
     setLicensingHandoffActive(false);
     setLicensingHandoffMessage('');
     setLicensingPlanNotes('');
+    setLicensingPrivateContext('');
+    setLicensingCapabilities([]);
+    setLicensingRails(null);
     setBillingChoiceRequired(false);
     setLicensingHandoff(null);
     setLicenseRecoveryProductId(null);
@@ -224,13 +240,19 @@ export default function StorePage() {
           handoff.guildId,
           recovery,
           handoff.creationRequestId,
+          handoff.capabilities,
+          (handoff.subscriptionPlanId ?? subscriptionPlanId) || undefined,
         ),
       );
-      setLicensingHandoff({ ...handoff, recovery });
+      setLicensingHandoff({
+        ...handoff,
+        recovery,
+        subscriptionPlanId: (handoff.subscriptionPlanId ?? subscriptionPlanId) || undefined,
+      });
     } catch {
       setLicensingHandoffMessage('The product remains inactive, but this tab could not persist its policy-recovery identity. Retry the policy before leaving this page.');
     }
-  }, []);
+  }, [subscriptionPlanId]);
   const [storeControls, setStoreControls] = useState({
     product_types_enabled: [...defaultStoreProductFacets] as StoreProductFacet[],
     repeat_purchase_policy: 'unique' as 'unique' | 'stackable' | 'renewable' | 'seat-based',
@@ -561,7 +583,7 @@ export default function StorePage() {
     }
     let prefill: ReturnType<typeof promptEnvelopeToStorePrefill>;
     try {
-      prefill = promptEnvelopeToStorePrefill(handoff.envelope);
+      prefill = promptEnvelopeToStorePrefill(handoff.envelope, handoff.capabilities);
     } catch {
       window.sessionStorage.removeItem(LICENSING_STORE_HANDOFF_KEY);
       setLicensingHandoff(null);
@@ -572,7 +594,7 @@ export default function StorePage() {
     setForm({
       ...emptyForm,
       name: prefill.name,
-      description: prefill.description,
+      description: prefill.customerDescription,
       type: prefill.billingType ?? 'one_time',
       delivery_type: prefill.deliveryType,
       price_dollars: prefill.billingType === 'free' ? '0.00' : '',
@@ -583,8 +605,31 @@ export default function StorePage() {
     setLicenseOfflineGraceSeconds(prefill.offlineGracePeriodSeconds);
     setLicenseFeatureFlags(prefill.featureFlags.join(', '));
     setLicensingPlanNotes(prefill.planNotes);
+    setLicensingPrivateContext(prefill.privateIntegrationContext);
+    setLicensingCapabilities(prefill.capabilities);
+    setLicensingRails(handoff.envelope.rails);
+    const stablePlanId = handoff.subscriptionPlanId ?? crypto.randomUUID();
+    setSubscriptionPlanId(stablePlanId);
+    if (!handoff.subscriptionPlanId) {
+      const persistedHandoff = {
+        ...handoff,
+        subscriptionPlanId: stablePlanId,
+      };
+      window.sessionStorage.setItem(
+        LICENSING_STORE_HANDOFF_KEY,
+        serializeLicensingStoreHandoff(
+          handoff.envelope,
+          handoff.guildId,
+          handoff.recovery,
+          handoff.creationRequestId,
+          handoff.capabilities,
+          stablePlanId,
+        ),
+      );
+      setLicensingHandoff(persistedHandoff);
+    }
     setBillingChoiceRequired(prefill.billingChoiceRequired);
-    setLicensingHandoffMessage('Completed-project values were loaded from this tab. Review the customer-facing description and Store policy before creating the inactive product.');
+    setLicensingHandoffMessage('Private integration context and capability controls were loaded from this tab. Write the separate customer-facing description before creating the inactive product.');
     setEditingId(null);
     setEditingOriginalDeliveryType(null);
     setShowForm(true);
@@ -606,11 +651,15 @@ export default function StorePage() {
     setLicenseFeatureFlags('');
     setLicenseRequireMembership(true);
     setPlanDraft(emptyPlan);
+    setSubscriptionPlanId(crypto.randomUUID());
     setIntegrationRecovery(null);
     setPendingCreateRequestId(null);
     setPendingPlanRecovery(null);
     setBillingChoiceRequired(false);
     setLicensingPlanNotes('');
+    setLicensingPrivateContext('');
+    setLicensingCapabilities([]);
+    setLicensingRails(null);
     setEditingId(null);
     setShowForm(true);
   };
@@ -620,6 +669,12 @@ export default function StorePage() {
     setLicensingPlanNotes('');
     setLicensingHandoffActive(false);
     setLicensingHandoffMessage('');
+    const completedProject = readCompletedProjectLicensingMetadata(p.metadata);
+    setLicensingPrivateContext(
+      completedProject?.privateIntegrationContext || completedProject?.projectContext || '',
+    );
+    setLicensingCapabilities(completedProject?.capabilities ?? []);
+    setLicensingRails(completedProject?.rails ?? null);
     setForm({
       name: p.name,
       description: p.description ?? '',
@@ -645,6 +700,7 @@ export default function StorePage() {
     setEditingOriginalDeliveryType(p.delivery_type);
     setIntegrationProduct(p);
     setPlanDraft(p.plans?.[0] ?? { ...emptyPlan, currency: p.currency, price_cents: p.price_cents });
+    setSubscriptionPlanId(p.plans?.[0]?.id ?? crypto.randomUUID());
     setShowForm(true);
   };
 
@@ -658,21 +714,32 @@ export default function StorePage() {
     return product;
   };
 
-  const saveLicensePolicy = async (productId: string): Promise<string | null> => {
+  const effectiveLicenseFeatureFlags = (): string[] => {
+    const parsed = licensingCapabilitiesSchema.safeParse(licensingCapabilities);
+    if (parsed.success && parsed.data.length > 0) {
+      return parsed.data.map((capability) => capability.key);
+    }
+    return licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean);
+  };
+
+  const saveLicensePolicy = async (
+    productId: string,
+    desiredPolicy: NonNullable<ReturnType<typeof readCompletedProjectPolicy>> = {
+      keyPrefix: licenseKeyPrefix,
+      maxDevices: licenseMaxDevices,
+      heartbeatIntervalMs: licenseHeartbeatMs,
+      sdkCacheTtlMs: licenseSdkCacheTtlMs,
+      offlineGracePeriodSeconds: licenseOfflineGraceSeconds,
+      featureFlags: effectiveLicenseFeatureFlags(),
+      requireDiscordGuildMembership: licenseRequireMembership,
+      rotationPolicy,
+      selfServiceDeviceRemoval,
+    },
+  ): Promise<string | null> => {
     const configRes = await fetch(`/api/license/config/${productId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        key_prefix: licenseKeyPrefix,
-        max_devices: licenseMaxDevices,
-        heartbeat_interval_ms: licenseHeartbeatMs,
-        sdk_cache_ttl_ms: licenseSdkCacheTtlMs,
-        offline_grace_period_seconds: licenseOfflineGraceSeconds,
-        feature_flags: licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean),
-        require_discord_guild_membership: licenseRequireMembership,
-        rotation_policy: rotationPolicy,
-        self_service_device_removal: selfServiceDeviceRemoval,
-      }),
+      body: JSON.stringify(buildLicensePolicySaveRequest(desiredPolicy)),
     });
     if (configRes.ok) return null;
     const result: { error?: string } = await configRes.json();
@@ -682,8 +749,9 @@ export default function StorePage() {
   const licensePolicyMatches = (product: Product): boolean => {
     const config = licenseConfigForProduct(product);
     if (!config) return false;
-    const expectedFlags = licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean);
-    return config.key_prefix === licenseKeyPrefix
+    const expectedFlags = effectiveLicenseFeatureFlags();
+    return product.active === false
+      && config.key_prefix === licenseKeyPrefix
       && config.max_devices === licenseMaxDevices
       && config.heartbeat_interval_seconds * 1000 === licenseHeartbeatMs
       && config.sdk_cache_ttl_ms === licenseSdkCacheTtlMs
@@ -742,11 +810,18 @@ export default function StorePage() {
         return;
       }
 
-      const policyError = await saveLicensePolicy(integrationProduct.id);
+      const desiredPolicy = readCompletedProjectPolicy(integrationProduct.metadata);
+      if (!desiredPolicy) {
+        setIntegrationRecovery({ kind: 'license', message: 'The saved product has no recoverable desired license policy. Reload the product before retrying.' });
+        return;
+      }
+      const policyError = await saveLicensePolicy(integrationProduct.id, desiredPolicy);
       setIntegrationRecovery(policyError ? { kind: 'license', message: policyError } : null);
       if (!policyError) {
         const verifiedProduct = await readbackProduct(integrationProduct.id);
-        if (!verifiedProduct || !licensePolicyMatches(verifiedProduct)) {
+        const verifiedConfig = verifiedProduct ? licenseConfigForProduct(verifiedProduct) : null;
+        if (!verifiedProduct || verifiedProduct.active || hasPendingCompletedProjectPolicy(verifiedProduct.metadata)
+          || !verifiedConfig || !licenseConfigMatchesDesiredPolicy(verifiedConfig, desiredPolicy)) {
           setIntegrationRecovery({
             kind: 'license',
             message: 'The license policy save returned, but authoritative readback did not match. Retry safely.',
@@ -784,10 +859,37 @@ export default function StorePage() {
       toast({ title: 'License key prefix must contain 2 to 8 uppercase letters', variant: 'error' });
       return;
     }
+    const parsedCapabilities = licensingCapabilitiesSchema.safeParse(licensingCapabilities);
+    if (!parsedCapabilities.success) {
+      toast({ title: parsedCapabilities.error.issues[0]?.message ?? 'Review the licensing capabilities', variant: 'error' });
+      return;
+    }
+    let resolvedCapabilities: LicensingCapability[];
+    try {
+      resolvedCapabilities = resolveCapabilityPlanGrants(
+        parsedCapabilities.data,
+        form.type === 'subscription'
+          ? [{ id: subscriptionPlanId, name: planDraft.name }]
+          : [],
+      );
+    } catch (error) {
+      toast({
+        title: error instanceof Error ? error.message : 'Every capability grant must resolve to a saved plan',
+        variant: 'error',
+      });
+      return;
+    }
+    const capabilityFeatureFlags = resolvedCapabilities.map((capability) => capability.key);
+    const policyFeatureFlags = capabilityFeatureFlags.length > 0
+      ? capabilityFeatureFlags
+      : licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean);
 
     const convertingToDynamic = editingId !== null
       && editingOriginalDeliveryType !== 'license_key'
       && form.delivery_type === 'license_key';
+    const existingCompletedProject = editingId
+      ? readCompletedProjectLicensingMetadata(integrationProduct?.metadata)
+      : null;
     const createRequestId = editingId
       ? null
       : licensingHandoff?.creationRequestId ?? pendingCreateRequestId ?? crypto.randomUUID();
@@ -796,7 +898,7 @@ export default function StorePage() {
     let productResponseReceived = false;
     setSaving(true);
     try {
-      const payload = {
+      const payload = prepareStoreProductSave({
         ...(createRequestId ? { id: createRequestId } : {}),
         ...(editingId ? { id: editingId } : {}),
         name: form.name,
@@ -807,17 +909,25 @@ export default function StorePage() {
         currency: form.currency.toUpperCase(),
         granted_role_ids: form.granted_role_ids,
         granted_channel_ids: form.granted_channel_ids,
-        active: convertingToDynamic ? false : editingId ? form.active : false,
+        active: editingId ? form.active : false,
         ...(form.type === 'subscription' && !editingId ? {
-          plans: [{ ...planDraft, currency: form.currency.toUpperCase() }],
+          plans: [{ id: subscriptionPlanId, ...planDraft, currency: form.currency.toUpperCase() }],
         } : {}),
-        ...((!editingId && (licensingHandoff || form.delivery_type === 'license_key')) || convertingToDynamic ? {
+        ...((form.delivery_type === 'license_key' || (!editingId && licensingHandoff) || convertingToDynamic) ? {
           metadata: {
             completed_project_licensing: {
-              plansAndFeatures: licensingHandoff?.envelope.billing.plansAndFeatures ?? '',
-              projectContext: licensingHandoff?.envelope.project.context ?? form.description,
-              outputFormats: licensingHandoff?.envelope.staticPolicy?.outputFormats ?? '',
-              installationIdentity: licensingHandoff?.envelope.dynamicPolicy?.installationIdentity ?? '',
+              plansAndFeatures: licensingHandoff?.envelope.billing.plansAndFeatures ?? existingCompletedProject?.plansAndFeatures ?? '',
+              privateIntegrationContext: licensingPrivateContext,
+              outputFormats: licensingHandoff?.envelope.staticPolicy?.outputFormats ?? existingCompletedProject?.outputFormats ?? '',
+              installationIdentity: licensingHandoff?.envelope.dynamicPolicy?.installationIdentity ?? existingCompletedProject?.installationIdentity ?? '',
+              capabilities: resolvedCapabilities,
+              rails: licensingRails ?? {
+                runtimeLicensing: form.delivery_type === 'license_key',
+                downloadableFiles: form.delivery_type === 'file' || form.delivery_type === 'mixed',
+                hostedAccess: form.delivery_type === 'link' || form.delivery_type === 'access_pass',
+                discordRoles: form.granted_role_ids.length > 0 || form.granted_channel_ids.length > 0,
+                updates: false,
+              },
               policyPending: form.delivery_type === 'license_key',
               ...(form.delivery_type === 'license_key' ? {
                 desiredPolicy: {
@@ -826,7 +936,7 @@ export default function StorePage() {
                   heartbeatIntervalMs: licenseHeartbeatMs,
                   sdkCacheTtlMs: licenseSdkCacheTtlMs,
                   offlineGracePeriodSeconds: licenseOfflineGraceSeconds,
-                  featureFlags: licenseFeatureFlags.split(',').map((flag) => flag.trim()).filter(Boolean),
+                  featureFlags: policyFeatureFlags,
                   requireDiscordGuildMembership: licenseRequireMembership,
                   rotationPolicy,
                   selfServiceDeviceRemoval,
@@ -835,7 +945,7 @@ export default function StorePage() {
             },
           },
         } : {}),
-      };
+      });
 
       const res = await fetch('/api/store/products', {
         method: editingId ? 'PUT' : 'POST',
@@ -902,7 +1012,9 @@ export default function StorePage() {
       setPendingPlanRecovery(null);
       if (!editingId && licensingHandoffActive) clearLicensingHandoff();
       setShowForm(false);
-      toast({ title: editingId ? 'Product updated and verified' : 'Product created and verified', variant: 'success' });
+      toast({ title: editingId
+        ? form.delivery_type === 'license_key' ? 'Product updated and verified; activate it from the Store when ready' : 'Product updated and verified'
+        : 'Product created and verified', variant: 'success' });
     } catch {
       if (preservedProductId && form.delivery_type === 'license_key' && productResponseReceived) {
         persistLicenseRecovery(preservedProductId);
@@ -984,6 +1096,40 @@ export default function StorePage() {
   const formProductTypeOptions = unresolvedHandoffBilling
     ? [{ value: '', label: 'Choose billing model' }, ...availableProductTypeOptions]
     : availableProductTypeOptions;
+  const updateCapability = (index: number, values: Partial<LicensingCapability>) => {
+    setLicensingCapabilities((current) => current.map((capability, capabilityIndex) => (
+      capabilityIndex === index ? { ...capability, ...values } : capability
+    )));
+  };
+  const addCapability = () => {
+    const nextIndex = Array.from({ length: 101 }, (_, index) => index + 1)
+      .find((index) => !licensingCapabilities.some((capability) => capability.key === `capability-${index}`))
+      ?? licensingCapabilities.length + 1;
+    setLicensingCapabilities((current) => [...current, {
+      key: `capability-${nextIndex}`,
+      name: `Capability ${nextIndex}`,
+      behavioralMeaning: 'Describe the customer-visible value this capability unlocks.',
+      controlledFunctionality: 'List the exact operations, screens, commands, or services controlled by this capability.',
+      grantingPlans: [],
+      unavailableBehavior: 'Keep unrelated features and customer data available; refuse only this capability.',
+      dependencyKeys: [],
+    }]);
+  };
+  const addGrantingPlan = (capabilityIndex: number) => {
+    const capability = licensingCapabilities[capabilityIndex];
+    if (!capability) return;
+    const normalizedName = planDraft.name.trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const planKey = /^[a-z]/.test(normalizedName) ? normalizedName : `plan-${normalizedName || 'standard'}`;
+    updateCapability(capabilityIndex, {
+      grantingPlans: [...capability.grantingPlans, {
+        key: planKey,
+        name: planDraft.name,
+        ...(form.type === 'subscription' && subscriptionPlanId ? { planId: subscriptionPlanId } : {}),
+      }],
+    });
+  };
   const cancelProductForm = () => {
     if (licensingHandoffActive) clearLicensingHandoff();
     setShowForm(false);
@@ -1030,6 +1176,7 @@ export default function StorePage() {
       </div>
 
       <StoreControlRoom />
+      <CommerceOperationsCenter />
 
       <PayPalOnboardingStatusPanel onStatus={setPaypalStatus} />
 
@@ -1178,8 +1325,26 @@ export default function StorePage() {
               </ol>
             </div>
             <div className="sm:col-span-2">
+              {(licensingHandoffActive || licensingPrivateContext) && (
+                <div className="mb-4 rounded-card border border-discord-accent/40 bg-discord-bg-tertiary/60 p-4">
+                  <label htmlFor="private-integration-context" className="block text-sm font-medium text-discord-text-primary">
+                    Private integration context
+                  </label>
+                  <p id="private-integration-context-help" className="mt-1 text-xs text-discord-text-muted">
+                    Internal agent and architecture guidance. Stored in product metadata for prompt regeneration; never shown as Store copy.
+                  </p>
+                  <textarea
+                    id="private-integration-context"
+                    aria-describedby="private-integration-context-help"
+                    value={licensingPrivateContext}
+                    onChange={(event) => setLicensingPrivateContext(event.target.value)}
+                    rows={5}
+                    className="mt-3 w-full resize-y rounded-input border border-discord-border-subtle bg-discord-bg-primary px-3 py-2 text-sm text-discord-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-discord-accent"
+                  />
+                </div>
+              )}
               <label htmlFor="product-description" className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Description
+                Customer-facing Store description
               </label>
               <textarea
                 id="product-description"
@@ -1187,9 +1352,9 @@ export default function StorePage() {
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
                 rows={3}
                 className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none resize-none"
-                placeholder="Product description"
+                placeholder="Explain what the customer receives and why it is useful."
               />
-              {licensingHandoffActive && <p className="mt-1 text-xs text-discord-warning" role="status">Review this carefully. It came from project context and will be visible to customers.</p>}
+              {licensingHandoffActive && <p className="mt-1 text-xs text-discord-warning" role="status">This starts blank intentionally. Write customer-facing copy here; private architecture notes are kept above.</p>}
             </div>
             {licensingPlanNotes && (
               <div className="sm:col-span-2 rounded-input border border-discord-warning/40 bg-discord-warning/10 p-3 text-sm text-discord-text-secondary">
@@ -1227,6 +1392,77 @@ export default function StorePage() {
                   </div>
                 </div>
               </div>
+            )}
+            {form.delivery_type === 'license_key' && (
+              <section className="sm:col-span-2 space-y-3" aria-labelledby="licensing-capabilities-title">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 id="licensing-capabilities-title" className="text-sm font-semibold text-discord-text-primary">Licensed capabilities</h3>
+                    <p className="mt-1 text-xs text-discord-text-muted">Each stable key controls explicit functionality. Plan grants resolve to the saved plan identity before activation; dependencies are never inferred from names or notes.</p>
+                  </div>
+                  <Button size="sm" variant="secondary" onClick={addCapability}>Add capability</Button>
+                </div>
+                {licensingCapabilities.length === 0 ? (
+                  <p className="rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 p-3 text-xs text-discord-text-muted">No structured capabilities. Add one for every independently licensed behavior, or keep the product all-or-nothing.</p>
+                ) : licensingCapabilities.map((capability, capabilityIndex) => (
+                  <article key={capabilityIndex} className="rounded-card border border-discord-border-subtle bg-discord-bg-primary/60 p-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Input
+                        id={`capability-key-${capabilityIndex}`}
+                        label="Stable capability key"
+                        value={capability.key}
+                        disabled={editingId !== null}
+                        onChange={(event) => updateCapability(capabilityIndex, { key: event.target.value.trim().toLowerCase() })}
+                        placeholder="exports"
+                      />
+                      <Input
+                        id={`capability-name-${capabilityIndex}`}
+                        label="Customer-readable name"
+                        value={capability.name}
+                        onChange={(event) => updateCapability(capabilityIndex, { name: event.target.value })}
+                        placeholder="Data exports"
+                      />
+                      <div className="sm:col-span-2">
+                        <label htmlFor={`capability-meaning-${capabilityIndex}`} className="mb-1 block text-xs font-medium text-discord-text-muted">Behavioral meaning</label>
+                        <textarea id={`capability-meaning-${capabilityIndex}`} value={capability.behavioralMeaning} onChange={(event) => updateCapability(capabilityIndex, { behavioralMeaning: event.target.value })} rows={2} className="w-full resize-y rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-discord-accent" />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label htmlFor={`capability-functionality-${capabilityIndex}`} className="mb-1 block text-xs font-medium text-discord-text-muted">Controlled functionality</label>
+                        <textarea id={`capability-functionality-${capabilityIndex}`} value={capability.controlledFunctionality} onChange={(event) => updateCapability(capabilityIndex, { controlledFunctionality: event.target.value })} rows={2} className="w-full resize-y rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-discord-accent" />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label htmlFor={`capability-unavailable-${capabilityIndex}`} className="mb-1 block text-xs font-medium text-discord-text-muted">Unavailable behavior</label>
+                        <textarea id={`capability-unavailable-${capabilityIndex}`} value={capability.unavailableBehavior} onChange={(event) => updateCapability(capabilityIndex, { unavailableBehavior: event.target.value })} rows={2} className="w-full resize-y rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-discord-accent" />
+                      </div>
+                      <Input
+                        id={`capability-dependencies-${capabilityIndex}`}
+                        label="Dependency keys"
+                        value={capability.dependencyKeys.join(', ')}
+                        onChange={(event) => updateCapability(capabilityIndex, { dependencyKeys: event.target.value.split(',').map((key) => key.trim()).filter(Boolean) })}
+                        placeholder="core-data, hosted-api"
+                      />
+                      <div className="flex items-end justify-end">
+                        <Button size="sm" variant="danger" onClick={() => setLicensingCapabilities((current) => current.filter((_, index) => index !== capabilityIndex))}>Remove capability</Button>
+                      </div>
+                    </div>
+                    <div className="mt-4 space-y-2 border-t border-discord-border-subtle pt-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h4 className="text-xs font-medium text-discord-text-secondary">Granting plans</h4>
+                        <Button size="sm" variant="ghost" onClick={() => addGrantingPlan(capabilityIndex)}>Add granting plan</Button>
+                      </div>
+                      {capability.grantingPlans.length === 0 ? (
+                        <p className="text-xs text-discord-text-muted">Available to every active entitlement. Add a granting plan to restrict this capability.</p>
+                      ) : capability.grantingPlans.map((plan, planIndex) => (
+                        <div key={planIndex} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                          <Input id={`capability-${capabilityIndex}-plan-key-${planIndex}`} label="Plan key" value={plan.key} onChange={(event) => updateCapability(capabilityIndex, { grantingPlans: capability.grantingPlans.map((currentPlan, index) => index === planIndex ? { ...currentPlan, key: event.target.value.trim().toLowerCase() } : currentPlan) })} placeholder="pro-annual" />
+                          <Input id={`capability-${capabilityIndex}-plan-name-${planIndex}`} label="Plan name" value={plan.name} onChange={(event) => updateCapability(capabilityIndex, { grantingPlans: capability.grantingPlans.map((currentPlan, index) => index === planIndex ? { ...currentPlan, name: event.target.value } : currentPlan) })} placeholder="Pro annual" />
+                          <div className="flex items-end"><Button size="sm" variant="ghost" onClick={() => updateCapability(capabilityIndex, { grantingPlans: capability.grantingPlans.filter((_, index) => index !== planIndex) })}>Remove</Button></div>
+                        </div>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </section>
             )}
             {form.type === 'subscription' && (
               <div className="sm:col-span-2">
@@ -1269,7 +1505,9 @@ export default function StorePage() {
               </>
             )}
             <Input id="product-currency" label="Currency" value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value })} placeholder="USD" />
-            {editingId ? (
+            {editingId && form.delivery_type === 'license_key' ? (
+              <p className="self-end rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-secondary">Saving integration settings pauses this product. It stays inactive while the requested license policy is saved and verified. Activate it separately from the Store after verification.</p>
+            ) : editingId ? (
               <div className="pt-5"><Toggle label="Active" checked={form.active} onChange={(active) => setForm({ ...form, active })} /></div>
             ) : (
               <p className="self-end rounded-input border border-discord-border-subtle bg-discord-bg-primary/60 px-3 py-2 text-xs text-discord-text-secondary">New products are created inactive. Activate this product from the Store only after its saved policy is verified.</p>
@@ -1279,10 +1517,16 @@ export default function StorePage() {
           <div className="mt-4 flex gap-2">
             <Button
               variant="success"
-              onClick={save}
+              onClick={() => {
+                if (form.delivery_type === 'license_key' && products.some((product) => product.id === editingId && product.active)) {
+                  setConfirmPolicySave(true);
+                } else {
+                  void save();
+                }
+              }}
               disabled={saving || !form.name || unresolvedHandoffBilling || integrationRecovery !== null || licenseRecoveryProductId !== null}
             >
-              {saving ? 'Saving…' : editingId ? 'Update' : 'Create'}
+              {saving ? 'Saving…' : editingId ? form.delivery_type === 'license_key' ? 'Save policy' : 'Update' : 'Create'}
             </Button>
             <Button
               variant="secondary"
@@ -1342,6 +1586,18 @@ export default function StorePage() {
         </div>
       )}
 
+      <ConfirmDialog
+        open={confirmPolicySave}
+        title="Pause product and save integration settings?"
+        description={`Saving changes to "${form.name}" stops new sales while its license policy is saved and verified. Existing entitlements are preserved. The product stays inactive until you activate it separately from the Store.`}
+        confirmLabel="Pause and save"
+        variant="warning"
+        onConfirm={async () => {
+          setConfirmPolicySave(false);
+          await save();
+        }}
+        onCancel={() => setConfirmPolicySave(false)}
+      />
       {/* Confirm Delete Dialog */}
       <ConfirmDialog
         open={!!confirmDelete}

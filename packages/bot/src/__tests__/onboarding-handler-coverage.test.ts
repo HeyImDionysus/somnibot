@@ -109,14 +109,23 @@ function makeClient(configOverrides: Record<string, unknown> = {}) {
 
 function makeMember(overrides: Record<string, unknown> = {}) {
   const cache = new MockCollection<unknown>();
+  const guildRoles = new MockCollection<unknown>();
+  for (const roleId of ['role1', 'member-role', 'current-member-role', 'stale-member-role']) {
+    guildRoles.set(roleId, { id: roleId, name: roleId, managed: false, editable: true });
+  }
   return {
     id: 'u1',
     partial: false,
     user: { tag: 'TestUser#1234' },
     guild: {
       id: 'g1',
-      roles: { cache: new MockCollection<unknown>() },
-      members: { me: { roles: { highest: { position: 100 } } } },
+      roles: { cache: guildRoles },
+      members: {
+        me: {
+          roles: { highest: { position: 100 } },
+          permissions: { has: vi.fn(() => true) },
+        },
+      },
     },
     roles: {
       cache,
@@ -169,14 +178,15 @@ describe('handleMemberJoin', () => {
     it('grants member role and restores roles', async () => {
       const rolesCache = new MockCollection<unknown>();
       const guildRolesCache = new MockCollection<unknown>([
-        ['r1', { id: 'r1', managed: false, position: 5 }],
-        ['r2', { id: 'r2', managed: false, position: 10 }],
+        ['role1', { id: 'role1', name: 'Member', managed: false, editable: true, position: 1 }],
+        ['r1', { id: 'r1', name: 'One', managed: false, editable: true, position: 5 }],
+        ['r2', { id: 'r2', name: 'Two', managed: false, editable: true, position: 10 }],
       ]);
       const member = makeMember({
         guild: {
           id: 'g1',
           roles: { cache: guildRolesCache },
-          members: { me: { roles: { highest: { position: 100 } } } },
+          members: { me: { roles: { highest: { position: 100 } }, permissions: { has: vi.fn(() => true) } } },
         },
         roles: { cache: rolesCache, add: vi.fn().mockResolvedValue(undefined) },
       });
@@ -255,13 +265,14 @@ describe('handleMemberJoin', () => {
         return chainBuilder({ data: defaultConfig });
       });
       const guildRolesCache = new MockCollection([
-        ['lr1', { id: 'lr1', managed: false, position: 5 }],
+        ['role1', { id: 'role1', name: 'Member', managed: false, editable: true, position: 1 }],
+        ['lr1', { id: 'lr1', name: 'Level', managed: false, editable: true, position: 5 }],
       ]);
       const member = makeMember({
         guild: {
           id: 'g1',
           roles: { cache: guildRolesCache },
-          members: { me: { roles: { highest: { position: 100 } } } },
+          members: { me: { roles: { highest: { position: 100 } }, permissions: { has: vi.fn(() => true) } } },
         },
         roles: { cache: new MockCollection(), add: vi.fn().mockResolvedValue(undefined) },
       });

@@ -45,6 +45,20 @@ export const paypalCaptureResourceSchema = z.object({
       currency_code: z.string().optional(),
     }).optional(),
   }).optional(),
+  seller_receivable_breakdown: z.object({
+    gross_amount: z.object({
+      value: z.string().optional(),
+      currency_code: z.string().optional(),
+    }).optional(),
+    paypal_fee: z.object({
+      value: z.string().optional(),
+      currency_code: z.string().optional(),
+    }).optional(),
+    net_amount: z.object({
+      value: z.string().optional(),
+      currency_code: z.string().optional(),
+    }).optional(),
+  }).optional(),
   supplementary_data: z.object({
     related_ids: z.object({
       capture_id: z.string().optional(),

@@ -132,21 +132,15 @@ async function main(): Promise<void> {
     // idles (reporting awaiting_setup) until credentials arrive.
     startHealthServer(null);
 
-    // This branch is precisely the one that waits for the DASHBOARD to supply
-    // the missing Discord token, so it is the branch that most needs the
-    // dashboard running. Starting it only on the configured-boot path meant a
-    // first-time launch with just Supabase credentials idled forever behind a
-    // dashboard the operator had to start themselves — the gap the supervisor
-    // exists to close.
+    // This branch waits for Launcher-managed installation credentials. Keep the
+    // dashboard supervisor available only for health, handoff, and server
+    // operations while Launcher remains the credential authority.
     await startDashboardSupervisor();
 
     // ── Transition-out: await_credentials (codex round-4 finding #2) ──
-    // Do NOT idle forever. The dashboard's verify-discord step writes
-    // `discord_bot_token` to instance_settings while this process is running;
-    // because health is 200, a supervisor won't restart it, so without this
-    // watcher first-time setup is stuck. Poll the gate; the moment a token
-    // appears (state leaves 'not_started') reload it from the DB into env and
-    // continue the boot in-process — no manual restart.
+    // Do NOT idle forever. Launcher can supply the missing credential while
+    // this process is healthy, so poll the gate and continue in-process once
+    // Launcher-managed state leaves 'not_started'.
     startAwaitingSetupTransition();
     return;
   }
@@ -349,13 +343,10 @@ async function main(): Promise<void> {
         log.error('Setup-verification boot failed', { error: String(err) });
       }
 
-      // ── Transition watcher: full boot once setup finalizes ──
-      // The desktop launcher does NOT restart the bot when the dashboard writes
-      // setup_completed_at, and the setup page only advances to its "done" step.
-      // So without this, the owner finishes setup but the bot stays gated (no
-      // GuildRouter features, commands, presence, diagnostics) until a manual
-      // restart. Poll the gate; when it reports 'complete', tear down the
-      // verification-only services and run the full boot in-process.
+      // ── Transition watcher: full boot once Launcher setup completes ──
+      // Launcher may mark setup complete without restarting this process. Poll
+      // that Launcher-owned state so the bot can leave verification mode and
+      // start full services without a manual restart.
       startSetupCompletionWatcher(client, botLevelServices);
       return;
     }
@@ -521,15 +512,15 @@ function startSetupCompletionWatcher(
       return;
     }
 
-    // Reload the freshly-finalized settings BEFORE the in-process full boot.
+    // Reload Launcher-finalized settings BEFORE the in-process full boot.
     // When the bot entered verification mode it had already run
     // loadConfigFromDatabase()/loadConfig() and cached process.env. The
-    // finalize step then persisted the remaining credentials (PayPal,
-    // deployment, guild) into instance_settings. Without re-reading them here,
+    // Launcher then persisted the remaining installation configuration.
+    // Without re-reading it here,
     // the full boot would start with the stale pre-setup env — features that
     // read process.env (e.g. PAYPAL_CLIENT_ID) would stay unconfigured until a
     // manual restart, defeating the no-restart transition. Reload DB→env now so
-    // full boot sees the finalized config.
+    // full boot sees Launcher-authoritative config.
     try {
       await loadConfigFromDatabase();
     } catch (err) {
@@ -539,7 +530,7 @@ function startSetupCompletionWatcher(
 
     // Re-resolve the primary guild from the FINALIZED config (codex round-3
     // finding #2 + round-4 finding #1). Verification mode may have provisionally
-    // auto-detected the first cached guild, but the finalize step can specify a
+    // auto-detected the first cached guild, but Launcher setup can specify a
     // DIFFERENT discord_guild_id. runFullBoot skips its own auto-detection when
     // client.guildId is already set, so without this override the bot-level
     // services (heartbeat, presence, deploy fallback, first-boot DM) would stay
@@ -547,10 +538,10 @@ function startSetupCompletionWatcher(
     //
     // Round-4 finding #1: we must NOT read the guild from process.env here.
     // loadConfigFromDatabase() only fills env vars that are MISSING, so when the
-    // launcher started with DISCORD_GUILD_ID already in env and finalize submits
+    // launcher started with DISCORD_GUILD_ID already in env and Launcher records
     // a DIFFERENT guild, the reload above leaves the STALE env value in place.
     // Read the finalized discord_guild_id straight from instance_settings so the
-    // transition honors the value the owner actually finalized. Also mirror it
+    // transition honors the Launcher-authoritative value. Also mirror it
     // into process.env so downstream env readers see the finalized guild. Fall
     // back to whatever env holds only when the row is absent/unreadable.
     const finalizedGuildId =
@@ -585,7 +576,7 @@ function stopSetupCompletionWatcher(): void {
  * init every guild's features/commands, and start bot-level services
  * (heartbeat, anti-raid pruner, presence). Runs either directly on ClientReady
  * for an already-finalized instance, or after the setup-completion watcher sees
- * setup finalize in a formerly-verification-mode process.
+ * Launcher mark setup complete in a formerly-verification-mode process.
  */
 async function runFullBoot(
   client: SomniClient,
@@ -730,8 +721,8 @@ async function runFullBoot(
               )
               .addFields(
                 {
-                  name: '1️⃣  Run the Setup Wizard',
-                  value: 'Type `/setup` in any channel to configure optional services like PayPal and deployment.',
+                  name: '1️⃣  Open the SomniBot Launcher',
+                  value: 'Use the Launcher on the installation host for credentials, deployment, services, updates, and recovery.',
                 },
                 {
                   name: '2️⃣  Open the Dashboard',

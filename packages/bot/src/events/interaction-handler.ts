@@ -191,7 +191,10 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       }
 
       // Commerce buy buttons — gated by store_enabled
-      if (interaction.isButton() && interaction.customId.startsWith('store:claim:')) {
+      if (interaction.isButton() && (
+        interaction.customId.startsWith('store:claim:')
+        || interaction.customId.startsWith('store:launch-claim:')
+      )) {
         const { data: storeCfg } = await client.supabase
           .from('guild_config')
           .select('store_enabled')
@@ -246,7 +249,10 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
         return;
       }
 
-      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.storeBuy)) {
+      if (interaction.isButton() && (
+        interaction.customId.startsWith(BUTTON_PREFIX.storeBuy)
+        || interaction.customId.startsWith('store:launch-buy:')
+      )) {
         const { data: storeCfg } = await client.supabase
           .from('guild_config')
           .select('store_enabled')

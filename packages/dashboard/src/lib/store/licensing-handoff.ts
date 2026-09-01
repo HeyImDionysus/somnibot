@@ -5,13 +5,47 @@ import {
   type LicensingPromptDraft,
   type LicensingPromptEnvelope,
 } from './licensing-prompt';
+import {
+  licensingCapabilitiesSchema,
+  normalizeLicensingCapabilities,
+  type LicensingCapability,
+} from './licensing-capabilities';
+import {
+  buildSdkProductPolicyRevision,
+  type SdkProductPolicyIdentityInput,
+} from './sdk-contract-identity';
+import {
+  DYNAMIC_DEFAULT_RAILS,
+  licensingRailsSchema,
+  STATIC_DEFAULT_RAILS,
+  type LicensingRails,
+} from './licensing-rails';
+
+export {
+  licensingCapabilitySchema,
+  licensingCapabilitiesSchema,
+  normalizeLicensingCapabilities,
+  type LicensingCapability,
+} from './licensing-capabilities';
 
 export const LICENSING_STORE_HANDOFF_KEY = 'somnibot.completed-project-licensing.v1';
 
-const licensingStoreHandoffSchema = z.object({
+function normalizeEnvelopeCapabilities(
+  envelope: LicensingPromptEnvelope,
+  capabilities?: readonly LicensingCapability[],
+): LicensingCapability[] {
+  const featureFlags = envelope.mode === 'dynamic'
+    ? normalizeFeatureFlags(envelope.dynamicPolicy.featureFlags)
+    : [];
+  return normalizeLicensingCapabilities(featureFlags, capabilities);
+}
+
+const rawLicensingStoreHandoffSchema = z.object({
   schemaVersion: z.literal(1),
   guildId: z.string().min(1),
   envelope: licensingPromptEnvelopeSchema,
+  capabilities: licensingCapabilitiesSchema.optional(),
+  subscriptionPlanId: z.string().uuid().optional(),
   creationRequestId: z.string().uuid().optional(),
   recovery: z.object({
     kind: z.enum(['license', 'setup']),
@@ -19,16 +53,31 @@ const licensingStoreHandoffSchema = z.object({
   }).optional(),
 });
 
+const licensingStoreHandoffSchema = rawLicensingStoreHandoffSchema.transform((handoff) => ({
+  ...handoff,
+  capabilities: normalizeEnvelopeCapabilities(handoff.envelope, handoff.capabilities),
+}));
+
 export type LicensingStoreHandoffV1 = z.infer<typeof licensingStoreHandoffSchema>;
 
 const savedLicensePolicySchema = z.object({
+  license_mode: z.string().min(1),
+  key_prefix: z.string().min(1),
   max_devices: z.number().int().min(1).max(100),
   heartbeat_interval_seconds: z.number().int().min(0).max(86_400),
+  sdk_cache_ttl_ms: z.number().int().min(1_000),
   offline_grace_period_seconds: z.number().int().min(0).max(604_800),
   feature_flags: z.array(z.string()).default([]),
+  tier: z.string().optional().nullable(),
+  device_policy: z.string().optional().nullable(),
+  watermark_config: z.record(z.unknown()).optional().nullable(),
+  require_discord_guild_membership: z.boolean(),
+  rotation_policy: z.string().min(1),
+  self_service_device_removal: z.boolean(),
 });
 
 const savedPlanSchema = z.object({
+  id: z.string().uuid(),
   name: z.string().min(1),
   interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']),
   interval_count: z.number().int().min(1),
@@ -39,8 +88,11 @@ const savedPlanSchema = z.object({
 }).passthrough();
 
 const savedProductFileSchema = z.object({
+  id: z.string().min(1),
   display_name: z.string().optional().nullable(),
   file_name: z.string().optional().nullable(),
+  mime_type: z.string().optional().nullable(),
+  content_type: z.string().optional().nullable(),
 }).passthrough();
 
 const completedProjectPolicySchema = z.object({
@@ -56,14 +108,19 @@ const completedProjectPolicySchema = z.object({
   selfServiceDeviceRemoval: z.boolean(),
 });
 
-const completedProjectMetadataSchema = z.object({
-  projectContext: z.string().default(''),
-  plansAndFeatures: z.string().default(''),
-  outputFormats: z.string().default(''),
-  installationIdentity: z.string().default(''),
+export const completedProjectLicensingMetadataSchema = z.object({
+  privateIntegrationContext: z.string().max(20_000).default(''),
+  projectContext: z.string().max(20_000).default(''),
+  plansAndFeatures: z.string().max(20_000).default(''),
+  outputFormats: z.string().max(5_000).default(''),
+  installationIdentity: z.string().max(1_000).default(''),
+  capabilities: licensingCapabilitiesSchema.default([]),
+  rails: licensingRailsSchema.optional(),
   policyPending: z.boolean().default(false),
   desiredPolicy: completedProjectPolicySchema.optional(),
-}).optional();
+}).passthrough();
+
+const completedProjectMetadataSchema = completedProjectLicensingMetadataSchema.optional();
 
 export const savedLicensingProductSchema = z.object({
   id: z.string().min(1),
@@ -71,6 +128,8 @@ export const savedLicensingProductSchema = z.object({
   description: z.string().nullable(),
   type: z.enum(['one_time', 'subscription', 'free']),
   delivery_type: z.enum(['file', 'link', 'access_pass', 'license_key', 'mixed']),
+  granted_role_ids: z.array(z.string()).optional().default([]),
+  granted_channel_ids: z.array(z.string()).optional().default([]),
   product_license_config: z.union([
     savedLicensePolicySchema,
     z.array(savedLicensePolicySchema),
@@ -84,7 +143,8 @@ export const savedLicensingProductSchema = z.object({
 
 export type LicensingStorePrefill = {
   readonly name: string;
-  readonly description: string;
+  readonly customerDescription: string;
+  readonly privateIntegrationContext: string;
   readonly deliveryType: 'file' | 'license_key';
   readonly billingType: 'one_time' | 'subscription' | 'free' | null;
   readonly billingChoiceRequired: boolean;
@@ -94,6 +154,7 @@ export type LicensingStorePrefill = {
   readonly heartbeatIntervalMs: number;
   readonly offlineGracePeriodSeconds: number;
   readonly featureFlags: string[];
+  readonly capabilities: LicensingCapability[];
 };
 
 export function serializeLicensingStoreHandoff(
@@ -101,6 +162,8 @@ export function serializeLicensingStoreHandoff(
   guildId: string,
   recovery?: LicensingStoreHandoffV1['recovery'],
   creationRequestId?: string,
+  capabilities?: readonly LicensingCapability[],
+  subscriptionPlanId?: string,
 ): string {
   return JSON.stringify(licensingStoreHandoffSchema.parse({
     schemaVersion: 1,
@@ -108,6 +171,8 @@ export function serializeLicensingStoreHandoff(
     envelope,
     recovery,
     creationRequestId,
+    capabilities: normalizeEnvelopeCapabilities(envelope, capabilities),
+    subscriptionPlanId,
   }));
 }
 
@@ -156,7 +221,64 @@ export function readCompletedProjectPolicy(
     : null;
 }
 
-export function promptEnvelopeToStorePrefill(envelope: LicensingPromptEnvelope): LicensingStorePrefill {
+export function readCompletedProjectLicensingMetadata(
+  metadata: unknown,
+): z.infer<typeof completedProjectLicensingMetadataSchema> | null {
+  const parsed = z.object({
+    completed_project_licensing: completedProjectMetadataSchema,
+  }).passthrough().safeParse(metadata);
+  return parsed.success
+    ? parsed.data.completed_project_licensing ?? null
+    : null;
+}
+
+export type AuthoritativeLicensingPlan = {
+  readonly id: string;
+  readonly key?: string;
+  readonly name: string;
+};
+
+export function resolveCapabilityPlanGrants(
+  capabilities: readonly LicensingCapability[],
+  plans: readonly AuthoritativeLicensingPlan[],
+): LicensingCapability[] {
+  const parsedCapabilities = licensingCapabilitiesSchema.parse(capabilities);
+  const parsedPlans = z.array(z.object({
+    id: z.string().uuid(),
+    key: z.string().min(1).optional(),
+    name: z.string().min(1),
+  })).parse(plans);
+  const planIds = new Set(parsedPlans.map((plan) => plan.id));
+
+  return licensingCapabilitiesSchema.parse(parsedCapabilities.map((capability) => ({
+    ...capability,
+    grantingPlans: capability.grantingPlans.map((grant) => {
+      if (grant.planId) {
+        if (!planIds.has(grant.planId)) {
+          throw new Error(`Capability ${capability.key} references a plan that is not saved on this product.`);
+        }
+        return grant;
+      }
+      const candidates = parsedPlans.filter((plan) => (
+        plan.key === grant.key || plan.name.toLocaleLowerCase() === grant.name.toLocaleLowerCase()
+      ));
+      const resolved = candidates.length === 1
+        ? candidates[0]
+        : parsedPlans.length === 1
+          ? parsedPlans[0]
+          : undefined;
+      if (!resolved) {
+        throw new Error(`Capability ${capability.key} has an unresolved granting plan ${grant.key}.`);
+      }
+      return { ...grant, planId: resolved.id };
+    }),
+  })));
+}
+
+export function promptEnvelopeToStorePrefill(
+  envelope: LicensingPromptEnvelope,
+  capabilities?: readonly LicensingCapability[],
+): LicensingStorePrefill {
   const billingType = envelope.billing.model === 'multiple'
     ? 'subscription'
     : envelope.billing.model === 'undecided'
@@ -168,7 +290,8 @@ export function promptEnvelopeToStorePrefill(envelope: LicensingPromptEnvelope):
   }
   return {
     name: envelope.project.name,
-    description: envelope.project.context,
+    customerDescription: '',
+    privateIntegrationContext: envelope.project.context,
     deliveryType: envelope.mode === 'dynamic' ? 'license_key' : 'file',
     billingType,
     billingChoiceRequired: billingType === null,
@@ -178,10 +301,103 @@ export function promptEnvelopeToStorePrefill(envelope: LicensingPromptEnvelope):
     heartbeatIntervalMs: (dynamicPolicy?.heartbeatSeconds ?? 300) * 1000,
     offlineGracePeriodSeconds: dynamicPolicy?.offlineGraceSeconds ?? 86_400,
     featureFlags: normalizeFeatureFlags(dynamicPolicy?.featureFlags ?? []),
+    capabilities: normalizeEnvelopeCapabilities(envelope, capabilities),
   };
 }
 
-export function savedProductToLicensingDraft(value: unknown, apiBase: string): LicensingPromptDraft {
+function railsForSavedProduct(
+  product: z.infer<typeof savedLicensingProductSchema>,
+): LicensingRails {
+  const saved = product.metadata.completed_project_licensing?.rails;
+  if (saved) return saved;
+  const hasDiscordGrants = product.granted_role_ids.length > 0
+    || product.granted_channel_ids.length > 0;
+  if (product.delivery_type === 'license_key') {
+    return {
+      ...DYNAMIC_DEFAULT_RAILS,
+      downloadableFiles: product.product_files.length > 0,
+      discordRoles: hasDiscordGrants,
+    };
+  }
+  return {
+    ...STATIC_DEFAULT_RAILS,
+    hostedAccess: product.delivery_type === 'link' || product.delivery_type === 'access_pass',
+    discordRoles: hasDiscordGrants,
+  };
+}
+
+export function savedProductToPolicyIdentityInput(
+  value: unknown,
+): SdkProductPolicyIdentityInput {
+  const product = savedLicensingProductSchema.parse(value);
+  const policy = Array.isArray(product.product_license_config)
+    ? product.product_license_config[0] ?? null
+    : product.product_license_config ?? null;
+  const completedProject = product.metadata.completed_project_licensing;
+  const capabilities = completedProject?.capabilities ?? [];
+  for (const capability of capabilities) {
+    if (capability.grantingPlans.some((grant) => !grant.planId)) {
+      throw new Error(`Capability ${capability.key} has a granting plan without an authoritative saved plan id.`);
+    }
+  }
+  return {
+    storeProductId: product.id,
+    billingModel: product.type,
+    plans: product.plans.map((plan) => ({
+      key: plan.id,
+      name: plan.name,
+      active: plan.active,
+      intervalUnit: plan.interval_unit,
+      intervalCount: plan.interval_count,
+    })),
+    rails: railsForSavedProduct(product),
+    dynamicPolicy: policy ? {
+      licenseMode: policy.license_mode,
+      keyPrefix: policy.key_prefix,
+      maxDevices: policy.max_devices,
+      heartbeatIntervalSeconds: policy.heartbeat_interval_seconds,
+      sdkCacheTtlMs: policy.sdk_cache_ttl_ms,
+      offlineGracePeriodSeconds: policy.offline_grace_period_seconds,
+      featureFlags: policy.feature_flags,
+      tier: policy.tier ?? null,
+      requireDiscordGuildMembership: policy.require_discord_guild_membership,
+      devicePolicy: policy.device_policy ?? null,
+      rotationPolicy: policy.rotation_policy,
+      selfServiceDeviceRemoval: policy.self_service_device_removal,
+      watermarkConfig: policy.watermark_config ?? null,
+    } : null,
+    staticPolicy: policy ? null : {
+      outputFormats: completedProject?.outputFormats ?? '',
+      deliveryDescriptors: product.product_files.map((file) => ({
+        key: file.id,
+        displayName: file.display_name?.trim() || file.file_name?.trim() || file.id,
+        mediaType: file.mime_type ?? file.content_type ?? null,
+      })),
+    },
+    capabilities: capabilities.map((capability) => ({
+      key: capability.key,
+      behavioralMeaning: capability.behavioralMeaning,
+      controlledFunctionality: capability.controlledFunctionality,
+      grantingPlans: capability.grantingPlans.map((grant) => {
+        if (!grant.planId) {
+          throw new Error(`Capability ${capability.key} has an unresolved granting plan.`);
+        }
+        return grant.planId;
+      }),
+      unavailableBehavior: capability.unavailableBehavior,
+      dependencyKeys: capability.dependencyKeys,
+    })),
+    discordGrants: {
+      roleIds: product.granted_role_ids,
+      channelIds: product.granted_channel_ids,
+    },
+  };
+}
+
+export async function savedProductToLicensingDraft(
+  value: unknown,
+  apiBase: string,
+): Promise<LicensingPromptDraft> {
   const product = savedLicensingProductSchema.parse(value);
   const dynamic = product.delivery_type === 'license_key';
   const policy = Array.isArray(product.product_license_config)
@@ -199,14 +415,20 @@ export function savedProductToLicensingDraft(value: unknown, apiBase: string): L
     .map((file) => file.display_name?.trim() || file.file_name?.trim() || '')
     .filter(Boolean)
     .join(', ');
+  const rails = railsForSavedProduct(product);
+  const productPolicyRevision = await buildSdkProductPolicyRevision(
+    savedProductToPolicyIdentityInput(product),
+  );
   return {
     mode: dynamic ? 'dynamic' : 'static',
     projectName: product.name,
-    projectContext: savedContext?.projectContext
-      || product.description
+    projectContext: savedContext?.privateIntegrationContext
+      || savedContext?.projectContext
       || 'Review the completed project and preserve its existing behavior and architecture.',
     productId: product.id,
     apiBase,
+    productPolicyRevision,
+    rails,
     billingModel: product.type,
     plansAndFeatures: savedPlans || savedContext?.plansAndFeatures || '',
     featureFlags: normalizeFeatureFlags(policy?.feature_flags ?? []).join(', '),

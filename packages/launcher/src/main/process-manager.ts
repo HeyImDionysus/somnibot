@@ -21,7 +21,13 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
+import { buildManagedChildEnvironment } from './child-environment.js';
 import { stopChildProcess } from './managed-child-stop.js';
+import {
+  SOMNIBOT_CONFIGURATION_GENERATION,
+  SOMNIBOT_MIGRATION_HEAD,
+  SOMNIBOT_REPOSITORY_REF,
+} from './release-source.js';
 import {
   PROCESS_RESTART_MAX_ATTEMPTS,
   PROCESS_RESTART_STABLE_WINDOW_MS,
@@ -32,46 +38,6 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-/**
- * V7 Audit §10.P3a — Allowlist of parent-process env vars to forward.
- * Only essential system vars (PATH, LANG, TZ, etc.) are passed to child
- * processes; everything else comes from the explicit envVars parameter.
- */
-const SAFE_PARENT_ENV_KEYS = [
-  'PATH',
-  'LANG',
-  'LC_ALL',
-  'TZ',
-  'HOME',
-  'USERPROFILE',
-  'TMPDIR',
-  'TEMP',
-  'TMP',
-  // Windows-specific
-  'APPDATA',
-  'LOCALAPPDATA',
-  'PROGRAMFILES',
-  'SystemRoot',
-  'COMSPEC',
-  // macOS / Linux
-  'SHELL',
-  'XDG_RUNTIME_DIR',
-  'XDG_CONFIG_HOME',
-  // Platform-specific library paths — required for native modules
-  // (@napi-rs/canvas, sharp, etc.) that load shared libraries at runtime.
-  'LD_LIBRARY_PATH',           // Linux
-  'DYLD_LIBRARY_PATH',         // macOS
-  'DYLD_FALLBACK_LIBRARY_PATH', // macOS fallback
-] as const;
-
-function safeParentEnv(): Record<string, string> {
-  const filtered: Record<string, string> = {};
-  for (const key of SAFE_PARENT_ENV_KEYS) {
-    const val = process.env[key];
-    if (val !== undefined) filtered[key] = val;
-  }
-  return filtered;
-}
 import {
   getLavalinkStatus,
   getLavalinkPid,
@@ -597,7 +563,17 @@ function startBotProcess(envVars: Record<string, string>): void {
   const { SESSION_TOKEN: ignoredSessionToken, ...botEnvVars } = envVars;
   void ignoredSessionToken;
   botProcess = fork(entryPath, [], {
-    env: { ...safeParentEnv(), ...botEnvVars, MIGRATIONS_DIR: getMigrationsDir() },
+    env: buildManagedChildEnvironment({
+      parentEnv: process.env,
+      serviceEnv: botEnvVars,
+      isPackaged: app.isPackaged,
+      releaseIdentity: {
+        exactSha: SOMNIBOT_REPOSITORY_REF,
+        migrationHead: SOMNIBOT_MIGRATION_HEAD,
+        configurationGeneration: SOMNIBOT_CONFIGURATION_GENERATION,
+      },
+      extraEnv: { MIGRATIONS_DIR: getMigrationsDir() },
+    }),
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });
@@ -773,12 +749,20 @@ function startDashboardProcess(envVars: Record<string, string>, sessionToken: st
 
   const { SESSION_TOKEN: ignoredSessionToken, ...dashboardEnvVars } = envVars;
   void ignoredSessionToken;
-  const dashEnv: Record<string, string> = {
-    ...safeParentEnv(),
-    ...dashboardEnvVars,
-    SOMNIBOT_DASHBOARD_LOCAL_MODE: '1',
-    SESSION_TOKEN_FILE: tokenFile,
-  };
+  const dashEnv = buildManagedChildEnvironment({
+    parentEnv: process.env,
+    serviceEnv: dashboardEnvVars,
+    isPackaged: app.isPackaged,
+    releaseIdentity: {
+      exactSha: SOMNIBOT_REPOSITORY_REF,
+      migrationHead: SOMNIBOT_MIGRATION_HEAD,
+      configurationGeneration: SOMNIBOT_CONFIGURATION_GENERATION,
+    },
+    extraEnv: {
+      SOMNIBOT_DASHBOARD_LOCAL_MODE: '1',
+      SESSION_TOKEN_FILE: tokenFile,
+    },
+  });
   // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
   try {
     dashboardProcess = fork(entryPath, [], {

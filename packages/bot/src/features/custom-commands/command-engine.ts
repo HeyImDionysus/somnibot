@@ -19,6 +19,7 @@ import { raiseOwnerAlert } from '../../services/alert-service.js';
 import { defaultBrandKit, resolveBrandKit } from '../branding/brand-kit.js';
 import { brandedEmbed } from '../branding/branded-embed.js';
 import { voice } from '../branding/voice.js';
+import { requireAssignableRole } from '../../services/role-assignability.js';
 
 const log = createLogger('CommandEngine');
 
@@ -341,6 +342,7 @@ export async function handleCustomCommand(
           if (action.roleId) {
             const member = await guild.members.fetch(interaction.user.id).catch(() => null);
             if (member) {
+              requireAssignableRole(guild, action.roleId);
               await member.roles.add(action.roleId, `Custom command: ${cmd.name}`);
             }
           }
@@ -351,6 +353,7 @@ export async function handleCustomCommand(
           if (action.roleId) {
             const member = await guild.members.fetch(interaction.user.id).catch(() => null);
             if (member) {
+              requireAssignableRole(guild, action.roleId);
               await member.roles.remove(action.roleId, `Custom command: ${cmd.name}`);
             }
           }
