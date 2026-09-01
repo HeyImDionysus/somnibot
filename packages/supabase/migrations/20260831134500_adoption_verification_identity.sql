@@ -122,7 +122,7 @@ BEGIN
   v_requires_sdk := v_product.delivery_type = 'license_key' OR v_product.metadata ? 'completed_project_licensing' OR v_product.metadata ? 'somnibot_sdk_integration_receipt';
   IF p_context IS NULL OR p_context->>'productId' IS DISTINCT FROM v_product.id::TEXT
     OR (p_context->>'productRevision')::TIMESTAMPTZ IS DISTINCT FROM v_product.updated_at
-    OR (p_context->>'policyRevision')::TIMESTAMPTZ IS DISTINCT FROM CASE WHEN v_product.delivery_type = 'license_key' THEN v_policy.updated_at ELSE NULL END
+    OR (p_context->>'policyRevision')::TIMESTAMPTZ IS DISTINCT FROM (CASE WHEN v_product.delivery_type = 'license_key' THEN v_policy.updated_at ELSE NULL END)
     OR p_context->>'integrationVerified' IS DISTINCT FROM 'true'
     OR (p_context->>'requiresSdk')::BOOLEAN IS DISTINCT FROM v_requires_sdk
     OR (v_requires_sdk AND NULLIF(p_context->>'origin', '') IS NULL)
@@ -136,8 +136,8 @@ BEGIN
     OR v_run.launch_receipt->>'product_id' IS DISTINCT FROM v_product.id::TEXT
     OR (CASE WHEN v_run.state = 'live' THEN v_run.launch_receipt->'activation'->>'product_revision' ELSE v_run.launch_receipt->>'product_revision' END)::TIMESTAMPTZ IS DISTINCT FROM v_product.updated_at
     OR v_run.launch_receipt->>'environment' IS DISTINCT FROM 'sandbox'
-    OR EXISTS (SELECT 1 FROM jsonb_each_text(v_run.stages) AS stage WHERE value IS DISTINCT FROM CASE
-      WHEN v_product.type = 'free' AND key IN ('sandbox_transaction','webhook','reversal') THEN 'not_applicable' ELSE 'verified' END)
+    OR EXISTS (SELECT 1 FROM jsonb_each_text(v_run.stages) AS stage WHERE value IS DISTINCT FROM (CASE
+      WHEN v_product.type = 'free' AND key IN ('sandbox_transaction','webhook','reversal') THEN 'not_applicable' ELSE 'verified' END))
     OR (SELECT count(*) FROM jsonb_each_text(v_run.stages)) <> 9
     OR (v_product.delivery_type = 'license_key' AND ((v_run.launch_receipt->>'policy_revision')::TIMESTAMPTZ IS DISTINCT FROM v_policy.updated_at OR v_policy.product_id IS NULL))
     OR EXISTS (SELECT 1 FROM public.product_files WHERE product_id = v_product.id AND created_at > v_run.verified_at) THEN
