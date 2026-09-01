@@ -7,6 +7,18 @@ async function seedPortalToken(page: Page, token: string): Promise<void> {
     sessionStorage.setItem('portal_guild', guildId);
     localStorage.setItem(`portal_token:${guildId}`, value);
   }, { guildId: PORTAL_GUILD_ID, value: token });
+  await page.route('**/api/portal/requests', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, data: [] }),
+    });
+  });
 }
 
 test.setTimeout(120_000);
@@ -255,6 +267,17 @@ test('subscription cancellation and support requests are reachable and truthful 
     });
   });
   await page.route('**/api/portal/requests', (route) => {
+    if (route.request().method() === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: [] }),
+      });
+    }
+    if (route.request().method() !== 'POST') {
+      return route.fallback();
+    }
+
     requestCount += 1;
     return route.fulfill({
       status: requestCount === 1 ? 201 : 200,
@@ -1118,6 +1141,19 @@ test('a pending seller request cannot be replaced or edited before it settles', 
     releaseRequest = resolve;
   });
   await page.route('**/api/portal/requests', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: [] }),
+      });
+      return;
+    }
+    if (route.request().method() !== 'POST') {
+      await route.fallback();
+      return;
+    }
+
     await heldRequest;
     await route.fulfill({
       status: 201,

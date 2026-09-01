@@ -156,11 +156,12 @@ test('completed project handoff survives reload and creates an inactive product 
   });
   await fillCompletedProject(page);
   await page.getByLabel('Billing model').selectOption('multiple');
-  await page.getByLabel('Plans and licensed capabilities').fill('Monthly Standard and annual Pro require review.');
+  await page.getByText('Legacy compatibility fields', { exact: true }).click();
+  await page.getByLabel('Legacy plan notes').fill('Monthly Standard and annual Pro require review.');
   await page.getByLabel('Max installations').fill('5');
   await page.getByLabel('Heartbeat seconds').fill('120');
   await page.getByLabel('Offline grace seconds').fill('7200');
-  await page.getByLabel('Structured feature flags').fill('alerts, exports, alerts');
+  await page.getByLabel('Legacy feature flags').fill('alerts, exports, alerts');
   await page.getByRole('button', { name: 'Use in Store' }).click();
 
   await expect(page).toHaveURL(/\/store\?licensingHandoff=1$/);
@@ -176,7 +177,7 @@ test('completed project handoff survives reload and creates an inactive product 
   await expect(page.getByPlaceholder('Product name')).toHaveValue('Completed Sentinel');
 
   await page.getByLabel('Price ($) *').fill('12.00');
-  await page.getByRole('button', { name: 'Create' }).click();
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Integrate Completed Sentinel' })).toBeVisible();
   expect(productPayload).toMatchObject({ active: false, type: 'subscription', delivery_type: 'license_key', price_cents: 1200 });
   expect(policyPayload).toMatchObject({
@@ -259,9 +260,9 @@ test('undecided billing blocks creation until chosen and explicit cancellation c
   await fillCompletedProject(page);
   await page.getByRole('button', { name: 'Use in Store' }).click();
   await expect(page.getByLabel('Type')).toHaveValue('');
-  await expect(page.getByRole('button', { name: 'Create' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Create', exact: true })).toBeDisabled();
   await page.getByLabel('Type').selectOption('one_time');
-  await expect(page.getByRole('button', { name: 'Create' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Create', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Cancel' }).click();
   expect(await page.evaluate((key) => window.sessionStorage.getItem(key), LICENSING_STORE_HANDOFF_KEY)).toBeNull();
 });
@@ -276,20 +277,21 @@ test('handoff remains through recoverable policy failure and clears after verifi
   });
   await fillCompletedProject(page);
   await page.getByLabel('Billing model').selectOption('one_time');
+  await page.getByText('Legacy compatibility fields', { exact: true }).click();
   await page.getByLabel('Max installations').fill('5');
   await page.getByLabel('Heartbeat seconds').fill('120');
   await page.getByLabel('Offline grace seconds').fill('7200');
-  await page.getByLabel('Structured feature flags').fill('alerts, exports');
+  await page.getByLabel('Legacy feature flags').fill('alerts, exports');
   await page.getByRole('button', { name: 'Use in Store' }).click();
   await page.getByLabel('Price ($) *').fill('12.00');
-  await page.getByRole('button', { name: 'Create' }).click();
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(page.getByText('Product preserved; setup needs a retry')).toBeVisible();
   expect(await page.evaluate((key) => window.sessionStorage.getItem(key), LICENSING_STORE_HANDOFF_KEY)).not.toBeNull();
   await page.reload();
   await expect(page.getByText('Product preserved; setup needs a retry')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Inactive' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'New Product' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Create' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Create', exact: true })).toHaveCount(0);
   expect(productCreates).toBe(1);
   await page.getByRole('button', { name: 'Retry license policy' }).click();
   await expect(page.getByText('License policy saved and verified')).toBeVisible();
@@ -324,7 +326,7 @@ test('free static handoff needs no PayPal and remains usable without responsive 
     const widths = await page.locator('#main-content').evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
     expect(widths.scroll).toBeLessThanOrEqual(widths.client);
   }
-  await page.getByRole('button', { name: 'Create' }).click();
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Integrate Completed Sentinel' })).toBeVisible();
   expect(submitted).toMatchObject({ type: 'free', price_cents: 0, active: false, delivery_type: 'file' });
   await expect(page.getByText('PayPal is not required.')).toBeVisible();

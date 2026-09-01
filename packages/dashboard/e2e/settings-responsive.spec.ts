@@ -3,11 +3,9 @@ import { expect, test, type Page, type Route } from '@playwright/test';
 type SettingSource = 'env' | 'db' | 'none';
 
 interface SettingsFixture {
-  values: Record<string, string>;
-  sources: Record<string, SettingSource>;
-  statuses: Record<string, string>;
-  lockedFields: string[];
-  environmentFallbacks: Record<string, boolean>;
+  readonly values: Record<string, string>;
+  readonly sources: Record<string, SettingSource>;
+  readonly statuses: Record<string, 'connected' | 'disconnected' | 'checking' | 'bot-side'>;
 }
 
 async function fulfillJson(route: Route, body: unknown, status = 200): Promise<void> {
@@ -18,21 +16,13 @@ function createSettingsFixture(): SettingsFixture {
   return {
     values: {
       supabase_url: 'https://example.supabase.co',
-      supabase_anon_key: '••••••••',
-      supabase_secret_key: '••••••••',
       discord_application_id: '222222222222222222',
-      discord_bot_token: '••••••••',
       discord_guild_id: '333333333333333333',
-      discord_client_secret: '••••••••',
       paypal_client_id: 'paypal-environment-client',
-      paypal_client_secret: '••••••••',
-      paypal_webhook_id: '••••••••',
       paypal_webhook_url: 'https://example.test/api/paypal/webhook',
       paypal_sandbox: 'true',
       lavalink_host: 'lavalink',
       lavalink_port: '2333',
-      lavalink_password: '••••••••',
-      valkey_url: '••••••••',
     },
     sources: {
       supabase_url: 'env',
@@ -41,7 +31,7 @@ function createSettingsFixture(): SettingsFixture {
       discord_application_id: 'db',
       discord_bot_token: 'db',
       discord_guild_id: 'env',
-      discord_client_secret: 'env',
+      discord_client_secret: 'none',
       paypal_client_id: 'env',
       paypal_client_secret: 'env',
       paypal_webhook_id: 'env',
@@ -59,172 +49,60 @@ function createSettingsFixture(): SettingsFixture {
       lavalink: 'bot-side',
       valkey: 'bot-side',
     },
-    lockedFields: ['supabase_url', 'supabase_anon_key', 'supabase_secret_key'],
-    environmentFallbacks: {
-      supabase_url: true,
-      supabase_anon_key: true,
-      supabase_secret_key: true,
-      discord_application_id: true,
-      discord_bot_token: true,
-      discord_guild_id: true,
-      discord_client_secret: true,
-      paypal_client_id: true,
-      paypal_client_secret: true,
-      paypal_webhook_id: true,
-      paypal_webhook_url: true,
-      paypal_sandbox: true,
-      lavalink_host: true,
-      lavalink_port: true,
-      lavalink_password: true,
-      valkey_url: true,
-    },
   };
 }
 
-async function installSettingsRoutes(page: Page) {
-  const fixture = createSettingsFixture();
-  const writes: Array<{ method: string; body: unknown }> = [];
-
-  await page.route('**/api/settings', async (route) => {
-    const method = route.request().method();
-    if (method === 'GET') {
-      await fulfillJson(route, fixture);
-      return;
-    }
-
-    const body: unknown = route.request().postDataJSON();
-    writes.push({ method, body });
-    if (method === 'PUT') {
-      const payload = body as { values: Record<string, string> };
-      Object.assign(fixture.values, payload.values);
-      for (const key of Object.keys(payload.values)) fixture.sources[key] = 'db';
-      await fulfillJson(route, {
-        ok: true,
-        restartRequired: true,
-        appliesAfter: 'bot-and-dashboard-restart',
-      });
-      return;
-    }
-
-    if (method === 'DELETE') {
-      const payload = body as { keys: string[] };
-      for (const key of payload.keys) {
-        fixture.sources[key] = 'env';
-        if (key === 'discord_application_id') fixture.values[key] = '111111111111111111';
-      }
-      await fulfillJson(route, {
-        ok: true,
-        restartRequired: true,
-        appliesAfter: 'bot-and-dashboard-restart',
-      });
-      return;
-    }
-
-    await fulfillJson(route, { error: 'Unsupported method' }, 405);
-  });
+async function installSettingsRoutes(page: Page, fixture = createSettingsFixture()): Promise<void> {
+  await page.route('**/api/settings', (route) => fulfillJson(route, fixture));
   await page.route('**/api/guild', (route) => fulfillJson(route, {
     success: true,
-    data: {
-      bot_status: 'online',
-      bot_activity_type: 'watching',
-      bot_activity_text: 'the server',
-    },
-    guild: {
-      bot_status: 'online',
-      bot_activity_type: 'watching',
-      bot_activity_text: 'the server',
-    },
+    data: { bot_status: 'online', bot_activity_type: 'watching', bot_activity_text: 'the server' },
+    guild: { bot_status: 'online', bot_activity_type: 'watching', bot_activity_text: 'the server' },
     config: {},
   }));
-  await page.route('**/api/retention', (route) => fulfillJson(route, {
-    retention_days: 180,
-  }));
-
-  return { fixture, writes };
+  await page.route('**/api/retention', (route) => fulfillJson(route, { retention_days: 180 }));
 }
 
-test.describe('Installation settings', () => {
-  test.setTimeout(120_000);
-
-  test('saves only changed fields and removes saved overrides', async ({ page }, testInfo) => {
-    const { writes } = await installSettingsRoutes(page);
+test.describe('Installation connection status', () => {
+  test('maps desktop readback to masked connection status and Launcher authority', async ({ page }) => {
+    await installSettingsRoutes(page);
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto('/settings');
 
-    const applicationId = page.getByLabel('Application ID');
-    await expect(applicationId).toBeEnabled();
-    await expect(applicationId).toHaveValue('222222222222222222');
-    await expect(page.getByLabel('Project URL')).toBeDisabled();
-    await expect(page.getByText('Deployment only')).toHaveCount(3);
-
-    await applicationId.fill('444444444444444444');
-    await page.getByRole('button', { name: 'Save Discord' }).click();
-    await expect.poll(() => writes.length).toBe(1);
-    expect(writes[0]).toEqual({
-      method: 'PUT',
-      body: {
-        section: 'discord',
-        values: { discord_application_id: '444444444444444444' },
-      },
-    });
-    await expect(applicationId).toHaveValue('444444444444444444');
-
-    await page.getByRole('button', { name: 'Remove saved overrides' }).click();
-    const dialog = page.getByRole('alertdialog', { name: 'Remove saved overrides?' });
-    await expect(dialog).toBeVisible();
-    await testInfo.attach('settings-desktop-reset-confirmation', {
-      body: await page.screenshot({ fullPage: true }),
-      contentType: 'image/png',
-    });
-    await dialog.getByRole('button', { name: 'Remove saved overrides' }).click();
-    await expect.poll(() => writes.length).toBe(2);
-    expect(writes[1]).toEqual({
-      method: 'DELETE',
-      body: {
-        section: 'discord',
-        keys: ['discord_application_id', 'discord_bot_token'],
-      },
-    });
-    await expect(applicationId).toHaveValue('111111111111111111');
+    await expect(page.getByText('5 of 5 connection sections configured')).toBeVisible();
+    await expect(page.getByText('Connection state is visible here for diagnosis. The SomniBot Launcher is the authoritative place to change installation credentials, deployment, services, updates, and recovery settings.')).toBeVisible();
+    await expect(page.getByText('Supabase', { exact: true })).toBeVisible();
+    await expect(page.getByText('https://example.supabase.co', { exact: true })).toBeVisible();
+    await expect(page.getByText('Saved installation value', { exact: true })).toHaveCount(2);
+    await expect(page.getByText('222222222222222222', { exact: true })).toBeVisible();
+    await expect(page.getByText('••••••••', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Open the SomniBot Launcher on the machine that owns this installation to change these values.').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Save Discord' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Remove saved overrides' })).toHaveCount(0);
   });
 
-  test('keeps secret editing and connection cards usable at 375px', async ({ page }, testInfo) => {
+  test('shows an actionable unavailable state when authoritative readback fails', async ({ page }) => {
+    await page.route('**/api/settings', (route) => fulfillJson(route, { error: 'unavailable' }, 503));
+    await page.route('**/api/guild', (route) => fulfillJson(route, { success: true, data: [], guild: {}, config: {} }));
+    await page.route('**/api/retention', (route) => fulfillJson(route, { retention_days: 180 }));
+    await page.goto('/settings');
+
+    await expect(page.getByRole('heading', { name: 'Connection status unavailable' })).toBeVisible();
+    await expect(page.getByText('Connection state is unknown because its authoritative readback could not be loaded. Retry with an installation-operator session. Manage installation connections in the SomniBot Launcher.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  });
+
+  test('keeps masked connection readback within the mobile viewport', async ({ page }) => {
     await installSettingsRoutes(page);
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto('/settings');
 
-    const changeButtons = page.getByRole('button', { name: 'Change' });
-    await expect(changeButtons.first()).toBeVisible();
-    await changeButtons.first().click();
-    const secretInput = page.getByLabel('Bot Token');
-    await expect(secretInput).toBeFocused();
-    await expect(secretInput).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Cancel' }).first()).toBeVisible();
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-
-    await testInfo.attach('settings-mobile-secret-edit', {
-      body: await page.screenshot({ fullPage: true }),
-      contentType: 'image/png',
-    });
-    await secretInput.fill('replacement-token');
-    await page.getByRole('button', { name: 'Cancel' }).first().click();
-    await expect(page.getByRole('button', { name: 'Save Discord' })).toBeDisabled();
-  });
-
-  test('removes a saved override even when no deployment fallback exists', async ({ page }) => {
-    const { fixture, writes } = await installSettingsRoutes(page);
-    fixture.sources.valkey_url = 'db';
-    fixture.environmentFallbacks.valkey_url = false;
-    await page.goto('/settings');
-
-    await page.getByRole('button', { name: 'Remove saved overrides' }).last().click();
-    const dialog = page.getByRole('alertdialog', { name: 'Remove saved overrides?' });
-    await dialog.getByRole('button', { name: 'Remove saved overrides' }).click();
-
-    await expect.poll(() => writes.length).toBe(1);
-    expect(writes[0]).toEqual({
-      method: 'DELETE',
-      body: { section: 'valkey', keys: ['valkey_url'] },
-    });
+    await expect(page.getByText('5 of 5 connection sections configured')).toBeVisible();
+    await expect(page.getByText('PayPal', { exact: true })).toBeVisible();
+    await expect(page.getByText('https://example.test/api/paypal/webhook', { exact: true })).toBeVisible();
+    await expect(page.getByText('••••••••', { exact: true }).first()).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (
+      document.documentElement.scrollWidth <= document.documentElement.clientWidth
+    ))).toBe(true);
   });
 });

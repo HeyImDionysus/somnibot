@@ -78,7 +78,11 @@ test('owner generates and reuses a stateless project licensing prompt', async ({
   await page.getByRole('button', { name: 'Download SDK bundle' }).click();
   expect((await bundleDownloadPromise).suggestedFilename()).toBe('somnibot-sdk-bundle.json');
 
-  const prompt = await page.locator('section[aria-labelledby="generated-prompt-heading"] details pre').innerText();
+  const completeContract = page.getByText('Inspect complete copy contract', { exact: true });
+  await completeContract.click();
+  const promptPreview = page.locator('section[aria-labelledby="generated-prompt-heading"] details pre');
+  await expect(promptPreview).toBeVisible();
+  const prompt = await promptPreview.innerText();
   expect(extractLicensingPromptEnvelope(prompt)).toMatchObject({
     mode: 'static',
     project: {
