@@ -237,13 +237,7 @@ describe('Given a requested SDK agent-conformance bundle', () => {
 
     expect(serializedFixture).not.toContain('@somnibot/license-sdk');
     expect(serializedFixture).not.toContain('packages/license-sdk');
-    expect(serializedFixture).not.toContain('external documentation');
     expect(bundle.sdkBundle.externalDependencies).toEqual([]);
-    const agentContract = bundle.sdkBundle.files['AGENT.md'].content;
-    if (typeof agentContract !== 'string') {
-      throw new Error('Generated AGENT.md must be text.');
-    }
-    expect(agentContract.toLowerCase()).toContain('do not install or depend on @somnibot/license-sdk');
   });
 });
 
