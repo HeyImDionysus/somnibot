@@ -343,6 +343,8 @@ jobs:
             node_modules
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Build shared
+        run: pnpm --filter @somnibot/shared build
       - name: Run launcher tests
         run: pnpm --filter @somnibot/launcher test --reporter=verbose
 
