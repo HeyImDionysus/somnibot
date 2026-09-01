@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LauncherAuditEntry } from './audit-log.js';
+import { retainedBackupAuditOccurrenceKey } from './database-recovery-audit-anchor.js';
 import { databaseConnection, DatabaseRecoveryError, type RecoveryCommand, type RecoveryResult, type RecoverySource, type RehearsalRequest } from './database-recovery-contract.js';
 import { checkRecoveryCapacity, RECOVERY_MAX_BYTES } from './database-recovery-process.js';
-import { describeArtifact, findLatestRecoveryBackup, loadRecoveryManifest, manifestChecksum, RECOVERY_ARTIFACTS, RECOVERY_HISTORY_ARTIFACTS, saveManifest, snapshotOwnedArtifacts, type RecoveryManifest } from './database-recovery-artifacts.js';
+import { describeArtifact, findLatestRecoveryBackup, loadRecoveryManifest, manifestChecksum, RECOVERY_ARTIFACTS, RECOVERY_HISTORY_ARTIFACTS, saveManifest, snapshotOwnedArtifacts, verifyRecoveryRoot, type RecoveryManifest } from './database-recovery-artifacts.js';
 import { parseRecoveryIdentity, RECOVERY_IDENTITY_SQL, RECOVERY_TARGET_GUARD_SQL, recoveryValidationSql, recoveryTimestamp } from './database-recovery-sql.js';
 import { observeRecoveryRuntime } from './database-recovery-runtime.js';
 import { loadRecoveryResources, type RecoveryVariant } from './database-recovery-resources.js';
@@ -13,6 +14,7 @@ import { prepareRecoveryImage, dumpRecoveryArtifact } from './database-recovery-
 export type RecoveryDependencies = {
   readonly run: (command: RecoveryCommand) => Promise<string>;
   readonly audit: (entry: LauncherAuditEntry, source: RecoverySource) => Promise<boolean>;
+  readonly authenticate: (manifest: RecoveryManifest, source: RecoverySource, timeoutMs: number) => Promise<boolean>;
 };
 export function createDatabaseRecovery(root: string, dependencies: RecoveryDependencies) {
   let busy = false;
@@ -42,6 +44,7 @@ export function createDatabaseRecovery(root: string, dependencies: RecoveryDepen
         const sourceEnv = { ...connection.env, PGOPTIONS: `${connection.env.PGOPTIONS} -c default_transaction_read_only=on` };
         if (!/^\d{17,20}$/.test(source.guildId)) throw new DatabaseRecoveryError('missing-source-server');
         await mkdir(root, { recursive: true, mode: 0o700 });
+        await verifyRecoveryRoot(root);
         await checkRecoveryCapacity(root);
         await dependencies.run({ tool: 'psql', args: ['--version'], env: {} });
         const query = { tool: 'psql' as const, args: [...psqlArgs, '--dbname', connection.url, '--command', RECOVERY_IDENTITY_SQL], env: sourceEnv };
@@ -80,8 +83,11 @@ export function createDatabaseRecovery(root: string, dependencies: RecoveryDepen
         await saveManifest(directory, manifest);
         if (artifacts.reduce((bytes, artifact) => bytes + artifact.bytes, 0) + (await describeArtifact(directory, 'manifest.json')).bytes > RECOVERY_MAX_BYTES) throw new DatabaseRecoveryError('artifact-size-limit');
         retained = true;
+        const details = proofDetails(manifest);
+        const occurrenceKey = retainedBackupAuditOccurrenceKey({ backupId, sourceProjectRef: manifest.sourceProjectRef,
+          checksumSha256: details.checksumSha256 });
         const audited = await dependencies.audit({ action: 'launcher.backup.database_succeeded', category: 'infrastructure', targetType: 'database_backup',
-          targetId: backupId, occurrenceKey: `launcher.backup.database_succeeded:${backupId}`, details: proofDetails(manifest) }, source);
+          targetId: backupId, occurrenceKey, details }, source);
         return { status: 'backed-up', backupId, message: audited
           ? `Logical database backup captured in ${directory}. Storage object bytes and provider configuration are excluded.`
           : `Logical backup retained in ${directory}, but durable audit recording failed. Recovery readiness remains unverified.` };
@@ -97,6 +103,7 @@ export function createDatabaseRecovery(root: string, dependencies: RecoveryDepen
         const current = databaseConnection(source);
         const target = databaseConnection(request);
         if (current.projectRef !== manifest.sourceProjectRef || source.guildId !== manifest.guildId) throw new DatabaseRecoveryError('source-context-changed');
+        if (!await dependencies.authenticate(manifest, source, 10_000)) throw new DatabaseRecoveryError('retained-backup-unauthenticated');
         if (target.projectRef === manifest.sourceProjectRef || request.confirmation !== target.projectRef) throw new DatabaseRecoveryError('isolated-target-required');
         const directory = path.resolve(root, manifest.backupId);
         await checkRecoveryCapacity(directory, 0);
@@ -119,7 +126,8 @@ export function createDatabaseRecovery(root: string, dependencies: RecoveryDepen
     latestBackup: async (source: RecoverySource) => {
       await mkdir(root, { recursive: true, mode: 0o700 });
       const connection = databaseConnection(source);
-      return await findLatestRecoveryBackup(root, { sourceProjectRef: connection.projectRef, guildId: source.guildId });
+      return await findLatestRecoveryBackup(root, { sourceProjectRef: connection.projectRef, guildId: source.guildId },
+        async (manifest, timeoutMs) => await dependencies.authenticate(manifest, source, timeoutMs));
     },
   };
 }

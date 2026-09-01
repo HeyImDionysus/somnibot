@@ -2,6 +2,8 @@ import path from 'node:path';
 import { app, dialog, ipcMain } from 'electron';
 import { getConfig } from './config-store.js';
 import { resolveLauncherGuildId, writeLauncherAuditLog } from './audit-log.js';
+import { verifyRetainedBackupAudit } from './database-recovery-audit-anchor.js';
+import { manifestChecksum } from './database-recovery-artifacts.js';
 import { createDatabaseRecovery } from './database-recovery.js';
 import type { RecoveryBackupSummary } from './database-recovery-api.js';
 import { databaseConnection, type RecoveryResult, type RecoverySource, type RehearsalRequest } from './database-recovery-contract.js';
@@ -32,6 +34,15 @@ export function registerDatabaseRecoveryIpc(): void {
       const result = await writeLauncherAuditLog({ supabaseUrl: source.projectUrl,
         supabaseSecretKey: config.supabaseSecretKey, guildId: source.guildId }, entry);
       return result.ok;
+    },
+    authenticate: async (manifest, source, timeoutMs) => {
+      const config = getConfig();
+      if (config.supabaseUrl !== source.projectUrl || resolveLauncherGuildId(config) !== source.guildId) return false;
+      return await verifyRetainedBackupAudit({ supabaseUrl: source.projectUrl,
+        supabaseSecretKey: config.supabaseSecretKey, guildId: source.guildId }, {
+        backupId: manifest.backupId, sourceProjectRef: databaseConnection(source).projectRef,
+        checksumSha256: manifestChecksum(manifest),
+      }, { timeoutMs });
     },
   });
   ipcMain.handle('database:backup', async (): Promise<RecoveryResult> => {

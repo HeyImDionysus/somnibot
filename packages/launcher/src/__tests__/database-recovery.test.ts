@@ -3,6 +3,9 @@ import { mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { LauncherAuditEntry } from '../main/audit-log.js';
+import { retainedBackupAuditOccurrenceKey } from '../main/database-recovery-audit-anchor.js';
+import { manifestChecksum, type RecoveryManifest } from '../main/database-recovery-artifacts.js';
 import { createDatabaseRecovery } from '../main/database-recovery.js';
 import { databaseConnection, DatabaseRecoveryError, type RecoveryCommand } from '../main/database-recovery-contract.js';
 
@@ -28,8 +31,9 @@ async function fixture() {
     if (command.args.includes('SELECT to_jsonb(clock_timestamp());')) return JSON.stringify('2026-08-31T12:01:00Z');
     return command.args.includes('--version') ? 'test-version' : JSON.stringify(identity);
   });
-  const audit = vi.fn(async () => true);
-  return { directory, run, audit, recovery: createDatabaseRecovery(directory, { run, audit }) };
+  const audit = vi.fn(async (_entry: LauncherAuditEntry, _source: typeof source) => true);
+  const authenticate = vi.fn(async (_manifest: RecoveryManifest, _source: typeof source, _timeoutMs: number) => true);
+  return { directory, run, audit, authenticate, recovery: createDatabaseRecovery(directory, { run, audit, authenticate }) };
 }
 
 describe('database recovery boundaries', () => {
@@ -55,9 +59,15 @@ describe('database recovery boundaries', () => {
     expect(f.audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'launcher.backup.database_succeeded' }), source);
     const entries = await readdir(f.directory);
     expect(entries).toHaveLength(1);
-    const manifest = JSON.parse(await readFile(path.join(f.directory, entries[0] ?? '', 'manifest.json'), 'utf8'));
+    const manifest = JSON.parse(await readFile(path.join(f.directory, entries[0] ?? '', 'manifest.json'), 'utf8')) as RecoveryManifest;
     expect(manifest.storageObjectsIncluded).toBe(false);
     expect(manifest.deployedIdentity).toBeNull();
+    const successAudit = f.audit.mock.calls.find(([entry]) => entry.action === 'launcher.backup.database_succeeded')?.[0];
+    expect(successAudit?.occurrenceKey).toBe(retainedBackupAuditOccurrenceKey({
+      backupId: manifest.backupId,
+      sourceProjectRef: manifest.sourceProjectRef,
+      checksumSha256: manifestChecksum(manifest),
+    }));
     expect(JSON.stringify(f.run.mock.calls.map(([command]) => command.args))).not.toContain('source secret');
   });
 
@@ -117,7 +127,7 @@ describe('database recovery boundaries', () => {
     const backup = await f.recovery.backup(source);
     expect(backup.status).toBe('backed-up');
     f.run.mockClear();
-    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit });
+    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit, authenticate: f.authenticate });
     // When the owner rehearses the retained backup through the recreated service.
     const result = await restarted.rehearse(source, { projectUrl: 'https://targetproject.supabase.co', password: 'target secret', template: '', backupId: backup.backupId, confirmation: 'targetproject' });
     // Then the verified files on disk are restored without process-memory ownership.
@@ -159,7 +169,7 @@ describe('database recovery boundaries', () => {
     expect(valid.status).toBe('backed-up');
     expect(tampered.status).toBe('backed-up');
     await writeFile(path.join(f.directory, tampered.backupId ?? '', 'data.sql'), 'SELECT unsafe();');
-    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit });
+    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit, authenticate: f.authenticate });
     // When retained recovery availability is discovered after restart.
     const summary = await restarted.latestBackup(source);
     // Then only the intact source-scoped backup is offered.
@@ -175,7 +185,7 @@ describe('database recovery boundaries', () => {
     const backupDirectory = path.join(f.directory, backupId);
     const manifestFile = path.join(backupDirectory, 'manifest.json');
     const manifest = await readFile(manifestFile, 'utf8');
-    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit });
+    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit, authenticate: f.authenticate });
     // When the manifest is malformed or requested from another source identity.
     await writeFile(manifestFile, '{"backupId":"truncated"}');
     expect(await restarted.latestBackup(source)).toBeNull();

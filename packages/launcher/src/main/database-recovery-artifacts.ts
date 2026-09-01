@@ -27,7 +27,11 @@ const HASH_32 = /^[0-9a-f]{32}$/;
 const HASH_64 = /^[0-9a-f]{64}$/;
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_CATALOG_ENTRIES = 256;
+const MAX_AUTHENTICATION_CANDIDATES = 8;
+const MAX_AUTHENTICATION_WINDOW_MS = 10_000;
+const MAX_AUTHENTICATION_ATTEMPT_MS = 2_500;
 const MAX_TABLES = 1_000;
+const MAX_FUTURE_CAPTURE_SKEW_MS = 5 * 60 * 1_000;
 const MANIFEST_KEYS = ['adoptionConfigurationHash', 'artifacts', 'backupId', 'capturedAt', 'configurationHash', 'consistency', 'deployedIdentity', 'guildId', 'migrationHash', 'migrationHead', 'objectCount', 'schemaHash', 'sourceProjectRef', 'storageObjectsIncluded', 'tables', 'userCount'] as const;
 const ARTIFACT_KEYS = ['bytes', 'name', 'sha256'] as const;
 const RUNTIME_IDENTITY_KEYS = ['bootId', 'configurationGeneration', 'deploymentProfile', 'exactSha', 'lifecycle', 'migrationHead', 'version'] as const;
@@ -49,6 +53,7 @@ function parseManifest(value: unknown, backupId: string): RecoveryManifest {
     || !('backupId' in value) || value.backupId !== backupId || typeof value.backupId !== 'string' || !UUID.test(value.backupId)
     || !('guildId' in value) || typeof value.guildId !== 'string' || !/^\d{17,20}$/.test(value.guildId)
     || !('capturedAt' in value) || typeof value.capturedAt !== 'string' || !Number.isFinite(Date.parse(value.capturedAt)) || new Date(value.capturedAt).toISOString() !== value.capturedAt
+    || Date.parse(value.capturedAt) > Date.now() + MAX_FUTURE_CAPTURE_SKEW_MS
     || !('sourceProjectRef' in value) || typeof value.sourceProjectRef !== 'string' || !/^[a-z0-9]{1,63}$/.test(value.sourceProjectRef)
     || !('migrationHead' in value) || typeof value.migrationHead !== 'string' || !/^\d{14}_[a-z0-9_]+\.sql$/.test(value.migrationHead)
     || !('migrationHash' in value) || typeof value.migrationHash !== 'string' || !HASH_32.test(value.migrationHash)
@@ -164,15 +169,28 @@ export async function saveManifest(directory: string, manifest: RecoveryManifest
   await writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest), { flag: 'wx', mode: 0o600 });
 }
 
+async function verifyPrivateDirectory(directory: string): Promise<void> {
+  const resolved = path.resolve(directory);
+  const stat = await lstat(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(resolved) !== resolved) throw new DatabaseRecoveryError('invalid-owned-directory');
+  if (process.platform !== 'win32') {
+    const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
+    if (currentUid === null || stat.uid !== currentUid || (stat.mode & 0o077) !== 0) throw new DatabaseRecoveryError('invalid-owned-directory');
+  }
+}
+
+export async function verifyRecoveryRoot(root: string): Promise<void> {
+  await verifyPrivateDirectory(path.resolve(root));
+}
+
 export async function loadRecoveryManifest(root: string, backupId: string): Promise<RecoveryManifest> {
   try {
     if (!UUID.test(backupId)) throw new DatabaseRecoveryError('retained-backup-invalid');
     const ownedRoot = path.resolve(root);
-    const rootStat = await lstat(ownedRoot);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || await realpath(ownedRoot) !== ownedRoot) throw new DatabaseRecoveryError('invalid-owned-directory');
+    await verifyPrivateDirectory(ownedRoot);
     const directory = path.resolve(ownedRoot, backupId);
-    const directoryStat = await lstat(directory);
-    if (path.dirname(directory) !== ownedRoot || !directoryStat.isDirectory() || directoryStat.isSymbolicLink() || await realpath(directory) !== directory) throw new DatabaseRecoveryError('invalid-owned-directory');
+    if (path.dirname(directory) !== ownedRoot) throw new DatabaseRecoveryError('invalid-owned-directory');
+    await verifyPrivateDirectory(directory);
     const manifestFile = path.join(directory, 'manifest.json');
     const manifestStat = await lstat(manifestFile);
     if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.nlink !== 1 || manifestStat.size === 0
@@ -199,9 +217,14 @@ export async function loadRecoveryManifest(root: string, backupId: string): Prom
   }
 }
 
-export async function findLatestRecoveryBackup(root: string, source: RecoverySourceIdentity): Promise<RecoveryBackupSummary | null> {
+export async function findLatestRecoveryBackup(
+  root: string,
+  source: RecoverySourceIdentity,
+  authenticate: (manifest: RecoveryManifest, timeoutMs: number) => Promise<boolean>,
+): Promise<RecoveryBackupSummary | null> {
   const candidates: string[] = [];
   let entries = 0;
+  await verifyRecoveryRoot(root);
   const catalog = await opendir(path.resolve(root));
   for await (const entry of catalog) {
     entries += 1;
@@ -218,6 +241,13 @@ export async function findLatestRecoveryBackup(root: string, source: RecoverySou
     }
   }
   manifests.sort((left, right) => right.capturedAt.localeCompare(left.capturedAt) || right.backupId.localeCompare(left.backupId));
-  const latest = manifests[0];
-  return latest ? { backupId: latest.backupId, capturedAt: latest.capturedAt } : null;
+  const authenticationDeadline = Date.now() + MAX_AUTHENTICATION_WINDOW_MS;
+  for (const manifest of manifests.slice(0, MAX_AUTHENTICATION_CANDIDATES)) {
+    const remainingMs = authenticationDeadline - Date.now();
+    if (remainingMs <= 0) break;
+    if (await authenticate(manifest, Math.min(remainingMs, MAX_AUTHENTICATION_ATTEMPT_MS))) {
+      return { backupId: manifest.backupId, capturedAt: manifest.capturedAt };
+    }
+  }
+  return null;
 }

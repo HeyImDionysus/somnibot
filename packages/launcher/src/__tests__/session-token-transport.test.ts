@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 
+const resourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath');
+
 const mocks = vi.hoisted(() => ({
   fork: vi.fn(() => new EventEmitter()),
   getConfig: vi.fn(() => ({
@@ -11,11 +13,14 @@ const mocks = vi.hoisted(() => ({
   })),
   saveConfig: vi.fn(),
   stopChildProcess: vi.fn(() => Promise.resolve()),
+  isPackaged: false,
 }));
 
 vi.mock('electron', () => ({
   app: {
-    isPackaged: false,
+    get isPackaged() {
+      return mocks.isPackaged;
+    },
     getAppPath: () => process.cwd(),
   },
   BrowserWindow: {
@@ -56,9 +61,55 @@ afterEach(async () => {
   await stopAll();
   mocks.fork.mockClear();
   mocks.stopChildProcess.mockClear();
+  mocks.isPackaged = false;
+  if (resourcesPathDescriptor) Reflect.defineProperty(process, 'resourcesPath', resourcesPathDescriptor);
+  else Reflect.deleteProperty(process, 'resourcesPath');
 });
 
 describe('launcher dashboard session-token transport', () => {
+  it('passes the packaged regular-local release identity to both children through the managed allowlist', async () => {
+    // Given: a packaged regular-local launch whose caller attempts to replace its release identity.
+    mocks.isPackaged = true;
+    Reflect.defineProperty(process, 'resourcesPath', { configurable: true, value: process.cwd() });
+
+    // When: the launcher starts the dashboard and bot children.
+    await startAll({
+      SOMNIBOT_RUNTIME_MODE: 'regular-local',
+      SOMNIBOT_GIT_SHA: 'b'.repeat(40),
+      SOMNIBOT_MIGRATION_HEAD: '20200101000000_untrusted.sql',
+      SOMNIBOT_CONFIG_GENERATION: '1',
+    }, 'release-identity-token');
+
+    // Then: both actual forks receive embedded metadata, never the caller values.
+    expect(mocks.fork).toHaveBeenCalledTimes(2);
+    for (const call of mocks.fork.mock.calls) {
+      expect(call[2]?.env).toMatchObject({
+        SOMNIBOT_GIT_SHA: 'a'.repeat(40),
+        SOMNIBOT_MIGRATION_HEAD: '20260823173000_experience_runtime_controls.sql',
+        SOMNIBOT_CONFIG_GENERATION: '20260823173000',
+      });
+    }
+  });
+
+  it('strips packaged provenance when a local caller impersonates the VPS profile', async () => {
+    mocks.isPackaged = true;
+    Reflect.defineProperty(process, 'resourcesPath', { configurable: true, value: process.cwd() });
+
+    await startAll({
+      SOMNIBOT_RUNTIME_MODE: 'vps',
+      SOMNIBOT_GIT_SHA: 'b'.repeat(40),
+      SOMNIBOT_MIGRATION_HEAD: '20200101000000_untrusted.sql',
+      SOMNIBOT_CONFIG_GENERATION: '1',
+    }, 'spoofed-vps-token');
+
+    expect(mocks.fork).toHaveBeenCalledTimes(2);
+    for (const call of mocks.fork.mock.calls) {
+      expect(call[2]?.env).not.toHaveProperty('SOMNIBOT_GIT_SHA');
+      expect(call[2]?.env).not.toHaveProperty('SOMNIBOT_MIGRATION_HEAD');
+      expect(call[2]?.env).not.toHaveProperty('SOMNIBOT_CONFIG_GENERATION');
+    }
+  });
+
   it('passes only a restrictive, single-use token-file path to the dashboard child', async () => {
     // Given: a local dashboard session token and no token in the service environment.
     const sessionToken = 'token-for-file-transport';

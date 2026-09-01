@@ -14,36 +14,21 @@ import {
   shouldApplyBotReadyTimeout,
   shouldRecoverManagedProcess,
 } from '../main/process-manager-guards';
+import { buildManagedChildEnvironment } from '../main/child-environment.js';
 
-// ── Replicated pure functions from process-manager.ts ────────
+const TEST_RELEASE_IDENTITY = {
+  exactSha: 'a'.repeat(40),
+  migrationHead: '20260831135500_adoption_recovery_proof.sql',
+  configurationGeneration: 20260831135500,
+} as const;
 
-const SAFE_PARENT_ENV_KEYS = [
-  'PATH',
-  'LANG',
-  'LC_ALL',
-  'TZ',
-  'HOME',
-  'USERPROFILE',
-  'TMPDIR',
-  'TEMP',
-  'TMP',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'PROGRAMFILES',
-  'SystemRoot',
-  'COMSPEC',
-  'SHELL',
-  'XDG_RUNTIME_DIR',
-  'XDG_CONFIG_HOME',
-] as const;
-
-function safeParentEnv(env: Record<string, string | undefined>): Record<string, string> {
-  const filtered: Record<string, string> = {};
-  for (const key of SAFE_PARENT_ENV_KEYS) {
-    const val = env[key];
-    if (val !== undefined) filtered[key] = val;
-  }
-  return filtered;
+function safeParentEnv(parentEnv: NodeJS.ProcessEnv): Record<string, string> {
+  return buildManagedChildEnvironment({
+    parentEnv,
+    serviceEnv: {},
+    isPackaged: false,
+    releaseIdentity: TEST_RELEASE_IDENTITY,
+  });
 }
 
 type ProcessStatus = 'offline' | 'starting' | 'online' | 'error';
@@ -91,7 +76,7 @@ describe('safeParentEnv', () => {
   });
 
   it('skips undefined env vars', () => {
-    const filtered = safeParentEnv({ PATH: '/usr/bin', HOME: undefined as unknown as string });
+    const filtered = safeParentEnv({ PATH: '/usr/bin', HOME: undefined });
     expect(filtered).toHaveProperty('PATH');
     expect(filtered).not.toHaveProperty('HOME');
   });
