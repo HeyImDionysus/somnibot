@@ -3,6 +3,7 @@ import { app, dialog, ipcMain } from 'electron';
 import { getConfig } from './config-store.js';
 import { resolveLauncherGuildId, writeLauncherAuditLog } from './audit-log.js';
 import { createDatabaseRecovery } from './database-recovery.js';
+import type { RecoveryBackupSummary } from './database-recovery-api.js';
 import { databaseConnection, type RecoveryResult, type RecoverySource, type RehearsalRequest } from './database-recovery-contract.js';
 import { runRecoveryCommand } from './database-recovery-process.js';
 
@@ -15,7 +16,7 @@ function currentSource(): RecoverySource {
 export function parseRehearsalRequest(raw: unknown): RehearsalRequest | null {
   if (!raw || typeof raw !== 'object' || !('projectUrl' in raw) || typeof raw.projectUrl !== 'string' || raw.projectUrl.length > 200
     || !('password' in raw) || typeof raw.password !== 'string' || raw.password.length > 4096
-    || !('backupId' in raw) || typeof raw.backupId !== 'string' || !/^[0-9a-f-]{36}$/.test(raw.backupId)
+    || !('backupId' in raw) || typeof raw.backupId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(raw.backupId)
     || !('confirmation' in raw) || typeof raw.confirmation !== 'string' || !/^[a-z0-9]+$/.test(raw.confirmation)
     || ('template' in raw && (typeof raw.template !== 'string' || raw.template.length > 300))) return null;
   return { projectUrl: raw.projectUrl, password: raw.password, backupId: raw.backupId,
@@ -44,6 +45,13 @@ export function registerDatabaseRecoveryIpc(): void {
       return await recovery.backup(source);
     } catch (error) {
       return { status: 'blocked', message: error instanceof Error ? 'Source connection is unavailable. Review saved database credentials and retry.' : 'Source configuration could not be read.' };
+    }
+  });
+  ipcMain.handle('database:retained-backup', async (): Promise<RecoveryBackupSummary | null> => {
+    try {
+      return await recovery.latestBackup(currentSource());
+    } catch {
+      return null;
     }
   });
   ipcMain.handle('database:rehearse', async (_event, raw: unknown): Promise<RecoveryResult> => {

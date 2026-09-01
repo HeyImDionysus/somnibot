@@ -79,8 +79,6 @@ export async function POST(
   }
   const product = productSchema.safeParse(productResult.data);
   if (!product.success) return NextResponse.json({ error: 'Product verification data is malformed' }, { status: 503 });
-  const dynamic = product.data.delivery_type === 'license_key';
-  const accessPass = product.data.delivery_type === 'access_pass';
   const files = z.array(z.object({ id: z.string().uuid(), created_at: z.string().datetime({ offset: true }) })).safeParse(filesResult.data ?? []);
   if (!files.success) return NextResponse.json({ error: 'Product file verification data is malformed' }, { status: 503 });
   const policy = z.object({ product_id: z.string().uuid(), updated_at: z.string().datetime({ offset: true }) }).nullable().safeParse(policyResult.data);
@@ -93,7 +91,17 @@ export async function POST(
   if (!policy.success || !checkoutIntents.success || !freeClaims.success) {
     return NextResponse.json({ error: 'Launch identity evidence is malformed' }, { status: 503 });
   }
-  const policyRevision = dynamic ? policy.data?.updated_at ?? null : null;
+  const requiresLicense = product.data.delivery_type === 'license_key';
+  const requiresDownload = files.data.length > 0 || !['license_key', 'access_pass'].includes(product.data.delivery_type);
+  const configuredDiscordGrants = product.data.granted_role_ids.length + product.data.granted_channel_ids.length;
+  const requiresDiscord = configuredDiscordGrants > 0 || product.data.delivery_type === 'access_pass';
+  const requiredFulfillments = [
+    ...(requiresLicense ? [{ kind: 'license' as const }] : []),
+    ...files.data.map((file) => ({ kind: 'download' as const, targetId: file.id })),
+    ...product.data.granted_role_ids.map((targetId) => ({ kind: 'discord_role' as const, targetId })),
+    ...product.data.granted_channel_ids.map((targetId) => ({ kind: 'discord_channel' as const, targetId })),
+  ];
+  const policyRevision = requiresLicense ? policy.data?.updated_at ?? null : null;
   const proofAfter = latestLaunchProofTimestamp([run.data.verification_started_at, product.data.updated_at, ...(policyRevision ? [policyRevision] : []), ...files.data.map((file) => file.created_at)]);
   const currentIntents = checkoutIntents.data.filter((intent) => launchProofAtOrAfter(intent.created_at, proofAfter));
   const currentClaims = freeClaims.data.filter((claim) => launchProofAtOrAfter(claim.created_at, proofAfter));
@@ -121,7 +129,7 @@ export async function POST(
     verifiedOrderIds.length ? admin.from('payment_refunds').select('id, order_id, payment_id, paypal_refund_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('portal_cancellation_operations').select('id, order_id, status').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).eq('status', 'completed').limit(1000) : emptyResult,
     verifiedOrderIds.length ? admin.from('commerce_fulfillment_outward_intents').select('id, order_id, intent_kind, state, sent_at, outward_generation_id').eq('guild_id', auth.ctx.guildId).in('order_id', verifiedOrderIds).eq('intent_kind', 'receipt_dm').limit(1000) : emptyResult,
-    accessPass && verifiedOrderIds.length ? admin.from('commerce_role_delivery_intents').select('id, order_id, product_id, entitlement_id, permanent_role_ids, completed_role_ids, delivery_confirmed_at, completed_channel_ids, channel_delivery_confirmed_at, state, outward_generation_id').eq('guild_id', auth.ctx.guildId).eq('product_id', product.data.id).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
+    configuredDiscordGrants > 0 && verifiedOrderIds.length ? admin.from('commerce_role_delivery_intents').select('id, order_id, product_id, entitlement_id, permanent_role_ids, completed_role_ids, delivery_confirmed_at, completed_channel_ids, channel_delivery_confirmed_at, state, outward_generation_id').eq('guild_id', auth.ctx.guildId).eq('product_id', product.data.id).in('order_id', verifiedOrderIds).limit(1000) : emptyResult,
   ]);
   for (const [name, result] of [['payments', paymentsResult], ['entitlements', entitlementsResult], ['keys', keysResult], ['downloads', downloadsResult], ['refunds', refundsResult], ['cancellations', cancellationsResult], ['outward', outwardResult], ['roles', rolesResult]] as const) {
     if (result.error) return dbError(result.error, `store/launch-runs/verify/${name}`);
@@ -143,12 +151,13 @@ export async function POST(
     return NextResponse.json({ error: 'Launch evidence is malformed' }, { status: 503 });
   }
   const paypalPolicy = await loadPayPalPolicy(admin, auth.ctx.guildId);
-  const policyConfigured = dynamic ? policy.data !== null : accessPass
-    ? product.data.granted_role_ids.length + product.data.granted_channel_ids.length > 0 : files.data.length > 0;
+  const policyConfigured = (!requiresLicense || policy.data !== null)
+    && (!requiresDownload || files.data.length > 0)
+    && (!requiresDiscord || configuredDiscordGrants > 0);
   let integrationVerified = policyConfigured;
-  if (dynamic || 'completed_project_licensing' in product.data.metadata || SDK_RECEIPT_METADATA_KEY in product.data.metadata) {
+  if (requiresLicense || 'completed_project_licensing' in product.data.metadata || SDK_RECEIPT_METADATA_KEY in product.data.metadata) {
     try {
-      integrationVerified = policyConfigured && await verifyLaunchSdkIntegration({ ...productResult.data, product_files: filesResult.data, product_license_config: dynamic ? policyResult.data : null }, resolveSdkDeploymentOrigin(process.env));
+      integrationVerified = policyConfigured && await verifyLaunchSdkIntegration({ ...productResult.data, product_files: filesResult.data, product_license_config: requiresLicense ? policyResult.data : null }, resolveSdkDeploymentOrigin(process.env));
     } catch (error) {
       console.error('[store/launch-runs/verify] SDK contract generation failed:', error instanceof Error ? error.message : 'unknown error');
       return NextResponse.json({ error: 'Saved licensing policy could not produce an SDK contract' }, { status: 503 });
@@ -178,6 +187,7 @@ export async function POST(
       priceCents: product.data.price_cents,
       policyConfigured,
       integrationVerified,
+      requiredFulfillments,
     },
     orders: currentOrders.map((order) => ({ id: order.id, productId: order.product_id, status: order.status, paypalOrderId: order.paypal_order_id, paypalSubscriptionId: order.paypal_subscription_id })),
     freeClaims: currentClaims.map((claim) => ({ id: claim.request_id, orderId: claim.order_id, productId: claim.product_id })),
@@ -190,19 +200,25 @@ export async function POST(
     })),
     entitlements: entitlements.data.map((entitlement) => ({ id: entitlement.id, orderId: entitlement.order_id, productId: entitlement.product_id, status: entitlement.status })),
     fulfillments: [
-      ...outward.data.filter((delivery) => delivery.intent_kind === 'receipt_dm' && keys.data.some((key) => key.order_id === delivery.order_id))
+      ...outward.data.filter((delivery) => delivery.intent_kind === 'receipt_dm'
+          && launchProofAtOrAfter(delivery.sent_at, proofAfter)
+          && keys.data.some((key) => key.order_id === delivery.order_id && ['active', 'pending_activation'].includes(key.status)))
         .map((delivery) => ({ id: delivery.id, orderId: delivery.order_id, kind: 'license' as const, deliveryState: delivery.state, sentAt: delivery.sent_at })),
       ...downloads.data.filter((download) => download.product_id === product.data.id && download.order_id !== null && launchProofAtOrAfter(download.delivered_at, proofAfter) && files.data.some((file) => file.id === download.file_id))
-        .map((download) => ({ id: download.id, orderId: download.order_id ?? '', kind: 'download' as const })),
+        .map((download) => ({ id: download.id, orderId: download.order_id ?? '', kind: 'download' as const, targetId: download.file_id ?? '' })),
       ...roles.data.flatMap((role) => role.product_id === product.data.id && role.outward_generation_id !== null
-        && launchProofAtOrAfter(role.delivery_confirmed_at, proofAfter)
-        && product.data.granted_role_ids.every((id) => role.permanent_role_ids.includes(id) && role.completed_role_ids.includes(id))
-        && (product.data.granted_channel_ids.length === 0 || (launchProofAtOrAfter(role.channel_delivery_confirmed_at, proofAfter)
-          && product.data.granted_channel_ids.every((id) => role.completed_channel_ids.includes(id))))
         && entitlements.data.some((entitlement) => entitlement.id === role.entitlement_id && entitlement.order_id === role.order_id && entitlement.product_id === role.product_id)
-        ? outward.data.filter((delivery) => delivery.order_id === role.order_id && delivery.outward_generation_id === role.outward_generation_id && delivery.intent_kind === 'receipt_dm' && launchProofAtOrAfter(delivery.sent_at, role.delivery_confirmed_at ?? proofAfter)
-          && (product.data.granted_channel_ids.length === 0 || launchProofAtOrAfter(delivery.sent_at, role.channel_delivery_confirmed_at ?? proofAfter)))
-          .map((delivery) => ({ id: role.id, orderId: role.order_id, kind: 'access' as const, deliveryState: delivery.state, sentAt: delivery.sent_at })) : []),
+        ? outward.data.filter((delivery) => delivery.order_id === role.order_id && delivery.outward_generation_id === role.outward_generation_id && delivery.intent_kind === 'receipt_dm')
+          .flatMap((delivery) => [
+            ...product.data.granted_role_ids.filter((targetId) => launchProofAtOrAfter(role.delivery_confirmed_at, proofAfter)
+              && launchProofAtOrAfter(delivery.sent_at, role.delivery_confirmed_at ?? proofAfter)
+              && role.permanent_role_ids.includes(targetId) && role.completed_role_ids.includes(targetId))
+              .map((targetId) => ({ id: role.id, orderId: role.order_id, kind: 'discord_role' as const, targetId, deliveryState: delivery.state, sentAt: delivery.sent_at })),
+            ...product.data.granted_channel_ids.filter((targetId) => launchProofAtOrAfter(role.channel_delivery_confirmed_at, proofAfter)
+              && launchProofAtOrAfter(delivery.sent_at, role.channel_delivery_confirmed_at ?? proofAfter)
+              && role.completed_channel_ids.includes(targetId))
+              .map((targetId) => ({ id: role.id, orderId: role.order_id, kind: 'discord_channel' as const, targetId, deliveryState: delivery.state, sentAt: delivery.sent_at })),
+          ]) : []),
     ],
     refunds: refunds.data.map((refund) => ({ id: refund.id, orderId: refund.order_id, paymentId: refund.payment_id, paypalRefundId: refund.paypal_refund_id })),
     cancellations: cancellations.data.map((cancellation) => ({ id: cancellation.id, orderId: cancellation.order_id, status: cancellation.status })),
@@ -226,8 +242,11 @@ export async function POST(
     cancellation_ids: cancellations.data.map((cancellation) => cancellation.id),
     outward_deliveries: outward.data,
     role_deliveries: roles.data,
+    license_keys: keys.data,
+    download_deliveries: downloads.data,
     file_ids: files.data.map((file) => file.id),
     witness: evaluated.witness,
+    fulfillment_requirements: evaluated.fulfillment,
     stages,
   };
   const hash = createHash('sha256').update(JSON.stringify(evidence)).digest('hex');

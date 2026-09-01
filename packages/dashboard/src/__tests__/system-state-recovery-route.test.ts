@@ -19,6 +19,10 @@ const rehearsedAt = '2026-08-31T13:30:00+00:00';
 const backupId = '11111111-1111-4111-8111-111111111111';
 const databaseChecksum = 'a'.repeat(64);
 const valkeyChecksum = 'b'.repeat(64);
+const deployedExactSha = 'd'.repeat(40);
+const deployedBootId = '22222222-2222-4222-8222-222222222222';
+const deployedMigrationHead = '20260831135500_adoption_recovery_proof.sql';
+const deployedConfigurationGeneration = 20260831135500;
 
 function fixture() {
   const admin = createMockSupabase();
@@ -34,7 +38,8 @@ function fixture() {
   ], error: null });
   admin.rpc.mockResolvedValue({ data: {
     identity: 'c'.repeat(32), backupId, databaseChecksumSha256: databaseChecksum,
-    valkeyChecksumSha256: valkeyChecksum, rehearsedAt, deployedExactSha: 'd'.repeat(40),
+    valkeyChecksumSha256: valkeyChecksum, rehearsedAt, deployedExactSha, deployedBootId,
+    deployedMigrationHead, deployedConfigurationGeneration,
     scope: 'database_rehearsal_and_valkey_snapshot', expiresAt: '2026-09-01T13:00:00+00:00', evidenceIds: [backupId],
   }, error: null });
   mocks.createAdminSupabase.mockReturnValue(admin);
@@ -48,7 +53,15 @@ beforeEach(() => {
   mocks.checkAdminRateLimit.mockResolvedValue(null);
   mocks.requireGuildOwner.mockResolvedValue({ ok: true, ctx: { guildId, discordId: 'owner', userId: 'owner' } });
   mocks.checkValkeyHealth.mockResolvedValue(true);
-  mocks.readValkeyKey.mockResolvedValue(null);
+  mocks.readValkeyKey.mockResolvedValue(JSON.stringify({ systemState: {
+    schemaVersion: 1, observedAt: '2026-08-31T13:59:59.000Z', mode: 'normal',
+    identity: {
+      lifecycle: 'ready', version: '1.0.0', exactSha: deployedExactSha, bootId: deployedBootId,
+      migrationHead: deployedMigrationHead, configurationGeneration: deployedConfigurationGeneration,
+      deploymentProfile: 'vps-single-guild',
+    },
+    providers: [], queues: [], features: [], guildConditions: [],
+  } }));
 });
 afterEach(() => vi.useRealTimers());
 
@@ -83,6 +96,26 @@ describe('System State recovery authority', () => {
     expect(response.status).toBe(200);
     expect(body).toMatchObject({ data: { recovery: { status: 'unverified' }, backups: { database: { status: 'current' } } } });
     expect(JSON.stringify(body)).not.toContain('fixture-private-connection-error');
+  });
+
+  it('keeps an unobserved runtime migration unknown instead of backfilling the database ledger', async () => {
+    const { admin } = fixture();
+    mocks.readValkeyKey.mockResolvedValue(JSON.stringify({ systemState: {
+      schemaVersion: 1, observedAt: '2026-08-31T13:59:59.000Z', mode: 'normal',
+      identity: {
+        lifecycle: 'ready', version: '1.0.0', exactSha: deployedExactSha, bootId: deployedBootId,
+        migrationHead: null, configurationGeneration: deployedConfigurationGeneration,
+        deploymentProfile: 'vps-single-guild',
+      },
+      providers: [], queues: [], features: [], guildConditions: [],
+    } }));
+
+    const response = await GET(new NextRequest('http://localhost/api/system-state'));
+    const body: unknown = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(admin.from).not.toHaveBeenCalledWith('schema_migrations');
+    expect(body).toMatchObject({ data: { identity: { migrationHead: null }, recovery: { status: 'unverified' } } });
   });
 
   it('never queries recovery authority before selected-guild ownership is established', async () => {

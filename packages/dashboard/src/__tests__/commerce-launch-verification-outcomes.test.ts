@@ -16,6 +16,7 @@ const ID = '00000000-0000-4000-8000-000000000201';
 const PRODUCT = '00000000-0000-4000-8000-000000000202';
 const ORDER = '00000000-0000-4000-8000-000000000203';
 const PAYMENT = '00000000-0000-4000-8000-000000000204';
+const FILE_TWO = '00000000-0000-4000-8000-000000000205';
 const START = '2026-08-23T12:00:00.000Z';
 const PURCHASE = '2026-08-23T12:01:00.000Z';
 const REVISION = '2026-08-23T12:02:00.000Z';
@@ -23,13 +24,27 @@ const policy = { product_id: PRODUCT, updated_at: START, license_mode: 'portal_o
   heartbeat_interval_seconds: 300, sdk_cache_ttl_ms: 60000, offline_grace_period_seconds: 86400, feature_flags: [],
   require_discord_guild_membership: false, rotation_policy: 'rotate-and-invalidate', self_service_device_removal: true };
 
-async function fixture(type: 'free' | 'one_time' | 'subscription' = 'free', deliveryType = 'license_key') {
+type FixtureComposition = {
+  readonly fileIds?: readonly string[];
+  readonly roleIds?: readonly string[];
+  readonly channelIds?: readonly string[];
+};
+
+async function fixture(
+  type: 'free' | 'one_time' | 'subscription' = 'free',
+  deliveryType = 'license_key',
+  composition: FixtureComposition = {},
+) {
   const mock = createMockSupabase();
   admin.create.mockReturnValue(mock);
+  const fileIds = composition.fileIds ?? (deliveryType === 'file' ? [ID] : []);
+  const roleIds = composition.roleIds ?? [];
+  const channelIds = composition.channelIds ?? [];
   const product = { id: PRODUCT, name: 'Launch product', description: null, active: false, type, delivery_type: deliveryType,
     price_cents: type === 'free' ? 0 : 100, updated_at: START, product_license_config: deliveryType === 'license_key' ? policy : null,
-    plans: [], product_files: deliveryType === 'file' ? [{ id: ID, created_at: START }] : [],
-    metadata: deliveryType === 'file' ? { completed_project_licensing: { outputFormats: 'ZIP' } } : {}, granted_role_ids: [], granted_channel_ids: [] };
+    plans: [], product_files: fileIds.map((id) => ({ id, created_at: START })),
+    metadata: deliveryType === 'file' ? { completed_project_licensing: { outputFormats: 'ZIP' } } : {},
+    granted_role_ids: roleIds, granted_channel_ids: channelIds };
   const draft = await savedProductToLicensingDraft(product, 'https://dashboard.example/api');
   const bundle = await buildSavedProductLicensingSdkBundle({ projectName: draft.projectName, projectContext: draft.projectContext,
     apiBase: 'https://dashboard.example/api', plansAndFeatures: draft.plansAndFeatures, installationIdentity: draft.installationIdentity,
@@ -50,9 +65,11 @@ async function fixture(type: 'free' | 'one_time' | 'subscription' = 'free', deli
     payments: type === 'free' ? [] : [{ id: PAYMENT, order_id: ORDER, status: 'refunded', paypal_payment_id: 'PAY-1', paypal_event_id: 'EV-1' }],
     entitlements: [{ id: ID, order_id: ORDER, product_id: PRODUCT, status: type === 'free' ? 'active' : 'cancelled' }],
     license_keys: deliveryType === 'license_key' ? [{ id: ID, order_id: ORDER, status: 'pending_activation' }] : [],
-    commerce_download_deliveries: deliveryType === 'file' ? [{ id: ID, order_id: ORDER, product_id: PRODUCT, file_id: ID, delivered_at: PURCHASE }] : [],
+    commerce_download_deliveries: fileIds.map((fileId) => ({ id: fileId, order_id: ORDER, product_id: PRODUCT, file_id: fileId, delivered_at: PURCHASE })),
     commerce_fulfillment_outward_intents: [{ id: ID, order_id: ORDER, intent_kind: 'receipt_dm', state: 'sent', sent_at: PURCHASE, outward_generation_id: ID }],
-    commerce_role_delivery_intents: [],
+    commerce_role_delivery_intents: roleIds.length + channelIds.length > 0 ? [{ id: ID, order_id: ORDER, product_id: PRODUCT, entitlement_id: ID,
+      permanent_role_ids: roleIds, completed_role_ids: roleIds, delivery_confirmed_at: PURCHASE,
+      completed_channel_ids: channelIds, channel_delivery_confirmed_at: PURCHASE, state: 'open', outward_generation_id: ID }] : [],
     payment_refunds: type === 'free' ? [] : [{ id: ID, order_id: ORDER, payment_id: PAYMENT, paypal_refund_id: 'REF-1' }],
     portal_cancellation_operations: type === 'subscription' ? [{ id: ID, order_id: ORDER, status: 'completed' }] : [],
     webhook_events: type === 'free' ? [] : [
@@ -87,6 +104,90 @@ describe('launch verifier observable readiness', () => {
     expect(response.status).toBe(200);
     expect(body.evaluation).toEqual({ state: 'ready', missing: [] });
     expect(body.data.state).toBe('ready');
+  });
+
+  it('requires current license, every file, and every Discord grant for one composed product', async () => {
+    // Given a saved dynamic product with file, role, and channel benefits.
+    await fixture('free', 'license_key', { fileIds: [ID, FILE_TWO], roleIds: ['role-1'], channelIds: ['channel-1'] });
+
+    // When its complete current delivery journey is verified.
+    const { response, body } = await verify();
+
+    // Then every configured rail is listed and proven.
+    expect(response.status).toBe(200);
+    expect(body.evaluation).toEqual({ state: 'ready', missing: [] });
+    expect(body.evidence.fulfillment_requirements).toEqual({
+      required: ['license', `file:${ID}`, `file:${FILE_TWO}`, 'discord_role:role-1', 'discord_channel:channel-1'],
+      verified: ['license', `file:${ID}`, `file:${FILE_TWO}`, 'discord_role:role-1', 'discord_channel:channel-1'],
+      missing: [],
+    });
+  });
+
+  it('requires both file and Discord evidence for a composed static product', async () => {
+    // Given a saved static product with one downloadable file and one Discord role.
+    await fixture('free', 'file', { fileIds: [ID], roleIds: ['role-1'] });
+
+    // When both deliveries are current and successful.
+    const { response, body } = await verify();
+
+    // Then neither rail substitutes for the other.
+    expect(response.status).toBe(200);
+    expect(body.evaluation).toEqual({ state: 'ready', missing: [] });
+    expect(body.evidence.fulfillment_requirements.missing).toEqual([]);
+  });
+
+  it('reports the exact secondary file missing from a composed dynamic product', async () => {
+    // Given valid license and Discord evidence but only one of two configured file deliveries.
+    const { rows } = await fixture('free', 'license_key', { fileIds: [ID, FILE_TWO], roleIds: ['role-1'] });
+    rows.commerce_download_deliveries = [{ id: ID, order_id: ORDER, product_id: PRODUCT, file_id: ID, delivered_at: PURCHASE }];
+
+    // When the composed journey is verified.
+    const { response, body } = await verify();
+
+    // Then readiness is blocked with the missing file identity preserved.
+    expect(response.status).toBe(200);
+    expect(body.evaluation.missing).toContain('fulfillment');
+    expect(body.evidence.fulfillment_requirements.missing).toEqual([`file:${FILE_TWO}`]);
+  });
+
+  it('reports a failed secondary Discord rail without discarding successful file evidence', async () => {
+    // Given a delivered file whose configured role intent did not complete.
+    const { rows } = await fixture('free', 'file', { fileIds: [ID], roleIds: ['role-1'] });
+    rows.commerce_role_delivery_intents = [{ id: ID, order_id: ORDER, product_id: PRODUCT, entitlement_id: ID,
+      permanent_role_ids: ['role-1'], completed_role_ids: [], delivery_confirmed_at: null,
+      completed_channel_ids: [], channel_delivery_confirmed_at: null, state: 'operator_required', outward_generation_id: ID }];
+
+    // When the composed journey is verified.
+    const { response, body } = await verify();
+
+    // Then only the failed role remains missing and its raw failure detail stays in the receipt.
+    expect(response.status).toBe(200);
+    expect(body.evidence.fulfillment_requirements).toEqual({
+      required: [`file:${ID}`, 'discord_role:role-1'],
+      verified: [`file:${ID}`],
+      missing: ['discord_role:role-1'],
+    });
+    expect(body.evidence.role_deliveries[0].state).toBe('operator_required');
+  });
+
+  it('preserves a completed Discord role when a sibling configured role is missing', async () => {
+    // Given two configured roles with current evidence for only the first role.
+    const { rows } = await fixture('free', 'file', { fileIds: [ID], roleIds: ['role-1', 'role-2'] });
+    rows.commerce_role_delivery_intents = [{ id: ID, order_id: ORDER, product_id: PRODUCT, entitlement_id: ID,
+      permanent_role_ids: ['role-1', 'role-2'], completed_role_ids: ['role-1'], delivery_confirmed_at: PURCHASE,
+      completed_channel_ids: [], channel_delivery_confirmed_at: null, state: 'operator_required', outward_generation_id: ID }];
+
+    // When the partially completed Discord vector is verified.
+    const { response, body } = await verify();
+
+    // Then the completed role remains proven and only its missing sibling is reported.
+    expect(response.status).toBe(200);
+    expect(body.evidence.fulfillment_requirements).toEqual({
+      required: [`file:${ID}`, 'discord_role:role-1', 'discord_role:role-2'],
+      verified: [`file:${ID}`, 'discord_role:role-1'],
+      missing: ['discord_role:role-2'],
+    });
+    expect(body.evaluation.missing).toContain('fulfillment');
   });
 
   it.each(['pending', 'sending', 'failed', 'uncertain', 'absent'])('blocks free readiness when delivery is %s', async (state) => {

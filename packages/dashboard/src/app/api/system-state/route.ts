@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
   if (!auth.ok) return auth.response;
 
   const admin = createAdminSupabase();
-  const [valkeyConnected, heartbeatRaw, evidenceResult, dlqResult, migrationResult, recoveryResult] = await Promise.all([
+  const [valkeyConnected, heartbeatRaw, evidenceResult, dlqResult, recoveryResult] = await Promise.all([
     checkValkeyHealth(),
     readValkeyKey(BOT_HEARTBEAT_KEY),
     admin
@@ -47,13 +47,6 @@ export async function GET(request: NextRequest) {
       .select('id', { count: 'exact', head: true })
       .eq('guild_id', auth.ctx.guildId)
       .eq('acknowledged', false),
-    admin
-      .from('schema_migrations')
-      .select('filename')
-      .eq('success', true)
-      .order('applied_at', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
     admin.rpc('adoption_recovery_proof', {
       p_guild_id: auth.ctx.guildId,
       p_since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
@@ -65,13 +58,7 @@ export async function GET(request: NextRequest) {
     const parsed = SystemStateEvidenceSchema.safeParse(row);
     if (parsed.success) evidence.push(parsed.data);
   }
-  const observedRuntime = parseRuntimeHeartbeat(heartbeatRaw);
-  const runtime = observedRuntime && !observedRuntime.identity.migrationHead && migrationResult.data?.filename
-    ? {
-        ...observedRuntime,
-        identity: { ...observedRuntime.identity, migrationHead: migrationResult.data.filename },
-      }
-    : observedRuntime;
+  const runtime = parseRuntimeHeartbeat(heartbeatRaw);
   const state = buildDashboardSystemState({
     observedAt: new Date().toISOString(),
     guildId: auth.ctx.guildId,

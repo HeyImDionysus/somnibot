@@ -160,11 +160,11 @@ describe('middleware health access', () => {
     expect(mockCreateServerClient).not.toHaveBeenCalled();
   });
 
-  it('keeps setup writes fail-closed on CSRF without public Supabase env', async () => {
+  it('lets retired setup writes reach the route-level Launcher-authority rejection', async () => {
     const res = await runWithoutPublicSupabaseEnv('/api/setup', { method: 'POST' });
 
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'Missing CSRF token' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
     expect(mockCreateServerClient).not.toHaveBeenCalled();
   });
 

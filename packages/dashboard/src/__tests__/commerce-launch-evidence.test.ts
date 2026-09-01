@@ -131,4 +131,61 @@ describe('commerce launch evidence', () => {
     });
     expect(result.stages.fulfillment).toBe('pending');
   });
+
+  it('requires every configured license, file, role, and channel fulfillment', () => {
+    // Given a composed product whose saved policy requires four distinct benefits.
+    const result = evaluateCommerceLaunchEvidence({
+      ...base,
+      product: {
+        ...base.product,
+        requiredFulfillments: [
+          { kind: 'license' },
+          { kind: 'download', targetId: 'file-1' },
+          { kind: 'discord_role', targetId: 'role-1' },
+          { kind: 'discord_channel', targetId: 'channel-1' },
+        ],
+      },
+      fulfillments: [
+        base.fulfillments[0],
+        { id: 'download-1', orderId: 'order-1', kind: 'download', targetId: 'file-1' },
+        { id: 'role-1', orderId: 'order-1', kind: 'discord_role', targetId: 'role-1', deliveryState: 'sent', sentAt: '2026-08-23T12:01:00Z' },
+        { id: 'channel-1', orderId: 'order-1', kind: 'discord_channel', targetId: 'channel-1', deliveryState: 'sent', sentAt: '2026-08-23T12:01:00Z' },
+      ],
+    });
+
+    // Then all four concrete requirements are proven.
+    expect(result.stages.fulfillment).toBe('verified');
+    expect(result.fulfillment).toEqual({
+      required: ['license', 'file:file-1', 'discord_role:role-1', 'discord_channel:channel-1'],
+      verified: ['license', 'file:file-1', 'discord_role:role-1', 'discord_channel:channel-1'],
+      missing: [],
+    });
+  });
+
+  it('preserves the specific missing secondary rail instead of accepting the primary delivery', () => {
+    // Given current license evidence without the separately configured file delivery.
+    const result = evaluateCommerceLaunchEvidence({
+      ...base,
+      product: {
+        ...base.product,
+        requiredFulfillments: [
+          { kind: 'license' },
+          { kind: 'download', targetId: 'file-1' },
+        ],
+      },
+    });
+
+    // Then the composed fulfillment is blocked with the exact missing file.
+    expect(result.stages.fulfillment).toBe('pending');
+    expect(result.fulfillment.missing).toEqual(['file:file-1']);
+  });
+
+  it('retains delivery-type fallback for a truly single-rail product', () => {
+    // Given a legacy license-only product with no explicit requirement vector.
+    const result = evaluateCommerceLaunchEvidence(base);
+
+    // Then its one successful rail remains sufficient.
+    expect(result.stages.fulfillment).toBe('verified');
+    expect(result.fulfillment).toEqual({ required: ['license'], verified: ['license'], missing: [] });
+  });
 });

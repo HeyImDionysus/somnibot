@@ -5,11 +5,12 @@ const fixtures = vi.hoisted(() => ({
   confirm: vi.fn(async () => ({ response: 0 })),
   backup: vi.fn(async () => ({ status: 'backed-up' })),
   rehearse: vi.fn(async () => ({ status: 'rehearsed' })),
+  latestBackup: vi.fn(async () => ({ backupId: '11111111-1111-4111-8111-111111111111', capturedAt: '2026-08-31T12:00:00.000Z' })),
 }));
 vi.mock('electron', () => ({ app: { getPath: () => 'C:/private-fixture' },
   dialog: { showMessageBox: fixtures.confirm }, ipcMain: { handle: (name: string, callback: (...args: unknown[]) => Promise<unknown>) => fixtures.handlers.set(name, callback) } }));
 vi.mock('../main/config-store.js', () => ({ getConfig: () => ({ supabaseUrl: 'https://sourceproject.supabase.co', supabaseDbPassword: 'source-secret', supabaseSecretKey: 'audit-secret', discordGuildId: '123456789012345678', guilds: [] }) }));
-vi.mock('../main/database-recovery.js', () => ({ createDatabaseRecovery: () => ({ backup: fixtures.backup, rehearse: fixtures.rehearse }) }));
+vi.mock('../main/database-recovery.js', () => ({ createDatabaseRecovery: () => ({ backup: fixtures.backup, rehearse: fixtures.rehearse, latestBackup: fixtures.latestBackup }) }));
 import { registerDatabaseRecoveryIpc } from '../main/database-recovery-ipc.js';
 
 beforeEach(() => { vi.clearAllMocks(); fixtures.handlers.clear(); fixtures.confirm.mockResolvedValue({ response: 0 }); registerDatabaseRecoveryIpc(); });
@@ -43,5 +44,15 @@ describe('database recovery native approval', () => {
     // Then the approved parsed request reaches the owned-backup runner.
     expect(fixtures.rehearse).toHaveBeenCalledWith(expect.objectContaining({ guildId: '123456789012345678' }), { ...request, template: '' });
     expect(JSON.stringify(fixtures.confirm.mock.calls)).not.toContain('source-secret');
+  });
+
+  it('exposes only a safe retained-backup summary for the current source', async () => {
+    // Given a verified retained backup and saved source credentials.
+    // When the renderer requests post-restart recovery availability.
+    const result = await fixtures.handlers.get('database:retained-backup')?.();
+    // Then IPC returns only the opaque ID and capture time, never source or target credentials.
+    expect(result).toEqual({ backupId: '11111111-1111-4111-8111-111111111111', capturedAt: '2026-08-31T12:00:00.000Z' });
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(fixtures.latestBackup).toHaveBeenCalledWith(expect.objectContaining({ projectUrl: 'https://sourceproject.supabase.co', guildId: '123456789012345678' }));
   });
 });

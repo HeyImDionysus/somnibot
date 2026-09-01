@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { readdir, lstat, statfs, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { Transform } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { DatabaseRecoveryError, type RecoveryCommand } from './database-recovery-contract.js';
 
@@ -36,22 +36,28 @@ function scopedEnvironment(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 export async function runRecoveryCommand(command: RecoveryCommand): Promise<string> {
+  if (command.input && command.input.length > RECOVERY_MAX_BYTES) throw new DatabaseRecoveryError('artifact-size-limit');
   const output = command.outputFile ? await openRecoveryOutput(command) : null;
   return new Promise((resolve, reject) => {
-    const child = spawn(command.tool, [...command.args], {
+    const spawnOptions = {
       env: scopedEnvironment(command.env), windowsHide: true, shell: false,
-      detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
-    });
+      detached: process.platform !== 'win32',
+    };
+    const child = command.input
+      ? spawn(command.tool, [...command.args], { ...spawnOptions, stdio: ['pipe', 'pipe', 'pipe'] })
+      : spawn(command.tool, [...command.args], { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
     const errorChunks: Buffer[] = [];
     let outputBytes = 0;
     let terminalError: DatabaseRecoveryError | null = null;
+    let inputFailed = false;
     let closed = false;
     let checking = false;
     const stop = (code: string) => {
       if (terminalError) return;
       terminalError = new DatabaseRecoveryError(code);
-      output?.destroy(terminalError);
+      output?.destroy();
+      child.stdin?.destroy();
       if (!child.pid || closed) return;
       if (process.platform === 'win32') {
         const killer = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -76,6 +82,9 @@ export async function runRecoveryCommand(command: RecoveryCommand): Promise<stri
       else errorChunks.push(chunk);
     };
     let artifactBytes = 0;
+    const feeding = command.input && child.stdin
+      ? pipeline(Readable.from([command.input]), child.stdin).catch(() => { inputFailed = true; })
+      : Promise.resolve();
     const writing = output ? pipeline(child.stdout, new Transform({
       transform(chunk: Buffer, _encoding, callback) {
         artifactBytes += chunk.length;
@@ -89,11 +98,12 @@ export async function runRecoveryCommand(command: RecoveryCommand): Promise<stri
     child.on('error', (error) => {
       clearTimeout(timer); clearInterval(monitor);
       output?.destroy();
+      child.stdin?.destroy();
       reject(new DatabaseRecoveryError('code' in error && error.code === 'ENOENT' ? 'missing-client-prerequisite' : 'client-start-failed'));
     });
     child.on('close', async (code) => {
       closed = true;
-      await writing;
+      await Promise.all([writing, feeding]);
       clearTimeout(timer); clearInterval(monitor);
       if (terminalError) reject(terminalError);
       else if (code !== 0) {
@@ -102,6 +112,7 @@ export async function runRecoveryCommand(command: RecoveryCommand): Promise<stri
           .find((known) => errorText.includes(known));
         reject(new DatabaseRecoveryError(refusal ?? 'client-command-failed'));
       }
+      else if (inputFailed) reject(new DatabaseRecoveryError('client-input-failed'));
       else resolve(Buffer.concat(chunks).toString('utf8').trim());
     });
   });

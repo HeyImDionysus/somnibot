@@ -13,7 +13,7 @@ class ElementFixture {
   async click() { await this.handlers.get('click')?.(); }
 }
 
-function setupSurface() {
+function setupSurface(retainedBackup: { readonly backupId: string; readonly capturedAt: string } | null = null) {
   const elements = new Map<string, ElementFixture>();
   const element = (id: string) => {
     const existing = elements.get(id);
@@ -24,10 +24,11 @@ function setupSurface() {
   };
   const backupDatabase = vi.fn(async () => ({ status: 'backed-up', backupId: 'owned-backup', message: 'captured' }));
   const rehearseDatabase = vi.fn(async (_request: unknown) => ({ status: 'rehearsed', message: 'validated' }));
+  const getRetainedDatabaseBackup = vi.fn(async () => retainedBackup);
   runInNewContext(readFileSync(fileURLToPath(new URL('../renderer/database-recovery.js', import.meta.url)), 'utf8'), {
-    document: { getElementById: element }, window: { somnibot: { backupDatabase, rehearseDatabase } },
+    document: { getElementById: element }, window: { somnibot: { backupDatabase, rehearseDatabase, getRetainedDatabaseBackup } },
   });
-  return { element, backupDatabase, rehearseDatabase };
+  return { element, backupDatabase, rehearseDatabase, getRetainedDatabaseBackup };
 }
 
 describe('database recovery renderer behavior', () => {
@@ -54,6 +55,22 @@ describe('database recovery renderer behavior', () => {
     expect(surface.rehearseDatabase).toHaveBeenCalledWith(expect.objectContaining({ backupId: 'owned-backup', password: 'transient-secret', confirmation: 'target' }));
     expect(surface.element('database-recovery-password').value).toBe('');
     expect(surface.element('database-rehearse').disabled).toBe(false);
+  });
+
+  it('enables rehearsal from a verified retained backup after initialization without running an operation', async () => {
+    // Given a retained backup summary returned during renderer initialization.
+    const surface = setupSurface({ backupId: 'retained-backup', capturedAt: '2026-08-31T12:00:00.000Z' });
+    // When initialization settles without an owner action.
+    await vi.waitFor(() => expect(surface.element('database-rehearse').disabled).toBe(false));
+    // Then rehearsal is enabled, while backup and rehearsal remain owner-triggered.
+    expect(surface.backupDatabase).not.toHaveBeenCalled();
+    expect(surface.rehearseDatabase).not.toHaveBeenCalled();
+    surface.element('database-recovery-target').value = 'https://target.supabase.co';
+    surface.element('database-recovery-password').value = 'transient-secret';
+    surface.element('database-recovery-confirmation').value = 'target';
+    await surface.element('database-rehearse').click();
+    expect(surface.rehearseDatabase).toHaveBeenCalledWith(expect.objectContaining({ backupId: 'retained-backup' }));
+    await vi.waitFor(() => expect(surface.element('database-recovery-password').value).toBe(''));
   });
 
   it('blocks a rehearsal when target details have not been supplied', async () => {

@@ -12,7 +12,9 @@
  * - inbound-webhooks/* → High-entropy receiver token + per-relay/IP rate limits
  * - csrf            → GET-only token issuance
  *
- * V6 Audit §1.1: /api/setup intentionally NOT exempt (uses parseBody + Supabase auth).
+ * /api/setup intentionally stays out of this prefix list. Its exact-path
+ * mutation handlers are passed through by middleware only to return 405 and
+ * never read or mutate setup state.
  *
  * This module is deliberately dependency-free: it is the single source of
  * truth for BOTH the server-side check (lib/api/csrf.ts) and the client fetch

@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { LauncherAuditEntry } from './audit-log.js';
 import { databaseConnection, DatabaseRecoveryError, type RecoveryCommand, type RecoveryResult, type RecoverySource, type RehearsalRequest } from './database-recovery-contract.js';
 import { checkRecoveryCapacity, RECOVERY_MAX_BYTES } from './database-recovery-process.js';
-import { describeArtifact, manifestChecksum, RECOVERY_ARTIFACTS, RECOVERY_HISTORY_ARTIFACTS, saveManifest, verifyOwnedArtifacts, type RecoveryManifest } from './database-recovery-artifacts.js';
+import { describeArtifact, findLatestRecoveryBackup, loadRecoveryManifest, manifestChecksum, RECOVERY_ARTIFACTS, RECOVERY_HISTORY_ARTIFACTS, saveManifest, snapshotOwnedArtifacts, type RecoveryManifest } from './database-recovery-artifacts.js';
 import { parseRecoveryIdentity, RECOVERY_IDENTITY_SQL, RECOVERY_TARGET_GUARD_SQL, recoveryValidationSql, recoveryTimestamp } from './database-recovery-sql.js';
 import { observeRecoveryRuntime } from './database-recovery-runtime.js';
 import { loadRecoveryResources, type RecoveryVariant } from './database-recovery-resources.js';
@@ -15,7 +15,6 @@ export type RecoveryDependencies = {
   readonly audit: (entry: LauncherAuditEntry, source: RecoverySource) => Promise<boolean>;
 };
 export function createDatabaseRecovery(root: string, dependencies: RecoveryDependencies) {
-  const backups = new Map<string, RecoveryManifest>();
   let busy = false;
   const psqlArgs = ['--no-psqlrc', '--quiet', '--tuples-only', '--no-align', '--set', 'ON_ERROR_STOP=1'];
   const runExclusive = async (operation: () => Promise<RecoveryResult>): Promise<RecoveryResult> => {
@@ -80,7 +79,6 @@ export function createDatabaseRecovery(root: string, dependencies: RecoveryDepen
           consistency: 'single-data-snapshot-with-stable-schema-config-checks' };
         await saveManifest(directory, manifest);
         if (artifacts.reduce((bytes, artifact) => bytes + artifact.bytes, 0) + (await describeArtifact(directory, 'manifest.json')).bytes > RECOVERY_MAX_BYTES) throw new DatabaseRecoveryError('artifact-size-limit');
-        backups.set(backupId, manifest);
         retained = true;
         const audited = await dependencies.audit({ action: 'launcher.backup.database_succeeded', category: 'infrastructure', targetType: 'database_backup',
           targetId: backupId, occurrenceKey: `launcher.backup.database_succeeded:${backupId}`, details: proofDetails(manifest) }, source);
@@ -94,18 +92,19 @@ export function createDatabaseRecovery(root: string, dependencies: RecoveryDepen
     }),
     rehearse: (source: RecoverySource, request: RehearsalRequest): Promise<RecoveryResult> => runExclusive(async () => {
       try {
-        const manifest = request.backupId ? backups.get(request.backupId) : undefined;
-        if (!manifest) throw new DatabaseRecoveryError('needs-current-owned-backup');
+        if (!request.backupId) throw new DatabaseRecoveryError('needs-owned-backup');
+        const manifest = await loadRecoveryManifest(root, request.backupId);
         const current = databaseConnection(source);
         const target = databaseConnection(request);
         if (current.projectRef !== manifest.sourceProjectRef || source.guildId !== manifest.guildId) throw new DatabaseRecoveryError('source-context-changed');
         if (target.projectRef === manifest.sourceProjectRef || request.confirmation !== target.projectRef) throw new DatabaseRecoveryError('isolated-target-required');
-        const directory = await verifyOwnedArtifacts(root, manifest);
+        const directory = path.resolve(root, manifest.backupId);
         await checkRecoveryCapacity(directory, 0);
+        const input = await snapshotOwnedArtifacts(root, manifest);
         const args = [...psqlArgs, '--dbname', target.url, '--single-transaction', '--command', RECOVERY_TARGET_GUARD_SQL];
-        for (const artifact of manifest.artifacts) args.push('--file', path.join(directory, artifact.name));
+        args.push('--file', '-');
         args.push('--command', recoveryValidationSql(parseRecoveryIdentity(JSON.stringify(manifest))));
-        await dependencies.run({ tool: 'psql', args, env: target.env, directory });
+        await dependencies.run({ tool: 'psql', args, env: target.env, directory, input });
         const rehearsedAt = recoveryTimestamp(await dependencies.run({ tool: 'psql',
           args: [...psqlArgs, '--dbname', current.url, '--command', 'SELECT to_jsonb(clock_timestamp());'],
           env: { ...current.env, PGOPTIONS: `${current.env.PGOPTIONS} -c default_transaction_read_only=on` } }));
@@ -117,5 +116,10 @@ export function createDatabaseRecovery(root: string, dependencies: RecoveryDepen
           : 'Isolated logical restore validated, but audit recording failed. Readiness remains unverified; target data is retained.' };
       } catch (error) { return await failed({ action: 'launcher.restore.rehearsal_failed', source, backupId: request.backupId }, error); }
     }),
+    latestBackup: async (source: RecoverySource) => {
+      await mkdir(root, { recursive: true, mode: 0o700 });
+      const connection = databaseConnection(source);
+      return await findLatestRecoveryBackup(root, { sourceProjectRef: connection.projectRef, guildId: source.guildId });
+    },
   };
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SystemStateSchema } from '../../../shared/src/system-state/index.js';
+import type { RuntimeSystemState } from '../../../shared/src/system-state/index.js';
 import { buildDashboardSystemState } from '@/lib/system-state';
 import type { SystemStateEvidence } from '@/lib/system-state';
 
@@ -9,16 +10,41 @@ const rehearsedAt = '2026-08-31T13:30:00.000Z';
 const backupId = '11111111-1111-4111-8111-111111111111';
 const databaseChecksum = 'a'.repeat(64);
 const valkeyChecksum = 'b'.repeat(64);
+const deployedExactSha = 'd'.repeat(40);
+const deployedBootId = '22222222-2222-4222-8222-222222222222';
+const deployedMigrationHead = '20260831135500_adoption_recovery_proof.sql';
+const deployedConfigurationGeneration = 20260831135500;
 const recoveryProof = {
   identity: 'c'.repeat(32),
   backupId,
   databaseChecksumSha256: databaseChecksum,
   valkeyChecksumSha256: valkeyChecksum,
   rehearsedAt,
-  deployedExactSha: 'd'.repeat(40),
+  deployedExactSha,
+  deployedBootId,
+  deployedMigrationHead,
+  deployedConfigurationGeneration,
   scope: 'database_rehearsal_and_valkey_snapshot',
   expiresAt: '2026-09-01T13:00:00.000Z',
   evidenceIds: [backupId],
+};
+const recoveryRuntime: RuntimeSystemState = {
+  schemaVersion: 1,
+  observedAt,
+  mode: 'normal',
+  identity: {
+    lifecycle: 'ready',
+    version: '1.0.0',
+    exactSha: deployedExactSha,
+    bootId: deployedBootId,
+    migrationHead: deployedMigrationHead,
+    configurationGeneration: deployedConfigurationGeneration,
+    deploymentProfile: 'vps-single-guild',
+  },
+  providers: [],
+  queues: [],
+  features: [],
+  guildConditions: [],
 };
 
 function recoveryEvidence(): SystemStateEvidence[] {
@@ -32,9 +58,13 @@ function recoveryEvidence(): SystemStateEvidence[] {
   ];
 }
 
-function buildRecoveryState(evidence: SystemStateEvidence[], proof: unknown = recoveryProof) {
+function buildRecoveryState(
+  evidence: SystemStateEvidence[],
+  proof: unknown = recoveryProof,
+  runtime: RuntimeSystemState | null = recoveryRuntime,
+) {
   const input = {
-    observedAt, guildId: '1464713668766732393', runtime: null,
+    observedAt, guildId: '1464713668766732393', runtime,
     valkeyConnected: true, supabaseConnected: true, dlqDepth: 0,
     evidence, credentials: [], recoveryProof: proof,
   };
@@ -154,12 +184,40 @@ describe('dashboard system state builder', () => {
     { rehearsedAt: '2026-08-31T12:59:00.000Z' },
     { expiresAt: '2026-08-31T13:59:59.000Z' },
     { scope: 'database_and_valkey_restored' },
+    { deployedExactSha: null },
+    { deployedBootId: null },
+    { deployedMigrationHead: null },
+    { deployedConfigurationGeneration: null },
   ])('rejects mismatched, expired or overclaimed recovery proof %j', (changes) => {
     const state = buildRecoveryState(recoveryEvidence(), { ...recoveryProof, ...changes });
 
     expect(state.recovery.status).not.toBe('ready');
     expect(state.backups.database.lastRestoreRehearsalAt).toBeNull();
     expect(state.backups.valkey.lastRestoreRehearsalAt).toBeNull();
+  });
+
+  it.each([
+    { label: 'exact SHA', proof: { ...recoveryProof, deployedExactSha: 'e'.repeat(40) } },
+    { label: 'boot ID', proof: { ...recoveryProof, deployedBootId: '33333333-3333-4333-8333-333333333333' } },
+    { label: 'migration head', proof: { ...recoveryProof, deployedMigrationHead: '20260831135600_drift.sql' } },
+    { label: 'configuration generation', proof: { ...recoveryProof, deployedConfigurationGeneration: deployedConfigurationGeneration + 1 } },
+  ])('keeps recovery unverified when proof $label drifts from the current runtime', ({ proof }) => {
+    const state = buildRecoveryState(recoveryEvidence(), proof);
+
+    expect(state.recovery.status).toBe('unverified');
+    expect(state.recovery.lastRehearsalAt).toBeNull();
+  });
+
+  it.each([
+    { label: 'exact SHA', identity: { ...recoveryRuntime.identity, exactSha: null } },
+    { label: 'boot ID', identity: { ...recoveryRuntime.identity, bootId: null } },
+    { label: 'migration head', identity: { ...recoveryRuntime.identity, migrationHead: null } },
+    { label: 'configuration generation', identity: { ...recoveryRuntime.identity, configurationGeneration: null } },
+  ])('keeps recovery unverified when current runtime $label is unknown', ({ identity }) => {
+    const state = buildRecoveryState(recoveryEvidence(), recoveryProof, { ...recoveryRuntime, identity });
+
+    expect(state.recovery.status).toBe('unverified');
+    expect(state.recovery.lastRehearsalAt).toBeNull();
   });
 
   it('invalidates recovery when a newer rehearsal has failed', () => {

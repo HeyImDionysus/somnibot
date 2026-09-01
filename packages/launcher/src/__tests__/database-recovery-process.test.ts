@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,10 +10,25 @@ vi.mock('node:child_process', () => ({ spawn: spawnFixture }));
 import { runRecoveryCommand } from '../main/database-recovery-process.js';
 
 class ChildFixture extends EventEmitter {
+  readonly stdin: Writable;
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly pid = 43120;
   readonly kill = vi.fn();
+  constructor(stdin: Writable = new PassThrough()) { super(); this.stdin = stdin; }
+}
+class ControlledInput extends Writable {
+  readonly chunks: Buffer[] = [];
+  private releaseWrite: (() => void) | null = null;
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) {
+    this.chunks.push(Buffer.from(chunk));
+    this.releaseWrite = callback;
+  }
+  release() {
+    const callback = this.releaseWrite;
+    this.releaseWrite = null;
+    callback?.();
+  }
 }
 let child: ChildFixture;
 const directories: string[] = [];
@@ -57,6 +72,69 @@ describe('bounded recovery process adapter', () => {
     await expect(pending).resolves.toBe('result');
     expect(spawnFixture.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ shell: false, windowsHide: true, env: expect.objectContaining({ PGPASSWORD: 'transient-secret' }) }));
     expect(JSON.stringify(spawnFixture.mock.calls[0]?.[1])).not.toContain('transient-secret');
+  });
+
+  it('streams bounded snapshot input through stdin without placing SQL in argv', async () => {
+    // Given immutable verified SQL bytes and a child that accepts stdin.
+    const input = Buffer.from('SELECT 1;\n');
+    const chunks: Buffer[] = [];
+    child.stdin.on('data', (chunk: Buffer) => chunks.push(chunk));
+    const pending = runRecoveryCommand({ tool: 'psql', args: ['--file', '-'], env: {}, input });
+    // When the input stream reaches EOF and the child exits successfully.
+    await vi.waitFor(() => expect(child.stdin.writableEnded).toBe(true));
+    child.emit('close', 0);
+    // Then backpressured stdin receives the snapshot and argv contains no SQL.
+    await expect(pending).resolves.toBe('');
+    expect(Buffer.concat(chunks)).toEqual(input);
+    expect(spawnFixture.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }));
+    expect(JSON.stringify(spawnFixture.mock.calls[0]?.[1])).not.toContain('SELECT 1');
+  });
+
+  it('waits for controlled stdin backpressure to release after child close', async () => {
+    // Given a child stdin that accepts bytes but defers its write callback.
+    const stdin = new ControlledInput();
+    child = new ChildFixture(stdin);
+    spawnFixture.mockReturnValue(child);
+    const input = Buffer.from('SELECT controlled;\n');
+    const pending = runRecoveryCommand({ tool: 'psql', args: ['--file', '-'], env: {}, input });
+    await vi.waitFor(() => expect(stdin.chunks).toHaveLength(1));
+    let settled = false;
+    void pending.finally(() => { settled = true; });
+    // When the child closes before the pending write is released.
+    child.emit('close', 0);
+    await Promise.resolve();
+    // Then the adapter remains pending until release and resolves with the exact bytes delivered.
+    expect(settled).toBe(false);
+    stdin.release();
+    await expect(pending).resolves.toBe('');
+    expect(Buffer.concat(stdin.chunks)).toEqual(input);
+  });
+
+  it('reports client input failure when stdin fails before a zero exit', async () => {
+    // Given snapshot input whose child stdin fails independently of process exit.
+    const stdin = new ControlledInput();
+    child = new ChildFixture(stdin);
+    spawnFixture.mockReturnValue(child);
+    const pending = runRecoveryCommand({ tool: 'psql', args: ['--file', '-'], env: {}, input: Buffer.from('SELECT 1;') });
+    const assertion = expect(pending).rejects.toMatchObject({ code: 'client-input-failed' });
+    await vi.waitFor(() => expect(stdin.chunks).toHaveLength(1));
+    // When stdin fails and the child otherwise reports success.
+    stdin.destroy(new Error('input failed'));
+    child.emit('close', 0);
+    // Then the adapter refuses the incomplete restore input.
+    await assertion;
+  });
+
+  it('preserves a known target refusal when the child closes stdin early', async () => {
+    // Given a restore child that rejects the target before consuming all snapshot bytes.
+    const pending = runRecoveryCommand({ tool: 'psql', args: ['--file', '-'], env: {}, input: Buffer.alloc(1024, 'x') });
+    const assertion = expect(pending).rejects.toMatchObject({ code: 'recovery_target_must_be_unused' });
+    // When stderr reports the known refusal and the child closes early.
+    child.stderr.end('recovery_target_must_be_unused');
+    child.stdin.destroy(new Error('early close'));
+    child.emit('close', 1);
+    // Then input-stream failure does not mask the safe refusal code.
+    await assertion;
   });
 
   it('reports a missing executable without echoing native error details', async () => {

@@ -60,10 +60,7 @@ describe('system-state credential authorization boundary', () => {
     expect(body).toMatchObject({ success: true, data: { credentials: [] } });
   });
 
-  it.each([
-    ['system state', getSystemState, '/api/system-state'],
-    ['diagnostic export', getDiagnosticBundle, '/api/system-state/diagnostic-bundle'],
-  ] as const)('reads the last successful migration for %s from the actual ledger shape', async (surface, handler, path) => {
+  it('reads the last successful migration for diagnostic export from the actual ledger shape', async () => {
     const admin = createMockSupabase();
     const migrations = registerTable(admin, 'schema_migrations');
     mocks.createAdminSupabase.mockReturnValue(admin);
@@ -90,13 +87,11 @@ describe('system-state credential authorization boundary', () => {
       },
     }));
 
-    const response = await handler(request(path));
+    const response = await getDiagnosticBundle(request('/api/system-state/diagnostic-bundle'));
     const body: unknown = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toMatchObject(surface === 'system state'
-      ? { success: true, data: { identity: { migrationHead: applied } } }
-      : { success: true, data: { deployment: { migrationHead: applied } } });
+    expect(body).toMatchObject({ success: true, data: { deployment: { migrationHead: applied } } });
   });
 
   it('returns only the authorized guild condition from a deployment-global heartbeat', async () => {

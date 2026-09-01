@@ -32,6 +32,9 @@ const recoveryProofSchema = z.object({
   valkeyChecksumSha256: checksumSchema,
   rehearsedAt: timestampSchema,
   deployedExactSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  deployedBootId: z.string().uuid(),
+  deployedMigrationHead: z.string().trim().min(1).max(255),
+  deployedConfigurationGeneration: z.number().int().nonnegative(),
   scope: z.literal('database_rehearsal_and_valkey_snapshot'),
   expiresAt: timestampSchema,
   evidenceIds: z.array(z.string().uuid()).min(1).max(20),
@@ -128,7 +131,15 @@ export function buildDashboardSystemState(input: DashboardSystemStateInput): Sys
   const valkeyBackup = backupState(input.evidence, 'launcher.backup.valkey', nowMs);
   const parsedProof = recoveryProofSchema.safeParse(input.recoveryProof);
   const proof = parsedProof.success ? parsedProof.data : null;
-  const proofMatches = proof !== null && rehearsal !== null && rehearsal.success
+  const runtimeIdentity = runtime?.identity ?? null;
+  const proofMatches = proof !== null && runtimeIdentity !== null
+    && runtimeIdentity.exactSha !== null && runtimeIdentity.bootId !== null
+    && runtimeIdentity.migrationHead !== null && runtimeIdentity.configurationGeneration !== null
+    && proof.deployedExactSha.toLowerCase() === runtimeIdentity.exactSha.toLowerCase()
+    && proof.deployedBootId === runtimeIdentity.bootId
+    && proof.deployedMigrationHead === runtimeIdentity.migrationHead
+    && proof.deployedConfigurationGeneration === runtimeIdentity.configurationGeneration
+    && rehearsal !== null && rehearsal.success
     && rehearsal.action === 'launcher.restore.rehearsal_succeeded'
     && databaseBackup.status === 'current' && valkeyBackup.status === 'current'
     && proof.backupId === databaseEntry?.details.backupId && proof.backupId === rehearsal.details.backupId

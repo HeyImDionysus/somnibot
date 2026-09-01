@@ -1,6 +1,6 @@
 import type { DatabaseCredentials } from './database-recovery-api.js';
 export type { DatabaseCredentials, RecoverySource, RehearsalRequest, RecoveryResult } from './database-recovery-api.js';
-export type RecoveryCommand = { readonly tool: 'docker' | 'psql'; readonly args: readonly string[]; readonly env: NodeJS.ProcessEnv; readonly directory?: string; readonly outputFile?: string; readonly outputLimit?: number };
+export type RecoveryCommand = { readonly tool: 'docker' | 'psql'; readonly args: readonly string[]; readonly env: NodeJS.ProcessEnv; readonly directory?: string; readonly outputFile?: string; readonly outputLimit?: number; readonly input?: Buffer };
 export class DatabaseRecoveryError extends Error {
   public constructor(public readonly code: string) { super(code); this.name = 'DatabaseRecoveryError'; }
 }

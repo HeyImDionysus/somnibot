@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -103,10 +103,95 @@ describe('database recovery boundaries', () => {
     expect(command?.env.PGPASSWORD).toBe('target secret');
     expect(command?.args).toContain('--single-transaction');
     expect(command?.args.indexOf('--command')).toBeLessThan(command?.args.indexOf('--file') ?? 0);
-    expect(command?.args.filter((arg) => arg.endsWith('.sql'))).toEqual(['roles.sql', 'schema.sql', 'data.sql'].map((name) => path.join(f.directory, backup.backupId ?? '', name)));
+    expect(command?.args.filter((arg) => arg === '--file' || arg === '-')).toEqual(['--file', '-']);
+    expect(command?.args.some((arg) => arg.includes(f.directory))).toBe(false);
+    expect(command?.input?.toString('utf8')).toBe('-- owned test dump\nSELECT 1;\n\n-- owned test dump\nSELECT 1;\n\n-- owned test dump\nSELECT 1;\n\n');
     expect(command?.args.at(-1)).not.toContain('artifactChecksums');
     expect(JSON.stringify(command?.args)).not.toContain('target secret');
     expect(f.audit).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'launcher.restore.rehearsal_succeeded', details: expect.objectContaining({ validated: true, targetProjectRef: 'targetproject' }) }), source);
+  });
+
+  it('rehearses an intact retained backup after the recovery service is recreated', async () => {
+    // Given a completed backup whose creating service no longer exists.
+    const f = await fixture();
+    const backup = await f.recovery.backup(source);
+    expect(backup.status).toBe('backed-up');
+    f.run.mockClear();
+    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit });
+    // When the owner rehearses the retained backup through the recreated service.
+    const result = await restarted.rehearse(source, { projectUrl: 'https://targetproject.supabase.co', password: 'target secret', template: '', backupId: backup.backupId, confirmation: 'targetproject' });
+    // Then the verified files on disk are restored without process-memory ownership.
+    expect(result.status).toBe('rehearsed');
+    expect(f.run.mock.calls[0]?.[0].args.filter((arg) => arg === '--file' || arg === '-')).toEqual(['--file', '-']);
+    expect(f.run.mock.calls[0]?.[0].input?.toString('utf8')).toContain('SELECT 1;');
+  });
+
+  it('uses the verified in-memory snapshot when an artifact is replaced before the restore runner reads input', async () => {
+    // Given a retained backup and a same-user replacement immediately after snapshot creation.
+    const f = await fixture();
+    const backup = await f.recovery.backup(source);
+    expect(backup.status).toBe('backed-up');
+    const dataFile = path.join(f.directory, backup.backupId ?? '', 'data.sql');
+    const implementation = f.run.getMockImplementation();
+    let restoreInput = '';
+    f.run.mockImplementation(async (command) => {
+      if (command.input) {
+        await writeFile(dataFile, 'SELECT unsafe();');
+        restoreInput = command.input.toString('utf8');
+      }
+      if (!implementation) throw new Error('fixture missing');
+      return await implementation(command);
+    });
+    // When the isolated rehearsal reaches the restore runner.
+    const result = await f.recovery.rehearse(source, { projectUrl: 'https://targetproject.supabase.co', password: 'target secret', backupId: backup.backupId, confirmation: 'targetproject' });
+    // Then only the previously hash-verified bytes are supplied and no artifact pathname is reopened.
+    expect(result.status).toBe('rehearsed');
+    expect(restoreInput).toContain('SELECT 1;');
+    expect(restoreInput).not.toContain('SELECT unsafe();');
+    expect(f.run.mock.calls[0]?.[0].args.some((arg) => arg.includes(dataFile))).toBe(false);
+  });
+
+  it('offers the newest valid source-scoped backup and falls back past a tampered candidate', async () => {
+    // Given two retained backups where one candidate has been tampered with.
+    const f = await fixture();
+    const valid = await f.recovery.backup(source);
+    const tampered = await f.recovery.backup(source);
+    expect(valid.status).toBe('backed-up');
+    expect(tampered.status).toBe('backed-up');
+    await writeFile(path.join(f.directory, tampered.backupId ?? '', 'data.sql'), 'SELECT unsafe();');
+    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit });
+    // When retained recovery availability is discovered after restart.
+    const summary = await restarted.latestBackup(source);
+    // Then only the intact source-scoped backup is offered.
+    expect(summary).toEqual({ backupId: valid.backupId, capturedAt: '2026-08-31T12:00:00.000Z' });
+  });
+
+  it('does not offer malformed, linked, or cross-source retained candidates', async () => {
+    // Given a retained backup successively presented through untrusted persisted forms.
+    const f = await fixture();
+    const backup = await f.recovery.backup(source);
+    expect(backup.status).toBe('backed-up');
+    const backupId = backup.backupId ?? '';
+    const backupDirectory = path.join(f.directory, backupId);
+    const manifestFile = path.join(backupDirectory, 'manifest.json');
+    const manifest = await readFile(manifestFile, 'utf8');
+    const restarted = createDatabaseRecovery(f.directory, { run: f.run, audit: f.audit });
+    // When the manifest is malformed or requested from another source identity.
+    await writeFile(manifestFile, '{"backupId":"truncated"}');
+    expect(await restarted.latestBackup(source)).toBeNull();
+    await writeFile(manifestFile, manifest);
+    expect(await restarted.latestBackup({ ...source, guildId: '999999999999999999' })).toBeNull();
+    f.run.mockClear();
+    const crossSource = await restarted.rehearse({ ...source, guildId: '999999999999999999' }, { projectUrl: 'https://targetproject.supabase.co', password: 'target secret', backupId, confirmation: 'targetproject' });
+    expect(crossSource.status).toBe('blocked');
+    expect(f.run).not.toHaveBeenCalled();
+    // Then a junction replacing the owned direct directory is also rejected.
+    const externalDirectory = `${backupDirectory}-external`;
+    await rename(backupDirectory, externalDirectory);
+    await symlink(externalDirectory, backupDirectory, 'junction');
+    expect(await restarted.latestBackup(source)).toBeNull();
+    const result = await restarted.rehearse(source, { projectUrl: 'https://targetproject.supabase.co', password: 'target secret', backupId, confirmation: 'targetproject' });
+    expect(result.status).toBe('blocked');
   });
 
   it('preserves the last good backup when a later dump fails and redacts native failures', async () => {

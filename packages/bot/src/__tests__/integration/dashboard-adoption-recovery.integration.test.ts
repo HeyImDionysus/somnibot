@@ -3,7 +3,19 @@ import postgres, { type TransactionSql } from 'postgres';
 import { describe, expect, it } from 'vitest';
 import { getTestDbUrl, requireSupabase } from './helpers.js';
 
-type RecoveryFixture = { readonly guild: string; readonly owner: string; readonly details: Record<string, unknown>; readonly migrationHead: string };
+type ProvenanceIdentity = {
+  readonly exactSha: string;
+  readonly bootId: string;
+  readonly migrationHead: string;
+  readonly configurationGeneration: number;
+};
+type RecoveryFixture = {
+  readonly guild: string;
+  readonly owner: string;
+  readonly details: Record<string, unknown>;
+  readonly migrationHead: string;
+  readonly deployedIdentity: ProvenanceIdentity;
+};
 const baseArtifactNames = ['roles.sql', 'schema.sql', 'data.sql'] as const;
 const historyArtifactNames = [...baseArtifactNames, 'history-schema.sql', 'history-data.sql'] as const;
 const artifactsFor = (names: readonly string[]) => names.map((name) => ({ name, bytes: 1, sha256: 'd'.repeat(64) }));
@@ -21,11 +33,14 @@ async function withRecovery(run: (tx: TransactionSql, fixture: RecoveryFixture) 
       await tx`INSERT INTO public.guild_config(guild_id) VALUES (${guild})`;
       const [migration] = await tx<{ filename: string }[]>`SELECT filename FROM public.schema_migrations WHERE success IS TRUE ORDER BY applied_at DESC,filename DESC LIMIT 1`;
       if (!migration) throw new TypeError('Recovery fixture requires applied migrations');
-      const deployedIdentity = { lifecycle: 'running', version: 'test', exactSha: 'a'.repeat(40), bootId: 'before-restart', migrationHead: migration.filename, configurationGeneration: null, deploymentProfile: 'test' };
+      const deployedIdentity = {
+        lifecycle: 'ready', version: 'test', exactSha: 'a'.repeat(40), bootId: randomUUID(),
+        migrationHead: migration.filename, configurationGeneration: 7, deploymentProfile: 'vps-single-guild',
+      };
       await tx`INSERT INTO public.audit_logs(guild_id,actor_type,actor_id,action,success,timestamp,details)
-        VALUES (${guild},'system','system','bot.started',true,clock_timestamp(),${JSON.stringify({ bootId: 'before-restart', runtimeIdentity: deployedIdentity })}::jsonb)`;
+        VALUES (${guild},'system','system','bot.started',true,clock_timestamp(),${JSON.stringify({ bootId: deployedIdentity.bootId, runtimeIdentity: deployedIdentity })}::jsonb)`;
       await tx`INSERT INTO public.bot_diagnostics(guild_id,type,boot_id,uptime_seconds,valkey_connected,discord_ws_ping,snapshot_at)
-        VALUES (${guild},'health','before-restart',0,true,10,clock_timestamp())`;
+        VALUES (${guild},'health',${deployedIdentity.bootId},0,true,10,clock_timestamp())`;
       const [identity] = await tx<{ identity: Record<string, unknown>; captured_at: string }[]>`SELECT public.adoption_recovery_identity() AS identity,clock_timestamp()::text AS captured_at`;
       if (!identity) throw new TypeError('Recovery fixture identity unavailable');
       const details = { ...identity.identity, backupId: randomUUID(), capturedAt: identity.captured_at, sourceProjectRef: 'sourcefixture', checksumSha256: 'b'.repeat(64), configurationHash: 'c'.repeat(32),
@@ -39,7 +54,7 @@ async function withRecovery(run: (tx: TransactionSql, fixture: RecoveryFixture) 
       const rehearsal = { ...details, targetProjectRef: 'isolatedfixture', validated: true, rehearsedAt: time.value };
       await tx`INSERT INTO public.audit_logs(guild_id,actor_type,actor_id,action,success,timestamp,details)
         VALUES (${guild},'system','launcher','launcher.restore.rehearsal_succeeded',true,clock_timestamp(),${JSON.stringify(rehearsal)}::jsonb)`;
-      await run(tx, { guild, owner, details: rehearsal, migrationHead: migration.filename });
+      await run(tx, { guild, owner, details: rehearsal, migrationHead: migration.filename, deployedIdentity });
       throw rollback;
     })).rejects.toBe(rollback);
   } finally { await sql.end(); }
@@ -81,7 +96,13 @@ describe('real database current recovery adoption evidence', () => {
   });
   it('records paired database rehearsal and independent Valkey snapshot without claiming their full restore', async () => {
     await withRecovery(async (tx, fixture) => {
-      expect(await proof(tx, fixture.guild)).toMatchObject({ scope: 'database_rehearsal_and_valkey_snapshot', deployedExactSha: 'a'.repeat(40) });
+      expect(await proof(tx, fixture.guild)).toMatchObject({
+        scope: 'database_rehearsal_and_valkey_snapshot',
+        deployedExactSha: fixture.deployedIdentity.exactSha,
+        deployedBootId: fixture.deployedIdentity.bootId,
+        deployedMigrationHead: fixture.deployedIdentity.migrationHead,
+        deployedConfigurationGeneration: fixture.deployedIdentity.configurationGeneration,
+      });
       const [row] = await tx<{ value: { result: string; eligible: boolean } }[]>`SELECT public.check_dashboard_adoption_track(
         ${fixture.guild},${fixture.owner},'recovery',${randomUUID()}::uuid,${randomUUID()}) AS value`;
       expect(row?.value).toMatchObject({ result: 'pass', eligible: true });
@@ -124,16 +145,29 @@ describe('real database current recovery adoption evidence', () => {
       expect(await proof(tx, fixture.guild)).toBeNull();
     });
   });
-  it('retains same-release proof across restart but rejects a changed deployed release', async () => {
+  it.each([
+    { label: 'drifted exact SHA', changes: { exactSha: 'f'.repeat(40) } },
+    { label: 'drifted boot ID', changes: { bootId: '22222222-2222-4222-8222-222222222222' } },
+    { label: 'drifted migration head', changes: { migrationHead: '20260831135600_drift.sql' } },
+    { label: 'drifted configuration generation', changes: { configurationGeneration: 8 } },
+    { label: 'unknown exact SHA', changes: { exactSha: null } },
+    { label: 'unknown boot ID', changes: { bootId: null } },
+    { label: 'unknown migration head', changes: { migrationHead: null } },
+    { label: 'unknown configuration generation', changes: { configurationGeneration: null } },
+  ])('rejects $label in the current runtime identity', async ({ changes }) => {
     await withRecovery(async (tx, fixture) => {
-      for (const exactSha of ['a'.repeat(40), 'f'.repeat(40)]) {
-        const bootId = randomUUID();
-        await tx`INSERT INTO public.audit_logs(guild_id,actor_type,actor_id,action,success,timestamp,details)
-          VALUES (${fixture.guild},'system','system','bot.started',true,clock_timestamp(),${JSON.stringify({ bootId, runtimeIdentity: { exactSha, migrationHead: fixture.migrationHead, configurationGeneration: null } })}::jsonb)`;
-        await tx`UPDATE public.bot_diagnostics SET boot_id=${bootId},snapshot_at=clock_timestamp() WHERE guild_id=${fixture.guild}`;
-        if (exactSha.startsWith('a')) expect(await proof(tx, fixture.guild)).not.toBeNull();
-        else expect(await proof(tx, fixture.guild)).toBeNull();
-      }
+      const currentIdentity = { ...fixture.deployedIdentity, ...changes };
+      const currentBootId = typeof currentIdentity.bootId === 'string'
+        ? currentIdentity.bootId
+        : fixture.deployedIdentity.bootId;
+      await tx`UPDATE public.audit_logs
+        SET details=${JSON.stringify({ bootId: currentBootId, runtimeIdentity: currentIdentity })}::jsonb,
+          timestamp=clock_timestamp()
+        WHERE guild_id=${fixture.guild} AND action='bot.started'`;
+      await tx`UPDATE public.bot_diagnostics SET boot_id=${currentBootId},snapshot_at=clock_timestamp()
+        WHERE guild_id=${fixture.guild}`;
+
+      expect(await proof(tx, fixture.guild)).toBeNull();
     });
   });
 });

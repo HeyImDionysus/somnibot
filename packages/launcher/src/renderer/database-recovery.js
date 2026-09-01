@@ -8,6 +8,22 @@
   const confirmation = document.getElementById('database-recovery-confirmation');
   let backupId = null;
   let busy = false;
+  rehearse.disabled = true;
+
+  async function initialize() {
+    try {
+      const retained = await window.somnibot.getRetainedDatabaseBackup();
+      if (!backupId && retained) {
+        backupId = retained.backupId;
+        rehearse.disabled = false;
+        status.textContent = `Verified retained backup from ${retained.capturedAt} is available for isolated rehearsal.`;
+      } else if (!backupId) {
+        status.textContent = 'No verified retained backup is currently available. Capture a backup to enable isolated rehearsal.';
+      }
+    } catch {
+      status.textContent = 'No verified retained backup is currently available. Capture a backup to enable isolated rehearsal.';
+    }
+  }
 
   async function run(operation) {
     if (busy) return;
@@ -41,4 +57,5 @@
       template: template.value.trim(), confirmation: confirmation.value.trim() };
     void run(() => window.somnibot.rehearseDatabase(request));
   });
+  void initialize();
 })();

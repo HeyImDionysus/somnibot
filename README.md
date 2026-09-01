@@ -117,7 +117,7 @@ manual fallback and development paths.
 5. Copy the **Project URL** — save this.
 6. Under "Project API keys," copy the **secret** key (starts with `sb_secret_`, click the eye icon to reveal it) — save this.
 7. Also copy the **publishable** key (starts with `sb_publishable_`) — save this too (needed for the dashboard).
-8. For automatic setup wizard auth configuration, go to **Account → Access Tokens** and create a Supabase personal access token. Save it as `SUPABASE_ACCESS_TOKEN`. If you skip this, configure the Supabase Discord auth provider manually, allow the dashboard callback URL, and set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
+8. For Launcher-managed auth configuration, go to **Account → Access Tokens** and create a Supabase personal access token. Save it as `SUPABASE_ACCESS_TOKEN`. If you skip this, configure the Supabase Discord auth provider manually, allow the dashboard callback URL, and set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before completing Launcher setup.
 
 ### Step 3: Clone and Set Up
 
@@ -251,9 +251,10 @@ Manual fallback:
 
    This starts Docker (Lavalink + Valkey), the built bot, and the dashboard's
    standalone production server.
-4. If you are using the script fallback, go to
-   [http://localhost:3000/setup](http://localhost:3000/setup) and complete the
-   dashboard setup wizard.
+4. If you are using the script fallback, complete installation credentials,
+   database initialization, and migrations before starting the stack. The
+   dashboard `/setup` page is a read-only handoff to the Launcher; it never
+   accepts credentials or runs setup actions.
 5. Once complete, open the launcher-provided dashboard URL or
    [http://localhost:3000/login](http://localhost:3000/login) for the script
    fallback, then click "Continue with Discord."
@@ -447,7 +448,7 @@ Use this when SomniBot runs on your own computer.
 | Valkey/Redis | Docker on `redis://127.0.0.1:6379` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` |
 | Supabase dashboard callback allow-list | `<local-operator-dashboard-url>/api/auth/callback`, `http://localhost:3000/api/auth/callback` for script fallback, and `<public-callback-base>/api/auth/callback` |
-| Supabase setup auth | `SUPABASE_ACCESS_TOKEN` for automatic setup, or manual provider setup plus `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` |
+| Supabase setup auth | `SUPABASE_ACCESS_TOKEN` for Launcher-managed setup, or manual provider setup plus `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` |
 
 Set `DASHBOARD_URL` to the local operator dashboard URL shown by the launcher
 so bot messages point to the owner control surface. Set
@@ -485,7 +486,7 @@ changes.
 | Valkey/Redis | Private service `redis://:<password>@valkey:6379` |
 | PayPal webhook URL | `https://your-domain.example/api/paypal/webhook` |
 | Supabase dashboard callback allow-list | `https://your-domain.example/api/auth/callback` |
-| Supabase setup auth | `SUPABASE_ACCESS_TOKEN` for automatic setup, or manual provider setup plus `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` |
+| Supabase setup auth | `SUPABASE_ACCESS_TOKEN` for Launcher-managed setup, or manual provider setup plus `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` |
 
 For the supplied production Compose file, set `DOMAIN`, `DASHBOARD_URL`,
 `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL`, `NEXT_PUBLIC_APP_URL`, `VALKEY_PASSWORD`,
@@ -591,7 +592,7 @@ somnibot/
 | `PAYPAL_WEBHOOK_ID` | PayPal webhook ID for signature verification |
 | `PAYPAL_WEBHOOK_URL` | PayPal webhook endpoint URL: `<public-callback-base>/api/paypal/webhook` |
 | `YOUTUBE_OAUTH_REFRESH_TOKEN` | YouTube OAuth token (for music reliability) |
-| `SUPABASE_ACCESS_TOKEN` | Supabase Management API token for auto-migration and setup wizard Discord auth auto-configuration |
+| `SUPABASE_ACCESS_TOKEN` | Supabase Management API token used by Launcher or manual setup tooling for migration and Discord auth configuration |
 | `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Set to `true` only after manually enabling Supabase Discord auth and allowing the dashboard callback URL(s) |
 | `SUPABASE_DB_URL` | Direct Postgres connection URL (alternative for auto-migration) |
 
@@ -618,8 +619,10 @@ Slash commands can take up to an hour to register with Discord the first time. I
 The Supabase Discord auth provider needs to match the URLs SomniBot is actually
 using. For a first install or a local/VPS runtime change, use the Electron
 launcher/setup GUI first. If the bot is already running, the owner-only `/setup`
-Discord flow remains available for recovery and credential reconfiguration; it
-can configure Supabase automatically when `SUPABASE_ACCESS_TOKEN` is set. If you turned the provider on manually,
+Discord flow only hands the owner back to the Launcher; it cannot inspect,
+change, or recover installation credentials. The Launcher is the authority for
+installation credentials, deployment, service lifecycle, and recovery. The
+dashboard and Discord remain server-operation and handoff surfaces. If you turned the provider on manually,
 also set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` and make sure the
 Supabase redirect allow-list includes:
 
@@ -663,8 +666,8 @@ on first boot when `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`, or `DATABASE_URL`
 is set. Do not treat startup alone as proof that the database is initialized:
 check the migration logs, the `schema_migrations` table, or Supabase migration
 status. `/api/health` only proves the dashboard health route can answer, and
-`/api/setup` only probes setup readiness; neither proves every migration
-finished. If the runner reports an error, apply migrations manually through
+`/api/setup` only reports the Launcher handoff and cannot prove migration
+status. If the runner reports an error, apply migrations manually through
 Supabase and fix the runner before calling first-run setup complete.
 
 ### Further Documentation

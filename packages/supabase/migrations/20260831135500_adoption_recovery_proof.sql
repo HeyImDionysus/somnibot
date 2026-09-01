@@ -81,17 +81,30 @@ BEGIN
       AND health.snapshot_at > v_now - INTERVAL '5 minutes' AND health.snapshot_at <= v_now
       AND audit.timestamp <= health.snapshot_at ORDER BY audit.timestamp DESC,audit.id DESC LIMIT 1;
   IF v_boot.id IS NULL OR COALESCE(v_boot.details->'runtimeIdentity'->>'exactSha','') !~* '^[a-f0-9]{40}$'
+    OR COALESCE(v_database.details->'deployedIdentity'->>'exactSha','') !~* '^[a-f0-9]{40}$'
     OR lower(v_boot.details->'runtimeIdentity'->>'exactSha') IS DISTINCT FROM lower(v_database.details->'deployedIdentity'->>'exactSha')
+    OR COALESCE(v_boot.details->'runtimeIdentity'->>'bootId','') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    OR COALESCE(v_database.details->'deployedIdentity'->>'bootId','') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    OR v_boot.details->'runtimeIdentity'->>'bootId' IS DISTINCT FROM v_boot.details->>'bootId'
+    OR v_boot.details->'runtimeIdentity'->>'bootId' IS DISTINCT FROM v_database.details->'deployedIdentity'->>'bootId'
+    OR v_boot.details->'runtimeIdentity'->>'migrationHead' IS NULL
+    OR v_database.details->'deployedIdentity'->>'migrationHead' IS NULL
     OR v_boot.details->'runtimeIdentity'->>'migrationHead' IS DISTINCT FROM v_identity->>'migrationHead'
     OR v_database.details->'deployedIdentity'->>'migrationHead' IS DISTINCT FROM v_identity->>'migrationHead'
-    OR (v_boot.details->'runtimeIdentity'->>'configurationGeneration' IS NOT NULL
-      AND v_database.details->'deployedIdentity'->>'configurationGeneration' IS NOT NULL
-      AND v_boot.details->'runtimeIdentity'->>'configurationGeneration' IS DISTINCT FROM v_database.details->'deployedIdentity'->>'configurationGeneration') THEN RETURN NULL; END IF;
+    OR jsonb_typeof(v_boot.details->'runtimeIdentity'->'configurationGeneration') IS DISTINCT FROM 'number'
+    OR COALESCE(v_boot.details->'runtimeIdentity'->>'configurationGeneration','') !~ '^(0|[1-9][0-9]*)$'
+    OR jsonb_typeof(v_database.details->'deployedIdentity'->'configurationGeneration') IS DISTINCT FROM 'number'
+    OR COALESCE(v_database.details->'deployedIdentity'->>'configurationGeneration','') !~ '^(0|[1-9][0-9]*)$'
+    OR v_boot.details->'runtimeIdentity'->'configurationGeneration' IS DISTINCT FROM v_database.details->'deployedIdentity'->'configurationGeneration' THEN RETURN NULL; END IF;
   RETURN jsonb_build_object('identity', md5((v_identity || jsonb_build_object('backupId',v_database.details->>'backupId','checksum',v_database.details->>'checksumSha256','valkeyChecksum',v_valkey.details->>'checksumSha256'))::TEXT),
     'evidenceIds',jsonb_build_array(v_database.id,v_valkey.id,v_rehearsal.id),
     'backupId',v_database.details->>'backupId','databaseChecksumSha256',v_database.details->>'checksumSha256',
     'valkeyChecksumSha256',v_valkey.details->>'checksumSha256','rehearsedAt',v_rehearsal.details->>'rehearsedAt',
-    'deployedExactSha',v_boot.details->'runtimeIdentity'->>'exactSha','scope','database_rehearsal_and_valkey_snapshot',
+    'deployedExactSha',lower(v_boot.details->'runtimeIdentity'->>'exactSha'),
+    'deployedBootId',v_boot.details->'runtimeIdentity'->>'bootId',
+    'deployedMigrationHead',v_boot.details->'runtimeIdentity'->>'migrationHead',
+    'deployedConfigurationGeneration',v_boot.details->'runtimeIdentity'->'configurationGeneration',
+    'scope','database_rehearsal_and_valkey_snapshot',
     'expiresAt',LEAST((v_database.details->>'capturedAt')::TIMESTAMPTZ,(v_valkey.details->>'capturedAt')::TIMESTAMPTZ) + INTERVAL '24 hours');
 EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow OR invalid_text_representation THEN RETURN NULL;
 END;

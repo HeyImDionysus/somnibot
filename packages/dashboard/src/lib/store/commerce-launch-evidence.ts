@@ -25,7 +25,15 @@ type ProductEvidence = {
   readonly priceCents: number;
   readonly policyConfigured: boolean;
   readonly integrationVerified: boolean;
+  readonly requiredFulfillments?: readonly FulfillmentRequirement[];
 };
+
+type FulfillmentRequirement =
+  | { readonly kind: 'license' }
+  | { readonly kind: 'download'; readonly targetId?: string }
+  | { readonly kind: 'access' }
+  | { readonly kind: 'discord_role'; readonly targetId: string }
+  | { readonly kind: 'discord_channel'; readonly targetId: string };
 
 type LaunchEvidenceInput = {
   readonly product: ProductEvidence;
@@ -50,7 +58,9 @@ type LaunchEvidenceInput = {
     readonly id: string; readonly orderId: string; readonly productId: string; readonly status: string;
   }[];
   readonly fulfillments: readonly {
-    readonly id: string; readonly orderId: string; readonly kind: 'license' | 'download' | 'access';
+    readonly id: string; readonly orderId: string;
+    readonly kind: 'license' | 'download' | 'access' | 'discord_role' | 'discord_channel';
+    readonly targetId?: string;
     readonly deliveryState?: string; readonly sentAt?: string | null;
   }[];
   readonly refunds: readonly {
@@ -68,6 +78,12 @@ type LaunchWitness = {
   readonly freeClaimId: string | null;
 };
 
+type FulfillmentSummary = {
+  readonly required: readonly string[];
+  readonly verified: readonly string[];
+  readonly missing: readonly string[];
+};
+
 function stage(proven: boolean): LaunchStageState {
   return proven ? 'verified' : 'pending';
 }
@@ -82,15 +98,55 @@ function emptyWitness(): LaunchWitness {
   };
 }
 
+function fallbackFulfillmentRequirements(deliveryType: string): readonly FulfillmentRequirement[] {
+  switch (deliveryType) {
+    case 'license_key': return [{ kind: 'license' }];
+    case 'access_pass': return [{ kind: 'access' }];
+    default: return [{ kind: 'download' }];
+  }
+}
+
+function fulfillmentRequirementKey(requirement: FulfillmentRequirement): string {
+  switch (requirement.kind) {
+    case 'license': return 'license';
+    case 'download': return requirement.targetId ? `file:${requirement.targetId}` : 'download';
+    case 'access': return 'access';
+    case 'discord_role': return `discord_role:${requirement.targetId}`;
+    case 'discord_channel': return `discord_channel:${requirement.targetId}`;
+  }
+}
+
 export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
   readonly stages: Readonly<Record<LaunchStageKey, LaunchStageState>>;
   readonly witness: LaunchWitness;
+  readonly fulfillment: FulfillmentSummary;
 } {
   const productOrders = input.orders.filter((order) => order.productId === input.product.id);
-  const deliveredFulfillments = input.fulfillments.filter((fulfillment) =>
-    (input.product.deliveryType !== 'license_key' || fulfillment.kind === 'license')
-    && (input.product.deliveryType !== 'access_pass' || fulfillment.kind === 'access')
-    && (fulfillment.kind === 'download' || (fulfillment.deliveryState === 'sent' && Boolean(fulfillment.sentAt))));
+  const requirements = input.product.requiredFulfillments
+    ?? fallbackFulfillmentRequirements(input.product.deliveryType);
+  const requirementMatches = (requirement: FulfillmentRequirement, orderId: string) => input.fulfillments.some((fulfillment) => {
+    if (fulfillment.orderId !== orderId) return false;
+    const delivered = fulfillment.kind === 'download'
+      || (fulfillment.deliveryState === 'sent' && Boolean(fulfillment.sentAt));
+    if (!delivered) return false;
+    switch (requirement.kind) {
+      case 'license': return fulfillment.kind === 'license';
+      case 'download': return fulfillment.kind === 'download'
+        && (requirement.targetId === undefined || fulfillment.targetId === requirement.targetId);
+      case 'access': return fulfillment.kind === 'access';
+      case 'discord_role': return (fulfillment.kind === 'access' || fulfillment.kind === 'discord_role')
+        && (fulfillment.kind === 'access' || fulfillment.targetId === requirement.targetId);
+      case 'discord_channel': return (fulfillment.kind === 'access' || fulfillment.kind === 'discord_channel')
+        && (fulfillment.kind === 'access' || fulfillment.targetId === requirement.targetId);
+    }
+  });
+  const summarizeFulfillment = (orderId: string | null): FulfillmentSummary => {
+    const required = requirements.map(fulfillmentRequirementKey);
+    const verified = orderId === null ? [] : requirements
+      .filter((requirement) => requirementMatches(requirement, orderId))
+      .map(fulfillmentRequirementKey);
+    return { required, verified, missing: required.filter((key) => !verified.includes(key)) };
+  };
   const baseStages = {
     product: stage(!input.product.active),
     policy: stage(input.product.policyConfigured),
@@ -108,19 +164,18 @@ export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
       ? input.entitlements.find((candidate) => candidate.orderId === orderId
         && candidate.productId === input.product.id && candidate.status === 'active')
       : undefined;
-    const fulfillment = orderId
-      ? deliveredFulfillments.find((candidate) => candidate.orderId === orderId)
-      : undefined;
+    const fulfillment = summarizeFulfillment(orderId);
     return {
       stages: {
         ...baseStages,
         sandbox_transaction: 'not_applicable',
         webhook: 'not_applicable',
         entitlement: stage(entitlement !== undefined),
-        fulfillment: stage(fulfillment !== undefined),
+        fulfillment: stage(fulfillment.missing.length === 0),
         reversal: 'not_applicable',
       },
       witness: { ...emptyWitness(), orderId, freeClaimId: claim?.id ?? null },
+      fulfillment,
     };
   }
 
@@ -145,9 +200,7 @@ export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
   const entitlement = order
     ? input.entitlements.find((candidate) => candidate.orderId === order.id && candidate.productId === input.product.id)
     : undefined;
-  const fulfillment = order
-    ? deliveredFulfillments.find((candidate) => candidate.orderId === order.id)
-    : undefined;
+  const fulfillment = summarizeFulfillment(order?.id ?? null);
   const refund = payment
     ? input.refunds.find((candidate) => candidate.orderId === payment.orderId && candidate.paymentId === payment.id)
     : undefined;
@@ -168,7 +221,7 @@ export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
       sandbox_transaction: stage(payment !== undefined),
       webhook: stage(paymentWebhook !== undefined),
       entitlement: stage(entitlement !== undefined),
-      fulfillment: stage(fulfillment !== undefined),
+      fulfillment: stage(fulfillment.missing.length === 0),
       reversal: stage(refund !== undefined && reversalWebhook !== undefined && entitlementRevoked && cancellationProven),
     },
     witness: {
@@ -178,5 +231,6 @@ export function evaluateCommerceLaunchEvidence(input: LaunchEvidenceInput): {
       reversalWebhookEventId: reversalWebhook?.eventId ?? null,
       freeClaimId: null,
     },
+    fulfillment,
   };
 }

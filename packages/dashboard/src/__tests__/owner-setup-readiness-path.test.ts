@@ -25,7 +25,6 @@ vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/setup-webhook-probe', () => ({ getSetupWebhookReachability: vi.fn() }));
 
 import { createClient } from '@supabase/supabase-js';
-import { GET as getSetupStatus } from '@/app/api/setup/route';
 import { getSetupWebhookReachability } from '@/lib/setup-webhook-probe';
 import { POST as createStoreProduct } from '@/app/api/store/products/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
@@ -242,7 +241,7 @@ describe('owner setup readiness path', () => {
     vi.restoreAllMocks();
   });
 
-  it('proves regular-local setup, dashboard status, and paid Store readiness agree on the ready path', async () => {
+  it('proves regular-local Launcher setup and paid Store readiness agree on the ready path', async () => {
     const { productsTable, plansTable } = configureReadySetupDatabase(mock);
     ensureChainReturnsSelf(productsTable);
     ensureChainReturnsSelf(plansTable);
@@ -273,33 +272,32 @@ describe('owner setup readiness path', () => {
       .mockResolvedValueOnce(jsonResponse({ id: 'PROD-123' }))
       .mockResolvedValueOnce(jsonResponse({ id: 'PLAN-123' })));
 
-    const setupResponse = await getSetupStatus(buildRequest('/api/setup'));
-    const setupBody = await setupResponse.json();
     const runtimeEnv = buildRuntimeEnvVars({
       runtimeMode: 'regular-local',
-      publicCallbackBaseUrl: setupBody.publicCallbackBaseUrl,
+      publicCallbackBaseUrl: PUBLIC_CALLBACK_BASE,
     });
     const launcherStatus = buildSetupStatus({
       runtimeMode: 'regular-local',
-      publicCallbackBaseUrl: setupBody.publicCallbackBaseUrl,
-      discordGuildId: setupBody.guildId,
-      credentialReady: setupBody.supabaseConnected && setupBody.discordCredentialsPresent,
+      publicCallbackBaseUrl: PUBLIC_CALLBACK_BASE,
+      discordGuildId: 'guild-1',
+      credentialReady: true,
       providerValidation: {
         valid: true,
         errors: [],
         checks: successfulProviderChecks(),
       },
-      supabaseDiscordAuthProviderStatus: setupBody.discordAuthProviderStatus,
-      paypalReady: Boolean(
-        setupBody.paypalWebhookUrl
-        && process.env.PAYPAL_CLIENT_ID
-        && process.env.PAYPAL_CLIENT_SECRET
-        && process.env.PAYPAL_WEBHOOK_ID
-      ),
-      dashboardOnline: setupBody.botOnline,
+      supabaseDiscordAuthProviderStatus: {
+        ready: true,
+        providerEnabled: true,
+        callbackAllowListReady: true,
+        missingCallbackUrls: [],
+        manualConfigured: false,
+      },
+      paypalReady: true,
+      dashboardOnline: true,
       localServiceReadiness: {
         dashboard: 'online',
-        bot: setupBody.botOnline ? 'online' : 'offline',
+        bot: 'online',
         lavalink: 'online',
         dashboardHealth: {
           ok: true,
@@ -313,26 +311,6 @@ describe('owner setup readiness path', () => {
       },
     });
 
-    expect(setupResponse.status).toBe(200);
-    expect(setupBody).toMatchObject({
-      supabaseConnected: true,
-      databaseInitialized: true,
-      botOnline: true,
-      guildDetected: true,
-      guildId: 'guild-1',
-      dashboardUrl: PUBLIC_CALLBACK_BASE,
-      operatorDashboardUrl: 'http://localhost:3456',
-      publicCallbackBaseUrl: PUBLIC_CALLBACK_BASE,
-      paypalWebhookUrl: PAYPAL_WEBHOOK_URL,
-      publicCallbackReady: true,
-      discordCredentialsPresent: true,
-      discordAuthProviderReady: true,
-      paypalWebhookReachable: true,
-      paypalWebhookReachability: expect.objectContaining({
-        status: 'reachable',
-        checkedUrl: PAYPAL_WEBHOOK_URL,
-      }),
-    });
     expect(launcherStatus.primaryAction).toEqual({
       label: 'Set Up & Start',
       enabled: true,
@@ -406,19 +384,23 @@ describe('owner setup readiness path', () => {
     });
     vi.stubGlobal('fetch', vi.fn());
 
-    const setupResponse = await getSetupStatus(buildRequest('/api/setup'));
-    const setupBody = await setupResponse.json();
     const launcherStatus = buildSetupStatus({
       runtimeMode: 'regular-local',
-      publicCallbackBaseUrl: setupBody.publicCallbackBaseUrl,
-      discordGuildId: setupBody.guildId,
+      publicCallbackBaseUrl: 'http://localhost:3456',
+      discordGuildId: 'guild-1',
       credentialReady: true,
       providerValidation: {
         valid: true,
         errors: [],
         checks: successfulProviderChecks(),
       },
-      supabaseDiscordAuthProviderStatus: setupBody.discordAuthProviderStatus,
+      supabaseDiscordAuthProviderStatus: {
+        ready: true,
+        providerEnabled: true,
+        callbackAllowListReady: true,
+        missingCallbackUrls: [],
+        manualConfigured: false,
+      },
       paypalReady: false,
       dashboardOnline: true,
       localServiceReadiness: {
@@ -437,17 +419,6 @@ describe('owner setup readiness path', () => {
       },
     });
 
-    expect(setupResponse.status).toBe(200);
-    expect(setupBody).toMatchObject({
-      publicCallbackRequired: true,
-      publicCallbackReady: false,
-      publicCallbackError: 'Public callback URL must use HTTPS before setup can finalize.',
-      paypalWebhookUrl: null,
-      paypalWebhookReady: false,
-      paypalWebhookError: 'Public callback URL must use HTTPS before setup can finalize.',
-      paypalWebhookReachable: false,
-      paypalWebhookReachability: expect.objectContaining({ status: 'skipped' }),
-    });
     expect(launcherStatus.firstBlockingStepId).toBe('regular-callback');
     expect(launcherStatus.primaryAction).toMatchObject({
       enabled: false,
