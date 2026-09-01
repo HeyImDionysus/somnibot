@@ -12,7 +12,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 const startLocalServer = !process.env.CI || process.env.PLAYWRIGHT_START_SERVER === '1';
 const authenticatedDashboardSpecs =
-  /(?:channel-picker-accessibility|team-invitations|community-flow|commerce-onboarding|completed-project-licensing|licensing-product-overview|licensing-prompt-generator|settings-responsive|shared-foundations)\.spec\.ts/;
+  /(?:channel-picker-accessibility|team-invitations|community-flow|commerce-onboarding|completed-project-licensing|dashboard-control-center|licensing-product-overview|licensing-prompt-generator|settings-responsive|shared-foundations)\.spec\.ts/;
 
 export default defineConfig({
   testDir: './e2e',
