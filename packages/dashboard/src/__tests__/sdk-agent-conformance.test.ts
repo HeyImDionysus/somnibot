@@ -268,7 +268,6 @@ describe('Given canonical generated bundles and deterministic reference integrat
     expect(serialized).not.toContain('heartbeat');
     expect(serialized).not.toContain('deactivate');
     expect(reference.credentialKind).toBe('server-delivery-secret');
-    expect(serialized).toContain('delivery-time protection has no in-project activation');
   });
 });
 
@@ -313,8 +312,15 @@ describe('Given the machine-readable grading contract', () => {
     const bundle = await generateFixtureBundle('static-files-site');
     const serializedCriteria = JSON.stringify(bundle.grader.criteria);
 
-    expect(serializedCriteria).toContain('Authorized delivery experience');
-    expect(serializedCriteria).toContain('No runtime deactivation surface');
+    expect(bundle.grader.criteria.find(({ id }) => id === 'activation_ux')?.bundleInputs).toEqual([
+      '/fixture/activationSurface',
+      '/sdkBundle/files/somnibot-sdk.json/content/rails',
+      '/sdkBundle/files/somnibot-sdk.json/content/acceptanceScenarios',
+    ]);
+    expect(bundle.grader.criteria.find(({ id }) => id === 'deactivation')?.bundleInputs).toEqual([
+      '/sdkBundle/files/somnibot-sdk.json/content/project/legacyMode',
+      '/sdkBundle/files/somnibot-sdk.json/content/rails',
+    ]);
     expect(serializedCriteria).not.toContain('/runtime/offline');
     expect(serializedCriteria).not.toContain('/license/deactivate');
   });

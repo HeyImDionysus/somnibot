@@ -103,9 +103,23 @@ describe('licensing prompt generator contract', () => {
     }));
 
     for (const prompt of [dynamicPrompt, staticPrompt]) {
-      expect(prompt).not.toMatch(/Discord benefit/i);
-      expect(prompt).not.toMatch(/role ids?/i);
-      expect(prompt).not.toMatch(/channel ids?/i);
+      const envelope = extractLicensingPromptEnvelope(prompt);
+      expect(Object.keys(envelope).sort()).toEqual([
+        'billing',
+        'dynamicPolicy',
+        'mode',
+        'project',
+        'rails',
+        'schemaVersion',
+        'staticPolicy',
+      ]);
+      expect(Object.keys(envelope.project).sort()).toEqual([
+        'apiBase',
+        'context',
+        'name',
+        'productId',
+        'productPolicyRevision',
+      ]);
     }
   });
 
